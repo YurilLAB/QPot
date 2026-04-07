@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="https://github.com/YurilLAB/QPot/blob/main/doc/qpot_wallpaper.png?raw=true" alt="QPot Wallpaper" width="800">
+  <img src="https://raw.githubusercontent.com/YurilLAB/QPot/main/doc/qpot_wallpaper.png" alt="QPot Wallpaper" width="800">
 </p>
 
 <h1 align="center">QPot</h1>
