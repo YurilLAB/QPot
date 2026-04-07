@@ -9,10 +9,12 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
+	"path/filepath"
 	"runtime"
 	"syscall"
 	"time"
 
+	"github.com/qpot/qpot/internal/cluster"
 	"github.com/qpot/qpot/internal/config"
 	"github.com/qpot/qpot/internal/instance"
 	"github.com/spf13/cobra"
@@ -62,6 +64,7 @@ Each QPot instance has a unique ID (qp_*) for tracking and authentication.`,
 	rootCmd.AddCommand(newHoneypotCommand())
 	rootCmd.AddCommand(newLogsCommand())
 	rootCmd.AddCommand(newIDCommand())
+	rootCmd.AddCommand(newClusterCommand())
 
 	return rootCmd.ExecuteContext(ctx)
 }
@@ -573,4 +576,401 @@ $notify.ShowBalloonTip(10000)
 	fmt.Println("║  Save this ID - you'll need it to access the Web UI   ║")
 	fmt.Println("╚════════════════════════════════════════════════════════╝")
 	fmt.Println()
+}
+
+
+// newClusterCommand creates the cluster management command
+func newClusterCommand() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "cluster",
+		Short: "Manage QPot clusters",
+		Long:  "Initialize, join, and manage multi-instance QPot clusters with password authentication",
+	}
+
+	cmd.AddCommand(newClusterInitCommand())
+	cmd.AddCommand(newClusterJoinCommand())
+	cmd.AddCommand(newClusterStatusCommand())
+	cmd.AddCommand(newClusterLeaveCommand())
+	cmd.AddCommand(newClusterNodesCommand())
+
+	return cmd
+}
+
+func newClusterInitCommand() *cobra.Command {
+	var (
+		clusterName string
+		password    string
+		bindAddr    string
+		bindPort    int
+	)
+
+	cmd := &cobra.Command{
+		Use:   "init",
+		Short: "Initialize a new cluster",
+		Long:  "Create a new QPot cluster with password protection",
+		Example: `  qpot cluster init --name production --password "SecurePass123!"
+  qpot cluster init --name east-coast --password "MyP@ssw0rd" --bind-addr 192.168.1.10 --bind-port 7946`,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			// Get home directory
+			homeDir, err := os.UserHomeDir()
+			if err != nil {
+				return fmt.Errorf("failed to get home directory: %w", err)
+			}
+
+			dataPath := filepath.Join(homeDir, ".qpot", "cluster")
+			mgr := cluster.NewManager(dataPath)
+
+			// Check if already in a cluster
+			existing, _ := mgr.LoadCluster()
+			if existing != nil {
+				return fmt.Errorf("already in cluster %s (%s). Leave first with 'qpot cluster leave'", existing.Name, existing.ID)
+			}
+
+			// Prompt for password if not provided
+			if password == "" {
+				fmt.Print("Enter cluster password (min 8 chars): ")
+				fmt.Scanln(&password)
+			}
+
+			if len(password) < 8 {
+				return fmt.Errorf("password must be at least 8 characters")
+			}
+
+			// Create cluster config
+			cfg := cluster.DefaultClusterConfig()
+			if bindAddr != "" {
+				cfg.BindAddr = bindAddr
+				cfg.AdvertiseAddr = bindAddr
+			}
+			if bindPort != 0 {
+				cfg.BindPort = bindPort
+			}
+
+			// Initialize cluster
+			c, err := mgr.InitCluster(clusterName, password, cfg)
+			if err != nil {
+				return fmt.Errorf("failed to initialize cluster: %w", err)
+			}
+
+			// Start cluster manager
+			if err := mgr.Start(); err != nil {
+				return fmt.Errorf("failed to start cluster manager: %w", err)
+			}
+
+			fmt.Printf("\n[OK] Cluster initialized successfully\n")
+			fmt.Printf("     Cluster ID:   %s\n", c.ID)
+			fmt.Printf("     Cluster Name: %s\n", c.Name)
+			fmt.Printf("     Node ID:      %s\n", c.LocalNode.ID)
+			fmt.Printf("     Bind Address: %s:%d\n", cfg.BindAddr, cfg.BindPort)
+			fmt.Println("\n[IMPORTANT] Save your Cluster ID and Password!")
+			fmt.Println("            Other nodes will need both to join.")
+			fmt.Printf("\nTo join this cluster, run:\n")
+			fmt.Printf("  qpot cluster join --id %s --seed %s:%d\n", c.ID, cfg.AdvertiseAddr, cfg.BindPort)
+
+			return nil
+		},
+	}
+
+	cmd.Flags().StringVarP(&clusterName, "name", "n", "", "Cluster name (required)")
+	cmd.Flags().StringVarP(&password, "password", "p", "", "Cluster password (min 8 chars)")
+	cmd.Flags().StringVar(&bindAddr, "bind-addr", "0.0.0.0", "Bind address for cluster communication")
+	cmd.Flags().IntVar(&bindPort, "bind-port", cluster.DefaultClusterPort, "Bind port for cluster communication")
+	cmd.MarkFlagRequired("name")
+
+	return cmd
+}
+
+func newClusterJoinCommand() *cobra.Command {
+	var (
+		clusterID   string
+		password    string
+		seedNodes   []string
+		nodeName    string
+		nodeAddr    string
+		nodePort    int
+		qpotID      string
+		instanceName string
+	)
+
+	cmd := &cobra.Command{
+		Use:   "join",
+		Short: "Join an existing cluster",
+		Long:  "Join a QPot cluster using the cluster ID, password, and seed node address",
+		Example: `  qpot cluster join --id qc_abc123 --password "SecurePass123!" --seed 192.168.1.10:7946
+  qpot cluster join --id qc_abc123 -p "MyP@ssw0rd" -s 10.0.0.5:7946 -s 10.0.0.6:7946 --node-name sensor-01`,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			// Get home directory
+			homeDir, err := os.UserHomeDir()
+			if err != nil {
+				return fmt.Errorf("failed to get home directory: %w", err)
+			}
+
+			dataPath := filepath.Join(homeDir, ".qpot", "cluster")
+			mgr := cluster.NewManager(dataPath)
+
+			// Check if already in a cluster
+			existing, _ := mgr.LoadCluster()
+			if existing != nil {
+				return fmt.Errorf("already in cluster %s. Leave first with 'qpot cluster leave'", existing.ID)
+			}
+
+			// Prompt for password if not provided
+			if password == "" {
+				fmt.Print("Enter cluster password: ")
+				fmt.Scanln(&password)
+			}
+
+			// Load instance info if available
+			if instanceName == "" {
+				instanceName = "default"
+			}
+			
+			idObj, _ := instance.LoadID(instanceName)
+			if idObj != nil {
+				qpotID = idObj.ID
+			}
+
+			// Auto-detect node address if not provided
+			if nodeAddr == "" {
+				// Try to get local IP
+				nodeAddr = getLocalIP()
+			}
+
+			if nodeName == "" {
+				hostname, _ := os.Hostname()
+				nodeName = hostname
+			}
+
+			// Create local node
+			localNode := &cluster.Node{
+				Name:         nodeName,
+				Address:      nodeAddr,
+				Port:         nodePort,
+				QPotID:       qpotID,
+				InstanceName: instanceName,
+				Metadata:     make(map[string]string),
+				Capabilities: []string{"honeypot", "sensor"},
+			}
+
+			// Join cluster
+			c, err := mgr.JoinCluster(clusterID, password, localNode, seedNodes)
+			if err != nil {
+				return fmt.Errorf("failed to join cluster: %w", err)
+			}
+
+			// Start cluster manager
+			if err := mgr.Start(); err != nil {
+				return fmt.Errorf("failed to start cluster manager: %w", err)
+			}
+
+			fmt.Printf("\n[OK] Successfully joined cluster\n")
+			fmt.Printf("     Cluster ID:   %s\n", c.ID)
+			fmt.Printf("     Cluster Name: %s\n", c.Name)
+			fmt.Printf("     Node ID:      %s\n", c.LocalNode.ID)
+			fmt.Printf("     Total Nodes:  %d\n", len(c.Nodes))
+
+			return nil
+		},
+	}
+
+	cmd.Flags().StringVarP(&clusterID, "id", "i", "", "Cluster ID (required)")
+	cmd.Flags().StringVarP(&password, "password", "p", "", "Cluster password")
+	cmd.Flags().StringArrayVarP(&seedNodes, "seed", "s", nil, "Seed node addresses (format: host:port)")
+	cmd.Flags().StringVar(&nodeName, "node-name", "", "Name for this node (default: hostname)")
+	cmd.Flags().StringVar(&nodeAddr, "node-addr", "", "Address for this node (auto-detected if not set)")
+	cmd.Flags().IntVar(&nodePort, "node-port", cluster.DefaultClusterPort, "Port for cluster communication")
+	cmd.Flags().StringVar(&qpotID, "qpot-id", "", "QPot ID (auto-detected if not set)")
+	cmd.Flags().StringVar(&instanceName, "instance", "default", "QPot instance name")
+	cmd.MarkFlagRequired("id")
+	cmd.MarkFlagRequired("seed")
+
+	return cmd
+}
+
+func newClusterStatusCommand() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "status",
+		Short: "Show cluster status",
+		Long:  "Display status information about the current cluster",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			homeDir, err := os.UserHomeDir()
+			if err != nil {
+				return fmt.Errorf("failed to get home directory: %w", err)
+			}
+
+			dataPath := filepath.Join(homeDir, ".qpot", "cluster")
+			mgr := cluster.NewManager(dataPath)
+
+			c, err := mgr.LoadCluster()
+			if err != nil {
+				return fmt.Errorf("failed to load cluster: %w", err)
+			}
+			if c == nil {
+				fmt.Println("Not a member of any cluster")
+				fmt.Println("\nTo create a cluster:")
+				fmt.Println("  qpot cluster init --name <name>")
+				fmt.Println("\nTo join a cluster:")
+				fmt.Println("  qpot cluster join --id <cluster-id> --seed <host:port>")
+				return nil
+			}
+
+			status := mgr.GetStatus()
+			if status == nil {
+				return fmt.Errorf("failed to get cluster status")
+			}
+
+			fmt.Println("Cluster Status")
+			fmt.Println("==============")
+			fmt.Printf("Cluster ID:    %s\n", status.ID)
+			fmt.Printf("Cluster Name:  %s\n", status.Name)
+			fmt.Printf("Status:        %s\n", map[bool]string{true: "running", false: "stopped"}[status.IsRunning])
+			fmt.Printf("\nNodes:\n")
+			fmt.Printf("  Total:       %d\n", status.NodeCount)
+			fmt.Printf("  Healthy:     %d\n", status.HealthyNodes)
+			if status.SuspectNodes > 0 {
+				fmt.Printf("  Suspect:     %d\n", status.SuspectNodes)
+			}
+			if status.FailedNodes > 0 {
+				fmt.Printf("  Failed:      %d\n", status.FailedNodes)
+			}
+			fmt.Printf("\nEvents:        %d total\n", status.TotalEvents)
+
+			// Show local node info
+			if c.LocalNode != nil {
+				fmt.Printf("\nLocal Node:\n")
+				fmt.Printf("  Node ID:     %s\n", c.LocalNode.ID)
+				fmt.Printf("  Name:        %s\n", c.LocalNode.Name)
+				fmt.Printf("  Address:     %s:%d\n", c.LocalNode.Address, c.LocalNode.Port)
+				fmt.Printf("  Status:      %s\n", c.LocalNode.Status)
+			}
+
+			return nil
+		},
+	}
+
+	return cmd
+}
+
+func newClusterLeaveCommand() *cobra.Command {
+	var force bool
+
+	cmd := &cobra.Command{
+		Use:   "leave",
+		Short: "Leave the cluster",
+		Long:  "Remove this node from the cluster",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			homeDir, err := os.UserHomeDir()
+			if err != nil {
+				return fmt.Errorf("failed to get home directory: %w", err)
+			}
+
+			dataPath := filepath.Join(homeDir, ".qpot", "cluster")
+			mgr := cluster.NewManager(dataPath)
+
+			c, err := mgr.LoadCluster()
+			if err != nil {
+				return fmt.Errorf("failed to load cluster: %w", err)
+			}
+			if c == nil {
+				fmt.Println("Not a member of any cluster")
+				return nil
+			}
+
+			if !force {
+				fmt.Printf("Are you sure you want to leave cluster '%s' (%s)? [y/N]: ", c.Name, c.ID)
+				var response string
+				fmt.Scanln(&response)
+				if response != "y" && response != "Y" {
+					fmt.Println("Aborted")
+					return nil
+				}
+			}
+
+			// Stop cluster manager
+			if err := mgr.Stop(); err != nil {
+				slog.Warn("Failed to stop cluster manager", "error", err)
+			}
+
+			// Leave cluster
+			if err := mgr.LeaveCluster(); err != nil {
+				return fmt.Errorf("failed to leave cluster: %w", err)
+			}
+
+			fmt.Println("[OK] Left cluster successfully")
+			return nil
+		},
+	}
+
+	cmd.Flags().BoolVarP(&force, "force", "f", false, "Skip confirmation prompt")
+
+	return cmd
+}
+
+func newClusterNodesCommand() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "nodes",
+		Short: "List cluster nodes",
+		Long:  "Display information about all nodes in the cluster",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			homeDir, err := os.UserHomeDir()
+			if err != nil {
+				return fmt.Errorf("failed to get home directory: %w", err)
+			}
+
+			dataPath := filepath.Join(homeDir, ".qpot", "cluster")
+			mgr := cluster.NewManager(dataPath)
+
+			c, err := mgr.LoadCluster()
+			if err != nil {
+				return fmt.Errorf("failed to load cluster: %w", err)
+			}
+			if c == nil {
+				fmt.Println("Not a member of any cluster")
+				return nil
+			}
+
+			nodes := mgr.GetNodes()
+			if len(nodes) == 0 {
+				fmt.Println("No nodes in cluster")
+				return nil
+			}
+
+			fmt.Println("Cluster Nodes")
+			fmt.Println("=============")
+			fmt.Printf("%-12s %-15s %-20s %-10s %-12s\n", "NODE ID", "NAME", "ADDRESS", "STATUS", "EVENTS")
+			fmt.Println(string(make([]byte, 80)))
+			
+			for _, node := range nodes {
+				nodeID := node.ID
+				if len(nodeID) > 12 {
+					nodeID = nodeID[:12]
+				}
+				fmt.Printf("%-12s %-15s %-20s %-10s %-12d\n",
+					nodeID,
+					truncate(node.Name, 15),
+					fmt.Sprintf("%s:%d", node.Address, node.Port),
+					node.Status,
+					node.Stats.TotalEvents)
+			}
+
+			return nil
+		},
+	}
+
+	return cmd
+}
+
+// getLocalIP attempts to get the local IP address
+func getLocalIP() string {
+	// This is a simplified implementation
+	// In production, use proper interface enumeration
+	return "127.0.0.1"
+}
+
+// truncate truncates a string to max length
+func truncate(s string, maxLen int) string {
+	if len(s) <= maxLen {
+		return s
+	}
+	return s[:maxLen-3] + "..."
 }

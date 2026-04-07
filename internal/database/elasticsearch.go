@@ -4,6 +4,7 @@ package database
 import (
 	"context"
 	"fmt"
+	"io"
 	"time"
 
 	"github.com/qpot/qpot/internal/config"
@@ -83,4 +84,35 @@ func (es *Elasticsearch) RetentionCleanup(ctx context.Context, olderThan time.Ti
 // Optimize runs maintenance tasks
 func (es *Elasticsearch) Optimize(ctx context.Context) error {
 	return nil
+}
+
+
+// ExportData exports data to a writer
+func (es *Elasticsearch) ExportData(ctx context.Context, start, end time.Time, w io.Writer) error {
+	return fmt.Errorf("elasticsearch backend not yet implemented")
+}
+
+// ImportData imports data from a reader
+func (es *Elasticsearch) ImportData(ctx context.Context, r io.Reader) error {
+	return fmt.Errorf("elasticsearch backend not yet implemented")
+}
+
+// GetSchemaVersion returns the current schema version
+func (es *Elasticsearch) GetSchemaVersion(ctx context.Context) (int, error) {
+	return 0, nil
+}
+
+// SetSchemaVersion sets the schema version
+func (es *Elasticsearch) SetSchemaVersion(ctx context.Context, version int) error {
+	return nil
+}
+
+// WithPool returns a new Elasticsearch instance with connection pooling
+func (es *Elasticsearch) WithPool(pool *Pool) Database {
+	return es
+}
+
+// GetPoolStats returns pool statistics
+func (es *Elasticsearch) GetPoolStats() PoolStats {
+	return PoolStats{}
 }

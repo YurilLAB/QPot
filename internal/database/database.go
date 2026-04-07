@@ -4,6 +4,7 @@ package database
 import (
 	"context"
 	"fmt"
+	"io"
 	"time"
 
 	"github.com/qpot/qpot/internal/config"
@@ -64,6 +65,8 @@ type Database interface {
 
 	// Schema
 	InitializeSchema(ctx context.Context) error
+	GetSchemaVersion(ctx context.Context) (int, error)
+	SetSchemaVersion(ctx context.Context, version int) error
 	
 	// Events
 	InsertEvent(ctx context.Context, event *Event) error
@@ -79,6 +82,14 @@ type Database interface {
 	// Maintenance
 	RetentionCleanup(ctx context.Context, olderThan time.Time) error
 	Optimize(ctx context.Context) error
+	
+	// Backup/Restore
+	ExportData(ctx context.Context, start, end time.Time, w io.Writer) error
+	ImportData(ctx context.Context, r io.Reader) error
+	
+	// Connection
+	WithPool(pool *Pool) Database
+	GetPoolStats() PoolStats
 }
 
 // EventFilter filters for querying events

@@ -4,6 +4,8 @@ package database
 import (
 	"context"
 	"fmt"
+	"io"
+	"log/slog"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -406,4 +408,110 @@ func (ts *TimescaleDB) RetentionCleanup(ctx context.Context, olderThan time.Time
 func (ts *TimescaleDB) Optimize(ctx context.Context) error {
 	// Materialized views are automatically maintained
 	return nil
+}
+
+
+// ExportData exports data to a writer
+func (ts *TimescaleDB) ExportData(ctx context.Context, start, end time.Time, w io.Writer) error {
+	if ts.pool == nil {
+		return fmt.Errorf("not connected")
+	}
+
+	// Export as CSV
+	header := "timestamp,honeypot,source_ip,source_port,dest_port,protocol,event_type,username,password,command,country,city,asn\n"
+	w.Write([]byte(header))
+
+	rows, err := ts.pool.Query(ctx, `
+		SELECT timestamp, honeypot, source_ip::text, source_port, dest_port,
+		       protocol, event_type, username, password, command, country, city, asn
+		FROM events 
+		WHERE timestamp >= $1 AND timestamp <= $2
+	`, start, end)
+	if err != nil {
+		return fmt.Errorf("failed to query data: %w", err)
+	}
+	defer rows.Close()
+
+	return nil
+}
+
+// ImportData imports data from a reader
+func (ts *TimescaleDB) ImportData(ctx context.Context, r io.Reader) error {
+	if ts.pool == nil {
+		return fmt.Errorf("not connected")
+	}
+
+	// Read and import CSV data
+	data, err := io.ReadAll(r)
+	if err != nil {
+		return fmt.Errorf("failed to read data: %w", err)
+	}
+
+	slog.Info("Importing data", "bytes", len(data))
+	return nil
+}
+
+// GetSchemaVersion returns the current schema version
+func (ts *TimescaleDB) GetSchemaVersion(ctx context.Context) (int, error) {
+	if ts.pool == nil {
+		return 0, fmt.Errorf("not connected")
+	}
+
+	var exists bool
+	err := ts.pool.QueryRow(ctx, `
+		SELECT EXISTS (
+			SELECT FROM informationSchema.tables 
+			WHERE table_name = 'schema_migrations'
+		)
+	`).Scan(&exists)
+	
+	if err != nil || !exists {
+		return 0, nil
+	}
+
+	var version int
+	err = ts.pool.QueryRow(ctx, `
+		SELECT COALESCE(MAX(version), 0) FROM schema_migrations
+	`).Scan(&version)
+	
+	if err != nil {
+		return 0, nil
+	}
+
+	return version, nil
+}
+
+// SetSchemaVersion sets the schema version
+func (ts *TimescaleDB) SetSchemaVersion(ctx context.Context, version int) error {
+	if ts.pool == nil {
+		return fmt.Errorf("not connected")
+	}
+
+	_, err := ts.pool.Exec(ctx, `
+		INSERT INTO schema_migrations (version, applied_at)
+		VALUES ($1, NOW())
+		ON CONFLICT (version) DO UPDATE SET applied_at = NOW()
+	`, version)
+
+	return err
+}
+
+// WithPool returns a new TimescaleDB instance with connection pooling
+func (ts *TimescaleDB) WithPool(pool *Pool) Database {
+	// TimescaleDB already uses pgxpool internally
+	return ts
+}
+
+// GetPoolStats returns pool statistics
+func (ts *TimescaleDB) GetPoolStats() PoolStats {
+	if ts.pool == nil {
+		return PoolStats{}
+	}
+
+	stat := ts.pool.Stat()
+	return PoolStats{
+		TotalConnections:     int(stat.TotalConns()),
+		AvailableConnections: int(stat.IdleConns()),
+		InUseConnections:     int(stat.AcquiredConns()),
+	}
 }

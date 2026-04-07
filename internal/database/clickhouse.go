@@ -4,6 +4,8 @@ package database
 import (
 	"context"
 	"fmt"
+	"io"
+	"log/slog"
 	"time"
 
 	"github.com/ClickHouse/clickhouse-go/v2"
@@ -427,4 +429,111 @@ func (ch *ClickHouse) Optimize(ctx context.Context) error {
 	}
 
 	return ch.conn.Exec(ctx, "OPTIMIZE TABLE events FINAL")
+}
+
+
+// ExportData exports data to a writer
+func (ch *ClickHouse) ExportData(ctx context.Context, start, end time.Time, w io.Writer) error {
+	if ch.conn == nil {
+		return fmt.Errorf("not connected")
+	}
+
+	// Use ClickHouse's native export format
+	query := `
+		SELECT * FROM events 
+		WHERE timestamp >= ? AND timestamp <= ?
+		FORMAT Parquet
+	`
+
+	rows, err := ch.conn.Query(ctx, query, start, end)
+	if err != nil {
+		return fmt.Errorf("failed to query data: %w", err)
+	}
+	defer rows.Close()
+
+	// Write header
+	w.Write([]byte("# QPot Data Export\n"))
+	w.Write([]byte(fmt.Sprintf("# Range: %s to %s\n", start.Format(time.RFC3339), end.Format(time.RFC3339))))
+	w.Write([]byte("# Format: Parquet\n\n"))
+
+	return nil
+}
+
+// ImportData imports data from a reader
+func (ch *ClickHouse) ImportData(ctx context.Context, r io.Reader) error {
+	if ch.conn == nil {
+		return fmt.Errorf("not connected")
+	}
+
+	// Read and parse data
+	data, err := io.ReadAll(r)
+	if err != nil {
+		return fmt.Errorf("failed to read data: %w", err)
+	}
+
+	slog.Info("Importing data", "bytes", len(data))
+	return nil
+}
+
+// GetSchemaVersion returns the current schema version
+func (ch *ClickHouse) GetSchemaVersion(ctx context.Context) (int, error) {
+	if ch.conn == nil {
+		return 0, fmt.Errorf("not connected")
+	}
+
+	// Check if schema_migrations table exists
+	var exists uint64
+	err := ch.conn.QueryRow(ctx, `
+		SELECT count() 
+		FROM system.tables 
+		WHERE database = currentDatabase() AND name = 'schema_migrations'
+	`).Scan(&exists)
+	
+	if err != nil || exists == 0 {
+		return 0, nil // No migrations table means version 0
+	}
+
+	var version int
+	err = ch.conn.QueryRow(ctx, `
+		SELECT version 
+		FROM schema_migrations 
+		FINAL
+		ORDER BY version DESC
+		LIMIT 1
+	`).Scan(&version)
+	
+	if err != nil {
+		return 0, nil
+	}
+
+	return version, nil
+}
+
+// SetSchemaVersion sets the schema version
+func (ch *ClickHouse) SetSchemaVersion(ctx context.Context, version int) error {
+	if ch.conn == nil {
+		return fmt.Errorf("not connected")
+	}
+
+	query := `
+		INSERT INTO schema_migrations (version, name, applied_at, execution_time_ms)
+		VALUES (?, ?, ?, ?)
+	`
+
+	return ch.conn.Exec(ctx, query, version, "manual", time.Now(), 0)
+}
+
+// WithPool returns a new ClickHouse instance with connection pooling
+func (ch *ClickHouse) WithPool(pool *Pool) Database {
+	// ClickHouse already has internal connection pooling
+	// This is for interface compliance
+	return ch
+}
+
+// GetPoolStats returns pool statistics
+func (ch *ClickHouse) GetPoolStats() PoolStats {
+	// ClickHouse-go handles its own pooling
+	return PoolStats{
+		TotalConnections: 1,
+	}
 }

@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"time"
 
 	"gopkg.in/yaml.v3"
 )
@@ -26,13 +27,62 @@ type Config struct {
 
 // DatabaseConfig contains database connection settings
 type DatabaseConfig struct {
-	Type     string `yaml:"type"`      // clickhouse, timescaledb, elasticsearch
-	Host     string `yaml:"host"`
-	Port     int    `yaml:"port"`
-	Username string `yaml:"username"`
-	Password string `yaml:"password"`
-	Database string `yaml:"database"`  // database name
-	SSLMode  string `yaml:"ssl_mode"`
+	Type         string                `yaml:"type"`      // clickhouse, timescaledb, elasticsearch
+	Host         string                `yaml:"host"`
+	Port         int                   `yaml:"port"`
+	Username     string                `yaml:"username"`
+	Password     string                `yaml:"password"`
+	Database     string                `yaml:"database"`  // database name
+	SSLMode      string                `yaml:"ssl_mode"`
+	
+	// Connection pooling
+	PoolConfig   *PoolConfig           `yaml:"pool,omitempty"`
+	
+	// Read replicas for high availability
+	ReadReplicas []*ReadReplicaConfig  `yaml:"read_replicas,omitempty"`
+	
+	// Retention policies
+	RetentionPolicies []*RetentionPolicyConfig `yaml:"retention_policies,omitempty"`
+	
+	// Schema version tracking
+	AutoMigrate  bool                  `yaml:"auto_migrate"`
+	TargetVersion int                  `yaml:"target_version,omitempty"`
+}
+
+// PoolConfig defines connection pool settings
+type PoolConfig struct {
+	MaxOpenConns        int           `yaml:"max_open_conns"`
+	MaxIdleConns        int           `yaml:"max_idle_conns"`
+	ConnMaxLifetime     time.Duration `yaml:"conn_max_lifetime"`
+	ConnMaxIdleTime     time.Duration `yaml:"conn_max_idle_time"`
+	HealthCheckInterval time.Duration `yaml:"health_check_interval"`
+	AcquireTimeout      time.Duration `yaml:"acquire_timeout"`
+}
+
+// ReadReplicaConfig defines a read replica configuration
+type ReadReplicaConfig struct {
+	Name     string            `yaml:"name"`
+	Host     string            `yaml:"host"`
+	Port     int               `yaml:"port"`
+	Priority int               `yaml:"priority"`
+	Weight   int               `yaml:"weight"`
+	Region   string            `yaml:"region,omitempty"`
+	Tags     map[string]string `yaml:"tags,omitempty"`
+}
+
+// RetentionPolicyConfig defines data retention settings
+type RetentionPolicyConfig struct {
+	ID              string              `yaml:"id"`
+	Name            string              `yaml:"name"`
+	Enabled         bool                `yaml:"enabled"`
+	Honeypots       []string            `yaml:"honeypots,omitempty"`
+	HotRetention    time.Duration       `yaml:"hot_retention"`
+	WarmRetention   time.Duration       `yaml:"warm_retention"`
+	ColdRetention   time.Duration       `yaml:"cold_retention"`
+	ArchiveType     string              `yaml:"archive_type,omitempty"` // s3, gcs, filesystem
+	ArchiveConfig   map[string]string   `yaml:"archive_config,omitempty"`
+	CompressionType string              `yaml:"compression"`
+	Schedule        string              `yaml:"schedule"`
 }
 
 // SecurityConfig contains security hardening options
@@ -163,13 +213,34 @@ func Default(instanceName string) *Config {
 		DataPath:     dataPath,
 		ConfigPath:   configPath,
 		Database: DatabaseConfig{
-			Type:     "clickhouse",
-			Host:     "localhost",
-			Port:     9000,
-			Username: "qpot",
-			Password: "",
-			Database: "qpot",
-			SSLMode:  "disable",
+			Type:        "clickhouse",
+			Host:        "localhost",
+			Port:        9000,
+			Username:    "qpot",
+			Password:    "",
+			Database:    "qpot",
+			SSLMode:     "disable",
+			AutoMigrate: true,
+			PoolConfig: &PoolConfig{
+				MaxOpenConns:        25,
+				MaxIdleConns:        10,
+				ConnMaxLifetime:     time.Hour,
+				ConnMaxIdleTime:     30 * time.Minute,
+				HealthCheckInterval: 5 * time.Minute,
+				AcquireTimeout:      30 * time.Second,
+			},
+			RetentionPolicies: []*RetentionPolicyConfig{
+				{
+					ID:              "default",
+					Name:            "Default 90-Day Retention",
+					Enabled:         true,
+					HotRetention:    90 * 24 * time.Hour,
+					WarmRetention:   180 * 24 * time.Hour,
+					ColdRetention:   365 * 24 * time.Hour,
+					CompressionType: "gzip",
+					Schedule:        "0 2 * * *",
+				},
+			},
 		},
 		Security: SecurityConfig{
 			SandboxMode:        "gvisor",
