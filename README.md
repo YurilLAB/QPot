@@ -68,13 +68,13 @@ Built-in anti-fingerprinting features including fake hostnames, randomized respo
 +-------------------------------------------------------------+
 |                        QPot Platform                        |
 |                                                             |
-|  +-----------------------------------------------------+   |
-|  |            Nginx Reverse Proxy (64297)              |   |
+|  +------------------------------------------------------+   |
+|  |            Nginx Reverse Proxy (64297)               |   |
 |  |  +----------+----------+----------+-------------+    |   |
 |  |  | Landing  |  Attack  |  Kibana  |  QPot API   |    |   |
 |  |  |  Page    |   Map    | Analytics|   Server    |    |   |
 |  |  +----------+----------+----------+-------------+    |   |
-|  +-----------------------------------------------------+   |
+|  +------------------------------------------------------+   |
 |                            |                                |
 |  +-------------------------+-----------------------------+  |
 |  |                         |                             |  |
@@ -82,13 +82,13 @@ Built-in anti-fingerprinting features including fake hostnames, randomized respo
 |  ClickHouse           Honeypots                     Web UI  |
 |  (Analytics)        (Docker Containers)            (React)  |
 |                                                             |
-|  +-----------------------------------------------------+   |
-|  |                   Security Features                 |   |
-|  |  - gVisor/Kata sandboxing  - Read-only filesystems  |   |
-|  |  - Resource limits         - Custom seccomp profiles|   |
-|  |  - Network isolation       - MAC randomization      |   |
+|  +------------------------------------------------------+   |
+|  |                   Security Features                  |   |
+|  |  - gVisor/Kata sandboxing  - Read-only filesystems   |   |
+|  |  - Resource limits         - Custom seccomp profiles |   |
+|  |  - Network isolation       - MAC randomization       |   |
 |  |  - Stealth/deception       - No privileged containers|   |
-|  +-----------------------------------------------------+   |
+|  +------------------------------------------------------+   |
 +-------------------------------------------------------------+
 ```
 
@@ -298,16 +298,16 @@ database:
 
 ## Security Features
 
-| Feature | Implementation | Status |
-|---------|---------------|--------|
-| Sandboxing | gVisor, Kata, Firecracker | Production |
-| Resource Limits | CPU, Memory, PIDs, FDs | Production |
-| Filesystem | Read-only root, tmpfs overlays | Production |
-| Capabilities | Drop ALL, minimal add | Production |
-| Seccomp | Custom profiles per honeypot | Production |
-| Network | Isolated per-honeypot networks | Production |
-| MAC Address | Randomized per container | Production |
-| Hostname | Unique per instance | Production |
+| Feature | Implementation | 
+|---------|---------------|
+| Sandboxing | gVisor, Kata, Firecracker| 
+| Resource Limits | CPU, Memory, PIDs, FDs| 
+| Filesystem | Read-only root, tmpfs overlays| 
+| Capabilities | Drop ALL, minimal add| 
+| Seccomp | Custom profiles per honeypot| 
+| Network | Isolated per-honeypot networks| 
+| MAC Address | Randomized per container| 
+| Hostname | Unique per instance| 
 
 ---
 
@@ -552,7 +552,7 @@ QPot adds enterprise features, enhanced security, and integration with the Yuril
 ## Support
 
 - **Issues**: [GitHub Issues](https://github.com/YurilLAB/QPot/issues)
-- **Enterprise Support**: Contact via GitHub
+- **Support**: Contact via GitHub
 
 ---
 
