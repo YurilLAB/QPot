@@ -5,7 +5,7 @@
 <h1 align="center">QPot</h1>
 <p align="center">
   <strong>Advanced Honeypot Platform</strong><br>
-  <em>A Yuril Security Project</em><br>
+  <em>Developed by Yuril Security Team</em><br>
 </p>
 
 <p align="center">
@@ -19,7 +19,7 @@
 
 ## Overview
 
-**QPot** is an enterprise-grade honeypot platform developed by **[Yuril Security](https://github.com/YurilLAB/YurilSecurity)** (Australia). Built on the solid foundation of T-Pot CE, QPot adds modern security features, enhanced sandboxing, and seamless integration with the Yuril Security ecosystem.
+**QPot** is an enterprise-grade honeypot platform developed by YurilLAB. Built on the solid foundation of T-Pot CE, QPot adds modern security features, enhanced sandboxing, and seamless integration with the Yuril Security ecosystem.
 
 > **Part of the Yuril Security Suite**  
 > QPot works alongside [YurilAntivirus](https://github.com/YurilLAB/YurilSecurity/tree/main/YurilAntivirus) and [YurilTracking](https://github.com/YurilLAB/YurilSecurity/tree/main/YurilTracking) to provide comprehensive threat detection and response capabilities.
