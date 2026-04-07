@@ -41,6 +41,10 @@
 | QPot ID Tracking | No | Yes - Instance identification |
 | Stealth Mode | No | Yes - Anti-fingerprinting |
 | Yuril Integration | No | Yes - Native ecosystem support |
+| Database Migrations | No | Yes - Versioned schema management |
+| Data Retention Policies | No | Yes - Automated S3 archival |
+| Read Replicas | No | Yes - High availability |
+| Cluster Management | No | Yes - Multi-instance with password auth |
 
 ### Key Advantages
 
@@ -218,6 +222,78 @@ stealth:
   block_scanner_probes: true
 ```
 
+### Database Migrations
+
+QPot supports versioned schema migrations for ClickHouse and TimescaleDB:
+
+```yaml
+database:
+  type: clickhouse
+  auto_migrate: true  # Automatically apply migrations on startup
+  target_version: 0   # 0 = latest, or specify specific version
+```
+
+View migration status:
+```bash
+./qpot db migrate status
+./qpot db migrate up      # Apply pending migrations
+./qpot db migrate down    # Rollback one migration
+```
+
+### Data Retention Policies
+
+Automated data lifecycle management with hot/warm/cold tiers:
+
+```yaml
+database:
+  retention_policies:
+    - id: default
+      name: "90-Day Retention"
+      enabled: true
+      hot_retention: 2160h      # Keep in hot storage for 90 days
+      warm_retention: 4320h     # Move to warm storage for 180 days
+      cold_retention: 8760h     # Archive for 365 days
+      archive_type: s3          # s3, gcs, or filesystem
+      archive_config:
+        endpoint: s3.amazonaws.com
+        region: us-east-1
+        bucket: qpot-archives
+        prefix: honeypot-data/
+        access_key_id: ${AWS_ACCESS_KEY_ID}
+        secret_access_key: ${AWS_SECRET_ACCESS_KEY}
+      compression: gzip
+      schedule: "0 2 * * *"     # Run daily at 2 AM
+```
+
+### Connection Pooling & Read Replicas
+
+Advanced database connection management:
+
+```yaml
+database:
+  pool:
+    max_open_conns: 25
+    max_idle_conns: 10
+    conn_max_lifetime: 1h
+    conn_max_idle_time: 30m
+    health_check_interval: 5m
+    acquire_timeout: 30s
+  
+  read_replicas:
+    - name: replica-1
+      host: 10.0.0.5
+      port: 9000
+      priority: 1
+      weight: 50
+      region: us-east-1
+    - name: replica-2
+      host: 10.0.0.6
+      port: 9000
+      priority: 2
+      weight: 50
+      region: us-west-2
+```
+
 ---
 
 ## Security Features
@@ -258,6 +334,95 @@ qpot logs [honeypot]             # View logs
 qpot id [--instance <name>]      # Show QPot ID
 qpot config [--instance <name>]  # Edit configuration
 ```
+
+---
+
+## Cluster Management
+
+QPot supports multi-instance clustering with password authentication for distributed honeypot deployments.
+
+### Initialize a Cluster
+
+Create a new cluster on your central server:
+
+```bash
+./qpot cluster init --name production --password "SecurePass123!"
+
+# Output:
+# [OK] Cluster initialized successfully
+#      Cluster ID:   qc_a1b2c3d4e5f6...
+#      Cluster Name: production
+#      Node ID:      qn_1234567890ab...
+#      Bind Address: 0.0.0.0:7946
+#
+# [IMPORTANT] Save your Cluster ID and Password!
+#             Other nodes will need both to join.
+```
+
+### Join a Cluster
+
+Add sensor nodes to the cluster:
+
+```bash
+./qpot cluster join \
+  --id qc_a1b2c3d4e5f6... \
+  --password "SecurePass123!" \
+  --seed 192.168.1.10:7946 \
+  --node-name sensor-01 \
+  --node-addr 192.168.1.20
+
+# Multiple seeds for redundancy:
+./qpot cluster join \
+  --id qc_a1b2c3d4e5f6... \
+  --password "SecurePass123!" \
+  --seed 192.168.1.10:7946 \
+  --seed 192.168.1.11:7946 \
+  --node-name sensor-02
+```
+
+### Cluster Operations
+
+```bash
+# View cluster status
+./qpot cluster status
+
+# Output:
+# Cluster ID:    qc_a1b2c3d4e5f6...
+# Cluster Name:  production
+# Status:        running
+# 
+# Nodes:
+#   Total:       5
+#   Healthy:     5
+#   Suspect:     0
+#   Failed:      0
+# 
+# Events:        1,234,567 total
+
+# List all nodes
+./qpot cluster nodes
+
+# Output:
+# NODE ID      NAME            ADDRESS          STATUS     EVENTS
+# -----------  --------------  ---------------  ---------  --------
+# qn_123456..  leader          192.168.1.10:79  healthy    567890
+# qn_789abc..  sensor-01       192.168.1.20:79  healthy    333777
+# qn_def012..  sensor-02       192.168.1.21:79  healthy    333000
+
+# Leave cluster (run on the node leaving)
+./qpot cluster leave
+```
+
+### Cluster Features
+
+| Feature | Description |
+|---------|-------------|
+| Password Auth | All nodes require cluster ID + password to join |
+| Automatic Discovery | Nodes discover each other via gossip protocol |
+| Health Monitoring | Automatic detection of failed nodes |
+| Event Aggregation | Centralized view of attacks across all nodes |
+| Encrypted Communication | TLS encryption between cluster members |
+| Read Replicas | Database reads distributed across replicas |
 
 ---
 
@@ -347,8 +512,12 @@ make dev
 QPot/
 ├── cmd/qpot/              # CLI entry point
 ├── internal/
+│   ├── cluster/          # Multi-instance cluster management
 │   ├── config/           # Configuration management
 │   ├── database/         # Database drivers (CH, TSDB, ES)
+│   │   ├── migration.go         # Schema migrations
+│   │   ├── retention.go         # Data retention & archival
+│   │   └── pool.go              # Connection pooling
 │   ├── security/         # Sandboxing and isolation
 │   ├── instance/         # Instance lifecycle
 │   └── server/           # API server
