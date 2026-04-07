@@ -12,7 +12,7 @@
   <a href="https://github.com/YurilLAB/QPot/releases"><img src="https://img.shields.io/github/v/release/YurilLAB/QPot?style=flat-square&color=blue" alt="Release"></a>
   <a href="https://golang.org"><img src="https://img.shields.io/badge/Go-1.23+-00ADD8.svg?style=flat-square" alt="Go Version"></a>
   <a href="https://docker.com"><img src="https://img.shields.io/badge/Docker-Required-2496ED.svg?style=flat-square" alt="Docker"></a>
-  <a href="LICENSE"><img src="https://img.shields.io/badge/License-Proprietary-red.svg?style=flat-square" alt="License"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-green.svg?style=flat-square" alt="License"></a>
 </p>
 
 ---
@@ -32,28 +32,28 @@
 
 | Feature | T-Pot | QPot |
 |---------|-------|------|
-| Attack Map | ✅ | ✅ Enhanced with QPot ID |
-| Kibana Dashboard | ✅ | ✅ With ClickHouse support |
-| 20+ Honeypots | ✅ | ✅ Same proven images |
-| **Per-Honeypot Resources** | ❌ | ✅ CPU/Mem/PID limits |
-| **gVisor/Kata Sandboxing** | ❌ | ✅ Container isolation |
-| **ClickHouse Database** | ❌ | ✅ High-performance analytics |
-| **QPot ID Tracking** | ❌ | ✅ Instance identification |
-| **Stealth Mode** | ❌ | ✅ Anti-fingerprinting |
-| **Yuril Integration** | ❌ | ✅ Native ecosystem support |
+| Attack Map | Yes | Yes - Enhanced with QPot ID |
+| Kibana Dashboard | Yes | Yes - With ClickHouse support |
+| 20+ Honeypots | Yes | Yes - Same proven images |
+| Per-Honeypot Resources | No | Yes - CPU/Mem/PID limits |
+| gVisor/Kata Sandboxing | No | Yes - Container isolation |
+| ClickHouse Database | No | Yes - High-performance analytics |
+| QPot ID Tracking | No | Yes - Instance identification |
+| Stealth Mode | No | Yes - Anti-fingerprinting |
+| Yuril Integration | No | Yes - Native ecosystem support |
 
 ### Key Advantages
 
-**🔒 Defense in Depth**  
+**Defense in Depth**  
 Every honeypot runs in its own sandbox with gVisor, Kata, or Firecracker isolation. Resource limits prevent container escape and resource exhaustion attacks.
 
-**📊 Modern Data Architecture**  
+**Modern Data Architecture**  
 Optional ClickHouse backend provides columnar storage for fast analytics, while the ClickHouse-Kibana connector maintains compatibility with existing Kibana dashboards.
 
-**🔍 Unique Instance Tracking**  
+**Unique Instance Tracking**  
 Every QPot deployment receives a unique QPot ID (`qp_*`) for multi-instance management, threat correlation, and integration with YurilTracking.
 
-**🛡️ Stealth Operations**  
+**Stealth Operations**  
 Built-in anti-fingerprinting features including fake hostnames, randomized response delays, and MAC address randomization make honeypots harder to detect.
 
 ---
@@ -61,31 +61,31 @@ Built-in anti-fingerprinting features including fake hostnames, randomized respo
 ## Architecture
 
 ```
-┌─────────────────────────────────────────────────────────────────┐
-│                        QPot Platform                            │
-│                                                                 │
-│  ┌─────────────────────────────────────────────────────────┐   │
-│  │              Nginx Reverse Proxy (64297)                │   │
-│  │  ┌────────────┬────────────┬────────────┬─────────────┐ │   │
-│  │  │  Landing   │   Attack   │   Kibana   │  QPot API   │ │   │
-│  │  │   Page     │    Map     │ Analytics  │   Server    │ │   │
-│  │  └────────────┴────────────┴────────────┴─────────────┘ │   │
-│  └─────────────────────────────────────────────────────────┘   │
-│                              │                                  │
-│  ┌───────────────────────────┼──────────────────────────────┐  │
-│  │                           │                              │  │
-│  ▼                           ▼                              ▼  │
-│  ClickHouse              Honeypots                     Web UI  │
-│  (Analytics)        (Docker Containers)               (React)  │
-│                                                                │
-│  ┌─────────────────────────────────────────────────────────┐  │
-│  │                    Security Features                    │  │
-│  │  • gVisor/Kata sandboxing  • Read-only filesystems      │  │
-│  │  • Resource limits         • Custom seccomp profiles    │  │
-│  │  • Network isolation       • MAC randomization          │  │
-│  │  • Stealth/deception       • No privileged containers   │  │
-│  └─────────────────────────────────────────────────────────┘  │
-└─────────────────────────────────────────────────────────────────┘
++-------------------------------------------------------------+
+|                        QPot Platform                        |
+|                                                             |
+|  +-----------------------------------------------------+   |
+|  |            Nginx Reverse Proxy (64297)              |   |
+|  |  +----------+----------+----------+-------------+    |   |
+|  |  | Landing  |  Attack  |  Kibana  |  QPot API   |    |   |
+|  |  |  Page    |   Map    | Analytics|   Server    |    |   |
+|  |  +----------+----------+----------+-------------+    |   |
+|  +-----------------------------------------------------+   |
+|                            |                                |
+|  +-------------------------+-----------------------------+  |
+|  |                         |                             |  |
+|  v                         v                             v  |
+|  ClickHouse           Honeypots                     Web UI  |
+|  (Analytics)        (Docker Containers)            (React)  |
+|                                                             |
+|  +-----------------------------------------------------+   |
+|  |                   Security Features                 |   |
+|  |  - gVisor/Kata sandboxing  - Read-only filesystems  |   |
+|  |  - Resource limits         - Custom seccomp profiles|   |
+|  |  - Network isolation       - MAC randomization      |   |
+|  |  - Stealth/deception       - No privileged containers|   |
+|  +-----------------------------------------------------+   |
++-------------------------------------------------------------+
 ```
 
 ---
@@ -224,14 +224,14 @@ stealth:
 
 | Feature | Implementation | Status |
 |---------|---------------|--------|
-| **Sandboxing** | gVisor, Kata, Firecracker | Production |
-| **Resource Limits** | CPU, Memory, PIDs, FDs | Production |
-| **Filesystem** | Read-only root, tmpfs overlays | Production |
-| **Capabilities** | Drop ALL, minimal add | Production |
-| **Seccomp** | Custom profiles per honeypot | Production |
-| **Network** | Isolated per-honeypot networks | Production |
-| **MAC Address** | Randomized per container | Production |
-| **Hostname** | Unique per instance | Production |
+| Sandboxing | gVisor, Kata, Firecracker | Production |
+| Resource Limits | CPU, Memory, PIDs, FDs | Production |
+| Filesystem | Read-only root, tmpfs overlays | Production |
+| Capabilities | Drop ALL, minimal add | Production |
+| Seccomp | Custom profiles per honeypot | Production |
+| Network | Isolated per-honeypot networks | Production |
+| MAC Address | Randomized per container | Production |
+| Hostname | Unique per instance | Production |
 
 ---
 
@@ -365,13 +365,7 @@ QPot/
 
 ## License
 
-**Proprietary Software - CLOSED SOURCE**
-
-Copyright © 2024 Yuril Security (Australia). All rights reserved.
-
-Unauthorized distribution, modification, or reverse engineering is prohibited.
-
-For licensing inquiries, contact: licensing@yurilsecurity.com
+MIT License - See [LICENSE](LICENSE)
 
 ---
 
@@ -389,12 +383,17 @@ QPot adds enterprise features, enhanced security, and integration with the Yuril
 ## Support
 
 - **Issues**: [GitHub Issues](https://github.com/YurilLAB/QPot/issues)
-- **Documentation**: [Wiki](https://github.com/YurilLAB/QPot/wiki)
-- **Enterprise Support**: support@yurilsecurity.com
+- **Enterprise Support**: Contact via GitHub
+
+---
+
+## Contributors
+
+- **Yuril** - Project lead and primary developer
 
 ---
 
 <p align="center">
-  <strong>Built with 🔒 by Yuril Security</strong><br>
+  <strong>Built by Yuril Security</strong><br>
   <em>Australian-made cybersecurity</em>
 </p>
