@@ -98,7 +98,7 @@ fi
 
 myINSTALL_NOTIFICATION="### Now installing required packages ..."
 myUSER=$(whoami)
-myTPOT_CONF_FILE="/home/${myUSER}/tpotce/.env"
+myQPOT_CONF_FILE="/home/${myUSER}/qpotce/.env"
 myPACKAGES_DEBIAN="ansible apache2-utils cracklib-runtime wget"
 myPACKAGES_FEDORA="ansible cracklib httpd-tools wget"
 myPACKAGES_ROCKY="ansible-core ansible-collection-redhat-rhel_mgmt epel-release cracklib httpd-tools wget"
@@ -130,7 +130,7 @@ myCURRENT_DISTRIBUTION=$(awk -F= '/^NAME/{print $2}' /etc/os-release | tr -d '"'
 if [[ ! " ${mySUPPORTED_DISTRIBUTIONS[@]} " =~ " ${myCURRENT_DISTRIBUTION} " ]];
   then
     echo "### Only the following distributions are supported: AlmaLinux, Fedora, Debian, openSUSE Tumbleweed, RHEL, Rocky Linux and Ubuntu."
-    echo "### Please follow the T-Pot documentation on how to run T-Pot on macOS, Windows and other currently unsupported platforms."
+    echo "### Please follow the QPot documentation on how to run QPot on macOS, Windows and other currently unsupported platforms."
     echo
     exit 1
 fi
@@ -139,7 +139,7 @@ fi
 echo "$myINSTALLER"
 echo
 echo
-echo "### This script will now install T-Pot and all of its dependencies."
+echo "### This script will now install QPot and all of its dependencies."
 if [[ -z "$myQST" ]]; then
   while [ "${myQST}" != "y" ] && [ "${myQST}" != "n" ]; do
     echo
@@ -233,20 +233,20 @@ if [[ "${myANSIBLE_DISTRIBUTIONS[@]}" =~ "${myCURRENT_DISTRIBUTION}" ]];
     myANSIBLE_TAG=${myCURRENT_DISTRIBUTION}
 fi
 
-# Download tpot.yml if not found locally
-if [ ! -f installer/install/tpot.yml ] && [ ! -f tpot.yml ];
+# Download qpot.yml if not found locally
+if [ ! -f installer/install/qpot.yml ] && [ ! -f qpot.yml ];
   then
-    echo "### Now downloading T-Pot Ansible Installation Playbook ... "
-    wget -qO tpot.yml https://raw.githubusercontent.com/telekom-security/tpotce/master/installer/install/tpot.yml
-    myANSIBLE_TPOT_PLAYBOOK="tpot.yml"
+    echo "### Now downloading QPot Ansible Installation Playbook ... "
+    wget -qO qpot.yml https://raw.githubusercontent.com/telekom-security/qpotce/master/installer/install/qpot.yml
+    myANSIBLE_QPOT_PLAYBOOK="qpot.yml"
     echo
   else
-    echo "### Using local T-Pot Ansible Installation Playbook ... "
-    if [ -f "installer/install/tpot.yml" ];
+    echo "### Using local QPot Ansible Installation Playbook ... "
+    if [ -f "installer/install/qpot.yml" ];
       then
-        myANSIBLE_TPOT_PLAYBOOK="installer/install/tpot.yml"
+        myANSIBLE_QPOT_PLAYBOOK="installer/install/qpot.yml"
       else
-        myANSIBLE_TPOT_PLAYBOOK="tpot.yml"
+        myANSIBLE_QPOT_PLAYBOOK="qpot.yml"
     fi
 fi
 
@@ -279,7 +279,7 @@ ANSIBLE_LOG_PATH=${HOME}/install_tpot.log ansible-playbook ${myANSIBLE_TPOT_PLAY
 # Something went wrong
 if [ ! $? -eq 0 ];
   then
-    echo "### Something went wrong with the Playbook, please review the output and / or install_tpot.log for clues."
+    echo "### Something went wrong with the Playbook, please review the output and / or install_qpot.log for clues."
     echo "### Aborting."
     echo
     exit 1
@@ -288,21 +288,21 @@ if [ ! $? -eq 0 ];
     echo
 fi
 
-# Ask for T-Pot Installation Type
+# Ask for QPot Installation Type
 echo
-echo "### Choose your T-Pot type:"
-echo "### (H)ive   - T-Pot Standard / HIVE installation."
+echo "### Choose your QPot type:"
+echo "### (H)ive   - QPot Standard / HIVE installation."
 echo "###            Includes also everything you need for a distributed setup with sensors."
-echo "### (S)ensor - T-Pot Sensor installation."
+echo "### (S)ensor - QPot Sensor installation."
 echo "###            Optimized for a distributed installation, without WebUI, Elasticsearch and Kibana."
-echo "### (L)LM    - T-Pot LLM installation."
+echo "### (L)LM    - QPot LLM installation."
 echo "###            Uses LLM based honeypots Beelzebub & Galah."
 echo "###            Requires Ollama (recommended) or ChatGPT subscription."
-echo "### M(i)ni   - T-Pot Mini installation."
+echo "### M(i)ni   - QPot Mini installation."
 echo "###            Run 30+ honeypots with just a couple of honeypot daemons."
-echo "### (M)obile - T-Pot Mobile installation."
-echo "###            Includes everything to run T-Pot Mobile (available separately)."
-echo "### (T)arpit - T-Pot Tarpit installation."
+echo "### (M)obile - QPot Mobile installation."
+echo "###            Includes everything to run QPot Mobile (available separately)."
+echo "### (T)arpit - QPot Tarpit installation."
 echo "###            Feed data endlessly to attackers, bots and scanners."
 echo "###            Also runs a Denial of Service Honeypot (ddospot)."
 echo
@@ -314,54 +314,54 @@ while true; do
   case "${myTPOT_TYPE}" in
     h|H)
       echo
-      echo "### Installing T-Pot Standard / HIVE."
-      myTPOT_TYPE="HIVE"
-      cp ${HOME}/tpotce/compose/standard.yml ${HOME}/tpotce/docker-compose.yml
+      echo "### Installing QPot Standard / HIVE."
+      myQPOT_TYPE="HIVE"
+      cp ${HOME}/qpotce/compose/standard.yml ${HOME}/qpotce/docker-compose.yml
       myINFO=""
       break ;;
     s|S)
       echo
-      echo "### Installing T-Pot Sensor."
-      myTPOT_TYPE="SENSOR"
-      cp ${HOME}/tpotce/compose/sensor.yml ${HOME}/tpotce/docker-compose.yml
+      echo "### Installing QPot Sensor."
+      myQPOT_TYPE="SENSOR"
+      cp ${HOME}/qpotce/compose/sensor.yml ${HOME}/qpotce/docker-compose.yml
       myINFO="### Make sure to deploy SSH keys to this SENSOR and disable SSH password authentication.
-### On HIVE run the tpotce/deploy.sh script to join this SENSOR to the HIVE."
+### On HIVE run the qpotce/deploy.sh script to join this SENSOR to the HIVE."
       break ;;
     l|L)
       echo
-      echo "### Installing T-Pot LLM."
-      myTPOT_TYPE="HIVE"
-      cp ${HOME}/tpotce/compose/llm.yml ${HOME}/tpotce/docker-compose.yml
-      myINFO="Make sure to adjust the T-Pot config file (.env) for Ollama / ChatGPT settings."
+      echo "### Installing QPot LLM."
+      myQPOT_TYPE="HIVE"
+      cp ${HOME}/qpotce/compose/llm.yml ${HOME}/qpotce/docker-compose.yml
+      myINFO="Make sure to adjust the QPot config file (.env) for Ollama / ChatGPT settings."
       break ;;
     i|I)
       echo
-      echo "### Installing T-Pot Mini."
-      myTPOT_TYPE="HIVE"
-      cp ${HOME}/tpotce/compose/mini.yml ${HOME}/tpotce/docker-compose.yml
+      echo "### Installing QPot Mini."
+      myQPOT_TYPE="HIVE"
+      cp ${HOME}/qpotce/compose/mini.yml ${HOME}/qpotce/docker-compose.yml
       myINFO=""
       break ;;
     m|M)
       echo
-      echo "### Installing T-Pot Mobile."
-      myTPOT_TYPE="MOBILE"
-      cp ${HOME}/tpotce/compose/mobile.yml ${HOME}/tpotce/docker-compose.yml
+      echo "### Installing QPot Mobile."
+      myQPOT_TYPE="MOBILE"
+      cp ${HOME}/qpotce/compose/mobile.yml ${HOME}/qpotce/docker-compose.yml
       myINFO=""
       break ;;
     t|T)
       echo
-      echo "### Installing T-Pot Tarpit."
-      myTPOT_TYPE="HIVE"
-      cp ${HOME}/tpotce/compose/tarpit.yml ${HOME}/tpotce/docker-compose.yml
+      echo "### Installing QPot Tarpit."
+      myQPOT_TYPE="HIVE"
+      cp ${HOME}/qpotce/compose/tarpit.yml ${HOME}/qpotce/docker-compose.yml
       myINFO=""
       break ;;
   esac
 done
 
-if [ "${myTPOT_TYPE}" == "HIVE" ];
+if [ "${myQPOT_TYPE}" == "HIVE" ];
   # If T-Pot Type is HIVE ask for WebUI username and password
   then
-  # Preparing web user for T-Pot
+  # Preparing web user for QPot
   echo
   echo "### T-Pot User Configuration ..."
   echo
@@ -419,18 +419,18 @@ if [ "${myTPOT_TYPE}" == "HIVE" ];
   fi
 
 
-  # Write username and password to T-Pot config file
-  echo "### Creating base64 encoded htpasswd username and password for T-Pot config file: ${myTPOT_CONF_FILE}"
+  # Write username and password to QPot config file
+  echo "### Creating base64 encoded htpasswd username and password for QPot config file: ${myQPOT_CONF_FILE}"
   myWEB_USER_ENC=$(htpasswd -b -n "${myWEB_USER}" "${myWEB_PW}")
     myWEB_USER_ENC_B64=$(echo -n "${myWEB_USER_ENC}" | base64 -w0)
     
   echo
-  sed -i "s|^WEB_USER=.*|WEB_USER=${myWEB_USER_ENC_B64}|" ${myTPOT_CONF_FILE}
+  sed -i "s|^WEB_USER=.*|WEB_USER=${myWEB_USER_ENC_B64}|" ${myQPOT_CONF_FILE}
 fi
 
 # Pull docker images
 echo "### Now pulling images ..."
-sudo docker compose -f /home/${myUSER}/tpotce/docker-compose.yml pull
+sudo docker compose -f /home/${myUSER}/qpotce/docker-compose.yml pull
 echo
 
 # Show running services

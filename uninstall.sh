@@ -2,8 +2,8 @@
 
 myUNINSTALL_NOTIFICATION="### Now installing required packages ..."
 myUSER=$(whoami)
-myTPOT_CONF_FILE="/home/${myUSER}/tpotce/.env"
-myANSIBLE_TPOT_PLAYBOOK="installer/remove/tpot.yml"
+myQPOT_CONF_FILE="/home/${myUSER}/qpotce/.env"
+myANSIBLE_QPOT_PLAYBOOK="installer/remove/qpot.yml"
 
 myUNINSTALLER=$(cat << "EOF"
  _____     ____       _     _   _       _           _        _ _
@@ -29,7 +29,7 @@ myCURRENT_DISTRIBUTION=$(awk -F= '/^NAME/{print $2}' /etc/os-release | tr -d '"'
 if [[ ! " ${mySUPPORTED_DISTRIBUTIONS[@]} " =~ " ${myCURRENT_DISTRIBUTION} " ]];
   then
     echo "### Only the following distributions are supported: AlmaLinux, Fedora, Debian, openSUSE Tumbleweed, RHEL, Rocky Linux and Ubuntu."
-    echo "### Please follow the T-Pot documentation on how to run T-Pot on macOS, Windows and other currently unsupported platforms."
+    echo "### Please follow the QPot documentation on how to run QPot on macOS, Windows and other currently unsupported platforms."
     echo
     exit 1
 fi
@@ -38,7 +38,7 @@ fi
 echo "$myUNINSTALLER"
 echo
 echo
-echo "### This script will now uninstall T-Pot."
+echo "### This script will now uninstall QPot."
 while [ "${myQST}" != "y" ] && [ "${myQST}" != "n" ];
   do
     echo
@@ -88,23 +88,23 @@ if [ "$myANSIBLE_TAG" = "Debian" ];
 fi
 
 # Run Ansible Playbook
-echo "### Now running T-Pot Ansible Uninstallation Playbook ..."
+echo "### Now running QPot Ansible Uninstallation Playbook ..."
 echo
-rm ${HOME}/uninstall_tpot.log > /dev/null 2>&1
-ANSIBLE_LOG_PATH=${HOME}/uninstall_tpot.log ansible-playbook ${myANSIBLE_TPOT_PLAYBOOK} -i 127.0.0.1, -c local --tags "${myANSIBLE_TAG}" ${myANSIBLE_BECOME_OPTION}
+rm ${HOME}/uninstall_qpot.log > /dev/null 2>&1
+ANSIBLE_LOG_PATH=${HOME}/uninstall_qpot.log ansible-playbook ${myANSIBLE_QPOT_PLAYBOOK} -i 127.0.0.1, -c local --tags "${myANSIBLE_TAG}" ${myANSIBLE_BECOME_OPTION}
 
 # Something went wrong
 if [ ! $? -eq 0 ];
   then
-    echo "### Something went wrong with the Playbook, please review the output and / or uninstall_tpot.log for clues."
+    echo "### Something went wrong with the Playbook, please review the output and / or uninstall_qpot.log for clues."
     echo "### Aborting."
     echo
     exit 1
   else
     echo "### Playbook was successful."
-    echo "### Now removing ${HOME}/tpotce."
-    sudo rm -rf ${HOME}/tpotce
-    rm -rf ${HOME}/tpot.yml
+    echo "### Now removing ${HOME}/qpotce."
+    sudo rm -rf ${HOME}/qpotce
+    rm -rf ${HOME}/qpot.yml
     echo
 fi
 

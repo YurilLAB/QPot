@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # Some global vars
-myCOMPOSEFILE="~/tpotce/docker-compose.yml"
+myCOMPOSEFILE="~/qpotce/docker-compose.yml"
 myDATE=$(date +%Y%m%d%H%M)
 myRED="[0;31m"
 myGREEN="[0;32m"
@@ -93,22 +93,22 @@ function fuCHECK_VERSION () {
 		exit
 	    fi
 	  else
-	    echo "###### $myBLUE""Unable to determine version. Please run 'update.sh' from within 'tpotce/'.""$myWHITE"" [ $myRED""NOT OK""$myWHITE ]"
+	    echo "###### $myBLUE""Unable to determine version. Please run 'update.sh' from within 'qpotce/'.""$myWHITE"" [ $myRED""NOT OK""$myWHITE ]""
 	    exit
 	  fi
 	echo
 }
 
-# Stop T-Pot to avoid race conditions with running containers with regard to the current T-Pot config
-function fuSTOP_TPOT () {
+# Stop QPot to avoid race conditions with running containers with regard to the current QPot config
+function fuSTOP_QPOT () {
 	echo
-	echo "### Need to stop T-Pot ..."
-	echo -n "###### $myBLUE Now stopping T-Pot.$myWHITE "
-	sudo systemctl stop tpot.service
+	echo "### Need to stop QPot ..."
+	echo -n "###### $myBLUE Now stopping QPot.$myWHITE "
+	sudo systemctl stop qpot.service
 	if [ $? -ne 0 ];
 	  then
 	    echo " [ $myRED""NOT OK""$myWHITE ]"
-	    echo "###### $myBLUE""Could not stop T-Pot.""$myWHITE"" [ $myRED""NOT OK""$myWHITE ]"
+	    echo "###### $myBLUE""Could not stop QPot.""$myWHITE"" [ $myRED""NOT OK""$myWHITE ]"
 	    echo "Exiting.""$myWHITE"
 	    echo
 	    exit 1
@@ -127,12 +127,12 @@ function fuSTOP_TPOT () {
 
 # Backup
 function fuBACKUP () {
-	myARCHIVE="$HOME/${myDATE}_tpot_backup.tgz"
+	myARCHIVE="$HOME/${myDATE}_qpot_backup.tgz"
 	local myPATH=$PWD
 	echo
 	echo "### Create a backup, just in case ... "
 	echo -n "###### $myBLUE Building archive in $myARCHIVE $myWHITE"
-	cd $HOME/tpotce
+	cd $HOME/qpotce
 	sudo tar cvf $myARCHIVE * .env >/dev/null 2>&1
 	sudo chown $LOGNAME:$LOGNAME $myARCHIVE
 	if [ $? -ne 0 ];
@@ -158,7 +158,7 @@ function fuREMOVEOLDIMAGES () {
 }
 
 function fuPULLIMAGES {
-	docker compose -f ~/tpotce/docker-compose.yml pull
+	docker compose -f ~/qpotce/docker-compose.yml pull
 }
 
 function fuUPDATER () {
@@ -174,24 +174,24 @@ function fuUPDATER () {
 	echo "### We stored the previous version as backup in $myARCHIVE."
 	echo "### Some updates may need an import of the latest Kibana objects as well."
 	echo "### Download the latest objects here if they recently changed:"
-	echo "### https://raw.githubusercontent.com/telekom-security/tpotce/master/etc/objects/kibana_export.ndjson.zip"
+	echo "### https://raw.githubusercontent.com/telekom-security/qpotce/master/etc/objects/kibana_export.ndjson.zip"
 	echo "### Export and import the objects easily through the Kibana WebUI:"
 	echo "### Go to Kibana > Management > Saved Objects > Export / Import"
 	echo
 }
 
 function fuRESTORE () {
-	if [ -f '~/tpotce/data/ews/conf/ews.cfg' ] && ! grep 'ews.cfg' $myCOMPOSEFILE > /dev/null; then
+	if [ -f '~/qpotce/data/ews/conf/ews.cfg' ] && ! grep 'ews.cfg' $myCOMPOSEFILE > /dev/null; then
 	    echo
-	    echo "### Restoring volume mount for ews.cfg in tpot.yml"
-	    sed -i '/- ${TPOT_DATA_PATH}:\/data/a \ \ \ \ \ - ${TPOT_DATA_PATH}/ews/conf/ews.cfg:/opt/ewsposter/ews.cfg' $myCOMPOSEFILE
+	    echo "### Restoring volume mount for ews.cfg in qpot.yml"
+	    sed -i '/- ${QPOT_DATA_PATH}:\/data/a \ \ \ \ \ - ${QPOT_DATA_PATH}/ews/conf/ews.cfg:/opt/ewsposter/ews.cfg' $myCOMPOSEFILE
 	fi
-	echo "### Restoring T-Pot config file .env"
-	tar xvf $myARCHIVE .env -C $HOME/tpotce >/dev/null 2>&1
-	# Backup file (.env) contains a record of the TPOT_VERSION that is used in docker-compose commmands. 
+	echo "### Restoring QPot config file .env"
+	tar xvf $myARCHIVE .env -C $HOME/qpotce >/dev/null 2>&1
+	# Backup file (.env) contains a record of the QPOT_VERSION that is used in docker-compose commmands. 
 	# We should upgrade the version in this file after restoring the backup.
 	newVERSION=$(cat version)
-	sed -i "s/^TPOT_VERSION=.*/TPOT_VERSION=${newVERSION}/" $HOME/tpotce/.env
+	sed -i "s/^QPOT_VERSION=.*/QPOT_VERSION=${newVERSION}/" $HOME/qpotce/.env
 }
 
 ################
@@ -203,8 +203,8 @@ sudo echo "$myUPDATER"
 
 if [ "$1" != "-y" ]; then
   echo
-  echo "This script will update T-Pot to the latest version."
-  echo "A backup of ~/tpotce will be written to $HOME. If you are unsure, you should save your work."
+  echo "This script will update QPot to the latest version."
+  echo "A backup of ~/qpotce will be written to $HOME. If you are unsure, you should save your work."
   echo "This tool might break things and therefore only recommended for experienced users."
   echo "If you understand the involved risks feel free to run this script with the '-y' switch."
   echo
@@ -213,12 +213,12 @@ fi
 
 fuCHECK_VERSION
 fuCHECKINET "https://index.docker.io https://github.com"
-fuSTOP_TPOT
+fuSTOP_QPOT
 fuBACKUP
 fuSELFUPDATE "$0" "$@"
 fuUPDATER
 fuRESTORE
 
 echo
-echo "### Done. You can now start T-Pot using 'systemctl start tpot' or 'docker compose up -d'."
+echo "### Done. You can now start QPot using 'systemctl start qpot' or 'docker compose up -d'."
 echo
