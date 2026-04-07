@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="https://raw.githubusercontent.com/YurilLAB/YurilSecurity/main/assets/qpot-logo.png" alt="QPot Logo" width="200">
+  <img src="doc/qpot_wallpaper.png" alt="QPot Wallpaper" width="800">
 </p>
 
 <h1 align="center">QPot</h1>
