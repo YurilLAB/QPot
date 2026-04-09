@@ -169,8 +169,6 @@ func (ts *TimescaleDB) InsertEvents(ctx context.Context, events []*Event) error 
 
 	// Fall back to batch insert
 	return ts.insertBatchFallback(ctx, events)
-
-	return nil
 }
 
 // insertBatchFallback falls back to regular INSERT for batch
@@ -514,4 +512,244 @@ func (ts *TimescaleDB) GetPoolStats() PoolStats {
 		AvailableConnections: int(stat.IdleConns()),
 		InUseConnections:     int(stat.AcquiredConns()),
 	}
+}
+
+// TagEvent updates the ATT&CK classification fields on an existing event row.
+func (ts *TimescaleDB) TagEvent(ctx context.Context, event *Event) error {
+	if ts.pool == nil {
+		return fmt.Errorf("not connected")
+	}
+	_, err := ts.pool.Exec(ctx, `
+		UPDATE events SET
+			technique_id     = $1,
+			technique_name   = $2,
+			tactic_id        = $3,
+			tactic_name      = $4,
+			kill_chain_stage = $5,
+			confidence       = $6,
+			classified       = TRUE
+		WHERE source_ip = $7 AND timestamp = $8
+	`,
+		event.TechniqueID,
+		event.TechniqueName,
+		event.TacticID,
+		event.TacticName,
+		event.KillChainStage,
+		event.Confidence,
+		event.SourceIP,
+		event.Timestamp,
+	)
+	return err
+}
+
+// InsertIOC upserts an IOC, incrementing count and updating last_seen on conflict.
+func (ts *TimescaleDB) InsertIOC(ctx context.Context, ioc *IOC) error {
+	if ts.pool == nil {
+		return fmt.Errorf("not connected")
+	}
+	_, err := ts.pool.Exec(ctx, `
+		INSERT INTO iocs (id, type, value, honeypot, source_ip, technique_id,
+		                  first_seen, last_seen, count, metadata)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+		ON CONFLICT (type, value, honeypot) DO UPDATE SET
+			last_seen    = EXCLUDED.last_seen,
+			count        = iocs.count + 1,
+			technique_id = COALESCE(EXCLUDED.technique_id, iocs.technique_id)
+	`,
+		ioc.ID,
+		ioc.Type,
+		ioc.Value,
+		ioc.Honeypot,
+		ioc.SourceIP,
+		ioc.TechniqueID,
+		ioc.FirstSeen,
+		ioc.LastSeen,
+		ioc.Count,
+		ioc.Metadata,
+	)
+	return err
+}
+
+// GetIOCs retrieves IOCs with optional filtering.
+func (ts *TimescaleDB) GetIOCs(ctx context.Context, filter IOCFilter) ([]*IOC, error) {
+	if ts.pool == nil {
+		return nil, fmt.Errorf("not connected")
+	}
+
+	query := `SELECT id, type, value, honeypot, source_ip, technique_id,
+	                 first_seen, last_seen, count, metadata
+	          FROM iocs WHERE 1=1`
+	var args []interface{}
+	argIdx := 1
+
+	if len(filter.Types) > 0 {
+		query += fmt.Sprintf(" AND type = ANY($%d)", argIdx)
+		args = append(args, filter.Types)
+		argIdx++
+	}
+	if len(filter.Honeypots) > 0 {
+		query += fmt.Sprintf(" AND honeypot = ANY($%d)", argIdx)
+		args = append(args, filter.Honeypots)
+		argIdx++
+	}
+	if !filter.StartTime.IsZero() {
+		query += fmt.Sprintf(" AND first_seen >= $%d", argIdx)
+		args = append(args, filter.StartTime)
+		argIdx++
+	}
+	if !filter.EndTime.IsZero() {
+		query += fmt.Sprintf(" AND last_seen <= $%d", argIdx)
+		args = append(args, filter.EndTime)
+		argIdx++
+	}
+	query += " ORDER BY last_seen DESC"
+	if filter.Limit > 0 {
+		query += fmt.Sprintf(" LIMIT $%d", argIdx)
+		args = append(args, filter.Limit)
+		argIdx++
+	}
+	if filter.Offset > 0 {
+		query += fmt.Sprintf(" OFFSET $%d", argIdx)
+		args = append(args, filter.Offset)
+	}
+
+	rows, err := ts.pool.Query(ctx, query, args...)
+	if err != nil {
+		return nil, fmt.Errorf("failed to query iocs: %w", err)
+	}
+	defer rows.Close()
+
+	var iocs []*IOC
+	for rows.Next() {
+		var ioc IOC
+		if err := rows.Scan(
+			&ioc.ID, &ioc.Type, &ioc.Value, &ioc.Honeypot,
+			&ioc.SourceIP, &ioc.TechniqueID, &ioc.FirstSeen,
+			&ioc.LastSeen, &ioc.Count, &ioc.Metadata,
+		); err != nil {
+			return nil, fmt.Errorf("failed to scan ioc: %w", err)
+		}
+		iocs = append(iocs, &ioc)
+	}
+	return iocs, nil
+}
+
+// UpsertTTPSession inserts or updates a TTP session record.
+func (ts *TimescaleDB) UpsertTTPSession(ctx context.Context, session *TTPSession) error {
+	if ts.pool == nil {
+		return fmt.Errorf("not connected")
+	}
+	_, err := ts.pool.Exec(ctx, `
+		INSERT INTO ttp_sessions (
+			session_id, campaign_fingerprint, source_ips,
+			shared_infrastructure, kill_chain_stages, techniques,
+			ioc_ids, event_count, first_seen, last_seen, confidence
+		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+		ON CONFLICT (session_id) DO UPDATE SET
+			source_ips            = EXCLUDED.source_ips,
+			shared_infrastructure = EXCLUDED.shared_infrastructure,
+			kill_chain_stages     = EXCLUDED.kill_chain_stages,
+			techniques            = EXCLUDED.techniques,
+			ioc_ids               = EXCLUDED.ioc_ids,
+			event_count           = EXCLUDED.event_count,
+			last_seen             = EXCLUDED.last_seen,
+			confidence            = EXCLUDED.confidence
+	`,
+		session.SessionID,
+		session.CampaignFingerprint,
+		session.SourceIPs,
+		session.SharedInfrastructure,
+		session.KillChainStages,
+		session.Techniques,
+		session.IOCIDs,
+		session.EventCount,
+		session.FirstSeen,
+		session.LastSeen,
+		session.Confidence,
+	)
+	return err
+}
+
+// GetTTPSessions retrieves TTP sessions ordered by last_seen descending.
+func (ts *TimescaleDB) GetTTPSessions(ctx context.Context, limit int) ([]*TTPSession, error) {
+	if ts.pool == nil {
+		return nil, fmt.Errorf("not connected")
+	}
+
+	query := `
+		SELECT session_id, campaign_fingerprint, source_ips,
+		       shared_infrastructure, kill_chain_stages, techniques,
+		       ioc_ids, event_count, first_seen, last_seen, confidence
+		FROM ttp_sessions
+		ORDER BY last_seen DESC
+	`
+	if limit > 0 {
+		query += fmt.Sprintf(" LIMIT %d", limit)
+	}
+
+	rows, err := ts.pool.Query(ctx, query)
+	if err != nil {
+		return nil, fmt.Errorf("failed to query ttp_sessions: %w", err)
+	}
+	defer rows.Close()
+
+	var sessions []*TTPSession
+	for rows.Next() {
+		var s TTPSession
+		if err := rows.Scan(
+			&s.SessionID, &s.CampaignFingerprint, &s.SourceIPs,
+			&s.SharedInfrastructure, &s.KillChainStages, &s.Techniques,
+			&s.IOCIDs, &s.EventCount, &s.FirstSeen, &s.LastSeen, &s.Confidence,
+		); err != nil {
+			return nil, fmt.Errorf("failed to scan ttp_session: %w", err)
+		}
+		sessions = append(sessions, &s)
+	}
+	return sessions, nil
+}
+
+// GetUnclassifiedEvents returns events that have not yet been classified.
+func (ts *TimescaleDB) GetUnclassifiedEvents(ctx context.Context, limit int) ([]*Event, error) {
+	if ts.pool == nil {
+		return nil, fmt.Errorf("not connected")
+	}
+
+	query := `
+		SELECT timestamp, honeypot, source_ip::text, source_port, dest_port,
+		       protocol, event_type, username, password, command,
+		       payload, metadata, country, city, asn,
+		       technique_id, technique_name, tactic_id, tactic_name,
+		       kill_chain_stage, confidence, classified
+		FROM events
+		WHERE classified = FALSE
+		ORDER BY timestamp ASC
+	`
+	if limit > 0 {
+		query += fmt.Sprintf(" LIMIT %d", limit)
+	}
+
+	rows, err := ts.pool.Query(ctx, query)
+	if err != nil {
+		return nil, fmt.Errorf("failed to query unclassified events: %w", err)
+	}
+	defer rows.Close()
+
+	var events []*Event
+	for rows.Next() {
+		var event Event
+		if err := rows.Scan(
+			&event.Timestamp, &event.Honeypot, &event.SourceIP,
+			&event.SourcePort, &event.DestPort, &event.Protocol,
+			&event.EventType, &event.Username, &event.Password,
+			&event.Command, &event.Payload, &event.Metadata,
+			&event.Country, &event.City, &event.ASN,
+			&event.TechniqueID, &event.TechniqueName,
+			&event.TacticID, &event.TacticName,
+			&event.KillChainStage, &event.Confidence, &event.Classified,
+		); err != nil {
+			return nil, fmt.Errorf("failed to scan event: %w", err)
+		}
+		events = append(events, &event)
+	}
+	return events, nil
 }

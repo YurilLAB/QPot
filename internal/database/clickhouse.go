@@ -537,3 +537,222 @@ func (ch *ClickHouse) GetPoolStats() PoolStats {
 		TotalConnections: 1,
 	}
 }
+
+// TagEvent updates an event's ATT&CK classification fields in ClickHouse.
+func (ch *ClickHouse) TagEvent(ctx context.Context, event *Event) error {
+	if ch.conn == nil {
+		return fmt.Errorf("not connected")
+	}
+	query := `
+		ALTER TABLE events UPDATE
+			technique_id    = ?,
+			technique_name  = ?,
+			tactic_id       = ?,
+			tactic_name     = ?,
+			kill_chain_stage = ?,
+			confidence      = ?,
+			classified      = 1
+		WHERE source_ip = ? AND timestamp = ?
+	`
+	return ch.conn.Exec(ctx, query,
+		event.TechniqueID,
+		event.TechniqueName,
+		event.TacticID,
+		event.TacticName,
+		event.KillChainStage,
+		event.Confidence,
+		event.SourceIP,
+		event.Timestamp,
+	)
+}
+
+// InsertIOC inserts or updates an IOC record using ClickHouse REPLACE semantics.
+func (ch *ClickHouse) InsertIOC(ctx context.Context, ioc *IOC) error {
+	if ch.conn == nil {
+		return fmt.Errorf("not connected")
+	}
+	query := `
+		INSERT INTO iocs (id, type, value, honeypot, source_ip, technique_id,
+		                  first_seen, last_seen, count, metadata)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+	`
+	return ch.conn.Exec(ctx, query,
+		ioc.ID,
+		ioc.Type,
+		ioc.Value,
+		ioc.Honeypot,
+		ioc.SourceIP,
+		ioc.TechniqueID,
+		ioc.FirstSeen,
+		ioc.LastSeen,
+		ioc.Count,
+		ioc.Metadata,
+	)
+}
+
+// GetIOCs retrieves IOCs with optional filtering.
+func (ch *ClickHouse) GetIOCs(ctx context.Context, filter IOCFilter) ([]*IOC, error) {
+	if ch.conn == nil {
+		return nil, fmt.Errorf("not connected")
+	}
+
+	query := "SELECT id, type, value, honeypot, source_ip, technique_id, first_seen, last_seen, count, metadata FROM iocs WHERE 1=1"
+	var args []interface{}
+
+	if len(filter.Types) > 0 {
+		query += " AND type IN ?"
+		args = append(args, filter.Types)
+	}
+	if len(filter.Honeypots) > 0 {
+		query += " AND honeypot IN ?"
+		args = append(args, filter.Honeypots)
+	}
+	if !filter.StartTime.IsZero() {
+		query += " AND first_seen >= ?"
+		args = append(args, filter.StartTime)
+	}
+	if !filter.EndTime.IsZero() {
+		query += " AND last_seen <= ?"
+		args = append(args, filter.EndTime)
+	}
+	query += " ORDER BY last_seen DESC"
+	if filter.Limit > 0 {
+		query += fmt.Sprintf(" LIMIT %d", filter.Limit)
+		if filter.Offset > 0 {
+			query += fmt.Sprintf(" OFFSET %d", filter.Offset)
+		}
+	}
+
+	rows, err := ch.conn.Query(ctx, query, args...)
+	if err != nil {
+		return nil, fmt.Errorf("failed to query iocs: %w", err)
+	}
+	defer rows.Close()
+
+	var iocs []*IOC
+	for rows.Next() {
+		var ioc IOC
+		if err := rows.Scan(
+			&ioc.ID, &ioc.Type, &ioc.Value, &ioc.Honeypot,
+			&ioc.SourceIP, &ioc.TechniqueID, &ioc.FirstSeen,
+			&ioc.LastSeen, &ioc.Count, &ioc.Metadata,
+		); err != nil {
+			return nil, fmt.Errorf("failed to scan ioc: %w", err)
+		}
+		iocs = append(iocs, &ioc)
+	}
+	return iocs, nil
+}
+
+// UpsertTTPSession inserts or replaces a TTP session record.
+func (ch *ClickHouse) UpsertTTPSession(ctx context.Context, session *TTPSession) error {
+	if ch.conn == nil {
+		return fmt.Errorf("not connected")
+	}
+	query := `
+		INSERT INTO ttp_sessions (
+			session_id, campaign_fingerprint, source_ips,
+			shared_infrastructure, kill_chain_stages, techniques,
+			ioc_ids, event_count, first_seen, last_seen, confidence
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+	`
+	return ch.conn.Exec(ctx, query,
+		session.SessionID,
+		session.CampaignFingerprint,
+		session.SourceIPs,
+		session.SharedInfrastructure,
+		session.KillChainStages,
+		session.Techniques,
+		session.IOCIDs,
+		session.EventCount,
+		session.FirstSeen,
+		session.LastSeen,
+		session.Confidence,
+	)
+}
+
+// GetTTPSessions retrieves TTP sessions ordered by last_seen descending.
+func (ch *ClickHouse) GetTTPSessions(ctx context.Context, limit int) ([]*TTPSession, error) {
+	if ch.conn == nil {
+		return nil, fmt.Errorf("not connected")
+	}
+
+	query := `
+		SELECT session_id, campaign_fingerprint, source_ips,
+		       shared_infrastructure, kill_chain_stages, techniques,
+		       ioc_ids, event_count, first_seen, last_seen, confidence
+		FROM ttp_sessions FINAL
+		ORDER BY last_seen DESC
+	`
+	if limit > 0 {
+		query += fmt.Sprintf(" LIMIT %d", limit)
+	}
+
+	rows, err := ch.conn.Query(ctx, query)
+	if err != nil {
+		return nil, fmt.Errorf("failed to query ttp_sessions: %w", err)
+	}
+	defer rows.Close()
+
+	var sessions []*TTPSession
+	for rows.Next() {
+		var s TTPSession
+		if err := rows.Scan(
+			&s.SessionID, &s.CampaignFingerprint, &s.SourceIPs,
+			&s.SharedInfrastructure, &s.KillChainStages, &s.Techniques,
+			&s.IOCIDs, &s.EventCount, &s.FirstSeen, &s.LastSeen, &s.Confidence,
+		); err != nil {
+			return nil, fmt.Errorf("failed to scan ttp_session: %w", err)
+		}
+		sessions = append(sessions, &s)
+	}
+	return sessions, nil
+}
+
+// GetUnclassifiedEvents returns events that have not yet been classified.
+func (ch *ClickHouse) GetUnclassifiedEvents(ctx context.Context, limit int) ([]*Event, error) {
+	if ch.conn == nil {
+		return nil, fmt.Errorf("not connected")
+	}
+
+	query := `
+		SELECT timestamp, honeypot, source_ip, source_port, dest_port,
+		       protocol, event_type, username, password, command,
+		       payload, metadata, country, city, asn,
+		       technique_id, technique_name, tactic_id, tactic_name,
+		       kill_chain_stage, confidence, classified
+		FROM events
+		WHERE classified = 0
+		ORDER BY timestamp ASC
+	`
+	if limit > 0 {
+		query += fmt.Sprintf(" LIMIT %d", limit)
+	}
+
+	rows, err := ch.conn.Query(ctx, query)
+	if err != nil {
+		return nil, fmt.Errorf("failed to query unclassified events: %w", err)
+	}
+	defer rows.Close()
+
+	var events []*Event
+	for rows.Next() {
+		var event Event
+		var payloadStr string
+		if err := rows.Scan(
+			&event.Timestamp, &event.Honeypot, &event.SourceIP,
+			&event.SourcePort, &event.DestPort, &event.Protocol,
+			&event.EventType, &event.Username, &event.Password,
+			&event.Command, &payloadStr, &event.Metadata,
+			&event.Country, &event.City, &event.ASN,
+			&event.TechniqueID, &event.TechniqueName,
+			&event.TacticID, &event.TacticName,
+			&event.KillChainStage, &event.Confidence, &event.Classified,
+		); err != nil {
+			return nil, fmt.Errorf("failed to scan event: %w", err)
+		}
+		event.Payload = []byte(payloadStr)
+		events = append(events, &event)
+	}
+	return events, nil
+}

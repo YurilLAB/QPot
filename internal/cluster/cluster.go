@@ -4,8 +4,6 @@ package cluster
 import (
 	"bytes"
 	"crypto/rand"
-	"crypto/sha256"
-	"crypto/subtle"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -17,6 +15,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"golang.org/x/crypto/bcrypt"
 )
 
 const (
@@ -158,6 +158,30 @@ type ClusterStatus struct {
 	IsRunning     bool              `json:"is_running"`
 }
 
+// ThreatIntel holds aggregated threat intelligence shared across cluster nodes.
+type ThreatIntel struct {
+	// TopSourceIPs contains the most active attacker IPs seen in the last hour
+	// along with their hit counts, collected from this node.
+	TopSourceIPs []IPCount `json:"top_source_ips"`
+	// NodeID is the originating node.
+	NodeID    string    `json:"node_id"`
+	Timestamp time.Time `json:"timestamp"`
+}
+
+// IPCount pairs an IP address with an event count.
+type IPCount struct {
+	IP    string `json:"ip"`
+	Count int64  `json:"count"`
+}
+
+// GossipMessage is the payload exchanged during gossip rounds.
+type GossipMessage struct {
+	SenderID  string    `json:"sender_id"`
+	Timestamp time.Time `json:"timestamp"`
+	// NodeDigest contains the current status of all nodes the sender knows about.
+	NodeDigest []*Node `json:"node_digest"`
+}
+
 // Manager handles cluster lifecycle
 type Manager struct {
 	mu            sync.RWMutex
@@ -167,14 +191,52 @@ type Manager struct {
 	gossipTicker  *time.Ticker
 	syncTicker    *time.Ticker
 	stopCh        chan struct{}
+	stopOnce      sync.Once
+	// localIntel holds threat intelligence for the local node, updated externally.
+	localIntel    *ThreatIntel
+	// peerIntel aggregates intel received from other nodes, keyed by node ID.
+	peerIntel     map[string]*ThreatIntel
 }
 
 // NewManager creates a new cluster manager
 func NewManager(dataPath string) *Manager {
 	return &Manager{
-		dataPath: dataPath,
-		stopCh:   make(chan struct{}),
+		dataPath:  dataPath,
+		stopCh:    make(chan struct{}),
+		peerIntel: make(map[string]*ThreatIntel),
 	}
+}
+
+// UpdateThreatIntel updates the local node's threat intelligence data.
+// Callers should pass the top source IPs seen in the last hour.
+func (m *Manager) UpdateThreatIntel(topIPs []IPCount) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	nodeID := ""
+	if m.cluster != nil && m.cluster.LocalNode != nil {
+		nodeID = m.cluster.LocalNode.ID
+	}
+	m.localIntel = &ThreatIntel{
+		TopSourceIPs: topIPs,
+		NodeID:       nodeID,
+		Timestamp:    time.Now(),
+	}
+}
+
+// GetThreatIntel returns the merged threat intelligence from all cluster nodes.
+func (m *Manager) GetThreatIntel() []*ThreatIntel {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	var result []*ThreatIntel
+	if m.localIntel != nil {
+		result = append(result, m.localIntel)
+	}
+	for _, intel := range m.peerIntel {
+		result = append(result, intel)
+	}
+	return result
 }
 
 // InitCluster initializes a new cluster with password authentication
@@ -336,7 +398,7 @@ func (m *Manager) attemptJoin(seedAddr, clusterID, password string, localNode *N
 	cluster := &Cluster{
 		ID:            clusterID,
 		Name:          joinResp.ClusterName,
-		PasswordHash:  hashPassword(password),
+		PasswordHash:  hashPassword(password), // bcrypt hash for local verification
 		CreatedAt:     now,
 		UpdatedAt:     now,
 		LocalNode:     localNode,
@@ -373,6 +435,10 @@ func (m *Manager) Start() error {
 		return nil
 	}
 
+	// Re-create stopCh so Start() works correctly after a previous Stop()
+	m.stopCh = make(chan struct{})
+	m.stopOnce = sync.Once{}
+
 	// Start API server
 	if err := m.startAPIServer(); err != nil {
 		return fmt.Errorf("failed to start API server: %w", err)
@@ -400,7 +466,10 @@ func (m *Manager) Stop() error {
 		return nil
 	}
 
-	close(m.stopCh)
+	// Use sync.Once to prevent double-close panics
+	m.stopOnce.Do(func() {
+		close(m.stopCh)
+	})
 
 	if m.gossipTicker != nil {
 		m.gossipTicker.Stop()
@@ -490,7 +559,7 @@ func (m *Manager) UpdateNodeStats(stats NodeStats) {
 	m.cluster.LocalNode.LastSeen = time.Now()
 }
 
-// VerifyPassword verifies the cluster password
+// VerifyPassword verifies the cluster password against the stored bcrypt hash.
 func (m *Manager) VerifyPassword(password string) bool {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
@@ -499,10 +568,7 @@ func (m *Manager) VerifyPassword(password string) bool {
 		return false
 	}
 
-	expectedHash := m.cluster.PasswordHash
-	providedHash := hashPassword(password)
-
-	return subtle.ConstantTimeCompare([]byte(expectedHash), []byte(providedHash)) == 1
+	return checkPassword(password, m.cluster.PasswordHash)
 }
 
 // HandleJoinRequest handles a join request from another node
@@ -525,12 +591,9 @@ func (m *Manager) HandleJoinRequest(req *JoinRequest) *JoinResponse {
 		}
 	}
 
-	// Verify password using constant-time comparison
-	expectedHash := m.cluster.PasswordHash
-	providedHash := hashPassword(req.Password)
-	
-	if subtle.ConstantTimeCompare([]byte(expectedHash), []byte(providedHash)) != 1 {
-		slog.Warn("Join attempt with invalid password", 
+	// Verify password using bcrypt comparison
+	if !checkPassword(req.Password, m.cluster.PasswordHash) {
+		slog.Warn("Join attempt with invalid password",
 			"cluster_id", req.ClusterID,
 			"from", req.NodeAddress)
 		return &JoinResponse{
@@ -596,6 +659,8 @@ func (m *Manager) startAPIServer() error {
 	mux.HandleFunc("/api/v1/cluster/status", m.handleStatusHTTP)
 	mux.HandleFunc("/api/v1/cluster/nodes", m.handleNodesHTTP)
 	mux.HandleFunc("/api/v1/cluster/leave", m.handleLeaveHTTP)
+	mux.HandleFunc("/api/v1/cluster/gossip", m.handleGossipHTTP)
+	mux.HandleFunc("/api/v1/cluster/intel", m.handleIntelHTTP)
 
 	addr := fmt.Sprintf("%s:%d", m.cluster.Config.BindAddr, m.cluster.Config.BindPort)
 	m.apiServer = &http.Server{
@@ -657,8 +722,38 @@ func (m *Manager) handleNodesHTTP(w http.ResponseWriter, r *http.Request) {
 }
 
 func (m *Manager) handleLeaveHTTP(w http.ResponseWriter, r *http.Request) {
-	// Handle node leaving
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	body, err := io.ReadAll(r.Body)
+	if err != nil {
+		http.Error(w, "Failed to read body", http.StatusBadRequest)
+		return
+	}
+
+	var req struct {
+		NodeID string `json:"node_id"`
+	}
+	if err := json.Unmarshal(body, &req); err != nil || req.NodeID == "" {
+		http.Error(w, "Invalid JSON or missing node_id", http.StatusBadRequest)
+		return
+	}
+
+	m.mu.Lock()
+	if m.cluster != nil {
+		if node, ok := m.cluster.Nodes[req.NodeID]; ok {
+			node.Status = NodeStatusLeft
+			delete(m.cluster.Nodes, req.NodeID)
+			slog.Info("Node left cluster", "node_id", req.NodeID)
+		}
+	}
+	m.mu.Unlock()
+
+	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
+	json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
 }
 
 // gossipLoop periodically gossips with other nodes
@@ -685,15 +780,296 @@ func (m *Manager) syncLoop() {
 	}
 }
 
-// gossip exchanges state with other nodes
+// gossip sends a heartbeat/state-digest to each known peer node and merges
+// any updated node information returned in the response.
 func (m *Manager) gossip() {
-	// Implementation would send UDP packets to other nodes
-	// containing digest of known nodes and their state
+	m.mu.RLock()
+	if m.cluster == nil || m.cluster.LocalNode == nil {
+		m.mu.RUnlock()
+		return
+	}
+
+	localID := m.cluster.LocalNode.ID
+	// Build a snapshot of current node states to share.
+	digest := make([]*Node, 0, len(m.cluster.Nodes))
+	for _, n := range m.cluster.Nodes {
+		digest = append(digest, n)
+	}
+
+	// Collect peer addresses to contact (all nodes except ourselves).
+	type peerInfo struct {
+		id      string
+		address string
+		port    int
+	}
+	var peers []peerInfo
+	for _, n := range m.cluster.Nodes {
+		if n.ID == localID {
+			continue
+		}
+		if n.Status == NodeStatusLeft || n.Status == NodeStatusFailed {
+			continue
+		}
+		peers = append(peers, peerInfo{id: n.ID, address: n.Address, port: n.Port})
+	}
+	m.mu.RUnlock()
+
+	msg := GossipMessage{
+		SenderID:   localID,
+		Timestamp:  time.Now(),
+		NodeDigest: digest,
+	}
+
+	body, err := json.Marshal(msg)
+	if err != nil {
+		slog.Error("Gossip: failed to marshal message", "error", err)
+		return
+	}
+
+	for _, peer := range peers {
+		url := fmt.Sprintf("http://%s:%d/api/v1/cluster/gossip", peer.address, peer.port)
+		resp, err := http.Post(url, "application/json", bytes.NewReader(body))
+		if err != nil {
+			slog.Debug("Gossip: peer unreachable", "node_id", peer.id, "error", err)
+			// Mark node as suspect after failed gossip contact.
+			m.mu.Lock()
+			if node, ok := m.cluster.Nodes[peer.id]; ok && node.Status == NodeStatusHealthy {
+				node.Status = NodeStatusSuspect
+			}
+			m.mu.Unlock()
+			continue
+		}
+
+		var peerMsg GossipMessage
+		if err := json.NewDecoder(resp.Body).Decode(&peerMsg); err != nil {
+			resp.Body.Close()
+			continue
+		}
+		resp.Body.Close()
+
+		// Merge peer's node knowledge into our own map.
+		now := time.Now()
+		m.mu.Lock()
+		for _, peerNode := range peerMsg.NodeDigest {
+			if peerNode.ID == localID {
+				continue
+			}
+			existing, ok := m.cluster.Nodes[peerNode.ID]
+			if !ok {
+				// New node discovered via gossip.
+				m.cluster.Nodes[peerNode.ID] = peerNode
+				slog.Info("Gossip: discovered new node", "node_id", peerNode.ID, "name", peerNode.Name)
+			} else if peerNode.LastSeen.After(existing.LastSeen) {
+				// Peer has fresher info about this node.
+				existing.Status = peerNode.Status
+				existing.LastSeen = peerNode.LastSeen
+				existing.Stats = peerNode.Stats
+			}
+		}
+		// Mark the responding peer as healthy and update its last-seen time.
+		if node, ok := m.cluster.Nodes[peer.id]; ok {
+			node.Status = NodeStatusHealthy
+			node.LastSeen = now
+		}
+		m.mu.Unlock()
+	}
+
+	// Mark nodes that haven't been seen for a long time as failed.
+	m.mu.Lock()
+	deadline := time.Now().Add(-3 * m.cluster.Config.GossipInterval * time.Duration(m.cluster.Config.SuspicionMult*10))
+	for _, node := range m.cluster.Nodes {
+		if node.ID == localID {
+			continue
+		}
+		if node.Status == NodeStatusSuspect && node.LastSeen.Before(deadline) {
+			node.Status = NodeStatusFailed
+			slog.Warn("Gossip: node marked as failed", "node_id", node.ID, "last_seen", node.LastSeen)
+		}
+	}
+	m.mu.Unlock()
 }
 
-// sync exchanges data with other nodes
+// sync aggregates node statistics and shares threat intelligence with peers.
 func (m *Manager) sync() {
-	// Implementation would sync event counts, threat intelligence, etc.
+	m.mu.RLock()
+	if m.cluster == nil || m.cluster.LocalNode == nil {
+		m.mu.RUnlock()
+		return
+	}
+
+	localID := m.cluster.LocalNode.ID
+	type peerInfo struct {
+		id      string
+		address string
+		port    int
+	}
+	var peers []peerInfo
+	for _, n := range m.cluster.Nodes {
+		if n.ID == localID {
+			continue
+		}
+		if n.Status == NodeStatusLeft || n.Status == NodeStatusFailed {
+			continue
+		}
+		peers = append(peers, peerInfo{id: n.ID, address: n.Address, port: n.Port})
+	}
+
+	var localIntel *ThreatIntel
+	if m.localIntel != nil {
+		localIntel = m.localIntel
+	}
+	m.mu.RUnlock()
+
+	// Share local intel with peers and collect theirs.
+	if localIntel != nil {
+		intelBody, err := json.Marshal(localIntel)
+		if err == nil {
+			for _, peer := range peers {
+				url := fmt.Sprintf("http://%s:%d/api/v1/cluster/intel", peer.address, peer.port)
+				resp, err := http.Post(url, "application/json", bytes.NewReader(intelBody))
+				if err != nil {
+					slog.Debug("Sync: failed to send intel to peer", "node_id", peer.id, "error", err)
+					continue
+				}
+
+				var peerIntel ThreatIntel
+				if err := json.NewDecoder(resp.Body).Decode(&peerIntel); err != nil {
+					resp.Body.Close()
+					continue
+				}
+				resp.Body.Close()
+
+				m.mu.Lock()
+				m.peerIntel[peerIntel.NodeID] = &peerIntel
+				// Update event count for this peer node based on intel total.
+				if node, ok := m.cluster.Nodes[peer.id]; ok {
+					var total int64
+					for _, ip := range peerIntel.TopSourceIPs {
+						total += ip.Count
+					}
+					node.Stats.TotalEvents += total
+					node.Stats.LastSync = time.Now()
+				}
+				m.mu.Unlock()
+			}
+		}
+	}
+
+	// Aggregate total event counts across all known nodes and log a summary.
+	m.mu.RLock()
+	var totalEvents int64
+	for _, node := range m.cluster.Nodes {
+		totalEvents += node.Stats.TotalEvents
+	}
+	nodeCount := len(m.cluster.Nodes)
+	m.mu.RUnlock()
+
+	slog.Debug("Cluster sync complete",
+		"total_nodes", nodeCount,
+		"total_events", totalEvents)
+}
+
+// handleGossipHTTP accepts a gossip ping from another node and responds with
+// the local node's own state digest.
+func (m *Manager) handleGossipHTTP(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	body, err := io.ReadAll(r.Body)
+	if err != nil {
+		http.Error(w, "Failed to read body", http.StatusBadRequest)
+		return
+	}
+
+	var incoming GossipMessage
+	if err := json.Unmarshal(body, &incoming); err != nil {
+		http.Error(w, "Invalid JSON", http.StatusBadRequest)
+		return
+	}
+
+	now := time.Now()
+	m.mu.Lock()
+	if m.cluster != nil {
+		// Merge the sender's node digest.
+		for _, node := range incoming.NodeDigest {
+			if m.cluster.LocalNode != nil && node.ID == m.cluster.LocalNode.ID {
+				continue
+			}
+			existing, ok := m.cluster.Nodes[node.ID]
+			if !ok {
+				m.cluster.Nodes[node.ID] = node
+				slog.Info("Gossip: discovered node via ping", "node_id", node.ID)
+			} else if node.LastSeen.After(existing.LastSeen) {
+				existing.Status = node.Status
+				existing.LastSeen = node.LastSeen
+				existing.Stats = node.Stats
+			}
+		}
+		// Update the sender's own record.
+		if existing, ok := m.cluster.Nodes[incoming.SenderID]; ok {
+			existing.Status = NodeStatusHealthy
+			existing.LastSeen = now
+		}
+	}
+
+	// Build response with our own digest.
+	digest := make([]*Node, 0)
+	if m.cluster != nil {
+		for _, n := range m.cluster.Nodes {
+			digest = append(digest, n)
+		}
+	}
+	var localID string
+	if m.cluster != nil && m.cluster.LocalNode != nil {
+		localID = m.cluster.LocalNode.ID
+	}
+	m.mu.Unlock()
+
+	response := GossipMessage{
+		SenderID:   localID,
+		Timestamp:  now,
+		NodeDigest: digest,
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(response)
+}
+
+// handleIntelHTTP accepts threat intel from a peer node and responds with
+// the local node's own intel.
+func (m *Manager) handleIntelHTTP(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	body, err := io.ReadAll(r.Body)
+	if err != nil {
+		http.Error(w, "Failed to read body", http.StatusBadRequest)
+		return
+	}
+
+	var incoming ThreatIntel
+	if err := json.Unmarshal(body, &incoming); err != nil {
+		http.Error(w, "Invalid JSON", http.StatusBadRequest)
+		return
+	}
+
+	m.mu.Lock()
+	if incoming.NodeID != "" {
+		m.peerIntel[incoming.NodeID] = &incoming
+	}
+	localIntel := m.localIntel
+	m.mu.Unlock()
+
+	w.Header().Set("Content-Type", "application/json")
+	if localIntel != nil {
+		json.NewEncoder(w).Encode(localIntel)
+	} else {
+		json.NewEncoder(w).Encode(&ThreatIntel{Timestamp: time.Now()})
+	}
 }
 
 // saveCluster saves cluster configuration to disk
@@ -731,7 +1107,12 @@ func (m *Manager) LoadCluster() (*Cluster, error) {
 		return nil, err
 	}
 
-	cluster.Nodes = make(map[string]*Node)
+	// Preserve the nodes map that was deserialized from JSON.
+	// Only create a new map when there are no nodes at all.
+	if cluster.Nodes == nil {
+		cluster.Nodes = make(map[string]*Node)
+	}
+	// Ensure the local node is always present in the map.
 	if cluster.LocalNode != nil {
 		cluster.Nodes[cluster.LocalNode.ID] = cluster.LocalNode
 	}
@@ -790,7 +1171,19 @@ func generateID(prefix string, length int) (string, error) {
 	return strings.ToLower(prefix + encoded[:length]), nil
 }
 
+// hashPassword hashes a password using bcrypt with a random salt.
 func hashPassword(password string) string {
-	hash := sha256.Sum256([]byte(password))
-	return hex.EncodeToString(hash[:])
+	hash, err := bcrypt.GenerateFromPassword([]byte(password), bcrypt.DefaultCost)
+	if err != nil {
+		// Fall back to a hex-encoded error marker that will never match
+		return "invalid"
+	}
+	return string(hash)
+}
+
+// checkPassword verifies a plain-text password against a bcrypt hash.
+// Returns true when they match.
+func checkPassword(password, hash string) bool {
+	err := bcrypt.CompareHashAndPassword([]byte(hash), []byte(password))
+	return err == nil
 }

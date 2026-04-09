@@ -27,6 +27,54 @@ type Event struct {
 	Country     string            `json:"country,omitempty"`
 	City        string            `json:"city,omitempty"`
 	ASN         string            `json:"asn,omitempty"`
+
+	// ATT&CK intelligence fields
+	TechniqueID    string  `json:"technique_id,omitempty"`
+	TechniqueName  string  `json:"technique_name,omitempty"`
+	TacticID       string  `json:"tactic_id,omitempty"`
+	TacticName     string  `json:"tactic_name,omitempty"`
+	KillChainStage string  `json:"kill_chain_stage,omitempty"`
+	Confidence     float64 `json:"confidence,omitempty"`
+	Classified     bool    `json:"classified"`
+}
+
+// IOC represents an extracted indicator of compromise
+type IOC struct {
+	ID          string            `json:"id"`
+	Type        string            `json:"type"`
+	Value       string            `json:"value"`
+	Honeypot    string            `json:"honeypot"`
+	SourceIP    string            `json:"source_ip"`
+	TechniqueID string            `json:"technique_id,omitempty"`
+	FirstSeen   time.Time         `json:"first_seen"`
+	LastSeen    time.Time         `json:"last_seen"`
+	Count       int64             `json:"count"`
+	Metadata    map[string]string `json:"metadata,omitempty"`
+}
+
+// TTPSession represents a correlated attack campaign session
+type TTPSession struct {
+	SessionID            string    `json:"session_id"`
+	CampaignFingerprint  string    `json:"campaign_fingerprint"`
+	SourceIPs            []string  `json:"source_ips"`
+	SharedInfrastructure bool      `json:"shared_infrastructure"`
+	KillChainStages      []string  `json:"kill_chain_stages"`
+	Techniques           []string  `json:"techniques"`
+	IOCIDs               []string  `json:"ioc_ids"`
+	EventCount           int64     `json:"event_count"`
+	FirstSeen            time.Time `json:"first_seen"`
+	LastSeen             time.Time `json:"last_seen"`
+	Confidence           float64   `json:"confidence"`
+}
+
+// IOCFilter filters IOC queries
+type IOCFilter struct {
+	Types     []string
+	Honeypots []string
+	StartTime time.Time
+	EndTime   time.Time
+	Limit     int
+	Offset    int
 }
 
 // Stats represents aggregate statistics
@@ -86,10 +134,18 @@ type Database interface {
 	// Backup/Restore
 	ExportData(ctx context.Context, start, end time.Time, w io.Writer) error
 	ImportData(ctx context.Context, r io.Reader) error
-	
+
 	// Connection
 	WithPool(pool *Pool) Database
 	GetPoolStats() PoolStats
+
+	// Intelligence methods
+	TagEvent(ctx context.Context, event *Event) error
+	InsertIOC(ctx context.Context, ioc *IOC) error
+	GetIOCs(ctx context.Context, filter IOCFilter) ([]*IOC, error)
+	UpsertTTPSession(ctx context.Context, session *TTPSession) error
+	GetTTPSessions(ctx context.Context, limit int) ([]*TTPSession, error)
+	GetUnclassifiedEvents(ctx context.Context, limit int) ([]*Event, error)
 }
 
 // EventFilter filters for querying events

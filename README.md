@@ -45,6 +45,12 @@
 | Data Retention Policies | No | Yes - Automated S3 archival |
 | Read Replicas | No | Yes - High availability |
 | Cluster Management | No | Yes - Multi-instance with password auth |
+| Threat Intel (ATT&CK) | No | Yes - Auto MITRE ATT&CK classification |
+| IOC Tracking | No | Yes - Automated IOC extraction & dedup |
+| TTP Session Analysis | No | Yes - Behavioral campaign fingerprinting |
+| Alert Webhooks | No | Yes - Slack/Discord/generic thresholds |
+| IOC Export | No | Yes - Attacker blocklist API |
+| GeoIP Enrichment | No | Yes - MaxMind via Vector pipeline |
 
 ### Key Advantages
 
@@ -296,6 +302,88 @@ database:
 
 ---
 
+## Threat Intelligence
+
+QPot includes a built-in threat intelligence engine that automatically classifies attacks against the MITRE ATT&CK framework, extracts IOCs, and builds behavioral TTP sessions.
+
+### MITRE ATT&CK Auto-Classification
+
+Every honeypot event is automatically mapped to an ATT&CK technique the moment it arrives. QPot fetches the latest ATT&CK Enterprise knowledge base from MITRE on startup, caches it locally, and falls back to an embedded technique set if offline.
+
+```
+SSH brute force     → T1110.001 - Password Guessing      (Credential Access)
+Password spraying   → T1110.003 - Password Spraying      (Credential Access)
+wget/curl in shell  → T1105    - Ingress Tool Transfer   (Command & Control)
+uname / id / whoami → T1082    - System Info Discovery   (Discovery)
+crontab / systemctl → T1053    - Scheduled Task/Job      (Persistence)
+sudo / chmod 777    → T1548    - Abuse Elevation Control (Priv. Escalation)
+Conpot Modbus probe → T0840    - Network Scanning        (ICS Discovery)
+```
+
+Classification runs in real-time on incoming events. A background worker runs every 15 minutes to backfill any events that were stored before classification was active.
+
+### IOC Extraction
+
+QPot automatically extracts and deduplicates indicators of compromise from every event:
+
+- **IP addresses** — public source IPs (RFC1918/loopback filtered)
+- **Credential pairs** — username:password combinations attempted
+- **URLs** — download URLs from `wget`/`curl` commands
+- **File hashes** — MD5, SHA1, SHA256 from captured payloads
+- **Commands** — shell commands executed in honeypot sessions
+- **User agents** — HTTP client fingerprints
+- **Domains** — extracted from URLs in commands
+
+### TTP Session Tracking
+
+QPot builds attack campaign sessions using **behavioral fingerprinting**, not naive IP+time-window grouping. Sessions are defined by:
+
+- **Credential set similarity** — same username lists across different IPs = same campaign
+- **Tool signatures** — identical download domains, user agents, payload hashes
+- **Command pattern overlap** — same shell command sequences
+- **Port/service targeting** — same sequence of services probed
+
+Sessions stay open until 30 minutes of inactivity. Shared infrastructure (AWS, GCP, Azure, Tor) is flagged but never assumed to represent a single attacker.
+
+### Intelligence API
+
+| Endpoint | Description |
+|----------|-------------|
+| `GET /api/techniques` | ATT&CK techniques observed, with event counts |
+| `GET /api/iocs` | Extracted IOCs, filterable by type and honeypot |
+| `GET /api/ttps` | Active and completed TTP campaign sessions |
+| `GET /api/intelligence` | Intelligence summary (techniques, IOC counts, active sessions) |
+| `GET /api/ioc` | Unique attacker IP list for firewall blocklist generation |
+
+### Intelligence Configuration
+
+```yaml
+intelligence:
+  enabled: true
+  fetch_attck: true              # Fetch latest from MITRE GitHub on startup
+  worker_interval: 15m           # Backfill worker interval
+  worker_batch_size: 500         # Events per backfill run
+  inactivity_window: 30m         # TTP session inactivity before closing
+```
+
+---
+
+## Alert Webhooks
+
+QPot can fire webhook alerts to Slack, Discord, or any HTTP endpoint when attack volume crosses a threshold.
+
+```yaml
+alerts:
+  enabled: true
+  webhook_url: https://hooks.slack.com/services/...
+  threshold: 100       # Events per minute to trigger alert
+  honeypots:           # Leave empty to alert on all
+    - cowrie
+    - dionaea
+```
+
+---
+
 ## Security Features
 
 | Feature | Implementation | 
@@ -518,6 +606,13 @@ QPot/
 │   │   ├── migration.go         # Schema migrations
 │   │   ├── retention.go         # Data retention & archival
 │   │   └── pool.go              # Connection pooling
+│   ├── intelligence/     # Threat intelligence engine
+│   │   ├── attck.go             # MITRE ATT&CK loader (fetch + embedded fallback)
+│   │   ├── rules.go             # Classification rules (16 built-in)
+│   │   ├── classifier.go        # Real-time event classifier
+│   │   ├── ioc.go               # IOC extractor
+│   │   ├── ttp.go               # Behavioral TTP session builder
+│   │   └── worker.go            # Background backfill worker
 │   ├── security/         # Sandboxing and isolation
 │   ├── instance/         # Instance lifecycle
 │   └── server/           # API server

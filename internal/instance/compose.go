@@ -398,12 +398,18 @@ transforms:
     inputs:
       - add_qpot_metadata
     source: |
-      # GeoIP enrichment
+      # GeoIP enrichment using the MaxMind GeoLite2 enrichment table
       if exists(.source_ip) && .source_ip != "0.0.0.0" && .source_ip != "127.0.0.1" {
-        # Would use geoip lookup here
-        .country = "unknown"
-        .city = "unknown"
-        .asn = "unknown"
+        enriched, err = get_enrichment_table_record("qpot_geoip", {"ip": .source_ip})
+        if err == null {
+          .country = enriched.country.iso_code
+          .city = enriched.city.names.en
+          .asn = to_string(enriched.autonomous_system.autonomous_system_number)
+        } else {
+          .country = "unknown"
+          .city = "unknown"
+          .asn = "unknown"
+        }
       }
 
   filter_stealth:

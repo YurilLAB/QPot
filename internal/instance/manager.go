@@ -10,6 +10,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/qpot/qpot/internal/config"
@@ -22,6 +23,8 @@ type Manager struct {
 	config   *config.Config
 	sandbox  *security.Sandbox
 	database database.Database
+	dbOnce   sync.Once
+	dbErr    error
 }
 
 // InstanceInfo represents information about an instance
@@ -50,23 +53,31 @@ type HoneypotStatus struct {
 	Risk    string `json:"risk"`
 }
 
-// NewManager creates a new instance manager
+// NewManager creates a new instance manager.
+// The database connection is not established at construction time; it is
+// lazily initialized on first use via db(). This means commands such as
+// "qpot status" or "qpot logs" succeed even when the database container is
+// not running.
 func NewManager(cfg *config.Config) (*Manager, error) {
 	sandbox, err := security.NewSandbox(&cfg.Security)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create sandbox: %w", err)
 	}
 
-	db, err := database.New(&cfg.Database)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create database: %w", err)
-	}
-
 	return &Manager{
-		config:   cfg,
-		sandbox:  sandbox,
-		database: db,
+		config:  cfg,
+		sandbox: sandbox,
 	}, nil
+}
+
+// db returns the database connection, creating it on first call.
+// Callers that need the database (e.g. Start) should call this and handle
+// the error explicitly.
+func (m *Manager) db() (database.Database, error) {
+	m.dbOnce.Do(func() {
+		m.database, m.dbErr = database.New(&m.config.Database)
+	})
+	return m.database, m.dbErr
 }
 
 // Initialize sets up a new instance
@@ -127,6 +138,11 @@ func (m *Manager) Start(ctx context.Context, detach bool) error {
 	// Check if already running
 	if m.IsRunning(ctx) {
 		return fmt.Errorf("instance is already running")
+	}
+
+	// Eagerly initialize the database connection when starting.
+	if _, err := m.db(); err != nil {
+		slog.Warn("Database connection could not be established at start", "error", err)
 	}
 
 	// Pull images first
@@ -340,7 +356,9 @@ func (m *Manager) waitForHealthy(ctx context.Context) error {
 	}
 }
 
-// isHealthy checks if all services are healthy
+// isHealthy checks if all services are healthy.
+// Returns false when no containers are running, when any container is
+// unhealthy/exited, or when containers are still starting up.
 func (m *Manager) isHealthy(ctx context.Context) bool {
 	composeFile := m.config.GetDockerComposePath()
 	cmd := exec.CommandContext(ctx, "docker", "compose", "-f", composeFile, "ps", "-a", "--format", "table {{.Name}}\t{{.Status}}")
@@ -351,15 +369,30 @@ func (m *Manager) isHealthy(ctx context.Context) bool {
 		return false
 	}
 
-	// Check if any container is unhealthy
-	lines := strings.Split(string(output), "\n")
+	lines := strings.Split(strings.TrimSpace(string(output)), "\n")
+	// The first line is the header; if there are no service rows the stack is
+	// not running and we must not report healthy.
+	serviceRows := 0
 	for _, line := range lines {
-		if strings.Contains(line, "unhealthy") || strings.Contains(line, "Exit") {
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "" {
+			continue
+		}
+		// Skip the header row produced by the "table" format.
+		if strings.HasPrefix(trimmed, "NAME") {
+			continue
+		}
+		serviceRows++
+		// Any of these states means we are not yet fully healthy.
+		if strings.Contains(line, "unhealthy") ||
+			strings.Contains(line, "Exit") ||
+			strings.Contains(line, "starting") ||
+			strings.Contains(line, "health: starting") {
 			return false
 		}
 	}
 
-	return true
+	return serviceRows > 0
 }
 
 // pullImages pulls Docker images for the instance
