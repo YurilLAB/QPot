@@ -2,6 +2,7 @@
 package security
 
 import (
+	cryptorand "crypto/rand"
 	"fmt"
 	"os"
 	"os/exec"
@@ -473,18 +474,17 @@ func (sb *Sandbox) generateSeccompProfile(honeypot string) string {
 	return profile
 }
 
-// generateRandomMAC generates a random MAC address
+// generateRandomMAC generates a cryptographically random MAC address.
+// The first byte sets the locally-administered and unicast bits.
 func (sb *Sandbox) generateRandomMAC() string {
-	// Generate random bytes for MAC
-	// Use locally administered address (bit 1 of first byte = 1)
 	mac := make([]byte, 6)
-	// First byte: locally administered, unicast
-	mac[0] = 0x02
-	// Random remaining bytes
-	for i := 1; i < 6; i++ {
-		mac[i] = byte(0x00 + (i*17)%256)  // Deterministic but looks random
+	if _, err := cryptorand.Read(mac); err != nil {
+		// Fallback: use a fixed locally-administered prefix only (still unique per call would
+		// require entropy, so log and return a safe static value).
+		return "02:00:00:00:00:01"
 	}
-	
+	// Set locally administered bit (bit 1) and clear multicast bit (bit 0).
+	mac[0] = (mac[0] | 0x02) & 0xfe
 	return fmt.Sprintf("%02x:%02x:%02x:%02x:%02x:%02x",
 		mac[0], mac[1], mac[2], mac[3], mac[4], mac[5])
 }

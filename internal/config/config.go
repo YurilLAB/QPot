@@ -11,6 +11,24 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
+// AlertConfig configures webhook alerting when attack thresholds are crossed.
+type AlertConfig struct {
+	Enabled    bool     `yaml:"enabled"`
+	WebhookURL string   `yaml:"webhook_url"`  // Slack/Discord/generic webhook
+	Threshold  int      `yaml:"threshold"`     // events per minute to trigger
+	Honeypots  []string `yaml:"honeypots"`     // which honeypots to alert on (empty = all)
+}
+
+// IntelligenceConfig configures the threat intelligence subsystem.
+type IntelligenceConfig struct {
+	Enabled          bool          `yaml:"enabled"`
+	ATTCKDataPath    string        `yaml:"attck_data_path"`   // where to cache downloaded ATT&CK data
+	WorkerInterval   time.Duration `yaml:"worker_interval"`   // default 15min
+	WorkerBatchSize  int           `yaml:"worker_batch_size"` // default 500
+	InactivityWindow time.Duration `yaml:"inactivity_window"` // TTP session inactivity, default 30min
+	FetchATTCK       bool          `yaml:"fetch_attck"`       // try to fetch latest from MITRE, default true
+}
+
 // Config represents QPot configuration
 type Config struct {
 	InstanceName string            `yaml:"instance_name"`
@@ -23,6 +41,8 @@ type Config struct {
 	Ports        PortConfig        `yaml:"ports"`
 	WebUI        WebUIConfig       `yaml:"web_ui"`
 	Stealth      StealthConfig     `yaml:"stealth"`
+	Alerts       AlertConfig       `yaml:"alerts"`
+	Intelligence IntelligenceConfig `yaml:"intelligence"`
 }
 
 // DatabaseConfig contains database connection settings
@@ -384,6 +404,19 @@ func Default(instanceName string) *Config {
 				"shodan",
 			},
 		},
+		Alerts: AlertConfig{
+			Enabled:   false,
+			Threshold: 10, // 10 events per minute before alerting
+			Honeypots: []string{}, // empty = alert on all honeypots
+		},
+		Intelligence: IntelligenceConfig{
+			Enabled:          true,
+			ATTCKDataPath:    filepath.Join(dataPath, "intelligence"),
+			WorkerInterval:   15 * time.Minute,
+			WorkerBatchSize:  500,
+			InactivityWindow: 30 * time.Minute,
+			FetchATTCK:       true,
+		},
 	}
 }
 
@@ -482,19 +515,27 @@ func (c *Config) GetEnabledHoneypots() []string {
 	return enabled
 }
 
-// AllocatePort allocates a unique port for an instance
+// AllocatePort allocates a unique port for an instance.
+// It uses FNV-1a hashing over the instance name for good distribution,
+// and clamps the result to a sensible range (BasePort + 0..999 * 2).
 func (c *Config) AllocatePort(basePort int) int {
 	if !c.Ports.AutoAllocate {
 		return basePort
 	}
-	
-	// Use base port offset by instance hash to avoid conflicts
-	hash := 0
+
+	// FNV-1a 32-bit hash for better distribution than summing ASCII values.
+	const (
+		fnvOffset32 uint32 = 2166136261
+		fnvPrime32  uint32 = 16777619
+	)
+	h := fnvOffset32
 	for _, ch := range c.InstanceName {
-		hash += int(ch)
+		h ^= uint32(ch)
+		h *= fnvPrime32
 	}
-	offset := (hash % 1000) * 10
-	
+	// Map to [0, 500) and multiply by 2 to keep even spacing between instances.
+	offset := int(h%500) * 2
+
 	return c.Ports.BasePort + offset + basePort
 }
 

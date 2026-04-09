@@ -116,3 +116,33 @@ func (es *Elasticsearch) WithPool(pool *Pool) Database {
 func (es *Elasticsearch) GetPoolStats() PoolStats {
 	return PoolStats{}
 }
+
+// TagEvent is a no-op stub for the legacy Elasticsearch backend.
+func (es *Elasticsearch) TagEvent(ctx context.Context, event *Event) error {
+	return nil
+}
+
+// InsertIOC is a no-op stub for the legacy Elasticsearch backend.
+func (es *Elasticsearch) InsertIOC(ctx context.Context, ioc *IOC) error {
+	return nil
+}
+
+// GetIOCs returns an empty result for the legacy Elasticsearch backend.
+func (es *Elasticsearch) GetIOCs(ctx context.Context, filter IOCFilter) ([]*IOC, error) {
+	return []*IOC{}, nil
+}
+
+// UpsertTTPSession is a no-op stub for the legacy Elasticsearch backend.
+func (es *Elasticsearch) UpsertTTPSession(ctx context.Context, session *TTPSession) error {
+	return nil
+}
+
+// GetTTPSessions returns an empty result for the legacy Elasticsearch backend.
+func (es *Elasticsearch) GetTTPSessions(ctx context.Context, limit int) ([]*TTPSession, error) {
+	return []*TTPSession{}, nil
+}
+
+// GetUnclassifiedEvents returns an empty result for the legacy Elasticsearch backend.
+func (es *Elasticsearch) GetUnclassifiedEvents(ctx context.Context, limit int) ([]*Event, error) {
+	return []*Event{}, nil
+}

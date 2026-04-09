@@ -2,6 +2,7 @@
 package server
 
 import (
+	"bytes"
 	"context"
 	"embed"
 	"encoding/json"
@@ -14,6 +15,7 @@ import (
 	"github.com/qpot/qpot/internal/config"
 	"github.com/qpot/qpot/internal/database"
 	"github.com/qpot/qpot/internal/instance"
+	"github.com/qpot/qpot/internal/intelligence"
 )
 
 //go:embed static/*
@@ -21,22 +23,30 @@ var staticFS embed.FS
 
 // Server represents the web server
 type Server struct {
-	config   *config.Config
-	manager  *instance.Manager
-	database database.Database
-	mux      *http.ServeMux
+	config     *config.Config
+	manager    *instance.Manager
+	database   database.Database
+	mux        *http.ServeMux
+	classifier *intelligence.Classifier
+	worker     *intelligence.Worker
+	ttpBuilder *intelligence.TTPBuilder
+	attckLoader *intelligence.ATTCKLoader
 }
 
-// New creates a new web server
+// New creates a new web server.
+// The database connection is attempted but a failure is non-fatal; API
+// endpoints that require the database will return appropriate errors when
+// it is unavailable.
 func New(cfg *config.Config) (*Server, error) {
 	mgr, err := instance.NewManager(cfg)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create manager: %w", err)
 	}
 
+	// Attempt DB connection; log a warning but do not abort server creation.
 	db, err := database.New(&cfg.Database)
 	if err != nil {
-		return nil, fmt.Errorf("failed to create database: %w", err)
+		slog.Warn("Database not available at server start, some API endpoints will be unavailable", "error", err)
 	}
 
 	s := &Server{
@@ -44,6 +54,20 @@ func New(cfg *config.Config) (*Server, error) {
 		manager:  mgr,
 		database: db,
 		mux:      http.NewServeMux(),
+	}
+
+	// Wire up the intelligence subsystem when enabled.
+	if cfg.Intelligence.Enabled {
+		loader := intelligence.NewATTCKLoader(cfg.Intelligence.ATTCKDataPath)
+		loader.Load(context.Background())
+		ttpBuilder := intelligence.NewTTPBuilder(cfg.Intelligence.InactivityWindow)
+		classifier := intelligence.NewClassifier(loader, ttpBuilder)
+		s.attckLoader = loader
+		s.ttpBuilder = ttpBuilder
+		s.classifier = classifier
+		if db != nil {
+			s.worker = intelligence.NewWorker(classifier, db, cfg.Intelligence.WorkerInterval, cfg.Intelligence.WorkerBatchSize)
+		}
 	}
 
 	s.setupRoutes()
@@ -61,6 +85,13 @@ func (s *Server) setupRoutes() {
 	s.mux.HandleFunc("/api/events", s.withQPotAuth(s.handleEvents))
 	s.mux.HandleFunc("/api/stats", s.withQPotAuth(s.handleStats))
 	s.mux.HandleFunc("/api/logs", s.withQPotAuth(s.handleLogs))
+	s.mux.HandleFunc("/api/ioc", s.withQPotAuth(s.handleIOC))
+
+	// Intelligence API routes
+	s.mux.HandleFunc("/api/techniques", s.withQPotAuth(s.handleTechniques))
+	s.mux.HandleFunc("/api/iocs", s.withQPotAuth(s.handleIOCs))
+	s.mux.HandleFunc("/api/ttps", s.withQPotAuth(s.handleTTPs))
+	s.mux.HandleFunc("/api/intelligence", s.withQPotAuth(s.handleIntelligenceSummary))
 }
 
 // withQPotAuth middleware checks QPot ID authentication
@@ -128,10 +159,10 @@ func (s *Server) handleStatic(w http.ResponseWriter, r *http.Request) {
 	http.FileServer(http.FS(staticFS)).ServeHTTP(w, r)
 }
 
-// Start starts the web server
+// Start starts the web server and background alert polling.
 func (s *Server) Start(ctx context.Context) error {
 	addr := fmt.Sprintf("%s:%d", s.config.WebUI.BindAddr, s.config.WebUI.Port)
-	
+
 	srv := &http.Server{
 		Addr:         addr,
 		Handler:      s.authMiddleware(s.mux),
@@ -142,6 +173,16 @@ func (s *Server) Start(ctx context.Context) error {
 
 	slog.Info("Starting web server", "addr", addr, "qpot_id", s.config.QPotID)
 
+	// Start alert polling goroutine when alerts are enabled.
+	if s.config.Alerts.Enabled && s.config.Alerts.WebhookURL != "" {
+		go s.alertLoop(ctx)
+	}
+
+	// Start intelligence worker goroutine when enabled.
+	if s.worker != nil {
+		go s.worker.Run(ctx)
+	}
+
 	go func() {
 		<-ctx.Done()
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -150,6 +191,83 @@ func (s *Server) Start(ctx context.Context) error {
 	}()
 
 	return srv.ListenAndServe()
+}
+
+// alertLoop polls event stats every minute and fires a webhook when the
+// configured events-per-minute threshold is exceeded.
+func (s *Server) alertLoop(ctx context.Context) {
+	ticker := time.NewTicker(time.Minute)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			if s.database == nil {
+				continue
+			}
+			since := time.Now().Add(-time.Minute)
+			stats, err := s.database.GetStats(ctx, since)
+			if err != nil {
+				slog.Warn("Alert loop: failed to get stats", "error", err)
+				continue
+			}
+
+			triggered := false
+			if len(s.config.Alerts.Honeypots) == 0 {
+				// Alert on total events across all honeypots.
+				if int(stats.TotalEvents) >= s.config.Alerts.Threshold {
+					triggered = true
+				}
+			} else {
+				// Alert only when a configured honeypot exceeds the threshold.
+				for _, hc := range stats.TopHoneypots {
+					for _, alertHP := range s.config.Alerts.Honeypots {
+						if hc.Honeypot == alertHP && int(hc.Count) >= s.config.Alerts.Threshold {
+							triggered = true
+						}
+					}
+				}
+			}
+
+			if triggered {
+				s.fireWebhook(ctx, stats)
+			}
+		}
+	}
+}
+
+// fireWebhook sends a JSON POST to the configured webhook URL.
+func (s *Server) fireWebhook(ctx context.Context, stats *database.Stats) {
+	payload := map[string]interface{}{
+		"qpot_id":      s.config.QPotID,
+		"instance":     s.config.InstanceName,
+		"total_events": stats.TotalEvents,
+		"unique_ips":   stats.UniqueIPs,
+		"message":      fmt.Sprintf("QPot alert: %d events in the last minute on instance %s", stats.TotalEvents, s.config.InstanceName),
+	}
+
+	body, err := json.Marshal(payload)
+	if err != nil {
+		slog.Error("Alert webhook: failed to marshal payload", "error", err)
+		return
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, s.config.Alerts.WebhookURL, bytes.NewReader(body))
+	if err != nil {
+		slog.Error("Alert webhook: failed to create request", "error", err)
+		return
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		slog.Error("Alert webhook: request failed", "error", err)
+		return
+	}
+	resp.Body.Close()
+	slog.Info("Alert webhook fired", "status", resp.StatusCode, "url", s.config.Alerts.WebhookURL)
 }
 
 // authMiddleware adds basic authentication
@@ -350,6 +468,228 @@ func (s *Server) handleLogs(w http.ResponseWriter, r *http.Request) {
 	}
 
 	s.sendJSON(w, lines)
+}
+
+// handleIOC returns a list of unique source IPs seen in the last 24 hours,
+// sorted by attack count. Useful for firewall blocklist generation.
+func (s *Server) handleIOC(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	if s.database == nil {
+		s.sendError(w, http.StatusServiceUnavailable, "database not available")
+		return
+	}
+
+	ctx := r.Context()
+	since := time.Now().Add(-24 * time.Hour)
+
+	attackers, err := s.database.GetTopAttackers(ctx, 1000, since)
+	if err != nil {
+		s.sendError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	type IOCEntry struct {
+		SourceIP    string   `json:"source_ip"`
+		Country     string   `json:"country,omitempty"`
+		AttackCount int64    `json:"attack_count"`
+		Honeypots   []string `json:"honeypots,omitempty"`
+		FirstSeen   string   `json:"first_seen"`
+		LastSeen    string   `json:"last_seen"`
+	}
+
+	entries := make([]IOCEntry, 0, len(attackers))
+	for _, a := range attackers {
+		entries = append(entries, IOCEntry{
+			SourceIP:    a.SourceIP,
+			Country:     a.Country,
+			AttackCount: a.AttackCount,
+			Honeypots:   a.Honeypots,
+			FirstSeen:   a.FirstSeen.UTC().Format(time.RFC3339),
+			LastSeen:    a.LastSeen.UTC().Format(time.RFC3339),
+		})
+	}
+
+	response := map[string]interface{}{
+		"qpot_id":    s.config.QPotID,
+		"generated":  time.Now().UTC().Format(time.RFC3339),
+		"count":      len(entries),
+		"ioc_list":   entries,
+	}
+	s.sendJSON(w, response)
+}
+
+// handleTechniques returns unique ATT&CK techniques observed in classified events.
+func (s *Server) handleTechniques(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if s.database == nil {
+		s.sendError(w, http.StatusServiceUnavailable, "database not available")
+		return
+	}
+
+	ctx := r.Context()
+	// Fetch recent events and aggregate technique counts client-side.
+	filter := database.EventFilter{Limit: 10000}
+	events, err := s.database.GetEvents(ctx, filter)
+	if err != nil {
+		s.sendError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	type techEntry struct {
+		TechniqueID   string `json:"technique_id"`
+		TechniqueName string `json:"technique_name"`
+		TacticName    string `json:"tactic_name"`
+		Count         int    `json:"count"`
+	}
+
+	counts := make(map[string]*techEntry)
+	for _, ev := range events {
+		if ev.TechniqueID == "" {
+			continue
+		}
+		entry, ok := counts[ev.TechniqueID]
+		if !ok {
+			entry = &techEntry{
+				TechniqueID:   ev.TechniqueID,
+				TechniqueName: ev.TechniqueName,
+				TacticName:    ev.TacticName,
+			}
+			counts[ev.TechniqueID] = entry
+		}
+		entry.Count++
+	}
+
+	result := make([]*techEntry, 0, len(counts))
+	for _, e := range counts {
+		result = append(result, e)
+	}
+	// Sort by count descending.
+	for i := 0; i < len(result); i++ {
+		for j := i + 1; j < len(result); j++ {
+			if result[j].Count > result[i].Count {
+				result[i], result[j] = result[j], result[i]
+			}
+		}
+	}
+
+	s.sendJSON(w, result)
+}
+
+// handleIOCs returns filtered IOC records.
+func (s *Server) handleIOCs(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if s.database == nil {
+		s.sendError(w, http.StatusServiceUnavailable, "database not available")
+		return
+	}
+
+	ctx := r.Context()
+	filter := database.IOCFilter{Limit: 100}
+
+	if t := r.URL.Query().Get("type"); t != "" {
+		filter.Types = []string{t}
+	}
+	if hp := r.URL.Query().Get("honeypot"); hp != "" {
+		filter.Honeypots = []string{hp}
+	}
+	if l := r.URL.Query().Get("limit"); l != "" {
+		fmt.Sscanf(l, "%d", &filter.Limit)
+	}
+
+	iocs, err := s.database.GetIOCs(ctx, filter)
+	if err != nil {
+		s.sendError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	s.sendJSON(w, iocs)
+}
+
+// handleTTPs returns TTP session records.
+func (s *Server) handleTTPs(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if s.database == nil {
+		s.sendError(w, http.StatusServiceUnavailable, "database not available")
+		return
+	}
+
+	ctx := r.Context()
+	limit := 20
+	if l := r.URL.Query().Get("limit"); l != "" {
+		fmt.Sscanf(l, "%d", &limit)
+	}
+
+	sessions, err := s.database.GetTTPSessions(ctx, limit)
+	if err != nil {
+		s.sendError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	s.sendJSON(w, sessions)
+}
+
+// handleIntelligenceSummary returns a high-level intelligence overview.
+func (s *Server) handleIntelligenceSummary(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	activeSessions := 0
+	if s.ttpBuilder != nil {
+		activeSessions = len(s.ttpBuilder.GetActiveSessions())
+	}
+
+	attckLoaded := false
+	if s.attckLoader != nil {
+		attckLoaded = s.attckLoader.Loaded()
+	}
+
+	var techniquesObserved int
+	var iocsTotal int
+
+	if s.database != nil {
+		ctx := r.Context()
+		events, err := s.database.GetEvents(ctx, database.EventFilter{Limit: 50000})
+		if err == nil {
+			seen := make(map[string]bool)
+			for _, ev := range events {
+				if ev.TechniqueID != "" {
+					seen[ev.TechniqueID] = true
+				}
+			}
+			techniquesObserved = len(seen)
+		}
+
+		iocs, err := s.database.GetIOCs(ctx, database.IOCFilter{Limit: 1})
+		if err == nil && len(iocs) > 0 {
+			// We don't have a COUNT query, so we use what we have.
+			iocsTotal = len(iocs)
+		}
+	}
+
+	summary := map[string]interface{}{
+		"techniques_observed": techniquesObserved,
+		"iocs_total":          iocsTotal,
+		"active_sessions":     activeSessions,
+		"worker_enabled":      s.worker != nil,
+		"attck_loaded":        attckLoaded,
+	}
+
+	s.sendJSON(w, summary)
 }
 
 // sendJSON sends a JSON response

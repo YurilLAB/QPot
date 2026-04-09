@@ -11,13 +11,17 @@ import (
 	"os/signal"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"syscall"
 	"time"
 
 	"github.com/qpot/qpot/internal/cluster"
 	"github.com/qpot/qpot/internal/config"
 	"github.com/qpot/qpot/internal/instance"
+	"github.com/qpot/qpot/internal/intelligence"
+	"github.com/qpot/qpot/internal/server"
 	"github.com/spf13/cobra"
+	"golang.org/x/term"
 )
 
 var (
@@ -102,6 +106,14 @@ func newUpCommand() *cobra.Command {
 			}
 			cfg.QPotID = qpotID.ID
 
+			// Pre-load ATT&CK data in background so it's ready when events arrive.
+			if cfg.Intelligence.Enabled && cfg.Intelligence.FetchATTCK {
+				go func() {
+					loader := intelligence.NewATTCKLoader(cfg.Intelligence.ATTCKDataPath)
+					loader.Load(context.Background())
+				}()
+			}
+
 			mgr, err := instance.NewManager(cfg)
 			if err != nil {
 				return fmt.Errorf("failed to create instance manager: %w", err)
@@ -118,7 +130,22 @@ func newUpCommand() *cobra.Command {
 			fmt.Printf("[INFO] QPot ID: %s\n", qpotID.ID)
 			fmt.Printf("[INFO] Web UI: http://%s:%d\n", cfg.WebUI.BindAddr, cfg.WebUI.Port)
 			fmt.Println("\nUse this QPot ID to track your honeypot activity in the Web UI")
-			
+
+			// Start the web server if the web UI is enabled.
+			if cfg.WebUI.Enabled {
+				webSrv, err := server.New(cfg)
+				if err != nil {
+					slog.Warn("Failed to create web server", "error", err)
+				} else {
+					go func() {
+						if err := webSrv.Start(ctx); err != nil && err.Error() != "http: Server closed" {
+							slog.Error("Web server error", "error", err)
+						}
+					}()
+					slog.Info("Web server started", "addr", fmt.Sprintf("%s:%d", cfg.WebUI.BindAddr, cfg.WebUI.Port))
+				}
+			}
+
 			if !detach {
 				fmt.Println("\nPress Ctrl+C to stop")
 				<-ctx.Done()
@@ -626,10 +653,15 @@ func newClusterInitCommand() *cobra.Command {
 				return fmt.Errorf("already in cluster %s (%s). Leave first with 'qpot cluster leave'", existing.Name, existing.ID)
 			}
 
-			// Prompt for password if not provided
+			// Prompt for password if not provided (no echo)
 			if password == "" {
 				fmt.Print("Enter cluster password (min 8 chars): ")
-				fmt.Scanln(&password)
+				pwBytes, err := term.ReadPassword(int(os.Stdin.Fd()))
+				fmt.Println() // newline after hidden input
+				if err != nil {
+					return fmt.Errorf("failed to read password: %w", err)
+				}
+				password = string(pwBytes)
 			}
 
 			if len(password) < 8 {
@@ -714,10 +746,15 @@ func newClusterJoinCommand() *cobra.Command {
 				return fmt.Errorf("already in cluster %s. Leave first with 'qpot cluster leave'", existing.ID)
 			}
 
-			// Prompt for password if not provided
+			// Prompt for password if not provided (no echo)
 			if password == "" {
 				fmt.Print("Enter cluster password: ")
-				fmt.Scanln(&password)
+				pwBytes, err := term.ReadPassword(int(os.Stdin.Fd()))
+				fmt.Println() // newline after hidden input
+				if err != nil {
+					return fmt.Errorf("failed to read password: %w", err)
+				}
+				password = string(pwBytes)
 			}
 
 			// Load instance info if available
@@ -938,7 +975,7 @@ func newClusterNodesCommand() *cobra.Command {
 			fmt.Println("Cluster Nodes")
 			fmt.Println("=============")
 			fmt.Printf("%-12s %-15s %-20s %-10s %-12s\n", "NODE ID", "NAME", "ADDRESS", "STATUS", "EVENTS")
-			fmt.Println(string(make([]byte, 80)))
+			fmt.Println(strings.Repeat("-", 80))
 			
 			for _, node := range nodes {
 				nodeID := node.ID
