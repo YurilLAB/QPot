@@ -467,9 +467,14 @@ func Load(instanceName string) (*Config, error) {
 
 // Save saves configuration to disk
 func Save(cfg *Config) error {
-	// Ensure directory exists
+	// Ensure both the data directory and the config file's directory exist.
 	if err := os.MkdirAll(cfg.DataPath, 0750); err != nil {
 		return fmt.Errorf("failed to create data directory: %w", err)
+	}
+	if configDir := filepath.Dir(cfg.ConfigPath); configDir != cfg.DataPath {
+		if err := os.MkdirAll(configDir, 0750); err != nil {
+			return fmt.Errorf("failed to create config directory: %w", err)
+		}
 	}
 
 	data, err := yaml.Marshal(cfg)

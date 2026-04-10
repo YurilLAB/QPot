@@ -17,10 +17,16 @@ type Classifier struct {
 }
 
 // NewClassifier creates a Classifier wired with the given loader and TTPBuilder.
+// It merges static rules with dynamically generated rules from the ATT&CK dataset.
 func NewClassifier(loader *ATTCKLoader, ttpBuilder *TTPBuilder) *Classifier {
+	staticRules := DefaultRules()
+	dynamicRules := loader.GenerateDynamicRules()
+	merged := MergeRules(staticRules, dynamicRules)
+	compiledAll := compileRules(merged)
+
 	return &Classifier{
 		loader:     loader,
-		rules:      defaultCompiledRules,
+		rules:      compiledAll,
 		extractor:  NewExtractor(),
 		ttpBuilder: ttpBuilder,
 	}
@@ -106,7 +112,10 @@ func (c *Classifier) applyRule(cr compiledRule, event *database.Event) {
 	event.TacticID = cr.TacticID
 	event.TacticName = cr.TacticName
 	event.KillChainStage = cr.KillChain
-	event.Confidence = 1.0
+	event.Confidence = cr.Confidence
+	if event.Confidence == 0 {
+		event.Confidence = 1.0 // default for legacy rules with zero value
+	}
 	event.Classified = true
 
 	// Enrich name from loaded ATT&CK data when available.

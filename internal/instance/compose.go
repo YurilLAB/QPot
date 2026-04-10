@@ -78,7 +78,7 @@ services:
       - "{{.Config.AllocatePort 8123}}:8123"
     networks:
       - qpot_internal
-    {{template "security" dict "Config" $.Config "HP" (dict) "GlobalLimits" $.Config.Security.ResourceLimits}}
+    {{template "security" dict "Config" $.Config "HP" (dict) "GlobalLimits" $.Config.Security.ResourceLimits "Name" "database"}}
     healthcheck:
       test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:8123/ping"]
       interval: 10s
@@ -100,7 +100,7 @@ services:
       - "{{.Config.AllocatePort 5432}}:5432"
     networks:
       - qpot_internal
-    {{template "security" dict "Config" $.Config "HP" (dict) "GlobalLimits" $.Config.Security.ResourceLimits}}
+    {{template "security" dict "Config" $.Config "HP" (dict) "GlobalLimits" $.Config.Security.ResourceLimits "Name" "database"}}
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U {{.Config.Database.Username}} -d {{.Config.Database.Database}}"]
       interval: 10s
@@ -186,7 +186,7 @@ services:
       # TPOT-compatible environment variables
       - TPOT_HONEYPOT={{.Name}}
       - TPOT_INSTANCE={{$.Config.InstanceName}}
-    {{template "security" dict "Config" $.Config "HP" .HP "GlobalLimits" $.Config.Security.ResourceLimits}}
+    {{template "security" dict "Config" $.Config "HP" .HP "GlobalLimits" $.Config.Security.ResourceLimits "Name" .Name "FakeHostname" .HP.Stealth.FakeHostname}}
     healthcheck:
       test: ["CMD-SHELL", "netstat -tln 2>/dev/null | grep -q ':{{.HP.Port}}' || ss -tln | grep -q ':{{.HP.Port}}'"]
       interval: 30s
@@ -240,7 +240,7 @@ services:
     pid: "private"
     
     # Hostname isolation
-    hostname: {{if .HP.Stealth.FakeHostname}}"{{.HP.Stealth.FakeHostname}}"{{else}}"{{.Name}}-host"{{end}}
+    hostname: {{if .FakeHostname}}"{{.FakeHostname}}"{{else if .Name}}"{{.Name}}-host"{{else}}"qpot-host"{{end}}
     
     # Temporary filesystems for read-only containers
     {{if .Config.Security.ReadOnlyFilesystem}}tmpfs:

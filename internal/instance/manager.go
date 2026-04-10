@@ -165,12 +165,25 @@ func (m *Manager) Start(ctx context.Context, detach bool) error {
 	}
 
 	if detach {
+		// Reap the process in the background to avoid zombies.
+		go func() { _ = cmd.Wait() }()
 		return nil
 	}
+
+	// When not detached, wait for the process in a goroutine so we can also
+	// poll for health. The process ends when docker compose exits.
+	waitDone := make(chan error, 1)
+	go func() { waitDone <- cmd.Wait() }()
 
 	// Wait for startup
 	if err := m.waitForHealthy(ctx); err != nil {
 		return fmt.Errorf("services failed to become healthy: %w", err)
+	}
+
+	// Block until the compose process exits or context is cancelled.
+	select {
+	case <-ctx.Done():
+	case <-waitDone:
 	}
 
 	slog.Info("QPot instance started successfully")

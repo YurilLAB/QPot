@@ -10,6 +10,8 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"regexp"
+	"sort"
 	"strings"
 	"time"
 )
@@ -22,13 +24,18 @@ const attckCacheFile = "attck-enterprise.json"
 
 // Technique represents a MITRE ATT&CK technique.
 type Technique struct {
-	ID          string
-	SubID       string // e.g. "T1110.001"
-	Name        string
-	TacticIDs   []string
-	TacticNames []string
-	Description string
-	URL         string
+	ID             string
+	SubID          string // e.g. "T1110.001"
+	Name           string
+	TacticIDs      []string
+	TacticNames    []string
+	Description    string
+	URL            string
+	Detection      string   // x_mitre_detection text
+	DataSources    []string // x_mitre_data_sources
+	Platforms      []string // x_mitre_platforms
+	IsSubTechnique bool     // x_mitre_is_subtechnique
+	Keywords       []string // extracted from name + description + detection
 }
 
 // ATTCKLoader loads and caches ATT&CK technique data.
@@ -140,6 +147,10 @@ type stixObject struct {
 	ExternalReferences []stixExtRef         `json:"external_references"`
 	KillChainPhases    []stixKillChainPhase `json:"kill_chain_phases"`
 	Revoked            bool                 `json:"revoked"`
+	Detection          string               `json:"x_mitre_detection"`
+	DataSources        []string             `json:"x_mitre_data_sources"`
+	Platforms          []string             `json:"x_mitre_platforms"`
+	IsSubTechnique     bool                 `json:"x_mitre_is_subtechnique"`
 }
 
 type stixExtRef struct {
@@ -151,6 +162,82 @@ type stixExtRef struct {
 type stixKillChainPhase struct {
 	KillChainName string `json:"kill_chain_name"`
 	PhaseName     string `json:"phase_name"`
+}
+
+// reBacktick matches terms inside backticks.
+var reBacktick = regexp.MustCompile("`([^`]+)`")
+
+// reQuoted matches quoted terms 2-30 chars long.
+var reQuoted = regexp.MustCompile(`"([^"]{2,30})"`)
+
+// stopwords is a set of common English words to exclude from keywords.
+var stopwords = map[string]bool{
+	"the": true, "and": true, "for": true, "with": true, "that": true,
+	"this": true, "are": true, "from": true, "may": true, "can": true,
+	"use": true, "used": true, "such": true, "also": true, "has": true,
+	"have": true, "been": true, "when": true, "their": true, "they": true,
+	"using": true, "will": true, "which": true, "more": true, "than": true,
+	"these": true, "into": true, "other": true, "system": true, "not": true,
+	"its": true, "all": true, "any": true, "via": true, "often": true,
+	"both": true, "well": true, "each": true, "through": true, "about": true,
+	"data": true, "log": true, "logs": true, "file": true, "files": true,
+	"user": true, "users": true, "access": true, "attack": true,
+	"monitor": true, "activity": true, "malicious": true, "content": true,
+}
+
+// ExtractKeywords extracts meaningful technical keywords from text.
+// It lowercases input, pulls out backtick/quoted terms, and filters stopwords.
+func ExtractKeywords(text string) []string {
+	text = strings.ToLower(text)
+	seen := make(map[string]bool)
+	var keywords []string
+
+	addKW := func(w string) {
+		w = strings.TrimSpace(w)
+		if len(w) < 3 {
+			return
+		}
+		if stopwords[w] {
+			return
+		}
+		if !seen[w] {
+			seen[w] = true
+			keywords = append(keywords, w)
+		}
+	}
+
+	// Extract backtick-quoted terms first (highest specificity).
+	for _, m := range reBacktick.FindAllStringSubmatch(text, -1) {
+		addKW(m[1])
+	}
+
+	// Extract double-quoted terms.
+	for _, m := range reQuoted.FindAllStringSubmatch(text, -1) {
+		addKW(m[1])
+	}
+
+	// Extract individual words (alpha + digits + hyphens, no pure numbers).
+	for _, word := range strings.FieldsFunc(text, func(r rune) bool {
+		return !(r >= 'a' && r <= 'z') && !(r >= '0' && r <= '9') && r != '-' && r != '_' && r != '.'
+	}) {
+		// Skip pure numbers and overly long words.
+		if len(word) > 50 {
+			continue
+		}
+		allDigit := true
+		for _, ch := range word {
+			if ch < '0' || ch > '9' {
+				allDigit = false
+				break
+			}
+		}
+		if allDigit {
+			continue
+		}
+		addKW(word)
+	}
+
+	return keywords
 }
 
 // parseSTIX parses a STIX 2.x bundle and populates the techniques map.
@@ -187,13 +274,27 @@ func (a *ATTCKLoader) parseSTIX(data []byte) error {
 			}
 		}
 
+		// Extract keywords from name + detection text + data sources.
+		kwText := obj.Name + " " + obj.Detection
+		for _, ds := range obj.DataSources {
+			// e.g. "Command: Windows Command Shell" → extract "command"
+			parts := strings.SplitN(ds, ":", 2)
+			kwText += " " + strings.TrimSpace(parts[0])
+		}
+		keywords := ExtractKeywords(kwText)
+
 		tech := &Technique{
-			ID:          techID,
-			SubID:       techID,
-			Name:        obj.Name,
-			TacticNames: tacticNames,
-			Description: truncate(obj.Description, 512),
-			URL:         techURL,
+			ID:             techID,
+			SubID:          techID,
+			Name:           obj.Name,
+			TacticNames:    tacticNames,
+			Description:    truncate(obj.Description, 512),
+			URL:            techURL,
+			Detection:      truncate(obj.Detection, 1024),
+			DataSources:    obj.DataSources,
+			Platforms:      obj.Platforms,
+			IsSubTechnique: obj.IsSubTechnique,
+			Keywords:       keywords,
 		}
 
 		a.techniques[techID] = tech
@@ -204,6 +305,123 @@ func (a *ATTCKLoader) parseSTIX(data []byte) error {
 		return fmt.Errorf("no attack-pattern objects found in bundle")
 	}
 	return nil
+}
+
+// tacticToKillChain maps ATT&CK tactic phase names to QPot kill chain stages.
+var tacticToKillChain = map[string]string{
+	"credential-access":      "initial-access",
+	"execution":              "execution",
+	"discovery":              "discovery",
+	"persistence":            "persistence",
+	"privilege-escalation":   "privilege-escalation",
+	"lateral-movement":       "c2",
+	"collection":             "collection",
+	"exfiltration":           "exfiltration",
+	"command-and-control":    "c2",
+	"initial-access":         "initial-access",
+	"defense-evasion":        "execution",
+	"impact":                 "exfiltration",
+	"reconnaissance":         "reconnaissance",
+	"resource-development":   "reconnaissance",
+	"impair-process-control": "initial-access",
+}
+
+// GenerateDynamicRules generates classification rules for all loaded techniques
+// that are not embedded-only. Returns nil when only the embedded fallback is
+// loaded (those techniques lack detection metadata for meaningful rules).
+func (a *ATTCKLoader) GenerateDynamicRules() []Rule {
+	if !a.loaded {
+		// Embedded fallback has no detection metadata — skip dynamic generation.
+		return nil
+	}
+
+	var rules []Rule
+	for _, tech := range a.techniques {
+		rule := buildDynamicRule(tech)
+		if rule != nil {
+			rules = append(rules, *rule)
+		}
+	}
+	return rules
+}
+
+// buildDynamicRule constructs a single Rule from a Technique's metadata.
+// Returns nil when the technique should be skipped (wrong platform, no keywords).
+func buildDynamicRule(t *Technique) *Rule {
+	// Platform filter: skip techniques that only target Windows with no
+	// cross-platform applicability. Techniques with empty platforms are also
+	// skipped (embedded fallback — no metadata).
+	if len(t.Platforms) == 0 {
+		return nil
+	}
+	onlyWindows := true
+	for _, p := range t.Platforms {
+		switch strings.ToLower(p) {
+		case "linux", "macos", "network", "containers":
+			onlyWindows = false
+		}
+	}
+	if onlyWindows {
+		return nil
+	}
+
+	// Gather keywords: prefer shorter, more specific terms.
+	kws := t.Keywords
+	if len(kws) == 0 {
+		return nil
+	}
+
+	// Sort by length ascending (shorter = more specific command names).
+	sorted := make([]string, len(kws))
+	copy(sorted, kws)
+	sort.SliceStable(sorted, func(i, j int) bool {
+		return len(sorted[i]) < len(sorted[j])
+	})
+
+	// Take up to 5 keywords, skipping those shorter than 3 chars.
+	var selected []string
+	for _, kw := range sorted {
+		if len(kw) < 3 {
+			continue
+		}
+		selected = append(selected, regexp.QuoteMeta(kw))
+		if len(selected) == 5 {
+			break
+		}
+	}
+	if len(selected) == 0 {
+		return nil
+	}
+
+	pattern := "(?i)(" + strings.Join(selected, "|") + ")"
+
+	// Tactic info from first tactic.
+	tacticName := ""
+	if len(t.TacticNames) > 0 {
+		tacticName = t.TacticNames[0]
+	}
+	tacticID := ""
+	if len(t.TacticIDs) > 0 {
+		tacticID = t.TacticIDs[0]
+	}
+	killChain := tacticToKillChain[tacticName]
+	if killChain == "" {
+		killChain = "execution"
+	}
+
+	return &Rule{
+		TechniqueID: t.SubID,
+		TacticID:    tacticID,
+		TacticName:  tacticName,
+		Name:        t.Name,
+		KillChain:   killChain,
+		Honeypots:   []string{},
+		Priority:    10,
+		Conditions: []Condition{
+			{Field: "command", Pattern: pattern},
+		},
+		Confidence: 0.6,
+	}
 }
 
 // loadEmbedded populates techniques with the hardcoded minimal map.

@@ -1,6 +1,9 @@
 package intelligence
 
-import "regexp"
+import (
+	"regexp"
+	"sort"
+)
 
 // Rule maps event patterns to an ATT&CK technique.
 type Rule struct {
@@ -13,7 +16,36 @@ type Rule struct {
 	KillChain  string
 	Honeypots  []string // empty = applies to all honeypots
 	Conditions []Condition
-	Priority   int // higher = evaluated first
+	Priority   int     // higher = evaluated first
+	Confidence float64 // 0.0–1.0; static rules default to 1.0
+}
+
+// MergeRules combines static and dynamic rules.
+// Dynamic rules whose TechniqueID is already covered by a static rule are
+// dropped. The returned slice is sorted by Priority descending.
+func MergeRules(static []Rule, dynamic []Rule) []Rule {
+	// Build a set of technique IDs already covered by static rules.
+	covered := make(map[string]bool, len(static))
+	for _, r := range static {
+		covered[r.TechniqueID] = true
+	}
+
+	merged := make([]Rule, len(static))
+	copy(merged, static)
+
+	for _, dr := range dynamic {
+		if covered[dr.TechniqueID] {
+			continue
+		}
+		merged = append(merged, dr)
+		covered[dr.TechniqueID] = true
+	}
+
+	sort.SliceStable(merged, func(i, j int) bool {
+		return merged[i].Priority > merged[j].Priority
+	})
+
+	return merged
 }
 
 // Condition is a single match condition on an event field.
@@ -29,7 +61,7 @@ type compiledRule struct {
 	compiled []*regexp.Regexp
 }
 
-// defaultCompiledRules holds the singleton compiled ruleset.
+// defaultCompiledRules holds the singleton compiled ruleset of static rules only.
 var defaultCompiledRules []compiledRule
 
 func init() {
@@ -42,6 +74,28 @@ func init() {
 		}
 		defaultCompiledRules[i] = cr
 	}
+}
+
+// compileRules compiles a slice of Rules into compiledRules.
+// Rules whose patterns fail to compile are silently dropped.
+func compileRules(rules []Rule) []compiledRule {
+	result := make([]compiledRule, 0, len(rules))
+	for _, r := range rules {
+		cr := compiledRule{Rule: r, compiled: make([]*regexp.Regexp, len(r.Conditions))}
+		ok := true
+		for j, cond := range r.Conditions {
+			rx, err := regexp.Compile(cond.Pattern)
+			if err != nil {
+				ok = false
+				break
+			}
+			cr.compiled[j] = rx
+		}
+		if ok {
+			result = append(result, cr)
+		}
+	}
+	return result
 }
 
 // DefaultRules returns the built-in classification ruleset.
@@ -59,6 +113,7 @@ func DefaultRules() []Rule {
 			KillChain:   "initial-access",
 			Honeypots:   []string{"conpot"},
 			Priority:    200,
+			Confidence:  1.0,
 			Conditions: []Condition{
 				{Field: "event_type", Pattern: `command`},
 			},
@@ -75,6 +130,7 @@ func DefaultRules() []Rule {
 			KillChain:   "reconnaissance",
 			Honeypots:   []string{"conpot"},
 			Priority:    190,
+			Confidence:  1.0,
 			Conditions: []Condition{
 				{Field: "event_type", Pattern: `connection|probe`},
 			},
@@ -91,6 +147,7 @@ func DefaultRules() []Rule {
 			KillChain:   "initial-access",
 			Honeypots:   []string{"tanner", "honeyaml", "elasticpot", "ciscoasa", "citrixhoneypot"},
 			Priority:    180,
+			Confidence:  1.0,
 			Conditions:  []Condition{},
 		},
 
@@ -105,6 +162,7 @@ func DefaultRules() []Rule {
 			KillChain:   "initial-access",
 			Honeypots:   []string{"heralding"},
 			Priority:    170,
+			Confidence:  1.0,
 			Conditions: []Condition{
 				{Field: "event_type", Pattern: `login_failed`},
 			},
@@ -121,6 +179,7 @@ func DefaultRules() []Rule {
 			KillChain:   "initial-access",
 			Honeypots:   []string{},
 			Priority:    160,
+			Confidence:  1.0,
 			Conditions: []Condition{
 				{Field: "event_type", Pattern: `login_failed`},
 				// metadata field "unique_usernames" present signals spraying
@@ -139,6 +198,7 @@ func DefaultRules() []Rule {
 			KillChain:   "initial-access",
 			Honeypots:   []string{},
 			Priority:    150,
+			Confidence:  1.0,
 			Conditions: []Condition{
 				{Field: "event_type", Pattern: `login_failed`},
 				// metadata field "attempt_count" present signals repeated attempts
@@ -157,6 +217,7 @@ func DefaultRules() []Rule {
 			KillChain:   "initial-access",
 			Honeypots:   []string{"cowrie", "heralding"},
 			Priority:    140,
+			Confidence:  1.0,
 			Conditions: []Condition{
 				{Field: "event_type", Pattern: `login_failed`},
 			},
@@ -173,6 +234,7 @@ func DefaultRules() []Rule {
 			KillChain:   "privilege-escalation",
 			Honeypots:   []string{},
 			Priority:    130,
+			Confidence:  1.0,
 			Conditions: []Condition{
 				{Field: "command", Pattern: `sudo\s|su\s+root|\bchmod\s+[0-7]*7[0-7][0-7]|chown\s+root|pkexec`},
 			},
@@ -189,6 +251,7 @@ func DefaultRules() []Rule {
 			KillChain:   "persistence",
 			Honeypots:   []string{},
 			Priority:    120,
+			Confidence:  1.0,
 			Conditions: []Condition{
 				{Field: "command", Pattern: `crontab|/etc/cron|systemctl\s+enable|rc\.local|/etc/init\.d`},
 			},
@@ -205,6 +268,7 @@ func DefaultRules() []Rule {
 			KillChain:   "c2",
 			Honeypots:   []string{},
 			Priority:    110,
+			Confidence:  1.0,
 			Conditions: []Condition{
 				{Field: "command", Pattern: `wget|curl|fetch|tftp|ftp\s|scp\s|nc\s.*<`},
 			},
@@ -221,6 +285,7 @@ func DefaultRules() []Rule {
 			KillChain:   "discovery",
 			Honeypots:   []string{},
 			Priority:    100,
+			Confidence:  1.0,
 			Conditions: []Condition{
 				{Field: "command", Pattern: `netstat|ss\s+-|/proc/net`},
 			},
@@ -237,6 +302,7 @@ func DefaultRules() []Rule {
 			KillChain:   "discovery",
 			Honeypots:   []string{},
 			Priority:    90,
+			Confidence:  1.0,
 			Conditions: []Condition{
 				{Field: "command", Pattern: `ifconfig|ip\s+(addr|route|link)|netstat\s+-i|route\s+-n`},
 			},
@@ -253,6 +319,7 @@ func DefaultRules() []Rule {
 			KillChain:   "discovery",
 			Honeypots:   []string{},
 			Priority:    80,
+			Confidence:  1.0,
 			Conditions: []Condition{
 				{Field: "command", Pattern: `\bwhoami\b|\bid\b|\bw\b|\bwho\b|\blast\b`},
 			},
@@ -269,6 +336,7 @@ func DefaultRules() []Rule {
 			KillChain:   "discovery",
 			Honeypots:   []string{},
 			Priority:    70,
+			Confidence:  1.0,
 			Conditions: []Condition{
 				{Field: "command", Pattern: `uname|/proc/version|/etc/os-release|lsb_release|hostnamectl`},
 			},
@@ -285,6 +353,7 @@ func DefaultRules() []Rule {
 			KillChain:   "execution",
 			Honeypots:   []string{"cowrie"},
 			Priority:    60,
+			Confidence:  1.0,
 			Conditions: []Condition{
 				{Field: "event_type", Pattern: `command`},
 				{Field: "command", Pattern: `.+`},
@@ -302,6 +371,7 @@ func DefaultRules() []Rule {
 			KillChain:   "reconnaissance",
 			Honeypots:   []string{},
 			Priority:    50,
+			Confidence:  1.0,
 			Conditions: []Condition{
 				{Field: "event_type", Pattern: `connection|probe`},
 				// username must be absent (no auth attempted)

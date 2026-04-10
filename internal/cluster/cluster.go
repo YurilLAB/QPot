@@ -1133,14 +1133,21 @@ func (m *Manager) LeaveCluster() error {
 		return fmt.Errorf("not in a cluster")
 	}
 
-	// Notify other nodes
+	// Notify other nodes with a short timeout so a dead peer doesn't block.
+	leaveClient := &http.Client{Timeout: 3 * time.Second}
+	localNodeID := m.cluster.LocalNode.ID
+	leaveBody, _ := json.Marshal(map[string]string{"node_id": localNodeID})
 	for _, node := range m.cluster.Nodes {
-		if node.ID == m.cluster.LocalNode.ID {
+		if node.ID == localNodeID {
 			continue
 		}
-		// Send leave notification
 		url := fmt.Sprintf("http://%s:%d/api/v1/cluster/leave", node.Address, node.Port)
-		http.Post(url, "application/json", nil)
+		resp, err := leaveClient.Post(url, "application/json", bytes.NewReader(leaveBody))
+		if err != nil {
+			slog.Debug("LeaveCluster: failed to notify peer", "node_id", node.ID, "error", err)
+			continue
+		}
+		resp.Body.Close()
 	}
 
 	// Remove cluster file

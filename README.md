@@ -17,6 +17,21 @@
 
 ---
 
+## Recent Improvements
+
+### Latest Updates (Bug Fixes & Enhancements)
+
+- **Dynamic ATT&CK Rule Generation** - Automatically generates classification rules from the live MITRE ATT&CK dataset, enriching detection with detection strategies, data sources, platforms, and keyword extraction
+- **Confidence Scoring** - All classifications now include confidence scores (0.0-1.0) based on rule specificity and data quality
+- **Rule Merging System** - Smart merging of static and dynamically generated rules with deduplication by technique ID
+- **HTTP Timeout Protection** - All outbound HTTP requests (ATT&CK fetch, cluster communication) now have proper timeouts to prevent indefinite blocking
+- **Zombie Process Prevention** - Fixed process reaping in detached mode and proper wait handling in foreground mode
+- **Config Directory Handling** - Fixed edge case where config directory might not exist when different from data directory
+- **Template Security Fixes** - Fixed Docker Compose template to properly handle database services without honeypot-specific configurations
+- **Cluster Stability** - Improved node leave notifications with timeout handling and proper body closure
+
+---
+
 ## Overview
 
 **QPot** is an enterprise-grade honeypot platform developed by YurilLAB. Built on the solid foundation of T-Pot CE, QPot adds modern security features, enhanced sandboxing, and seamless integration with the Yuril Security ecosystem.
@@ -310,6 +325,14 @@ QPot includes a built-in threat intelligence engine that automatically classifie
 
 Every honeypot event is automatically mapped to an ATT&CK technique the moment it arrives. QPot fetches the latest ATT&CK Enterprise knowledge base from MITRE on startup, caches it locally, and falls back to an embedded technique set if offline.
 
+**Dynamic Rule Generation** - QPot analyzes the full ATT&CK dataset to automatically generate classification rules based on:
+- Detection strategies from MITRE's `x_mitre_detection` field
+- Data sources and platforms
+- Keyword extraction from technique names and descriptions
+- Cross-platform applicability filtering (non-Windows techniques prioritized)
+
+Rules are merged intelligently: static built-in rules take precedence, and dynamic rules fill gaps for techniques not explicitly covered. Each rule includes a confidence score based on data richness.
+
 ```
 SSH brute force     → T1110.001 - Password Guessing      (Credential Access)
 Password spraying   → T1110.003 - Password Spraying      (Credential Access)
@@ -361,10 +384,16 @@ Sessions stay open until 30 minutes of inactivity. Shared infrastructure (AWS, G
 intelligence:
   enabled: true
   fetch_attck: true              # Fetch latest from MITRE GitHub on startup
+  attck_data_path: "./data"      # Local cache path for ATT&CK data
   worker_interval: 15m           # Backfill worker interval
   worker_batch_size: 500         # Events per backfill run
   inactivity_window: 30m         # TTP session inactivity before closing
 ```
+
+**Confidence Levels:**
+- `1.0` - Static built-in rules (highest confidence)
+- `0.6` - Dynamically generated rules from ATT&CK data
+- Rules are evaluated by priority; first match wins
 
 ---
 
