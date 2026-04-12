@@ -67,8 +67,11 @@ func LoadID(instanceName string) (*QPotID, error) {
 	}, nil
 }
 
-// Save saves the QPot ID to disk
+// Save saves the QPot ID to disk. Creates the DataPath directory if needed.
 func (q *QPotID) Save() error {
+	if err := os.MkdirAll(q.DataPath, 0750); err != nil {
+		return fmt.Errorf("failed to create data directory: %w", err)
+	}
 	idPath := filepath.Join(q.DataPath, "qpot.id")
 	return os.WriteFile(idPath, []byte(q.ID), 0600)
 }

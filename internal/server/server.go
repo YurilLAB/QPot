@@ -4,11 +4,13 @@ package server
 import (
 	"bytes"
 	"context"
+	"crypto/subtle"
 	"embed"
 	"encoding/json"
 	"fmt"
 	"log/slog"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -130,8 +132,8 @@ func (s *Server) withQPotAuth(next http.HandlerFunc) http.HandlerFunc {
 			return
 		}
 
-		// Check if QPot ID matches this instance
-		if qpotID != s.config.QPotID {
+		// Check if QPot ID matches this instance (constant-time to prevent timing oracle).
+		if subtle.ConstantTimeCompare([]byte(qpotID), []byte(s.config.QPotID)) != 1 {
 			s.sendError(w, http.StatusForbidden, "QPot ID does not match this instance")
 			return
 		}
@@ -155,8 +157,9 @@ func (s *Server) handleStatic(w http.ResponseWriter, r *http.Request) {
 		}
 		
 		html := string(data)
-		// Inject the QPot ID as a script variable
-		injection := fmt.Sprintf(`<script>window.QPOT_ID = "%s";</script>`, s.config.QPotID)
+		// Inject the QPot ID as a script variable (JSON-encoded to prevent XSS).
+		idJSON, _ := json.Marshal(s.config.QPotID)
+		injection := fmt.Sprintf(`<script>window.QPOT_ID = %s;</script>`, idJSON)
 		html = strings.Replace(html, "<head>", "<head>\n"+injection, 1)
 		
 		w.Header().Set("Content-Type", "text/html")
@@ -373,6 +376,7 @@ func (s *Server) handleHoneypots(w http.ResponseWriter, r *http.Request) {
 			Name    string `json:"name"`
 			Enabled bool   `json:"enabled"`
 		}
+		r.Body = http.MaxBytesReader(w, r.Body, 4096)
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			s.sendError(w, http.StatusBadRequest, "Invalid request")
 			return
@@ -422,7 +426,12 @@ func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 		filter.Honeypots = honeypots
 	}
 	if limit := r.URL.Query().Get("limit"); limit != "" {
-		fmt.Sscanf(limit, "%d", &filter.Limit)
+		if n, err := strconv.Atoi(limit); err == nil && n > 0 {
+			if n > 1000 {
+				n = 1000
+			}
+			filter.Limit = n
+		}
 	}
 
 	events, err := s.database.GetEvents(ctx, filter)
@@ -474,7 +483,14 @@ func (s *Server) handleLogs(w http.ResponseWriter, r *http.Request) {
 
 	honeypot := r.URL.Query().Get("honeypot")
 	tail := 100
-	fmt.Sscanf(r.URL.Query().Get("tail"), "%d", &tail)
+	if t := r.URL.Query().Get("tail"); t != "" {
+		if n, err := strconv.Atoi(t); err == nil && n > 0 {
+			if n > 5000 {
+				n = 5000
+			}
+			tail = n
+		}
+	}
 
 	logs, err := s.manager.GetLogs(ctx, honeypot, false, tail)
 	if err != nil {
@@ -649,7 +665,12 @@ func (s *Server) handleTTPs(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	limit := 20
 	if l := r.URL.Query().Get("limit"); l != "" {
-		fmt.Sscanf(l, "%d", &limit)
+		if n, err := strconv.Atoi(l); err == nil && n > 0 {
+			if n > 500 {
+				n = 500
+			}
+			limit = n
+		}
 	}
 
 	sessions, err := s.database.GetTTPSessions(ctx, limit)
@@ -683,7 +704,9 @@ func (s *Server) handleIntelligenceSummary(w http.ResponseWriter, r *http.Reques
 
 	if s.database != nil {
 		ctx := r.Context()
-		events, err := s.database.GetEvents(ctx, database.EventFilter{Limit: 50000})
+		// Sample up to 5000 recent events to count distinct observed techniques.
+		// This is an approximation that avoids loading the full event table.
+		events, err := s.database.GetEvents(ctx, database.EventFilter{Limit: 5000})
 		if err == nil {
 			seen := make(map[string]bool)
 			for _, ev := range events {
@@ -694,9 +717,9 @@ func (s *Server) handleIntelligenceSummary(w http.ResponseWriter, r *http.Reques
 			techniquesObserved = len(seen)
 		}
 
-		iocs, err := s.database.GetIOCs(ctx, database.IOCFilter{Limit: 1})
-		if err == nil && len(iocs) > 0 {
-			// We don't have a COUNT query, so we use what we have.
+		// Approximate IOC count using a larger sample.
+		iocs, err := s.database.GetIOCs(ctx, database.IOCFilter{Limit: 10000})
+		if err == nil {
 			iocsTotal = len(iocs)
 		}
 	}

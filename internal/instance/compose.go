@@ -4,6 +4,7 @@ package instance
 import (
 	"bytes"
 	"fmt"
+	"hash/fnv"
 	"strings"
 	"text/template"
 
@@ -15,6 +16,18 @@ import (
 type ComposeGenerator struct {
 	Config  *config.Config
 	Sandbox *security.Sandbox
+}
+
+// subnetForNetwork computes a unique, stable /24 subnet for a Docker bridge
+// network given an (instanceName, networkName) pair. The result always falls
+// in the 172.20.x.y/24 range (RFC 1918) which Docker uses by default.
+func subnetForNetwork(instanceName, networkName string) string {
+	h := fnv.New32a()
+	_, _ = fmt.Fprintf(h, "%s:%s", instanceName, networkName)
+	v := h.Sum32()
+	x := 20 + int((v>>8)%12) // 20–31
+	y := int(v % 256)         // 0–255
+	return fmt.Sprintf("172.%d.%d.0/24", x, y)
 }
 
 // Generate generates a Docker Compose file
@@ -36,7 +49,7 @@ networks:
 {{if $.Config.Security.NetworkIsolation.RandomizeMAC}}
     ipam:
       config:
-        - subnet: 172.{{add 20 (int (index $.Config.InstanceName 0))}}.{{add 1 (int (index $.Config.InstanceName 1))}}.0/24
+        - subnet: {{subnetFor $.Config.InstanceName $name}}
 {{end}}{{end}}{{end}}
 
 volumes:
@@ -345,6 +358,7 @@ services:
 			return a < b
 		},
 		"GetHoneypotImage": GetHoneypotImage,
+		"subnetFor": subnetForNetwork,
 		"int": func(v interface{}) int {
 			switch i := v.(type) {
 			case int:

@@ -10,6 +10,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"strings"
 	"syscall"
@@ -23,6 +24,18 @@ import (
 	"github.com/spf13/cobra"
 	"golang.org/x/term"
 )
+
+// reValidName matches instance names: 1-32 chars, alphanumeric, hyphens, underscores.
+var reValidName = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9_-]{0,31}$`)
+
+// validateInstanceName returns an error if name contains characters that would
+// break Docker container names, bridge names, or file system paths.
+func validateInstanceName(name string) error {
+	if !reValidName.MatchString(name) {
+		return fmt.Errorf("invalid instance name %q: must be 1-32 characters, start with alphanumeric, and contain only letters, digits, hyphens, or underscores", name)
+	}
+	return nil
+}
 
 var (
 	version   = "dev"
@@ -265,7 +278,11 @@ func newInstanceCommand() *cobra.Command {
 		RunE: func(cmd *cobra.Command, args []string) error {
 			ctx := cmd.Context()
 			name := args[0]
-			
+
+			if err := validateInstanceName(name); err != nil {
+				return err
+			}
+
 			// Generate QPot ID
 			qpotID, err := instance.GenerateID(name)
 			if err != nil {

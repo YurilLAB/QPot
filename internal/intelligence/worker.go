@@ -74,16 +74,19 @@ func (w *Worker) runOnce(ctx context.Context) int {
 		}
 	}
 
+	n := len(events)
+
 	// Flush and persist expired TTP sessions.
-	expired := w.classifier.ttpBuilder.FlushExpired()
-	for _, session := range expired {
-		if err := w.db.UpsertTTPSession(ctx, session); err != nil {
-			slog.Warn("Intelligence worker: failed to upsert TTP session", "error", err,
-				"session_id", session.SessionID)
+	if w.classifier.ttpBuilder != nil {
+		expired := w.classifier.ttpBuilder.FlushExpired()
+		for _, session := range expired {
+			if err := w.db.UpsertTTPSession(ctx, session); err != nil {
+				slog.Warn("Intelligence worker: failed to upsert TTP session", "error", err,
+					"session_id", session.SessionID)
+			}
 		}
 	}
 
-	n := len(events)
 	slog.Info("Intelligence worker classified events", "count", n, "next_run", w.interval)
 	return n
 }

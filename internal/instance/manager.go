@@ -70,12 +70,23 @@ func NewManager(cfg *config.Config) (*Manager, error) {
 	}, nil
 }
 
-// db returns the database connection, creating it on first call.
+// db returns the database connection, creating and connecting it on first call.
 // Callers that need the database (e.g. Start) should call this and handle
 // the error explicitly.
 func (m *Manager) db() (database.Database, error) {
 	m.dbOnce.Do(func() {
-		m.database, m.dbErr = database.New(&m.config.Database)
+		db, err := database.New(&m.config.Database)
+		if err != nil {
+			m.dbErr = err
+			return
+		}
+		connectCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		defer cancel()
+		if err := db.Connect(connectCtx); err != nil {
+			m.dbErr = fmt.Errorf("connect: %w", err)
+			return
+		}
+		m.database = db
 	})
 	return m.database, m.dbErr
 }
