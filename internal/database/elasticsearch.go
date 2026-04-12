@@ -1298,3 +1298,4 @@ func (es *Elasticsearch) WithPool(pool *Pool) Database {
 func (es *Elasticsearch) GetPoolStats() PoolStats {
 	return PoolStats{}
 }
+
