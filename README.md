@@ -17,21 +17,6 @@
 
 ---
 
-## Recent Improvements
-
-### Latest Updates (Bug Fixes & Enhancements)
-
-- **Dynamic ATT&CK Rule Generation** - Automatically generates classification rules from the live MITRE ATT&CK dataset, enriching detection with detection strategies, data sources, platforms, and keyword extraction
-- **Confidence Scoring** - All classifications now include confidence scores (0.0-1.0) based on rule specificity and data quality
-- **Rule Merging System** - Smart merging of static and dynamically generated rules with deduplication by technique ID
-- **HTTP Timeout Protection** - All outbound HTTP requests (ATT&CK fetch, cluster communication) now have proper timeouts to prevent indefinite blocking
-- **Zombie Process Prevention** - Fixed process reaping in detached mode and proper wait handling in foreground mode
-- **Config Directory Handling** - Fixed edge case where config directory might not exist when different from data directory
-- **Template Security Fixes** - Fixed Docker Compose template to properly handle database services without honeypot-specific configurations
-- **Cluster Stability** - Improved node leave notifications with timeout handling and proper body closure
-
----
-
 ## Overview
 
 **QPot** is an enterprise-grade honeypot platform developed by YurilLAB. Built on the solid foundation of T-Pot CE, QPot adds modern security features, enhanced sandboxing, and seamless integration with the Yuril Security ecosystem.
@@ -331,7 +316,12 @@ Every honeypot event is automatically mapped to an ATT&CK technique the moment i
 - Keyword extraction from technique names and descriptions
 - Cross-platform applicability filtering (non-Windows techniques prioritized)
 
-Rules are merged intelligently: static built-in rules take precedence, and dynamic rules fill gaps for techniques not explicitly covered. Each rule includes a confidence score based on data richness.
+Rules are merged intelligently via a deduplication system: static built-in rules take precedence by technique ID, and dynamic rules automatically fill gaps for techniques not explicitly covered. This means new ATT&CK techniques are handled without any code changes as long as QPot can reach MITRE's dataset.
+
+**Confidence Scoring** - Every classification includes a confidence score (0.0–1.0) based on rule specificity and data richness:
+- `1.0` — Static built-in rules with hand-curated patterns
+- `0.6` — Dynamically generated rules derived from ATT&CK data
+- Rules are evaluated by priority; first match wins
 
 ```
 SSH brute force     → T1110.001 - Password Guessing      (Credential Access)
@@ -390,11 +380,6 @@ intelligence:
   inactivity_window: 30m         # TTP session inactivity before closing
 ```
 
-**Confidence Levels:**
-- `1.0` - Static built-in rules (highest confidence)
-- `0.6` - Dynamically generated rules from ATT&CK data
-- Rules are evaluated by priority; first match wins
-
 ---
 
 ## Alert Webhooks
@@ -445,6 +430,11 @@ qpot status [--instance <name>]  # Show status
 qpot honeypot list               # List available honeypots
 qpot honeypot enable <name>      # Enable honeypot
 qpot honeypot disable <name>     # Disable honeypot
+
+# Docker container management
+qpot docker ps                   # List all QPot Docker containers with status
+qpot docker logs <container>     # Tail logs for a container (default: 50 lines)
+qpot docker restart <container>  # Restart a specific QPot container
 
 # Utilities
 qpot logs [honeypot]             # View logs

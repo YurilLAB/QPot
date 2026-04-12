@@ -213,23 +213,35 @@ func (m *MigrationManager) rollbackMigration(ctx context.Context, mig *Migration
 	return m.removeMigration(ctx, mig.Version)
 }
 
-// getAppliedVersions returns list of applied migration versions
+// getAppliedVersions returns the list of applied migration versions by querying
+// the database's current schema version. Versions 1..currentVersion are assumed applied.
 func (m *MigrationManager) getAppliedVersions(ctx context.Context) ([]int, error) {
-	// This is a simplified version - in production, query the migrations table
-	// For now, return empty (each database implementation should override this)
-	return []int{}, nil
+	current, err := m.db.GetSchemaVersion(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get schema version: %w", err)
+	}
+	if current == 0 {
+		return []int{}, nil
+	}
+	versions := make([]int, current)
+	for i := range versions {
+		versions[i] = i + 1
+	}
+	return versions, nil
 }
 
-// recordMigration records that a migration was applied
+// recordMigration records that a migration was applied by setting the schema version.
 func (m *MigrationManager) recordMigration(ctx context.Context, version int) error {
-	// Insert into schema_migrations table
-	return nil
+	return m.db.SetSchemaVersion(ctx, version)
 }
 
-// removeMigration removes a migration record
+// removeMigration records a rollback by setting the schema version to version-1.
 func (m *MigrationManager) removeMigration(ctx context.Context, version int) error {
-	// Delete from schema_migrations table
-	return nil
+	prev := version - 1
+	if prev < 0 {
+		prev = 0
+	}
+	return m.db.SetSchemaVersion(ctx, prev)
 }
 
 // getLatestVersion returns the highest migration version

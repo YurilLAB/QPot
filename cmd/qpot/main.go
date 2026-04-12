@@ -69,6 +69,7 @@ Each QPot instance has a unique ID (qp_*) for tracking and authentication.`,
 	rootCmd.AddCommand(newLogsCommand())
 	rootCmd.AddCommand(newIDCommand())
 	rootCmd.AddCommand(newClusterCommand())
+	rootCmd.AddCommand(newDockerCommand())
 
 	return rootCmd.ExecuteContext(ctx)
 }
@@ -1010,4 +1011,250 @@ func truncate(s string, maxLen int) string {
 		return s
 	}
 	return s[:maxLen-3] + "..."
+}
+
+// newDockerCommand creates the docker management command for QPot containers.
+func newDockerCommand() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "docker",
+		Short: "Manage QPot Docker containers",
+		Long:  "Inspect and manage Docker containers belonging to QPot instances",
+	}
+
+	cmd.AddCommand(newDockerPSCommand())
+	cmd.AddCommand(newDockerLogsCommand())
+	cmd.AddCommand(newDockerRestartCommand())
+
+	return cmd
+}
+
+// dockerContainerInfo holds parsed container information from docker ps output.
+type dockerContainerInfo struct {
+	ID       string
+	Image    string
+	Status   string
+	Ports    string
+	Names    string
+	Health   string
+	Honeypot string
+}
+
+// runDockerPS executes docker ps and returns QPot-related containers.
+// QPot containers are identified by names containing "qpot" or by the
+// com.docker.compose.project label prefix.
+func runDockerPS(ctx context.Context) ([]dockerContainerInfo, error) {
+	// Use JSON format output to reliably parse each field.
+	// We run two passes: one for running containers, one with -a for all.
+	args := []string{
+		"ps", "-a",
+		"--format", "{{.ID}}\t{{.Image}}\t{{.Status}}\t{{.Ports}}\t{{.Names}}",
+	}
+	cmd := exec.CommandContext(ctx, "docker", args...)
+	out, err := cmd.Output()
+	if err != nil {
+		// If docker is not installed, exec.Error with "executable file not found"
+		if isDockerNotFound(err) {
+			return nil, fmt.Errorf("docker not found: install Docker to use this command")
+		}
+		return nil, fmt.Errorf("docker ps failed: %w", err)
+	}
+
+	var containers []dockerContainerInfo
+	lines := strings.Split(strings.TrimSpace(string(out)), "\n")
+	for _, line := range lines {
+		if line == "" {
+			continue
+		}
+		parts := strings.Split(line, "\t")
+		if len(parts) < 5 {
+			continue
+		}
+		name := parts[4]
+		// Filter to QPot containers only: name must contain "qpot" (case-insensitive).
+		if !strings.Contains(strings.ToLower(name), "qpot") {
+			continue
+		}
+		info := dockerContainerInfo{
+			ID:     parts[0],
+			Image:  parts[1],
+			Status: parts[2],
+			Ports:  parts[3],
+			Names:  name,
+		}
+		// Derive honeypot name from container name (format: <instance>_<honeypot>)
+		info.Honeypot = deriveHoneypot(name)
+		// Extract health status from Status field (e.g. "Up 5 minutes (healthy)")
+		info.Health = extractHealth(info.Status)
+		containers = append(containers, info)
+	}
+	return containers, nil
+}
+
+// isDockerNotFound returns true when the error indicates docker is not installed.
+func isDockerNotFound(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "executable file not found") ||
+		strings.Contains(msg, "not found") ||
+		strings.Contains(msg, "no such file")
+}
+
+// deriveHoneypot extracts the honeypot name from a QPot container name.
+// Container names follow the pattern <instance>_<service> or
+// <instance>-<service>-1 (compose v2).
+func deriveHoneypot(name string) string {
+	// Remove trailing "-1" suffix added by compose v2.
+	trimmed := strings.TrimSuffix(name, "-1")
+	// Split on underscore first (docker compose v1 style).
+	parts := strings.SplitN(trimmed, "_", 2)
+	if len(parts) == 2 {
+		return parts[1]
+	}
+	// Try hyphen split (compose v2 style: instance-service).
+	hparts := strings.SplitN(trimmed, "-", 2)
+	if len(hparts) == 2 {
+		return hparts[1]
+	}
+	return trimmed
+}
+
+// extractHealth parses the health state from a docker status string such as
+// "Up 2 minutes (healthy)" or "Up 3 hours (unhealthy)".
+func extractHealth(status string) string {
+	lower := strings.ToLower(status)
+	switch {
+	case strings.Contains(lower, "(healthy)"):
+		return "healthy"
+	case strings.Contains(lower, "(unhealthy)"):
+		return "unhealthy"
+	case strings.Contains(lower, "(health: starting)"):
+		return "starting"
+	case strings.HasPrefix(lower, "up"):
+		return "running"
+	case strings.HasPrefix(lower, "exited"):
+		return "exited"
+	default:
+		return "unknown"
+	}
+}
+
+func newDockerPSCommand() *cobra.Command {
+	return &cobra.Command{
+		Use:   "ps",
+		Short: "List QPot Docker containers",
+		Long:  "Show all QPot-related Docker containers with their status and honeypot type",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			ctx := cmd.Context()
+
+			containers, err := runDockerPS(ctx)
+			if err != nil {
+				return err
+			}
+
+			if len(containers) == 0 {
+				fmt.Println("No QPot containers found. Run 'qpot up' to start an instance.")
+				return nil
+			}
+
+			// Print table header.
+			fmt.Printf("%-20s %-35s %-25s %-25s %-15s %-10s\n",
+				"CONTAINER", "IMAGE", "STATUS", "PORTS", "HONEYPOT", "HEALTH")
+			fmt.Println(strings.Repeat("-", 135))
+			for _, c := range containers {
+				name := c.Names
+				if len(name) > 20 {
+					name = name[:17] + "..."
+				}
+				image := c.Image
+				if len(image) > 35 {
+					image = image[:32] + "..."
+				}
+				status := c.Status
+				if len(status) > 25 {
+					status = status[:22] + "..."
+				}
+				ports := c.Ports
+				if len(ports) > 25 {
+					ports = ports[:22] + "..."
+				}
+				hp := c.Honeypot
+				if len(hp) > 15 {
+					hp = hp[:12] + "..."
+				}
+				fmt.Printf("%-20s %-35s %-25s %-25s %-15s %-10s\n",
+					name, image, status, ports, hp, c.Health)
+			}
+			return nil
+		},
+	}
+}
+
+func newDockerLogsCommand() *cobra.Command {
+	var tail int
+
+	cmd := &cobra.Command{
+		Use:   "logs [container]",
+		Short: "Show logs for a QPot container",
+		Long:  "Tail logs for a specific QPot Docker container",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			ctx := cmd.Context()
+			containerName := args[0]
+
+			// Verify the container name contains "qpot" as a safety check.
+			if !strings.Contains(strings.ToLower(containerName), "qpot") {
+				return fmt.Errorf("container '%s' does not appear to be a QPot container (name must contain 'qpot')", containerName)
+			}
+
+			dockerArgs := []string{"logs", "--tail", fmt.Sprintf("%d", tail), containerName}
+			dockerCmd := exec.CommandContext(ctx, "docker", dockerArgs...)
+			dockerCmd.Stdout = os.Stdout
+			dockerCmd.Stderr = os.Stderr
+
+			if err := dockerCmd.Run(); err != nil {
+				if isDockerNotFound(err) {
+					return fmt.Errorf("docker not found: install Docker to use this command")
+				}
+				return fmt.Errorf("failed to get logs for container '%s': %w", containerName, err)
+			}
+			return nil
+		},
+	}
+
+	cmd.Flags().IntVarP(&tail, "tail", "n", 50, "number of lines to show from end of logs")
+	return cmd
+}
+
+func newDockerRestartCommand() *cobra.Command {
+	return &cobra.Command{
+		Use:   "restart [container]",
+		Short: "Restart a QPot container",
+		Long:  "Restart a specific QPot Docker container",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			ctx := cmd.Context()
+			containerName := args[0]
+
+			// Verify the container name contains "qpot" as a safety check.
+			if !strings.Contains(strings.ToLower(containerName), "qpot") {
+				return fmt.Errorf("container '%s' does not appear to be a QPot container (name must contain 'qpot')", containerName)
+			}
+
+			dockerCmd := exec.CommandContext(ctx, "docker", "restart", containerName)
+			dockerCmd.Stdout = os.Stdout
+			dockerCmd.Stderr = os.Stderr
+
+			if err := dockerCmd.Run(); err != nil {
+				if isDockerNotFound(err) {
+					return fmt.Errorf("docker not found: install Docker to use this command")
+				}
+				return fmt.Errorf("failed to restart container '%s': %w", containerName, err)
+			}
+
+			fmt.Printf("[OK] Container '%s' restarted\n", containerName)
+			return nil
+		},
+	}
 }

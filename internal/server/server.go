@@ -44,9 +44,18 @@ func New(cfg *config.Config) (*Server, error) {
 	}
 
 	// Attempt DB connection; log a warning but do not abort server creation.
-	db, err := database.New(&cfg.Database)
-	if err != nil {
+	var db database.Database
+	if rawDB, err := database.New(&cfg.Database); err != nil {
 		slog.Warn("Database not available at server start, some API endpoints will be unavailable", "error", err)
+	} else {
+		connectCtx, connectCancel := context.WithTimeout(context.Background(), 15*time.Second)
+		if err := rawDB.Connect(connectCtx); err != nil {
+			connectCancel()
+			slog.Warn("Database connection failed, some API endpoints will be unavailable", "error", err)
+		} else {
+			connectCancel()
+			db = rawDB
+		}
 	}
 
 	s := &Server{
@@ -261,7 +270,8 @@ func (s *Server) fireWebhook(ctx context.Context, stats *database.Stats) {
 	}
 	req.Header.Set("Content-Type", "application/json")
 
-	resp, err := http.DefaultClient.Do(req)
+	webhookClient := &http.Client{Timeout: 10 * time.Second}
+	resp, err := webhookClient.Do(req)
 	if err != nil {
 		slog.Error("Alert webhook: request failed", "error", err)
 		return
@@ -396,6 +406,11 @@ func (s *Server) handleHoneypots(w http.ResponseWriter, r *http.Request) {
 
 // handleEvents returns events
 func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
+	if s.database == nil {
+		s.sendError(w, http.StatusServiceUnavailable, "database not available")
+		return
+	}
+
 	ctx := r.Context()
 
 	filter := database.EventFilter{
@@ -429,10 +444,15 @@ func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 
-	since := time.Now().Add(-24 * time.Hour)
-	stats, err := s.database.GetStats(ctx, since)
-	if err != nil {
-		// Return empty stats if database not ready
+	var stats *database.Stats
+	if s.database != nil {
+		since := time.Now().Add(-24 * time.Hour)
+		var err error
+		stats, err = s.database.GetStats(ctx, since)
+		if err != nil {
+			stats = &database.Stats{}
+		}
+	} else {
 		stats = &database.Stats{}
 	}
 
@@ -700,9 +720,10 @@ func (s *Server) sendJSON(w http.ResponseWriter, data interface{}) {
 
 // sendError sends an error response
 func (s *Server) sendError(w http.ResponseWriter, code int, message string) {
+	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(code)
-	s.sendJSON(w, map[string]string{
-		"error":    message,
-		"qpot_id":  s.config.QPotID,
+	json.NewEncoder(w).Encode(map[string]string{
+		"error":   message,
+		"qpot_id": s.config.QPotID,
 	})
 }

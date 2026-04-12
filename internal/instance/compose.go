@@ -78,7 +78,7 @@ services:
       - "{{.Config.AllocatePort 8123}}:8123"
     networks:
       - qpot_internal
-    {{template "security" dict "Config" $.Config "HP" (dict) "GlobalLimits" $.Config.Security.ResourceLimits "Name" "database"}}
+    {{template "dbsecurity" dict "Config" $.Config "GlobalLimits" $.Config.Security.ResourceLimits "Name" "database"}}
     healthcheck:
       test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:8123/ping"]
       interval: 10s
@@ -100,7 +100,7 @@ services:
       - "{{.Config.AllocatePort 5432}}:5432"
     networks:
       - qpot_internal
-    {{template "security" dict "Config" $.Config "HP" (dict) "GlobalLimits" $.Config.Security.ResourceLimits "Name" "database"}}
+    {{template "dbsecurity" dict "Config" $.Config "GlobalLimits" $.Config.Security.ResourceLimits "Name" "database"}}
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U {{.Config.Database.Username}} -d {{.Config.Database.Database}}"]
       interval: 10s
@@ -197,6 +197,55 @@ services:
       - qpot_id
 {{end}}
 
+{{define "dbsecurity"}}
+    # Security hardening - Resource limits (database service)
+    deploy:
+      resources:
+        limits:
+          cpus: '{{divf .GlobalLimits.MaxCPUPercent 100}}'
+          memory: {{.GlobalLimits.MaxMemoryMB}}M
+          {{if .GlobalLimits.MaxPids}}pids: {{.GlobalLimits.MaxPids}}{{end}}
+        reservations:
+          cpus: '0.05'
+          memory: 64M
+      restart_policy:
+        condition: on-failure
+        delay: 5s
+        max_attempts: {{.Config.Security.ResourceLimits.RestartAttempts}}
+        window: 120s
+
+    # Security hardening - Container security
+    {{if .Config.Security.NoNewPrivileges}}security_opt:
+      - no-new-privileges:true{{end}}
+    {{if .Config.Security.DropCapabilities}}cap_drop:
+      - ALL
+    cap_add:
+      - SETUID
+      - SETGID{{end}}
+
+    # User namespace
+    user: "1000:1000"
+
+    # PID namespace for process isolation
+    pid: "private"
+
+    # Hostname isolation
+    hostname: "{{.Name}}-host"
+
+    # Memory and OOM settings
+    mem_swappiness: 0
+    oom_kill_disable: false
+
+    # Logging configuration
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+        labels: "qpot.instance,qpot.id"
+        env: "QPOT_ID,QPOT_INSTANCE"
+{{end}}
+
 {{define "security"}}
     # Security hardening - Resource limits
     {{$cpuLimit := .GlobalLimits.MaxCPUPercent}}
@@ -221,7 +270,7 @@ services:
         delay: 5s
         max_attempts: {{.Config.Security.ResourceLimits.RestartAttempts}}
         window: 120s
-    
+
     # Security hardening - Container security
     {{if .Config.Security.ReadOnlyFilesystem}}read_only: true{{end}}
     {{if .Config.Security.NoNewPrivileges}}security_opt:
@@ -231,27 +280,27 @@ services:
     cap_add:
       - SETUID
       - SETGID
-      {{if .HP.Port}}{{if lt .HP.Port 1024}}- NET_BIND_SERVICE{{end}}{{end}}{{end}}
-    
+      {{if and .HP.Port (lt .HP.Port 1024)}}- NET_BIND_SERVICE{{end}}{{end}}
+
     # User namespace
     user: "1000:1000"
-    
+
     # PID namespace for process isolation
     pid: "private"
-    
+
     # Hostname isolation
     hostname: {{if .FakeHostname}}"{{.FakeHostname}}"{{else if .Name}}"{{.Name}}-host"{{else}}"qpot-host"{{end}}
-    
+
     # Temporary filesystems for read-only containers
     {{if .Config.Security.ReadOnlyFilesystem}}tmpfs:
       - /tmp:noexec,nosuid,size=100m,mode=1777
       - /var/tmp:noexec,nosuid,size=50m,mode=1777
       - /run:noexec,nosuid,size=10m,mode=1777{{end}}
-    
+
     # Memory and OOM settings
     mem_swappiness: 0
     oom_kill_disable: false
-    
+
     # Device restrictions
     device_read_bps:
       - path: /dev/null
@@ -259,7 +308,7 @@ services:
     device_write_bps:
       - path: /dev/null
         rate: 1mb
-    
+
     # Logging configuration
     logging:
       driver: "json-file"

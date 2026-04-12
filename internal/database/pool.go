@@ -150,48 +150,66 @@ func NewPool(config *PoolConfig, factory ConnectionFactory) (*Pool, error) {
 	return pool, nil
 }
 
-// Acquire gets a connection from the pool
+// Acquire gets a connection from the pool. Uses a loop (not recursion) to avoid
+// stack overflow when connections are taken by concurrent goroutines.
 func (p *Pool) Acquire(ctx context.Context) (*PooledConnection, error) {
-	// Try to get from available channel first
-	select {
-	case conn := <-p.available:
-		if conn.inUse.CompareAndSwap(false, true) {
-			conn.lastUsedAt = time.Now()
-			return conn, nil
+	for {
+		// Check context first.
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		default:
 		}
-		// Connection was marked in use, try again
-		return p.Acquire(ctx)
-	case <-ctx.Done():
-		return nil, ctx.Err()
-	default:
-		// No available connections
-	}
 
-	// Try to create a new connection if under limit
-	p.mu.Lock()
-	if len(p.connections) < p.config.MaxOpenConns {
+		// Try to get an available connection immediately.
+		select {
+		case conn := <-p.available:
+			if conn.inUse.CompareAndSwap(false, true) {
+				conn.lastUsedAt = time.Now()
+				return conn, nil
+			}
+			// Already marked in-use by another goroutine — put it back and retry.
+			select {
+			case p.available <- conn:
+			default:
+			}
+			continue
+		default:
+			// No available connections right now.
+		}
+
+		// Try to create a new connection if under limit.
+		p.mu.Lock()
+		underLimit := len(p.connections) < p.config.MaxOpenConns
 		p.mu.Unlock()
-		if err := p.createConnection(); err != nil {
-			return nil, fmt.Errorf("failed to create connection: %w", err)
-		}
-		// New connection is added to available, try again
-		return p.Acquire(ctx)
-	}
-	p.mu.Unlock()
 
-	// Wait for a connection to become available
-	acquireCtx, cancel := context.WithTimeout(ctx, p.config.AcquireTimeout)
-	defer cancel()
-
-	select {
-	case conn := <-p.available:
-		if conn.inUse.CompareAndSwap(false, true) {
-			conn.lastUsedAt = time.Now()
-			return conn, nil
+		if underLimit {
+			if err := p.createConnection(); err != nil {
+				return nil, fmt.Errorf("failed to create connection: %w", err)
+			}
+			// New connection was added to available; loop back to pick it up.
+			continue
 		}
-		return p.Acquire(ctx)
-	case <-acquireCtx.Done():
-		return nil, fmt.Errorf("timeout acquiring connection: %w", acquireCtx.Err())
+
+		// At limit — wait for a connection to become available.
+		acquireCtx, cancel := context.WithTimeout(ctx, p.config.AcquireTimeout)
+		select {
+		case conn := <-p.available:
+			cancel()
+			if conn.inUse.CompareAndSwap(false, true) {
+				conn.lastUsedAt = time.Now()
+				return conn, nil
+			}
+			// Already taken; return it and loop.
+			select {
+			case p.available <- conn:
+			default:
+			}
+			continue
+		case <-acquireCtx.Done():
+			cancel()
+			return nil, fmt.Errorf("timeout acquiring connection: %w", acquireCtx.Err())
+		}
 	}
 }
 
@@ -213,20 +231,29 @@ func (p *Pool) AcquireWithRetry(ctx context.Context, maxRetries int) (*PooledCon
 	return nil, fmt.Errorf("failed to acquire connection after %d retries: %w", maxRetries, lastErr)
 }
 
-// release returns a connection to the pool
+// release returns a connection to the pool. Discards the connection if the pool
+// is shutting down or the connection is unhealthy.
 func (p *Pool) release(conn *PooledConnection) {
-	// Check if connection is still healthy
+	// If pool is shutting down, just close the connection.
+	select {
+	case <-p.ctx.Done():
+		conn.Close()
+		return
+	default:
+	}
+
+	// Check if connection is still healthy.
 	if !conn.IsHealthy(p.ctx) {
 		p.removeConnection(conn)
 		return
 	}
 
-	// Return to available pool
+	// Return to available pool (non-blocking; discard if full).
 	select {
 	case p.available <- conn:
-		// Successfully returned
+		// Successfully returned.
 	default:
-		// Pool is full, close this connection
+		// Channel full — close this connection.
 		p.removeConnection(conn)
 	}
 }
@@ -389,20 +416,33 @@ type PoolStats struct {
 	TotalClosed          int64         `json:"total_closed"`
 }
 
-// Close closes the pool and all connections
+// Close closes the pool and all connections.
 func (p *Pool) Close() error {
+	// Signal shutdown; release() will stop returning connections to the channel.
 	p.cancel()
+
+	// Wait for the maintenance goroutine to exit.
 	p.wg.Wait()
 
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
-	// Close all connections
+	// Drain the available channel so any connection sitting in it is closed.
+	for {
+		select {
+		case conn := <-p.available:
+			conn.Close()
+		default:
+			goto drained
+		}
+	}
+drained:
+
+	// Close all tracked connections (catches any not in the channel).
 	for _, conn := range p.connections {
 		conn.Close()
 	}
 	p.connections = p.connections[:0]
-	close(p.available)
 
 	slog.Info("Connection pool closed")
 	return nil
@@ -421,8 +461,9 @@ type ReadReplicaConfig struct {
 
 // ReadReplicaPool manages a pool of read replicas
 type ReadReplicaPool struct {
-	replicas []*Replica
-	strategy ReplicaSelectionStrategy
+	replicas    []*Replica
+	strategy    ReplicaSelectionStrategy
+	rrIdx       atomic.Int64 // index for round-robin selection
 }
 
 // Replica represents a read replica
@@ -457,6 +498,7 @@ func NewReadReplicaPool(replicas []*ReadReplicaConfig, factory func(cfg *ReadRep
 	}
 
 	for _, cfg := range replicas {
+		cfg := cfg // capture loop variable for the closure
 		replicaFactory := func() (Database, error) {
 			return factory(cfg)
 		}
@@ -507,10 +549,16 @@ func (rrp *ReadReplicaPool) selectReplica() *Replica {
 	}
 }
 
-// selectRoundRobin selects replicas in round-robin fashion
+// selectRoundRobin cycles through replicas using an atomic counter.
 func (rrp *ReadReplicaPool) selectRoundRobin() *Replica {
-	// Simple implementation - in production, use atomic counter
-	for _, r := range rrp.replicas {
+	n := len(rrp.replicas)
+	if n == 0 {
+		return nil
+	}
+	// Try every replica at most once.
+	start := int(rrp.rrIdx.Add(1)-1) % n
+	for i := 0; i < n; i++ {
+		r := rrp.replicas[(start+i)%n]
 		if r.Healthy.Load() {
 			return r
 		}
@@ -518,14 +566,59 @@ func (rrp *ReadReplicaPool) selectRoundRobin() *Replica {
 	return nil
 }
 
-// selectRandom selects a random healthy replica
+// selectRandom selects a random healthy replica using a simple LCG over the
+// round-robin index (sufficient for replica selection; crypto/rand is not needed).
 func (rrp *ReadReplicaPool) selectRandom() *Replica {
-	// Simplified - in production use crypto/rand
-	return rrp.selectRoundRobin()
+	n := len(rrp.replicas)
+	if n == 0 {
+		return nil
+	}
+	// Collect healthy replicas first.
+	var healthy []*Replica
+	for _, r := range rrp.replicas {
+		if r.Healthy.Load() {
+			healthy = append(healthy, r)
+		}
+	}
+	if len(healthy) == 0 {
+		return nil
+	}
+	// Use the round-robin counter as a cheap random seed.
+	idx := int(rrp.rrIdx.Add(1)) % len(healthy)
+	return healthy[idx]
 }
 
-// selectWeighted selects based on weight
+// selectWeighted selects a replica proportional to its Weight field.
 func (rrp *ReadReplicaPool) selectWeighted() *Replica {
+	var totalWeight int
+	for _, r := range rrp.replicas {
+		if r.Healthy.Load() {
+			w := r.Config.Weight
+			if w <= 0 {
+				w = 1
+			}
+			totalWeight += w
+		}
+	}
+	if totalWeight == 0 {
+		return rrp.selectRoundRobin()
+	}
+	// Deterministic modular selection using the atomic counter.
+	pick := int(rrp.rrIdx.Add(1)) % totalWeight
+	cumulative := 0
+	for _, r := range rrp.replicas {
+		if !r.Healthy.Load() {
+			continue
+		}
+		w := r.Config.Weight
+		if w <= 0 {
+			w = 1
+		}
+		cumulative += w
+		if pick < cumulative {
+			return r
+		}
+	}
 	return rrp.selectRoundRobin()
 }
 
@@ -551,9 +644,11 @@ func (rrp *ReadReplicaPool) HealthCheck(ctx context.Context) {
 			r.Healthy.Store(false)
 			continue
 		}
-		defer conn.Release()
 
-		r.Healthy.Store(conn.IsHealthy(ctx))
+		healthy := conn.IsHealthy(ctx)
+		conn.Release()
+
+		r.Healthy.Store(healthy)
 		r.LastCheck = time.Now()
 	}
 }

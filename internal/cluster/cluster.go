@@ -192,6 +192,9 @@ type Manager struct {
 	syncTicker    *time.Ticker
 	stopCh        chan struct{}
 	stopOnce      sync.Once
+	// plainPassword is the cluster password stored in memory (never on disk).
+	// Used to authenticate outbound gossip and intel requests to peer nodes.
+	plainPassword string
 	// localIntel holds threat intelligence for the local node, updated externally.
 	localIntel    *ThreatIntel
 	// peerIntel aggregates intel received from other nodes, keyed by node ID.
@@ -298,6 +301,7 @@ func (m *Manager) InitCluster(name, password string, cfg *ClusterConfig) (*Clust
 
 	m.mu.Lock()
 	m.cluster = cluster
+	m.plainPassword = password
 	m.mu.Unlock()
 
 	// Save cluster configuration
@@ -335,8 +339,9 @@ func (m *Manager) JoinCluster(clusterID, password string, localNode *Node, seedN
 		if err == nil {
 			m.mu.Lock()
 			m.cluster = cluster
+			m.plainPassword = password
 			m.mu.Unlock()
-			
+
 			if err := m.saveCluster(); err != nil {
 				slog.Warn("Failed to save cluster config", "error", err)
 			}
@@ -652,20 +657,39 @@ func (m *Manager) HandleJoinRequest(req *JoinRequest) *JoinResponse {
 	}
 }
 
+// withClusterAuth returns a handler that verifies X-Cluster-Password before
+// calling next. Used for mutation endpoints (leave, gossip, intel) to prevent
+// unauthenticated nodes from disrupting the cluster.
+func (m *Manager) withClusterAuth(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		password := r.Header.Get("X-Cluster-Password")
+		if password == "" || !m.VerifyPassword(password) {
+			http.Error(w, "Unauthorized", http.StatusUnauthorized)
+			return
+		}
+		next(w, r)
+	}
+}
+
 // startAPIServer starts the cluster API server
 func (m *Manager) startAPIServer() error {
 	mux := http.NewServeMux()
+	// join verifies the password internally via HandleJoinRequest.
 	mux.HandleFunc("/api/v1/cluster/join", m.handleJoinHTTP)
+	// Read-only endpoints are unauthenticated (internal network assumed).
 	mux.HandleFunc("/api/v1/cluster/status", m.handleStatusHTTP)
 	mux.HandleFunc("/api/v1/cluster/nodes", m.handleNodesHTTP)
-	mux.HandleFunc("/api/v1/cluster/leave", m.handleLeaveHTTP)
-	mux.HandleFunc("/api/v1/cluster/gossip", m.handleGossipHTTP)
-	mux.HandleFunc("/api/v1/cluster/intel", m.handleIntelHTTP)
+	// Mutation/peer endpoints require cluster password authentication.
+	mux.HandleFunc("/api/v1/cluster/leave", m.withClusterAuth(m.handleLeaveHTTP))
+	mux.HandleFunc("/api/v1/cluster/gossip", m.withClusterAuth(m.handleGossipHTTP))
+	mux.HandleFunc("/api/v1/cluster/intel", m.withClusterAuth(m.handleIntelHTTP))
 
 	addr := fmt.Sprintf("%s:%d", m.cluster.Config.BindAddr, m.cluster.Config.BindPort)
 	m.apiServer = &http.Server{
-		Addr:    addr,
-		Handler: mux,
+		Addr:         addr,
+		Handler:      mux,
+		ReadTimeout:  15 * time.Second,
+		WriteTimeout: 15 * time.Second,
 	}
 
 	go func() {
@@ -826,9 +850,20 @@ func (m *Manager) gossip() {
 		return
 	}
 
+	m.mu.RLock()
+	plainPwd := m.plainPassword
+	m.mu.RUnlock()
+
+	gossipClient := &http.Client{Timeout: 5 * time.Second}
 	for _, peer := range peers {
-		url := fmt.Sprintf("http://%s:%d/api/v1/cluster/gossip", peer.address, peer.port)
-		resp, err := http.Post(url, "application/json", bytes.NewReader(body))
+		peerURL := fmt.Sprintf("http://%s:%d/api/v1/cluster/gossip", peer.address, peer.port)
+		req, err := http.NewRequest(http.MethodPost, peerURL, bytes.NewReader(body))
+		if err != nil {
+			continue
+		}
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("X-Cluster-Password", plainPwd)
+		resp, err := gossipClient.Do(req)
 		if err != nil {
 			slog.Debug("Gossip: peer unreachable", "node_id", peer.id, "error", err)
 			// Mark node as suspect after failed gossip contact.
@@ -920,13 +955,25 @@ func (m *Manager) sync() {
 	}
 	m.mu.RUnlock()
 
+	m.mu.RLock()
+	syncPlainPwd := m.plainPassword
+	m.mu.RUnlock()
+
+	syncClient := &http.Client{Timeout: 10 * time.Second}
+
 	// Share local intel with peers and collect theirs.
 	if localIntel != nil {
 		intelBody, err := json.Marshal(localIntel)
 		if err == nil {
 			for _, peer := range peers {
-				url := fmt.Sprintf("http://%s:%d/api/v1/cluster/intel", peer.address, peer.port)
-				resp, err := http.Post(url, "application/json", bytes.NewReader(intelBody))
+				peerURL := fmt.Sprintf("http://%s:%d/api/v1/cluster/intel", peer.address, peer.port)
+				intelReq, err := http.NewRequest(http.MethodPost, peerURL, bytes.NewReader(intelBody))
+				if err != nil {
+					continue
+				}
+				intelReq.Header.Set("Content-Type", "application/json")
+				intelReq.Header.Set("X-Cluster-Password", syncPlainPwd)
+				resp, err := syncClient.Do(intelReq)
 				if err != nil {
 					slog.Debug("Sync: failed to send intel to peer", "node_id", peer.id, "error", err)
 					continue

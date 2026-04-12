@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -96,7 +97,14 @@ func (ts *TimescaleDB) InitializeSchema(ctx context.Context) error {
 			metadata JSONB,
 			country TEXT,
 			city TEXT,
-			asn TEXT
+			asn TEXT,
+			technique_id TEXT DEFAULT '',
+			technique_name TEXT DEFAULT '',
+			tactic_id TEXT DEFAULT '',
+			tactic_name TEXT DEFAULT '',
+			kill_chain_stage TEXT DEFAULT '',
+			confidence DOUBLE PRECISION DEFAULT 0,
+			classified BOOLEAN DEFAULT FALSE
 		)
 	`
 	if _, err := ts.pool.Exec(ctx, eventsTable); err != nil {
@@ -151,6 +159,46 @@ func (ts *TimescaleDB) InitializeSchema(ctx context.Context) error {
 	`
 	if _, err := ts.pool.Exec(ctx, retentionPolicy); err != nil {
 		return fmt.Errorf("failed to create retention policy: %w", err)
+	}
+
+	// Create IOCs table
+	iocsTable := `
+		CREATE TABLE IF NOT EXISTS iocs (
+			id TEXT NOT NULL,
+			type TEXT NOT NULL,
+			value TEXT NOT NULL,
+			honeypot TEXT NOT NULL,
+			source_ip TEXT,
+			technique_id TEXT DEFAULT '',
+			first_seen TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+			last_seen TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+			count BIGINT DEFAULT 1,
+			metadata JSONB,
+			UNIQUE (type, value, honeypot)
+		)
+	`
+	if _, err := ts.pool.Exec(ctx, iocsTable); err != nil {
+		return fmt.Errorf("failed to create iocs table: %w", err)
+	}
+
+	// Create TTP sessions table
+	ttpTable := `
+		CREATE TABLE IF NOT EXISTS ttp_sessions (
+			session_id TEXT PRIMARY KEY,
+			campaign_fingerprint TEXT NOT NULL,
+			source_ips TEXT[],
+			shared_infrastructure BOOLEAN DEFAULT FALSE,
+			kill_chain_stages TEXT[],
+			techniques TEXT[],
+			ioc_ids TEXT[],
+			event_count BIGINT DEFAULT 0,
+			first_seen TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+			last_seen TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+			confidence DOUBLE PRECISION DEFAULT 0
+		)
+	`
+	if _, err := ts.pool.Exec(ctx, ttpTable); err != nil {
+		return fmt.Errorf("failed to create ttp_sessions table: %w", err)
 	}
 
 	return nil
@@ -218,13 +266,15 @@ func (ts *TimescaleDB) GetEvents(ctx context.Context, filter EventFilter) ([]*Ev
 	}
 
 	query := `
-		SELECT 
-			id, timestamp, honeypot, source_ip, source_port, dest_port,
+		SELECT
+			id, timestamp, honeypot, source_ip::text, source_port, dest_port,
 			protocol, event_type, username, password, command,
-			payload, metadata, country, city, asn
-		FROM events 
+			payload, metadata, country, city, asn,
+			technique_id, technique_name, tactic_id, tactic_name,
+			kill_chain_stage, confidence, classified
+		FROM events
 		WHERE 1=1`
-	
+
 	var args []interface{}
 	argIdx := 1
 
@@ -244,7 +294,7 @@ func (ts *TimescaleDB) GetEvents(ctx context.Context, filter EventFilter) ([]*Ev
 		argIdx++
 	}
 	if len(filter.SourceIPs) > 0 {
-		query += fmt.Sprintf(" AND source_ip = ANY($%d)", argIdx)
+		query += fmt.Sprintf(" AND source_ip::text = ANY($%d)", argIdx)
 		args = append(args, filter.SourceIPs)
 		argIdx++
 	}
@@ -264,7 +314,6 @@ func (ts *TimescaleDB) GetEvents(ctx context.Context, filter EventFilter) ([]*Ev
 	if filter.Offset > 0 {
 		query += fmt.Sprintf(" OFFSET $%d", argIdx)
 		args = append(args, filter.Offset)
-		argIdx++
 	}
 
 	rows, err := ts.pool.Query(ctx, query, args...)
@@ -273,7 +322,41 @@ func (ts *TimescaleDB) GetEvents(ctx context.Context, filter EventFilter) ([]*Ev
 	}
 	defer rows.Close()
 
-	return pgx.CollectRows(rows, pgx.RowToAddrOfStructByPos[Event])
+	var events []*Event
+	for rows.Next() {
+		var event Event
+		var id int64
+		err := rows.Scan(
+			&id,
+			&event.Timestamp,
+			&event.Honeypot,
+			&event.SourceIP,
+			&event.SourcePort,
+			&event.DestPort,
+			&event.Protocol,
+			&event.EventType,
+			&event.Username,
+			&event.Password,
+			&event.Command,
+			&event.Payload,
+			&event.Metadata,
+			&event.Country,
+			&event.City,
+			&event.ASN,
+			&event.TechniqueID,
+			&event.TechniqueName,
+			&event.TacticID,
+			&event.TacticName,
+			&event.KillChainStage,
+			&event.Confidence,
+			&event.Classified,
+		)
+		if err != nil {
+			return nil, fmt.Errorf("failed to scan event: %w", err)
+		}
+		events = append(events, &event)
+	}
+	return events, nil
 }
 
 // GetEventByID retrieves a single event by ID
@@ -283,15 +366,31 @@ func (ts *TimescaleDB) GetEventByID(ctx context.Context, id string) (*Event, err
 	}
 
 	var event Event
+	var dbID int64
 	err := ts.pool.QueryRow(ctx, `
-		SELECT 
-			id, timestamp, honeypot, source_ip, source_port, dest_port,
+		SELECT
+			id, timestamp, honeypot, source_ip::text, source_port, dest_port,
 			protocol, event_type, username, password, command,
 			payload, metadata, country, city, asn
-		FROM events 
+		FROM events
 		WHERE id = $1
 	`, id).Scan(
-		// ... scan fields
+		&dbID,
+		&event.Timestamp,
+		&event.Honeypot,
+		&event.SourceIP,
+		&event.SourcePort,
+		&event.DestPort,
+		&event.Protocol,
+		&event.EventType,
+		&event.Username,
+		&event.Password,
+		&event.Command,
+		&event.Payload,
+		&event.Metadata,
+		&event.Country,
+		&event.City,
+		&event.ASN,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get event: %w", err)
@@ -393,13 +492,76 @@ func (ts *TimescaleDB) GetTopAttackers(ctx context.Context, limit int, since tim
 
 // GetHoneypotStats retrieves statistics for a specific honeypot
 func (ts *TimescaleDB) GetHoneypotStats(ctx context.Context, honeypot string, since time.Time) (*HoneypotStats, error) {
-	return nil, fmt.Errorf("not implemented")
+	if ts.pool == nil {
+		return nil, fmt.Errorf("not connected")
+	}
+
+	stats := &HoneypotStats{Honeypot: honeypot}
+
+	err := ts.pool.QueryRow(ctx,
+		"SELECT COUNT(*), COUNT(DISTINCT source_ip) FROM events WHERE honeypot = $1 AND timestamp >= $2",
+		honeypot, since).Scan(&stats.TotalEvents, &stats.UniqueIPs)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get honeypot totals: %w", err)
+	}
+
+	usernameRows, err := ts.pool.Query(ctx,
+		"SELECT username, COUNT(*) FROM events WHERE honeypot = $1 AND timestamp >= $2 AND username != '' GROUP BY username ORDER BY COUNT(*) DESC LIMIT 20",
+		honeypot, since)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get top usernames: %w", err)
+	}
+	defer usernameRows.Close()
+	for usernameRows.Next() {
+		var cc CredentialCount
+		if err := usernameRows.Scan(&cc.Value, &cc.Count); err != nil {
+			return nil, err
+		}
+		stats.TopUsernames = append(stats.TopUsernames, cc)
+	}
+
+	passwordRows, err := ts.pool.Query(ctx,
+		"SELECT password, COUNT(*) FROM events WHERE honeypot = $1 AND timestamp >= $2 AND password != '' GROUP BY password ORDER BY COUNT(*) DESC LIMIT 20",
+		honeypot, since)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get top passwords: %w", err)
+	}
+	defer passwordRows.Close()
+	for passwordRows.Next() {
+		var cc CredentialCount
+		if err := passwordRows.Scan(&cc.Value, &cc.Count); err != nil {
+			return nil, err
+		}
+		stats.TopPasswords = append(stats.TopPasswords, cc)
+	}
+
+	commandRows, err := ts.pool.Query(ctx,
+		"SELECT command, COUNT(*) FROM events WHERE honeypot = $1 AND timestamp >= $2 AND command != '' GROUP BY command ORDER BY COUNT(*) DESC LIMIT 20",
+		honeypot, since)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get top commands: %w", err)
+	}
+	defer commandRows.Close()
+	for commandRows.Next() {
+		var cc CommandCount
+		if err := commandRows.Scan(&cc.Command, &cc.Count); err != nil {
+			return nil, err
+		}
+		stats.Commands = append(stats.Commands, cc)
+	}
+
+	return stats, nil
 }
 
-// RetentionCleanup removes old data
+// RetentionCleanup removes data older than olderThan. The TimescaleDB retention
+// policy handles automatic expiry at the configured interval, but this method
+// supports ad-hoc deletion for custom retention windows.
 func (ts *TimescaleDB) RetentionCleanup(ctx context.Context, olderThan time.Time) error {
-	// TimescaleDB handles this via retention policy
-	return nil
+	if ts.pool == nil {
+		return fmt.Errorf("not connected")
+	}
+	_, err := ts.pool.Exec(ctx, "DELETE FROM events WHERE timestamp < $1", olderThan)
+	return err
 }
 
 // Optimize runs maintenance tasks
@@ -409,43 +571,135 @@ func (ts *TimescaleDB) Optimize(ctx context.Context) error {
 }
 
 
-// ExportData exports data to a writer
+// ExportData exports data to a writer in CSV format
 func (ts *TimescaleDB) ExportData(ctx context.Context, start, end time.Time, w io.Writer) error {
 	if ts.pool == nil {
 		return fmt.Errorf("not connected")
 	}
 
-	// Export as CSV
-	header := "timestamp,honeypot,source_ip,source_port,dest_port,protocol,event_type,username,password,command,country,city,asn\n"
-	w.Write([]byte(header))
+	header := "timestamp,honeypot,source_ip,source_port,dest_port,protocol,event_type,username,password,command,country,city,asn,technique_id,technique_name,confidence\n"
+	if _, err := w.Write([]byte(header)); err != nil {
+		return fmt.Errorf("failed to write header: %w", err)
+	}
 
 	rows, err := ts.pool.Query(ctx, `
 		SELECT timestamp, honeypot, source_ip::text, source_port, dest_port,
-		       protocol, event_type, username, password, command, country, city, asn
-		FROM events 
+		       protocol, event_type, username, password, command, country, city, asn,
+		       technique_id, technique_name, confidence
+		FROM events
 		WHERE timestamp >= $1 AND timestamp <= $2
+		ORDER BY timestamp ASC
 	`, start, end)
 	if err != nil {
 		return fmt.Errorf("failed to query data: %w", err)
 	}
 	defer rows.Close()
 
-	return nil
+	for rows.Next() {
+		var (
+			ts2           time.Time
+			honeypot      string
+			sourceIP      string
+			sourcePort    int
+			destPort      int
+			protocol      string
+			eventType     string
+			username      string
+			password      string
+			command       string
+			country       string
+			city          string
+			asn           string
+			techniqueID   string
+			techniqueName string
+			confidence    float64
+		)
+		if err := rows.Scan(
+			&ts2, &honeypot, &sourceIP, &sourcePort, &destPort,
+			&protocol, &eventType, &username, &password, &command,
+			&country, &city, &asn, &techniqueID, &techniqueName, &confidence,
+		); err != nil {
+			return fmt.Errorf("failed to scan row: %w", err)
+		}
+		line := fmt.Sprintf("%s,%s,%s,%d,%d,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%.4f\n",
+			ts2.UTC().Format(time.RFC3339),
+			csvEscape(honeypot), csvEscape(sourceIP),
+			sourcePort, destPort,
+			csvEscape(protocol), csvEscape(eventType),
+			csvEscape(username), csvEscape(password), csvEscape(command),
+			csvEscape(country), csvEscape(city), csvEscape(asn),
+			csvEscape(techniqueID), csvEscape(techniqueName),
+			confidence,
+		)
+		if _, err := w.Write([]byte(line)); err != nil {
+			return fmt.Errorf("failed to write row: %w", err)
+		}
+	}
+
+	return rows.Err()
 }
 
-// ImportData imports data from a reader
+// csvEscape wraps a field in quotes if it contains a comma, quote, or newline.
+func csvEscape(s string) string {
+	if strings.ContainsAny(s, ",\"\n\r") {
+		return `"` + strings.ReplaceAll(s, `"`, `""`) + `"`
+	}
+	return s
+}
+
+// ImportData imports CSV data exported by ExportData back into the database.
 func (ts *TimescaleDB) ImportData(ctx context.Context, r io.Reader) error {
 	if ts.pool == nil {
 		return fmt.Errorf("not connected")
 	}
 
-	// Read and import CSV data
 	data, err := io.ReadAll(r)
 	if err != nil {
 		return fmt.Errorf("failed to read data: %w", err)
 	}
 
-	slog.Info("Importing data", "bytes", len(data))
+	lines := strings.Split(string(data), "\n")
+	if len(lines) < 2 {
+		return nil // empty or header-only
+	}
+
+	// Skip header line
+	imported := 0
+	for _, line := range lines[1:] {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		fields := strings.Split(line, ",")
+		if len(fields) < 16 {
+			continue
+		}
+
+		ts2, err := time.Parse(time.RFC3339, fields[0])
+		if err != nil {
+			continue
+		}
+
+		_, err = ts.pool.Exec(ctx, `
+			INSERT INTO events (
+				timestamp, honeypot, source_ip, source_port, dest_port,
+				protocol, event_type, username, password, command,
+				country, city, asn, technique_id, technique_name
+			) VALUES ($1,$2,$3::inet,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)
+			ON CONFLICT DO NOTHING
+		`,
+			ts2, fields[1], fields[2], fields[3], fields[4],
+			fields[5], fields[6], fields[7], fields[8], fields[9],
+			fields[10], fields[11], fields[12], fields[13], fields[14],
+		)
+		if err != nil {
+			slog.Warn("ImportData: failed to insert row", "error", err)
+			continue
+		}
+		imported++
+	}
+
+	slog.Info("ImportData complete", "imported", imported)
 	return nil
 }
 
@@ -458,7 +712,7 @@ func (ts *TimescaleDB) GetSchemaVersion(ctx context.Context) (int, error) {
 	var exists bool
 	err := ts.pool.QueryRow(ctx, `
 		SELECT EXISTS (
-			SELECT FROM informationSchema.tables 
+			SELECT FROM information_schema.tables
 			WHERE table_name = 'schema_migrations'
 		)
 	`).Scan(&exists)

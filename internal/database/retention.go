@@ -317,21 +317,19 @@ func (rm *RetentionManager) archiveToFilesystem(ctx context.Context, policy *Ret
 	return 1, nil
 }
 
-// exportDataToFile exports data to a file
+// exportDataToFile exports data to a CSV file using the database's ExportData method.
 func (rm *RetentionManager) exportDataToFile(ctx context.Context, policy *RetentionPolicy, start, end time.Time, path string) error {
-	// This would export data from the database in Parquet or CSV format
-	// For now, create an empty file as placeholder
 	f, err := os.Create(path)
 	if err != nil {
-		return err
+		return fmt.Errorf("failed to create archive file: %w", err)
 	}
 	defer f.Close()
 
-	// Write header/metadata
-	metadata := fmt.Sprintf("# QPot Archive\n# Policy: %s\n# Range: %s to %s\n# Honeypots: %v\n",
-		policy.Name, start.Format(time.RFC3339), end.Format(time.RFC3339), policy.Honeypots)
-	_, err = f.WriteString(metadata)
-	return err
+	if err := rm.db.ExportData(ctx, start, end, f); err != nil {
+		return fmt.Errorf("failed to export data: %w", err)
+	}
+
+	return nil
 }
 
 // deleteExpiredData removes data older than the retention period
@@ -436,12 +434,23 @@ func (rm *RetentionManager) RestoreFromArchive(ctx context.Context, policyID str
 		return fmt.Errorf("failed to write temp file: %w", err)
 	}
 
-	// Import data (would call database-specific import)
-	slog.Info("Restored from archive", "archive", archiveKey, "temp", tempFile)
+	// Open the downloaded file and import into the database.
+	importFile, err := os.Open(tempFile)
+	if err != nil {
+		os.Remove(tempFile)
+		return fmt.Errorf("failed to open temp file for import: %w", err)
+	}
+	defer importFile.Close()
 
-	// Clean up
+	if err := rm.db.ImportData(ctx, importFile); err != nil {
+		os.Remove(tempFile)
+		return fmt.Errorf("failed to import archive data: %w", err)
+	}
+
+	slog.Info("Restored from archive", "archive", archiveKey)
+
+	// Clean up temp file.
 	os.Remove(tempFile)
-
 	return nil
 }
 

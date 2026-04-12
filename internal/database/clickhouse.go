@@ -101,7 +101,14 @@ func (ch *ClickHouse) InitializeSchema(ctx context.Context) error {
 			metadata Map(String, String),
 			country LowCardinality(String),
 			city String,
-			asn String
+			asn String,
+			technique_id String DEFAULT '',
+			technique_name String DEFAULT '',
+			tactic_id String DEFAULT '',
+			tactic_name String DEFAULT '',
+			kill_chain_stage String DEFAULT '',
+			confidence Float64 DEFAULT 0,
+			classified UInt8 DEFAULT 0
 		) ENGINE = MergeTree()
 		PARTITION BY toYYYYMM(timestamp)
 		ORDER BY (timestamp, honeypot, source_ip)
@@ -156,6 +163,47 @@ func (ch *ClickHouse) InitializeSchema(ctx context.Context) error {
 		return fmt.Errorf("failed to create attackers materialized view: %w", err)
 	}
 
+	// Create IOCs table
+	iocsTable := `
+		CREATE TABLE IF NOT EXISTS iocs (
+			id String,
+			type LowCardinality(String),
+			value String,
+			honeypot LowCardinality(String),
+			source_ip String,
+			technique_id String,
+			first_seen DateTime64(3),
+			last_seen DateTime64(3),
+			count UInt64,
+			metadata Map(String, String)
+		) ENGINE = ReplacingMergeTree(last_seen)
+		ORDER BY (type, value, honeypot)
+	`
+	if err := ch.conn.Exec(ctx, iocsTable); err != nil {
+		return fmt.Errorf("failed to create iocs table: %w", err)
+	}
+
+	// Create TTP sessions table
+	ttpTable := `
+		CREATE TABLE IF NOT EXISTS ttp_sessions (
+			session_id String,
+			campaign_fingerprint String,
+			source_ips Array(String),
+			shared_infrastructure UInt8,
+			kill_chain_stages Array(String),
+			techniques Array(String),
+			ioc_ids Array(String),
+			event_count UInt64,
+			first_seen DateTime64(3),
+			last_seen DateTime64(3),
+			confidence Float64
+		) ENGINE = ReplacingMergeTree(last_seen)
+		ORDER BY session_id
+	`
+	if err := ch.conn.Exec(ctx, ttpTable); err != nil {
+		return fmt.Errorf("failed to create ttp_sessions table: %w", err)
+	}
+
 	return nil
 }
 
@@ -176,6 +224,10 @@ func (ch *ClickHouse) InsertEvents(ctx context.Context, events []*Event) error {
 	}
 
 	for _, event := range events {
+		classified := uint8(0)
+		if event.Classified {
+			classified = 1
+		}
 		err := batch.Append(
 			event.Timestamp,
 			event.Honeypot,
@@ -192,6 +244,13 @@ func (ch *ClickHouse) InsertEvents(ctx context.Context, events []*Event) error {
 			event.Country,
 			event.City,
 			event.ASN,
+			event.TechniqueID,
+			event.TechniqueName,
+			event.TacticID,
+			event.TacticName,
+			event.KillChainStage,
+			event.Confidence,
+			classified,
 		)
 		if err != nil {
 			return fmt.Errorf("failed to append event: %w", err)
@@ -211,7 +270,12 @@ func (ch *ClickHouse) GetEvents(ctx context.Context, filter EventFilter) ([]*Eve
 		return nil, fmt.Errorf("not connected")
 	}
 
-	query := "SELECT * FROM events WHERE 1=1"
+	query := `SELECT timestamp, honeypot, source_ip, source_port, dest_port,
+		protocol, event_type, username, password, command,
+		payload, metadata, country, city, asn,
+		technique_id, technique_name, tactic_id, tactic_name,
+		kill_chain_stage, confidence, classified
+	FROM events WHERE 1=1`
 	var args []interface{}
 
 	if !filter.StartTime.IsZero() {
@@ -258,6 +322,7 @@ func (ch *ClickHouse) GetEvents(ctx context.Context, filter EventFilter) ([]*Eve
 	for rows.Next() {
 		var event Event
 		var payloadStr string
+		var classified uint8
 		err := rows.Scan(
 			&event.Timestamp,
 			&event.Honeypot,
@@ -274,11 +339,19 @@ func (ch *ClickHouse) GetEvents(ctx context.Context, filter EventFilter) ([]*Eve
 			&event.Country,
 			&event.City,
 			&event.ASN,
+			&event.TechniqueID,
+			&event.TechniqueName,
+			&event.TacticID,
+			&event.TacticName,
+			&event.KillChainStage,
+			&event.Confidence,
+			&classified,
 		)
 		if err != nil {
 			return nil, fmt.Errorf("failed to scan event: %w", err)
 		}
 		event.Payload = []byte(payloadStr)
+		event.Classified = classified != 0
 		events = append(events, &event)
 	}
 
@@ -413,13 +486,78 @@ func (ch *ClickHouse) GetTopAttackers(ctx context.Context, limit int, since time
 
 // GetHoneypotStats retrieves statistics for a specific honeypot
 func (ch *ClickHouse) GetHoneypotStats(ctx context.Context, honeypot string, since time.Time) (*HoneypotStats, error) {
-	return nil, fmt.Errorf("not implemented")
+	if ch.conn == nil {
+		return nil, fmt.Errorf("not connected")
+	}
+
+	stats := &HoneypotStats{Honeypot: honeypot}
+
+	err := ch.conn.QueryRow(ctx,
+		"SELECT count(), uniqExact(source_ip) FROM events WHERE honeypot = ? AND timestamp >= ?",
+		honeypot, since).Scan(&stats.TotalEvents, &stats.UniqueIPs)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get honeypot totals: %w", err)
+	}
+
+	usernameRows, err := ch.conn.Query(ctx,
+		"SELECT username, count() FROM events WHERE honeypot = ? AND timestamp >= ? AND username != '' GROUP BY username ORDER BY count() DESC LIMIT 20",
+		honeypot, since)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get top usernames: %w", err)
+	}
+	defer usernameRows.Close()
+	for usernameRows.Next() {
+		var cc CredentialCount
+		if err := usernameRows.Scan(&cc.Value, &cc.Count); err != nil {
+			return nil, err
+		}
+		stats.TopUsernames = append(stats.TopUsernames, cc)
+	}
+
+	passwordRows, err := ch.conn.Query(ctx,
+		"SELECT password, count() FROM events WHERE honeypot = ? AND timestamp >= ? AND password != '' GROUP BY password ORDER BY count() DESC LIMIT 20",
+		honeypot, since)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get top passwords: %w", err)
+	}
+	defer passwordRows.Close()
+	for passwordRows.Next() {
+		var cc CredentialCount
+		if err := passwordRows.Scan(&cc.Value, &cc.Count); err != nil {
+			return nil, err
+		}
+		stats.TopPasswords = append(stats.TopPasswords, cc)
+	}
+
+	commandRows, err := ch.conn.Query(ctx,
+		"SELECT command, count() FROM events WHERE honeypot = ? AND timestamp >= ? AND command != '' GROUP BY command ORDER BY count() DESC LIMIT 20",
+		honeypot, since)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get top commands: %w", err)
+	}
+	defer commandRows.Close()
+	for commandRows.Next() {
+		var cc CommandCount
+		if err := commandRows.Scan(&cc.Command, &cc.Count); err != nil {
+			return nil, err
+		}
+		stats.Commands = append(stats.Commands, cc)
+	}
+
+	return stats, nil
 }
 
-// RetentionCleanup removes old data
+// RetentionCleanup removes data older than olderThan. ClickHouse TTL handles
+// automatic expiry at 90 days, but this method allows ad-hoc deletion for
+// custom retention windows shorter than the TTL.
 func (ch *ClickHouse) RetentionCleanup(ctx context.Context, olderThan time.Time) error {
-	// ClickHouse handles this via TTL
-	return nil
+	if ch.conn == nil {
+		return fmt.Errorf("not connected")
+	}
+	return ch.conn.Exec(ctx,
+		"ALTER TABLE events DELETE WHERE timestamp < ?",
+		olderThan,
+	)
 }
 
 // Optimize runs maintenance tasks
@@ -432,47 +570,229 @@ func (ch *ClickHouse) Optimize(ctx context.Context) error {
 }
 
 
-// ExportData exports data to a writer
+// ExportData exports data to a writer in CSV format
 func (ch *ClickHouse) ExportData(ctx context.Context, start, end time.Time, w io.Writer) error {
 	if ch.conn == nil {
 		return fmt.Errorf("not connected")
 	}
 
-	// Use ClickHouse's native export format
-	query := `
-		SELECT * FROM events 
-		WHERE timestamp >= ? AND timestamp <= ?
-		FORMAT Parquet
-	`
+	header := "timestamp,honeypot,source_ip,source_port,dest_port,protocol,event_type,username,password,command,country,city,asn,technique_id,technique_name,confidence\n"
+	if _, err := w.Write([]byte(header)); err != nil {
+		return fmt.Errorf("failed to write header: %w", err)
+	}
 
-	rows, err := ch.conn.Query(ctx, query, start, end)
+	rows, err := ch.conn.Query(ctx, `
+		SELECT timestamp, honeypot, source_ip, source_port, dest_port,
+		       protocol, event_type, username, password, command,
+		       country, city, asn, technique_id, technique_name, confidence
+		FROM events
+		WHERE timestamp >= ? AND timestamp <= ?
+		ORDER BY timestamp ASC
+	`, start, end)
 	if err != nil {
 		return fmt.Errorf("failed to query data: %w", err)
 	}
 	defer rows.Close()
 
-	// Write header
-	w.Write([]byte("# QPot Data Export\n"))
-	w.Write([]byte(fmt.Sprintf("# Range: %s to %s\n", start.Format(time.RFC3339), end.Format(time.RFC3339))))
-	w.Write([]byte("# Format: Parquet\n\n"))
+	for rows.Next() {
+		var (
+			ts2           time.Time
+			honeypot      string
+			sourceIP      string
+			sourcePort    uint16
+			destPort      uint16
+			protocol      string
+			eventType     string
+			username      string
+			password      string
+			command       string
+			country       string
+			city          string
+			asn           string
+			techniqueID   string
+			techniqueName string
+			confidence    float64
+		)
+		if err := rows.Scan(
+			&ts2, &honeypot, &sourceIP, &sourcePort, &destPort,
+			&protocol, &eventType, &username, &password, &command,
+			&country, &city, &asn, &techniqueID, &techniqueName, &confidence,
+		); err != nil {
+			return fmt.Errorf("failed to scan row: %w", err)
+		}
+		line := fmt.Sprintf("%s,%s,%s,%d,%d,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%.4f\n",
+			ts2.UTC().Format(time.RFC3339),
+			chCSVEscape(honeypot), chCSVEscape(sourceIP),
+			sourcePort, destPort,
+			chCSVEscape(protocol), chCSVEscape(eventType),
+			chCSVEscape(username), chCSVEscape(password), chCSVEscape(command),
+			chCSVEscape(country), chCSVEscape(city), chCSVEscape(asn),
+			chCSVEscape(techniqueID), chCSVEscape(techniqueName),
+			confidence,
+		)
+		if _, err := w.Write([]byte(line)); err != nil {
+			return fmt.Errorf("failed to write row: %w", err)
+		}
+	}
 
 	return nil
 }
 
-// ImportData imports data from a reader
+// chCSVEscape wraps a field in quotes if it contains a comma, quote, or newline.
+func chCSVEscape(s string) string {
+	if len(s) == 0 {
+		return s
+	}
+	needsQuote := false
+	for _, c := range s {
+		if c == ',' || c == '"' || c == '\n' || c == '\r' {
+			needsQuote = true
+			break
+		}
+	}
+	if !needsQuote {
+		return s
+	}
+	// Replace " with ""
+	escaped := make([]byte, 0, len(s)+2)
+	escaped = append(escaped, '"')
+	for i := 0; i < len(s); i++ {
+		if s[i] == '"' {
+			escaped = append(escaped, '"', '"')
+		} else {
+			escaped = append(escaped, s[i])
+		}
+	}
+	escaped = append(escaped, '"')
+	return string(escaped)
+}
+
+// ImportData imports CSV data exported by ExportData back into the database.
 func (ch *ClickHouse) ImportData(ctx context.Context, r io.Reader) error {
 	if ch.conn == nil {
 		return fmt.Errorf("not connected")
 	}
 
-	// Read and parse data
 	data, err := io.ReadAll(r)
 	if err != nil {
 		return fmt.Errorf("failed to read data: %w", err)
 	}
 
-	slog.Info("Importing data", "bytes", len(data))
+	lines := splitLines(string(data))
+	if len(lines) < 2 {
+		return nil
+	}
+
+	batch, err := ch.conn.PrepareBatch(ctx, "INSERT INTO events (timestamp,honeypot,source_ip,source_port,dest_port,protocol,event_type,username,password,command,country,city,asn,technique_id,technique_name,confidence)")
+	if err != nil {
+		return fmt.Errorf("failed to prepare import batch: %w", err)
+	}
+
+	imported := 0
+	for _, line := range lines[1:] {
+		line = trimString(line)
+		if line == "" {
+			continue
+		}
+		fields := splitCSVLine(line)
+		if len(fields) < 16 {
+			continue
+		}
+
+		ts2, err := time.Parse(time.RFC3339, fields[0])
+		if err != nil {
+			continue
+		}
+		var sourcePort, destPort uint16
+		fmt.Sscanf(fields[3], "%d", &sourcePort)
+		fmt.Sscanf(fields[4], "%d", &destPort)
+		var confidence float64
+		fmt.Sscanf(fields[15], "%f", &confidence)
+
+		if err := batch.Append(
+			ts2, fields[1], fields[2], sourcePort, destPort,
+			fields[5], fields[6], fields[7], fields[8], fields[9],
+			fields[10], fields[11], fields[12], fields[13], fields[14], confidence,
+		); err != nil {
+			slog.Warn("ImportData: failed to append row", "error", err)
+			continue
+		}
+		imported++
+	}
+
+	if imported > 0 {
+		if err := batch.Send(); err != nil {
+			return fmt.Errorf("failed to send import batch: %w", err)
+		}
+	}
+
+	slog.Info("ImportData complete", "imported", imported)
 	return nil
+}
+
+// splitLines splits a string into lines, handling \r\n and \n.
+func splitLines(s string) []string {
+	var lines []string
+	start := 0
+	for i := 0; i < len(s); i++ {
+		if s[i] == '\n' {
+			end := i
+			if end > start && s[end-1] == '\r' {
+				end--
+			}
+			lines = append(lines, s[start:end])
+			start = i + 1
+		}
+	}
+	if start < len(s) {
+		lines = append(lines, s[start:])
+	}
+	return lines
+}
+
+// trimString trims spaces from a string.
+func trimString(s string) string {
+	start, end := 0, len(s)
+	for start < end && (s[start] == ' ' || s[start] == '\t') {
+		start++
+	}
+	for end > start && (s[end-1] == ' ' || s[end-1] == '\t') {
+		end--
+	}
+	return s[start:end]
+}
+
+// splitCSVLine splits a CSV line respecting double-quoted fields.
+func splitCSVLine(line string) []string {
+	var fields []string
+	var current []byte
+	inQuote := false
+	for i := 0; i < len(line); i++ {
+		c := line[i]
+		if inQuote {
+			if c == '"' {
+				if i+1 < len(line) && line[i+1] == '"' {
+					current = append(current, '"')
+					i++
+				} else {
+					inQuote = false
+				}
+			} else {
+				current = append(current, c)
+			}
+		} else {
+			if c == '"' {
+				inQuote = true
+			} else if c == ',' {
+				fields = append(fields, string(current))
+				current = current[:0]
+			} else {
+				current = append(current, c)
+			}
+		}
+	}
+	fields = append(fields, string(current))
+	return fields
 }
 
 // GetSchemaVersion returns the current schema version
