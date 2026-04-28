@@ -4,8 +4,11 @@ package cluster
 import (
 	"bytes"
 	"crypto/rand"
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -210,6 +213,65 @@ func NewManager(dataPath string) *Manager {
 	}
 }
 
+// schemeLocked returns "https" when the cluster config has TLS enabled
+// AND both a cert and key path configured; otherwise "http". Caller must
+// hold m.mu (read or write).
+func (m *Manager) schemeLocked() string {
+	if m.cluster == nil || m.cluster.Config == nil {
+		return "http"
+	}
+	cfg := m.cluster.Config
+	if cfg.EnableEncryption && cfg.TLSCertPath != "" && cfg.TLSKeyPath != "" {
+		return "https"
+	}
+	return "http"
+}
+
+// scheme is the lock-acquiring variant.
+func (m *Manager) scheme() string {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.schemeLocked()
+}
+
+// peerHTTPClient builds an HTTP client suitable for talking to other
+// cluster members. When TLS is enabled it verifies peer certs against
+// the configured CA bundle (CACertPath). With EnableEncryption=true and
+// no CA path set, it falls back to the system trust store — operators
+// using self-signed certs should always set CACertPath to avoid
+// mid-rotation verification failures.
+func (m *Manager) peerHTTPClient(timeout time.Duration) *http.Client {
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	if m.cluster != nil && m.cluster.Config != nil && m.cluster.Config.EnableEncryption {
+		tlsCfg := &tls.Config{MinVersion: tls.VersionTLS12}
+		if caPath := m.cluster.Config.CACertPath; caPath != "" {
+			caData, err := os.ReadFile(caPath)
+			if err != nil {
+				slog.Warn("Cluster TLS: failed to read CA cert; falling back to system roots",
+					"path", caPath, "error", err)
+			} else {
+				pool := x509.NewCertPool()
+				if pool.AppendCertsFromPEM(caData) {
+					tlsCfg.RootCAs = pool
+				} else {
+					slog.Warn("Cluster TLS: CA cert file contained no PEM blocks", "path", caPath)
+				}
+			}
+		}
+		transport.TLSClientConfig = tlsCfg
+	}
+	return &http.Client{Timeout: timeout, Transport: transport}
+}
+
+// peerURL builds a fully-qualified URL for a peer endpoint, picking
+// http or https based on the local cluster config. Caller must hold m.mu.
+func (m *Manager) peerURLLocked(host string, port int, path string) string {
+	return fmt.Sprintf("%s://%s:%d%s", m.schemeLocked(), host, port, path)
+}
+
 // UpdateThreatIntel updates the local node's threat intelligence data.
 // Callers should pass the top source IPs seen in the last hour.
 func (m *Manager) UpdateThreatIntel(topIPs []IPCount) {
@@ -372,8 +434,29 @@ func (m *Manager) attemptJoin(seedAddr, clusterID, password string, localNode *N
 		return nil, fmt.Errorf("failed to marshal join request: %w", err)
 	}
 
-	url := fmt.Sprintf("http://%s/api/v1/cluster/join", seedAddr)
-	resp, err := http.Post(url, "application/json", bytes.NewReader(reqBody))
+	// At join time we don't yet have the cluster's TLS settings, so let the
+	// seed address itself say which scheme to use:
+	//   http://1.2.3.4:7946  -> plain HTTP join
+	//   https://1.2.3.4:7946 -> TLS join (verifies against system roots)
+	//   1.2.3.4:7946         -> defaults to http for backwards compatibility
+	scheme := "http"
+	host := seedAddr
+	switch {
+	case strings.HasPrefix(seedAddr, "https://"):
+		scheme = "https"
+		host = strings.TrimPrefix(seedAddr, "https://")
+	case strings.HasPrefix(seedAddr, "http://"):
+		host = strings.TrimPrefix(seedAddr, "http://")
+	}
+	url := fmt.Sprintf("%s://%s/api/v1/cluster/join", scheme, host)
+
+	joinClient := &http.Client{Timeout: 15 * time.Second}
+	if scheme == "https" {
+		joinClient.Transport = &http.Transport{
+			TLSClientConfig: &tls.Config{MinVersion: tls.VersionTLS12},
+		}
+	}
+	resp, err := joinClient.Post(url, "application/json", bytes.NewReader(reqBody))
 	if err != nil {
 		return nil, fmt.Errorf("failed to contact seed node: %w", err)
 	}
@@ -685,16 +768,43 @@ func (m *Manager) startAPIServer() error {
 	mux.HandleFunc("/api/v1/cluster/intel", m.withClusterAuth(m.handleIntelHTTP))
 
 	addr := fmt.Sprintf("%s:%d", m.cluster.Config.BindAddr, m.cluster.Config.BindPort)
-	m.apiServer = &http.Server{
+	tlsEnabled := m.cluster.Config.EnableEncryption &&
+		m.cluster.Config.TLSCertPath != "" &&
+		m.cluster.Config.TLSKeyPath != ""
+
+	srv := &http.Server{
 		Addr:         addr,
 		Handler:      mux,
 		ReadTimeout:  15 * time.Second,
 		WriteTimeout: 15 * time.Second,
 	}
+	if tlsEnabled {
+		// Refuse to keep going with broken TLS rather than silently falling
+		// back to plain HTTP (which would expose the cluster password header
+		// in cleartext on the wire).
+		if _, err := tls.LoadX509KeyPair(m.cluster.Config.TLSCertPath, m.cluster.Config.TLSKeyPath); err != nil {
+			return fmt.Errorf("cluster TLS: failed to load cert/key pair: %w", err)
+		}
+		srv.TLSConfig = &tls.Config{MinVersion: tls.VersionTLS12}
+	} else if m.cluster.Config.EnableEncryption {
+		// User asked for encryption but didn't provide cert+key. Fail closed
+		// so they notice instead of silently downgrading.
+		return fmt.Errorf("cluster TLS enabled but tls_cert_path and tls_key_path must both be set")
+	}
 
+	m.apiServer = srv
+
+	certPath := m.cluster.Config.TLSCertPath
+	keyPath := m.cluster.Config.TLSKeyPath
 	go func() {
-		if err := m.apiServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			slog.Error("API server error", "error", err)
+		var err error
+		if tlsEnabled {
+			err = srv.ListenAndServeTLS(certPath, keyPath)
+		} else {
+			err = srv.ListenAndServe()
+		}
+		if err != nil && !errors.Is(err, http.ErrServerClosed) {
+			slog.Error("Cluster API server error", "tls", tlsEnabled, "error", err)
 		}
 	}()
 
@@ -852,11 +962,12 @@ func (m *Manager) gossip() {
 
 	m.mu.RLock()
 	plainPwd := m.plainPassword
+	scheme := m.schemeLocked()
 	m.mu.RUnlock()
 
-	gossipClient := &http.Client{Timeout: 5 * time.Second}
+	gossipClient := m.peerHTTPClient(5 * time.Second)
 	for _, peer := range peers {
-		peerURL := fmt.Sprintf("http://%s:%d/api/v1/cluster/gossip", peer.address, peer.port)
+		peerURL := fmt.Sprintf("%s://%s:%d/api/v1/cluster/gossip", scheme, peer.address, peer.port)
 		req, err := http.NewRequest(http.MethodPost, peerURL, bytes.NewReader(body))
 		if err != nil {
 			continue
@@ -957,16 +1068,17 @@ func (m *Manager) sync() {
 
 	m.mu.RLock()
 	syncPlainPwd := m.plainPassword
+	syncScheme := m.schemeLocked()
 	m.mu.RUnlock()
 
-	syncClient := &http.Client{Timeout: 10 * time.Second}
+	syncClient := m.peerHTTPClient(10 * time.Second)
 
 	// Share local intel with peers and collect theirs.
 	if localIntel != nil {
 		intelBody, err := json.Marshal(localIntel)
 		if err == nil {
 			for _, peer := range peers {
-				peerURL := fmt.Sprintf("http://%s:%d/api/v1/cluster/intel", peer.address, peer.port)
+				peerURL := fmt.Sprintf("%s://%s:%d/api/v1/cluster/intel", syncScheme, peer.address, peer.port)
 				intelReq, err := http.NewRequest(http.MethodPost, peerURL, bytes.NewReader(intelBody))
 				if err != nil {
 					continue
@@ -1202,16 +1314,17 @@ func (m *Manager) LeaveCluster() error {
 		peers = append(peers, peerInfo{id: node.ID, address: node.Address, port: node.Port})
 	}
 	plainPwd := m.plainPassword
+	leaveScheme := m.schemeLocked()
 	m.mu.RUnlock()
 
 	// Notify other nodes with a short timeout so a dead peer doesn't block.
-	leaveClient := &http.Client{Timeout: 3 * time.Second}
+	leaveClient := m.peerHTTPClient(3 * time.Second)
 	leaveBody, err := json.Marshal(map[string]string{"node_id": localNodeID})
 	if err != nil {
 		return fmt.Errorf("marshal leave body: %w", err)
 	}
 	for _, peer := range peers {
-		url := fmt.Sprintf("http://%s:%d/api/v1/cluster/leave", peer.address, peer.port)
+		url := fmt.Sprintf("%s://%s:%d/api/v1/cluster/leave", leaveScheme, peer.address, peer.port)
 		req, err := http.NewRequest(http.MethodPost, url, bytes.NewReader(leaveBody))
 		if err != nil {
 			slog.Debug("LeaveCluster: build request failed", "node_id", peer.id, "error", err)

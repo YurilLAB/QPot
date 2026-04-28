@@ -19,6 +19,32 @@ type AlertConfig struct {
 	Honeypots  []string `yaml:"honeypots"`     // which honeypots to alert on (empty = all)
 }
 
+// ResponseConfig configures local commands to execute when an alert
+// threshold trips. Each entry runs through `sh -c` on Linux/macOS and
+// `cmd /C` on Windows, with the following environment variables set so
+// the command can act on the trigger:
+//
+//	QPOT_ID            - the QPot instance ID
+//	QPOT_INSTANCE      - the human-readable instance name
+//	QPOT_TOTAL_EVENTS  - events seen in the trigger window (last minute)
+//	QPOT_TOP_SOURCE_IP - the most active attacker IP, when known
+//	QPOT_TOP_HONEYPOT  - the most-hit honeypot, when known
+//
+// This replaces the previous fictional "lockdown integration" with a
+// real, generic mechanism — point it at any firewall, lockdown script,
+// SOAR runbook, or custom shell pipeline.
+type ResponseConfig struct {
+	Enabled          bool             `yaml:"enabled"`
+	OnAttackDetected []ResponseAction `yaml:"on_attack_detected"`
+}
+
+// ResponseAction is one command that fires on an attack-detected event.
+type ResponseAction struct {
+	Name    string        `yaml:"name"`    // free-form label for logs
+	Command string        `yaml:"command"` // shell command line
+	Timeout time.Duration `yaml:"timeout"` // per-command timeout (default 10s, hard cap 5min)
+}
+
 // IntelligenceConfig configures the threat intelligence subsystem.
 type IntelligenceConfig struct {
 	Enabled          bool          `yaml:"enabled"`
@@ -44,6 +70,7 @@ type Config struct {
 	Alerts       AlertConfig       `yaml:"alerts"`
 	Intelligence IntelligenceConfig `yaml:"intelligence"`
 	Yuril        YurilConfig        `yaml:"yuril"`
+	Response     ResponseConfig    `yaml:"response"`
 }
 
 // YurilConfig controls the forwarder that pushes classified IOCs into the

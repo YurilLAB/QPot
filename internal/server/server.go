@@ -7,9 +7,13 @@ import (
 	"crypto/subtle"
 	"embed"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
+	"os"
+	"os/exec"
+	"runtime"
 	"strconv"
 	"strings"
 	"time"
@@ -18,6 +22,7 @@ import (
 	"github.com/qpot/qpot/internal/database"
 	"github.com/qpot/qpot/internal/instance"
 	"github.com/qpot/qpot/internal/intelligence"
+	"github.com/qpot/qpot/internal/yuril"
 )
 
 //go:embed static/*
@@ -77,7 +82,17 @@ func New(cfg *config.Config) (*Server, error) {
 		s.ttpBuilder = ttpBuilder
 		s.classifier = classifier
 		if db != nil {
-			s.worker = intelligence.NewWorker(classifier, db, cfg.Intelligence.WorkerInterval, cfg.Intelligence.WorkerBatchSize)
+			w := intelligence.NewWorker(classifier, db, cfg.Intelligence.WorkerInterval, cfg.Intelligence.WorkerBatchSize)
+			// Attach the Yuril forwarder when configured. Failures here are
+			// logged but not fatal — QPot must stay up even if Yuril is
+			// unreachable.
+			if fwd, err := yuril.New(cfg.Yuril); err != nil {
+				slog.Warn("Yuril forwarder disabled due to config error", "error", err)
+			} else if fwd != nil {
+				w = w.WithForwarder(fwd)
+				slog.Info("Yuril forwarder enabled", "endpoint", cfg.Yuril.Endpoint)
+			}
+			s.worker = w
 		}
 	}
 
@@ -103,6 +118,13 @@ func (s *Server) setupRoutes() {
 	s.mux.HandleFunc("/api/iocs", s.withQPotAuth(s.handleIOCs))
 	s.mux.HandleFunc("/api/ttps", s.withQPotAuth(s.handleTTPs))
 	s.mux.HandleFunc("/api/intelligence", s.withQPotAuth(s.handleIntelligenceSummary))
+
+	// Yuril Security Suite integration routes — bidirectional intel sharing
+	// with YurilAntivirus / YurilTracking. Both endpoints require the QPot
+	// ID so an attacker who somehow reaches the API cannot poison the IOC
+	// store or scrape attacker data.
+	s.mux.HandleFunc("/api/yuril/intel", s.withQPotAuth(s.handleYurilIntel))
+	s.mux.HandleFunc("/api/yuril/query", s.withQPotAuth(s.handleYurilQuery))
 }
 
 // withQPotAuth middleware checks QPot ID authentication
@@ -245,9 +267,93 @@ func (s *Server) alertLoop(ctx context.Context) {
 
 			if triggered {
 				s.fireWebhook(ctx, stats)
+				if s.config.Response.Enabled && len(s.config.Response.OnAttackDetected) > 0 {
+					s.runResponseHooks(ctx, stats)
+				}
 			}
 		}
 	}
+}
+
+// runResponseHooks executes every configured response action when an
+// alert threshold trips. Each command runs in a per-action timeout so a
+// hung script can't block the alert loop, and stdout/stderr are captured
+// to the structured log instead of inheriting the parent FDs.
+func (s *Server) runResponseHooks(ctx context.Context, stats *database.Stats) {
+	envExtra := s.responseEnv(ctx, stats)
+
+	const defaultTimeout = 10 * time.Second
+	const hardCap = 5 * time.Minute
+
+	for i, action := range s.config.Response.OnAttackDetected {
+		cmdLine := strings.TrimSpace(action.Command)
+		if cmdLine == "" {
+			slog.Warn("Response hook: empty command, skipping",
+				"index", i, "name", action.Name)
+			continue
+		}
+		timeout := action.Timeout
+		if timeout <= 0 {
+			timeout = defaultTimeout
+		}
+		if timeout > hardCap {
+			timeout = hardCap
+		}
+
+		cmdCtx, cancel := context.WithTimeout(ctx, timeout)
+		var cmd *exec.Cmd
+		if runtime.GOOS == "windows" {
+			cmd = exec.CommandContext(cmdCtx, "cmd", "/C", cmdLine)
+		} else {
+			// Use sh, not bash — sh is universally available on Linux,
+			// macOS, and BSDs, including minimal Arch installs.
+			cmd = exec.CommandContext(cmdCtx, "sh", "-c", cmdLine)
+		}
+		cmd.Env = append(os.Environ(), envExtra...)
+
+		out, err := cmd.CombinedOutput()
+		cancel()
+		// Trim trailing whitespace so multiline output doesn't double-line in logs.
+		outStr := strings.TrimRight(string(out), "\n\r\t ")
+
+		switch {
+		case err == nil:
+			slog.Info("Response hook ran",
+				"name", action.Name, "command", cmdLine, "output", outStr)
+		case errors.Is(cmdCtx.Err(), context.DeadlineExceeded):
+			slog.Warn("Response hook timed out",
+				"name", action.Name, "command", cmdLine, "timeout", timeout, "output", outStr)
+		default:
+			slog.Warn("Response hook failed",
+				"name", action.Name, "command", cmdLine, "error", err, "output", outStr)
+		}
+	}
+}
+
+// responseEnv collects the environment variables that response-hook
+// commands receive. The list is intentionally small and stable — every
+// extra var is a contract that operators' scripts may grow to depend on.
+func (s *Server) responseEnv(ctx context.Context, stats *database.Stats) []string {
+	env := []string{
+		"QPOT_ID=" + s.config.QPotID,
+		"QPOT_INSTANCE=" + s.config.InstanceName,
+		fmt.Sprintf("QPOT_TOTAL_EVENTS=%d", stats.TotalEvents),
+	}
+	if len(stats.TopHoneypots) > 0 {
+		env = append(env, "QPOT_TOP_HONEYPOT="+stats.TopHoneypots[0].Honeypot)
+	}
+	// Top attacker IP isn't on Stats; pull it from GetTopAttackers with a
+	// short timeout so a sluggish DB doesn't delay every hook.
+	if s.database != nil {
+		lookupCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
+		defer cancel()
+		since := time.Now().Add(-time.Minute)
+		attackers, err := s.database.GetTopAttackers(lookupCtx, 1, since)
+		if err == nil && len(attackers) > 0 {
+			env = append(env, "QPOT_TOP_SOURCE_IP="+attackers[0].SourceIP)
+		}
+	}
+	return env
 }
 
 // fireWebhook sends a JSON POST to the configured webhook URL.
@@ -749,4 +855,195 @@ func (s *Server) sendError(w http.ResponseWriter, code int, message string) {
 		"error":   message,
 		"qpot_id": s.config.QPotID,
 	})
+}
+
+// yurilIntelRequest is the inbound payload for /api/yuril/intel. The
+// shape mirrors the outbound forwarder's IntelBatch so YurilAntivirus
+// can forward intel back to QPot using the same wire format it receives.
+type yurilIntelRequest struct {
+	BatchID string `json:"batch_id,omitempty"`
+	Source  string `json:"source,omitempty"`
+	Items   []struct {
+		Type     string            `json:"type"`
+		Value    string            `json:"value"`
+		Severity string            `json:"severity,omitempty"`
+		Context  map[string]string `json:"context,omitempty"`
+	} `json:"items"`
+}
+
+// handleYurilIntel accepts IOC pushes from the Yuril Security Suite and
+// upserts them into QPot's IOC table. This makes the deception layer
+// reactive: an antivirus detection on an endpoint immediately becomes a
+// honeypot blocklist entry.
+func (s *Server) handleYurilIntel(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if s.database == nil {
+		s.sendError(w, http.StatusServiceUnavailable, "database not available")
+		return
+	}
+
+	r.Body = http.MaxBytesReader(w, r.Body, 1<<20) // 1 MiB cap
+	var req yurilIntelRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		s.sendError(w, http.StatusBadRequest, "invalid JSON body")
+		return
+	}
+	if len(req.Items) == 0 {
+		s.sendError(w, http.StatusBadRequest, "items array is required and non-empty")
+		return
+	}
+
+	now := time.Now().UTC()
+	source := strings.TrimSpace(req.Source)
+	if source == "" {
+		source = "yuril"
+	}
+
+	accepted := 0
+	skipped := 0
+	for i, item := range req.Items {
+		t := strings.ToLower(strings.TrimSpace(item.Type))
+		v := strings.TrimSpace(item.Value)
+		if v == "" {
+			skipped++
+			continue
+		}
+		// Only accept the IOC types our schema models. Anything else is
+		// dropped with a logged warning rather than coerced.
+		switch t {
+		case "ip", "domain", "url", "hash":
+			// ok
+		default:
+			slog.Debug("yuril intel: skipping unsupported IOC type",
+				"index", i, "type", item.Type)
+			skipped++
+			continue
+		}
+
+		// Tag every inbound item with its origin so operators can audit which
+		// indicators came from QPot's own honeypots vs. pushed by Yuril.
+		meta := map[string]string{
+			"origin":      "yuril_inbound",
+			"yuril_source": source,
+		}
+		if item.Severity != "" {
+			meta["severity"] = item.Severity
+		}
+		for k, val := range item.Context {
+			// Don't let inbound metadata clobber our origin tag.
+			if k == "origin" {
+				continue
+			}
+			meta[k] = val
+		}
+
+		ioc := &database.IOC{
+			Type:      t,
+			Value:     v,
+			Honeypot:  "_yuril",
+			FirstSeen: now,
+			LastSeen:  now,
+			Count:     1,
+			Metadata:  meta,
+		}
+		if err := s.database.InsertIOC(r.Context(), ioc); err != nil {
+			slog.Warn("yuril intel: InsertIOC failed", "type", t, "value", v, "error", err)
+			skipped++
+			continue
+		}
+		accepted++
+	}
+
+	s.sendJSON(w, map[string]interface{}{
+		"qpot_id":  s.config.QPotID,
+		"accepted": accepted,
+		"skipped":  skipped,
+		"received": len(req.Items),
+	})
+}
+
+// handleYurilQuery returns everything QPot knows about a given indicator
+// — recent events, related IOCs, observed techniques. YurilAntivirus
+// hits this when an endpoint sees a connection to a suspicious peer and
+// wants to know whether the same peer has been hitting our honeypots.
+//
+// Query params (at least one required):
+//
+//	ip=<source-ip>
+//	hash=<md5|sha1|sha256>
+//	domain=<domain>
+func (s *Server) handleYurilQuery(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if s.database == nil {
+		s.sendError(w, http.StatusServiceUnavailable, "database not available")
+		return
+	}
+
+	q := r.URL.Query()
+	ip := strings.TrimSpace(q.Get("ip"))
+	hash := strings.TrimSpace(q.Get("hash"))
+	domain := strings.TrimSpace(q.Get("domain"))
+	if ip == "" && hash == "" && domain == "" {
+		s.sendError(w, http.StatusBadRequest, "at least one of ip, hash, domain is required")
+		return
+	}
+
+	ctx := r.Context()
+	since := time.Now().Add(-7 * 24 * time.Hour) // last 7 days
+
+	response := map[string]interface{}{
+		"qpot_id":   s.config.QPotID,
+		"queried":   map[string]string{"ip": ip, "hash": hash, "domain": domain},
+		"queried_at": time.Now().UTC().Format(time.RFC3339),
+	}
+
+	// IP lookup: count attacker activity over the last 7 days.
+	if ip != "" {
+		attackers, err := s.database.GetTopAttackers(ctx, 1000, since)
+		if err != nil {
+			slog.Warn("yuril query: GetTopAttackers failed", "error", err)
+		} else {
+			for _, a := range attackers {
+				if a.SourceIP == ip {
+					response["ip_activity"] = map[string]interface{}{
+						"attack_count": a.AttackCount,
+						"country":      a.Country,
+						"honeypots":    a.Honeypots,
+						"first_seen":   a.FirstSeen.UTC().Format(time.RFC3339),
+						"last_seen":    a.LastSeen.UTC().Format(time.RFC3339),
+					}
+					break
+				}
+			}
+		}
+	}
+
+	// IOC lookup across all types — a single query then in-memory filter
+	// avoids three round trips.
+	iocs, err := s.database.GetIOCs(ctx, database.IOCFilter{Limit: 5000})
+	if err != nil {
+		slog.Warn("yuril query: GetIOCs failed", "error", err)
+	} else {
+		var matches []*database.IOC
+		for _, ioc := range iocs {
+			switch {
+			case ip != "" && (ioc.SourceIP == ip || (ioc.Type == "ip" && ioc.Value == ip)):
+				matches = append(matches, ioc)
+			case hash != "" && ioc.Type == "hash" && strings.EqualFold(ioc.Value, hash):
+				matches = append(matches, ioc)
+			case domain != "" && ioc.Type == "domain" && strings.EqualFold(ioc.Value, domain):
+				matches = append(matches, ioc)
+			}
+		}
+		response["matching_iocs"] = matches
+		response["matching_iocs_count"] = len(matches)
+	}
+
+	s.sendJSON(w, response)
 }

@@ -55,7 +55,7 @@
 ### Key Advantages
 
 **Defense in Depth**  
-Every honeypot runs in its own sandbox with gVisor, Kata, or Firecracker isolation. Resource limits prevent container escape and resource exhaustion attacks.
+Every honeypot runs in its own sandbox. QPot detects and uses gVisor (`runsc`), Kata Containers (`kata-runtime`), or Firejail (`firejail`) when installed and falls back to the default container runtime otherwise. Resource limits (CPU, memory, PIDs, file descriptors) cap the blast radius of a container escape or resource-exhaustion attack.
 
 **Modern Data Architecture**  
 Optional ClickHouse backend provides columnar storage for fast analytics, while the ClickHouse-Kibana connector maintains compatibility with existing Kibana dashboards.
@@ -402,7 +402,7 @@ alerts:
 
 | Feature | Implementation | 
 |---------|---------------|
-| Sandboxing | gVisor, Kata, Firecracker| 
+| Sandboxing | gVisor, Kata Containers, Firejail (auto-detected)| 
 | Resource Limits | CPU, Memory, PIDs, FDs| 
 | Filesystem | Read-only root, tmpfs overlays| 
 | Capabilities | Drop ALL, minimal add| 
@@ -436,10 +436,15 @@ qpot docker ps                   # List all QPot Docker containers with status
 qpot docker logs <container>     # Tail logs for a container (default: 50 lines)
 qpot docker restart <container>  # Restart a specific QPot container
 
+# Database
+qpot db migrate status           # Show schema version and pending migrations
+qpot db migrate up [--to N]      # Apply pending migrations (or migrate to version N)
+qpot db migrate down [--yes]     # Roll back the most recent migration
+
 # Utilities
 qpot logs [honeypot]             # View logs
 qpot id [--instance <name>]      # Show QPot ID
-qpot config [--instance <name>]  # Edit configuration
+qpot config [--instance <name>]  # Open instance config in $EDITOR (--print to show path)
 ```
 
 ---
@@ -524,43 +529,102 @@ Add sensor nodes to the cluster:
 
 | Feature | Description |
 |---------|-------------|
-| Password Auth | All nodes require cluster ID + password to join |
-| Automatic Discovery | Nodes discover each other via gossip protocol |
-| Health Monitoring | Automatic detection of failed nodes |
-| Event Aggregation | Centralized view of attacks across all nodes |
-| Encrypted Communication | TLS encryption between cluster members |
-| Read Replicas | Database reads distributed across replicas |
+| Password Auth | All nodes require cluster ID + bcrypt-hashed password to join. Mutation endpoints (leave, gossip, intel) require the cluster password on every request. |
+| Automatic Discovery | Nodes discover each other via a custom gossip protocol. |
+| Health Monitoring | Failed gossip rounds escalate `healthy` → `suspect` → `failed` based on `suspicion_mult` and `gossip_interval`. |
+| Event Aggregation | Each node periodically shares its top source-IP intel with peers; the local manager merges peer reports for a unified attacker view. |
+| Encrypted Communication | TLS between cluster members (set `enable_encryption: true` plus `tls_cert_path`/`tls_key_path`; optional `ca_cert_path` for mutual-trust verification). |
+| Read Replicas | Database reads distributed across configured replicas (see `read_replicas` in the database config). |
 
 ---
 
 ## Integration with Yuril Security
 
-QPot is designed to work seamlessly with the Yuril Security ecosystem:
+QPot ships first-class integration points with the Yuril Security ecosystem.
 
-### YurilAntivirus Integration
+### YurilTracking — Outbound IOC Forwarding
 
-When YurilAntivirus detects a threat on an endpoint, it can:
-- Query QPot for related attack patterns
-- Trigger honeypot redeployment with updated signatures
-- Share IOCs with the honeypot deception layer
+Classified IOCs are pushed to a YurilTracking ingest endpoint as soon as the
+intelligence worker persists them. The forwarder batches up to 200 indicators
+per request, supports bearer-token auth, and handles TLS verification.
 
-### YurilTracking Integration
+Configure in the instance config:
 
-QPot feeds real-time attack data to YurilTracking:
-- Source IP geolocation and reputation
-- Attack patterns and TTPs
-- Correlated threat intelligence
-
-### Lockdown Integration
-
-Automatic system hardening when attacks are detected:
 ```yaml
-response:
-  on_attack_detected:
-    - notify_yuril_tracking
-    - trigger_lockdown_hardening
-    - isolate_attacker_ip
+yuril:
+  enabled: true
+  endpoint: https://tracking.yuril.local/api/v1/ingest/intel
+  api_key: ${YURIL_API_KEY}
+  source: qpot_honeypot     # producer label sent with every batch
+  batch_size: 200
+  timeout: 10s
+  verify_tls: true
 ```
+
+Source code: `internal/yuril/forwarder.go`. The wire format mirrors the
+`IngestIntelPayload` / `IntelItem` shape defined on the YurilAntivirus side.
+
+### YurilAntivirus — Bidirectional Intel API
+
+QPot exposes two endpoints for pushback from the AV side. Both require the
+QPot ID via the `X-QPot-ID` header (or `?qpot_id=` query string) when QPot ID
+auth is enabled.
+
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/api/yuril/intel` | POST | Push IOCs (ip / domain / url / hash) into QPot's IOC table. Inbound items are tagged `origin=yuril_inbound` so they're auditable. |
+| `/api/yuril/query` | GET  | Look up everything QPot knows about an indicator. Query params: `ip=`, `hash=`, `domain=` (at least one required). Returns recent attacker activity, matching IOCs, and counts. |
+
+Example: when YurilAntivirus quarantines a payload on an endpoint, it can
+push the file hash and the C2 domain back to QPot so future honeypot
+sessions hitting those indicators are tagged immediately.
+
+```bash
+curl -X POST https://qpot.local/api/yuril/intel \
+  -H "X-QPot-ID: qp_e2imzc43lisklwokb7vlspi7" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "batch_id": "yav-2024-04-28-001",
+    "source": "yuril_av_endpoint",
+    "items": [
+      {"type": "hash",   "value": "abc123...",       "severity": "high"},
+      {"type": "domain", "value": "evil.example.com","severity": "high"}
+    ]
+  }'
+```
+
+### Attack-Response Hooks
+
+QPot can run user-defined shell commands when an alert threshold trips —
+this is the real, generic equivalent of the previously-described "lockdown
+integration". Hooks fire from the same alert loop that drives webhooks,
+get a stable set of environment variables describing the trigger, and run
+under a per-action timeout (default 10s, hard cap 5 min).
+
+```yaml
+alerts:
+  enabled: true
+  threshold: 100              # events / minute to trigger
+
+response:
+  enabled: true
+  on_attack_detected:
+    - name: drop-top-attacker
+      command: 'iptables -I INPUT -s "$QPOT_TOP_SOURCE_IP" -j DROP'
+      timeout: 5s
+    - name: notify-yuril-tracking
+      command: 'curl -fsS -X POST -H "Content-Type: application/json" \
+                -d "{\"qpot_id\":\"$QPOT_ID\",\"events\":$QPOT_TOTAL_EVENTS}" \
+                https://tracking.yuril.local/api/v1/qpot/alert'
+    - name: trigger-lockdown
+      command: '/usr/local/bin/lockdown.sh'
+      timeout: 30s
+```
+
+Available environment variables: `QPOT_ID`, `QPOT_INSTANCE`, `QPOT_TOTAL_EVENTS`,
+`QPOT_TOP_SOURCE_IP`, `QPOT_TOP_HONEYPOT`. Commands run via `sh -c` on
+Linux/macOS and `cmd /C` on Windows; output is captured into the structured
+log so failed hooks show up next to the alert that fired them.
 
 ---
 

@@ -21,6 +21,7 @@ import (
 
 	"github.com/qpot/qpot/internal/cluster"
 	"github.com/qpot/qpot/internal/config"
+	"github.com/qpot/qpot/internal/database"
 	"github.com/qpot/qpot/internal/instance"
 	"github.com/qpot/qpot/internal/intelligence"
 	"github.com/qpot/qpot/internal/server"
@@ -89,6 +90,8 @@ Each QPot instance has a unique ID (qp_*) for tracking and authentication.`,
 	rootCmd.AddCommand(newIDCommand())
 	rootCmd.AddCommand(newClusterCommand())
 	rootCmd.AddCommand(newDockerCommand())
+	rootCmd.AddCommand(newConfigCommand())
+	rootCmd.AddCommand(newDBCommand())
 
 	return rootCmd.ExecuteContext(ctx)
 }
@@ -1376,4 +1379,301 @@ func newDockerRestartCommand() *cobra.Command {
 			return nil
 		},
 	}
+}
+
+// newConfigCommand opens the instance config file in the user's editor
+// or, with --print, just prints the absolute path. Useful for quickly
+// editing per-instance settings without remembering ~/.qpot/instances/...
+func newConfigCommand() *cobra.Command {
+	var (
+		instanceName string
+		printOnly    bool
+	)
+
+	cmd := &cobra.Command{
+		Use:   "config",
+		Short: "Open or show the instance configuration file",
+		Long: `Open the instance config file (config.yaml) in $EDITOR / $VISUAL.
+On Windows, falls back to notepad.exe; on Linux/macOS, falls back to nano,
+then vim, then vi. Use --print to just show the path without launching an editor.`,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if err := validateInstanceName(instanceName); err != nil {
+				return err
+			}
+
+			cfg, err := config.Load(instanceName)
+			if err != nil {
+				return fmt.Errorf("failed to load config: %w", err)
+			}
+
+			path := cfg.ConfigPath
+			if path == "" {
+				return fmt.Errorf("instance %q has no resolved config path", instanceName)
+			}
+
+			// Persist the file if it doesn't exist yet — config.Load returns
+			// a Default() in-memory config when the file is missing, but the
+			// editor needs an actual file to open. Save() also creates the
+			// parent directory.
+			if _, err := os.Stat(path); errors.Is(err, os.ErrNotExist) {
+				if err := config.Save(cfg); err != nil {
+					return fmt.Errorf("failed to materialise config file: %w", err)
+				}
+				slog.Info("Created default config", "path", path)
+			} else if err != nil {
+				return fmt.Errorf("failed to stat config file: %w", err)
+			}
+
+			if printOnly {
+				fmt.Println(path)
+				return nil
+			}
+
+			editor := pickEditor()
+			if editor == "" {
+				// No editor available — fall back to printing the path so the
+				// command still does something useful in headless contexts.
+				fmt.Printf("[INFO] No editor found in $EDITOR/$VISUAL/PATH; config is at:\n  %s\n", path)
+				return nil
+			}
+
+			editorCmd := exec.Command(editor, path)
+			editorCmd.Stdin = os.Stdin
+			editorCmd.Stdout = os.Stdout
+			editorCmd.Stderr = os.Stderr
+			if err := editorCmd.Run(); err != nil {
+				return fmt.Errorf("editor %q exited with error: %w", editor, err)
+			}
+			fmt.Printf("[OK] Saved %s\n", path)
+			return nil
+		},
+	}
+
+	cmd.Flags().StringVarP(&instanceName, "instance", "i", "default", "instance name")
+	cmd.Flags().BoolVar(&printOnly, "print", false, "print the config path and exit, do not open an editor")
+
+	return cmd
+}
+
+// pickEditor resolves an editor binary across platforms: prefers $VISUAL
+// then $EDITOR (POSIX convention), then a sensible OS-specific fallback
+// chain. Returns "" if nothing is available — Arch minimal installs may
+// have no editor in PATH at all, and headless servers commonly do too.
+func pickEditor() string {
+	for _, env := range []string{"VISUAL", "EDITOR"} {
+		if v := strings.TrimSpace(os.Getenv(env)); v != "" {
+			// $EDITOR may legitimately contain flags ("nano -w"). Use the
+			// command name to verify it resolves on PATH, but return the
+			// raw value so the user's flags are preserved — ah, but
+			// exec.Command needs argv0 separately. Keep it simple: only
+			// support a single binary. If users want flags they can set a
+			// wrapper script.
+			fields := strings.Fields(v)
+			if len(fields) > 0 {
+				if _, err := exec.LookPath(fields[0]); err == nil {
+					return fields[0]
+				}
+			}
+		}
+	}
+	var candidates []string
+	if runtime.GOOS == "windows" {
+		candidates = []string{"notepad.exe", "code", "vim", "nano"}
+	} else {
+		// Order tuned for Arch + Linux + macOS minimal installs.
+		candidates = []string{"nano", "vim", "vi", "code", "micro"}
+	}
+	for _, c := range candidates {
+		if _, err := exec.LookPath(c); err == nil {
+			return c
+		}
+	}
+	return ""
+}
+
+// newDBCommand wires the existing MigrationManager into the CLI so users
+// can inspect schema state, apply migrations, or roll back without
+// modifying auto_migrate in their config and restarting QPot.
+func newDBCommand() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "db",
+		Short: "Database management commands",
+		Long:  "Inspect schema versions and run/rollback migrations against the configured database backend.",
+	}
+
+	migrate := &cobra.Command{
+		Use:   "migrate",
+		Short: "Manage database schema migrations",
+	}
+	migrate.AddCommand(newDBMigrateStatusCommand())
+	migrate.AddCommand(newDBMigrateUpCommand())
+	migrate.AddCommand(newDBMigrateDownCommand())
+	cmd.AddCommand(migrate)
+
+	return cmd
+}
+
+// openMigrationManager loads the instance config, opens the database, and
+// returns a configured MigrationManager. Caller is responsible for closing
+// the database via the returned cleanup function.
+func openMigrationManager(ctx context.Context, instanceName string) (*database.MigrationManager, database.Database, func(), error) {
+	if err := validateInstanceName(instanceName); err != nil {
+		return nil, nil, nil, err
+	}
+
+	cfg, err := config.Load(instanceName)
+	if err != nil {
+		return nil, nil, nil, fmt.Errorf("failed to load config: %w", err)
+	}
+
+	db, err := database.New(&cfg.Database)
+	if err != nil {
+		return nil, nil, nil, fmt.Errorf("failed to construct database driver: %w", err)
+	}
+
+	connectCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
+	defer cancel()
+	if err := db.Connect(connectCtx); err != nil {
+		return nil, nil, nil, fmt.Errorf("failed to connect to database: %w", err)
+	}
+
+	mgr := database.NewMigrationManager(db)
+	for _, m := range database.GetCoreMigrations() {
+		mgr.Register(m)
+	}
+
+	cleanup := func() {
+		// Best-effort close; the Database interface does not expose Close
+		// uniformly so we rely on the driver's own connection lifetime.
+		_ = db
+	}
+	return mgr, db, cleanup, nil
+}
+
+func newDBMigrateStatusCommand() *cobra.Command {
+	var instanceName string
+	cmd := &cobra.Command{
+		Use:   "status",
+		Short: "Show migration status",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			ctx := cmd.Context()
+			mgr, _, cleanup, err := openMigrationManager(ctx, instanceName)
+			if err != nil {
+				return err
+			}
+			defer cleanup()
+
+			status, err := mgr.Status(ctx)
+			if err != nil {
+				return fmt.Errorf("failed to read migration status: %w", err)
+			}
+
+			fmt.Printf("Current schema version: %d\n", status.CurrentVersion)
+			fmt.Printf("Latest available:       %d\n", status.LatestVersion)
+			fmt.Printf("Pending:                %d\n", status.PendingCount)
+			fmt.Println()
+			fmt.Printf("%-8s %-32s %-10s\n", "VERSION", "NAME", "APPLIED")
+			fmt.Println(strings.Repeat("-", 55))
+			for _, m := range status.Migrations {
+				applied := "no"
+				if m.Applied {
+					applied = "yes"
+				}
+				fmt.Printf("%-8d %-32s %-10s\n", m.Version, m.Name, applied)
+			}
+			return nil
+		},
+	}
+	cmd.Flags().StringVarP(&instanceName, "instance", "i", "default", "instance name")
+	return cmd
+}
+
+func newDBMigrateUpCommand() *cobra.Command {
+	var (
+		instanceName  string
+		targetVersion int
+	)
+	cmd := &cobra.Command{
+		Use:   "up",
+		Short: "Apply pending migrations",
+		Long:  "Apply all pending migrations, or use --to <version> to migrate to a specific version.",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			ctx := cmd.Context()
+			mgr, _, cleanup, err := openMigrationManager(ctx, instanceName)
+			if err != nil {
+				return err
+			}
+			defer cleanup()
+
+			if targetVersion > 0 {
+				if err := mgr.MigrateToVersion(ctx, targetVersion); err != nil {
+					return fmt.Errorf("migrate to %d failed: %w", targetVersion, err)
+				}
+				fmt.Printf("[OK] Migrated to version %d\n", targetVersion)
+				return nil
+			}
+
+			if err := mgr.Migrate(ctx); err != nil {
+				return fmt.Errorf("migrate failed: %w", err)
+			}
+			current, err := mgr.GetCurrentVersion(ctx)
+			if err != nil {
+				return fmt.Errorf("failed to read current version: %w", err)
+			}
+			fmt.Printf("[OK] Schema is at version %d\n", current)
+			return nil
+		},
+	}
+	cmd.Flags().StringVarP(&instanceName, "instance", "i", "default", "instance name")
+	cmd.Flags().IntVar(&targetVersion, "to", 0, "migrate to a specific version (0 = latest)")
+	return cmd
+}
+
+func newDBMigrateDownCommand() *cobra.Command {
+	var (
+		instanceName string
+		yes          bool
+	)
+	cmd := &cobra.Command{
+		Use:   "down",
+		Short: "Roll back the most recent migration",
+		Long:  "Roll back the database schema by one migration. Pass --yes to skip the confirmation prompt.",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			ctx := cmd.Context()
+			mgr, _, cleanup, err := openMigrationManager(ctx, instanceName)
+			if err != nil {
+				return err
+			}
+			defer cleanup()
+
+			current, err := mgr.GetCurrentVersion(ctx)
+			if err != nil {
+				return fmt.Errorf("failed to read current version: %w", err)
+			}
+			if current == 0 {
+				fmt.Println("No migrations applied; nothing to roll back.")
+				return nil
+			}
+
+			if !yes {
+				fmt.Printf("Roll back version %d? This is destructive. [y/N]: ", current)
+				var resp string
+				fmt.Scanln(&resp)
+				if resp != "y" && resp != "Y" {
+					fmt.Println("Aborted.")
+					return nil
+				}
+			}
+
+			target := current - 1
+			if err := mgr.MigrateToVersion(ctx, target); err != nil {
+				return fmt.Errorf("rollback failed: %w", err)
+			}
+			fmt.Printf("[OK] Rolled back to version %d\n", target)
+			return nil
+		},
+	}
+	cmd.Flags().StringVarP(&instanceName, "instance", "i", "default", "instance name")
+	cmd.Flags().BoolVar(&yes, "yes", false, "skip confirmation prompt")
+	return cmd
 }
