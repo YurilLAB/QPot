@@ -1,7 +1,10 @@
 #!/bin/bash
 
 # Some global vars
-myCOMPOSEFILE="~/qpotce/docker-compose.yml"
+# Use ${HOME} explicitly: tilde expansion does NOT happen inside double
+# quotes, so the previous "~/qpotce/..." literally produced a path
+# starting with "~", which sed and docker compose then refused to find.
+myCOMPOSEFILE="${HOME}/qpotce/docker-compose.yml"
 myDATE=$(date +%Y%m%d%H%M)
 myRED="[0;31m"
 myGREEN="[0;32m"
@@ -93,7 +96,7 @@ function fuCHECK_VERSION () {
 		exit
 	    fi
 	  else
-	    echo "###### $myBLUE""Unable to determine version. Please run 'update.sh' from within 'qpotce/'.""$myWHITE"" [ $myRED""NOT OK""$myWHITE ]""
+	    echo "###### $myBLUE""Unable to determine version. Please run 'update.sh' from within 'qpotce/'.""$myWHITE"" [ $myRED""NOT OK""$myWHITE ]"
 	    exit
 	  fi
 	echo
@@ -158,7 +161,7 @@ function fuREMOVEOLDIMAGES () {
 }
 
 function fuPULLIMAGES {
-	docker compose -f ~/qpotce/docker-compose.yml pull
+	docker compose -f "${myCOMPOSEFILE}" pull
 }
 
 function fuUPDATER () {
@@ -181,7 +184,9 @@ function fuUPDATER () {
 }
 
 function fuRESTORE () {
-	if [ -f '~/qpotce/data/ews/conf/ews.cfg' ] && ! grep 'ews.cfg' $myCOMPOSEFILE > /dev/null; then
+	# Same tilde-in-quotes bug as above: use ${HOME} so the path actually
+	# resolves to the user's home directory.
+	if [ -f "${HOME}/qpotce/data/ews/conf/ews.cfg" ] && ! grep 'ews.cfg' "$myCOMPOSEFILE" > /dev/null; then
 	    echo
 	    echo "### Restoring volume mount for ews.cfg in qpot.yml"
 	    sed -i '/- ${QPOT_DATA_PATH}:\/data/a \ \ \ \ \ - ${QPOT_DATA_PATH}/ews/conf/ews.cfg:/opt/ewsposter/ews.cfg' $myCOMPOSEFILE

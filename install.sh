@@ -98,12 +98,14 @@ fi
 
 myINSTALL_NOTIFICATION="### Now installing required packages ..."
 myUSER=$(whoami)
-myQPOT_CONF_FILE="/home/${myUSER}/qpotce/.env"
+myQPOT_CONF_FILE="${HOME}/qpotce/.env"
 myPACKAGES_DEBIAN="ansible apache2-utils cracklib-runtime wget"
 myPACKAGES_FEDORA="ansible cracklib httpd-tools wget"
 myPACKAGES_ROCKY="ansible-core ansible-collection-redhat-rhel_mgmt epel-release cracklib httpd-tools wget"
-myPACKAGES_RHEL="ansible-core ansible-collection-redhat-rhel_mgmt cracklib httpd-tools wget"    
+myPACKAGES_RHEL="ansible-core ansible-collection-redhat-rhel_mgmt cracklib httpd-tools wget"
 myPACKAGES_OPENSUSE="ansible apache2-utils cracklib wget"
+# Arch uses apache (httpd-tools provides htpasswd) and cracklib from extra repo.
+myPACKAGES_ARCH="ansible apache cracklib wget"
 
 
 myINSTALLER=$(cat << "EOF"
@@ -124,12 +126,17 @@ if [ ${EUID} -eq 0 ];
 fi
 
 # Check if running on a supported distribution
-mySUPPORTED_DISTRIBUTIONS=("AlmaLinux" "Debian GNU/Linux" "Fedora Linux" "openSUSE Tumbleweed" "Raspbian GNU/Linux" "Red Hat Enterprise Linux" "Rocky Linux" "Ubuntu")
-myCURRENT_DISTRIBUTION=$(awk -F= '/^NAME/{print $2}' /etc/os-release | tr -d '"')
+mySUPPORTED_DISTRIBUTIONS=("AlmaLinux" "Arch Linux" "Debian GNU/Linux" "EndeavourOS" "Fedora Linux" "Manjaro Linux" "openSUSE Tumbleweed" "Raspbian GNU/Linux" "Red Hat Enterprise Linux" "Rocky Linux" "Ubuntu")
+if [ ! -r /etc/os-release ]; then
+  echo "### Cannot read /etc/os-release; unable to detect Linux distribution."
+  echo
+  exit 1
+fi
+myCURRENT_DISTRIBUTION=$(awk -F= '/^NAME=/{print $2}' /etc/os-release | tr -d '"')
 
 if [[ ! " ${mySUPPORTED_DISTRIBUTIONS[@]} " =~ " ${myCURRENT_DISTRIBUTION} " ]];
   then
-    echo "### Only the following distributions are supported: AlmaLinux, Fedora, Debian, openSUSE Tumbleweed, RHEL, Rocky Linux and Ubuntu."
+    echo "### Only the following distributions are supported: AlmaLinux, Arch Linux, EndeavourOS, Manjaro, Fedora, Debian, openSUSE Tumbleweed, RHEL, Rocky Linux and Ubuntu."
     echo "### Please follow the QPot documentation on how to run QPot on macOS, Windows and other currently unsupported platforms."
     echo
     exit 1
@@ -193,6 +200,21 @@ case ${myCURRENT_DISTRIBUTION} in
     echo "export ANSIBLE_PYTHON_INTERPRETER=/bin/python3" | sudo tee /etc/profile.d/ansible.sh >/dev/null
     source /etc/profile.d/ansible.sh
     ;;
+  "Arch Linux"|"Manjaro Linux"|"EndeavourOS")
+    echo
+    echo ${myINSTALL_NOTIFICATION}
+    echo
+    # pacman: refresh package databases and install non-interactively.
+    # --needed avoids reinstalling already-current packages.
+    if ! sudo pacman -Sy --noconfirm --needed ${myPACKAGES_ARCH}; then
+      echo "### Failed to install required packages via pacman. Aborting." >&2
+      exit 1
+    fi
+    # Arch ships Python 3 as /usr/bin/python; pin it for ansible-playbook.
+    echo "export ANSIBLE_PYTHON_INTERPRETER=/usr/bin/python" | sudo tee /etc/profile.d/ansible.sh >/dev/null
+    # shellcheck disable=SC1091
+    source /etc/profile.d/ansible.sh
+    ;;
   "AlmaLinux"|"Rocky Linux")
     echo
     echo ${myINSTALL_NOTIFICATION}
@@ -220,15 +242,15 @@ esac
 echo
 
 # Define tag for Ansible
-myANSIBLE_DISTRIBUTIONS=("Fedora Linux" "Debian GNU/Linux" "Raspbian GNU/Linux" "Rocky Linux" "Red Hat Enterprise Linux")
+myANSIBLE_DISTRIBUTIONS=("Fedora Linux" "Debian GNU/Linux" "Raspbian GNU/Linux" "Rocky Linux" "Red Hat Enterprise Linux" "Arch Linux" "Manjaro Linux" "EndeavourOS")
 if [[ "${myANSIBLE_DISTRIBUTIONS[@]}" =~ "${myCURRENT_DISTRIBUTION}" ]];
   then
     # special case AGAIN, /etc/os-release doesn't match Ansible's tagging conventions
-    if [[ "${myCURRENT_DISTRIBUTION}" == "Red Hat Enterprise Linux" ]]; then
-      myANSIBLE_TAG="RedHat"
-    else
-      myANSIBLE_TAG=$(echo ${myCURRENT_DISTRIBUTION} | cut -d " " -f 1)
-    fi
+    case "${myCURRENT_DISTRIBUTION}" in
+      "Red Hat Enterprise Linux") myANSIBLE_TAG="RedHat" ;;
+      "Arch Linux"|"Manjaro Linux"|"EndeavourOS") myANSIBLE_TAG="Archlinux" ;;
+      *) myANSIBLE_TAG=$(echo ${myCURRENT_DISTRIBUTION} | cut -d " " -f 1) ;;
+    esac
   else
     myANSIBLE_TAG=${myCURRENT_DISTRIBUTION}
 fi
@@ -271,22 +293,20 @@ if [ "$myANSIBLE_TAG" = "Debian" ];
 fi
 
 # Run Ansible Playbook
-echo "### Now running T-Pot Ansible Installation Playbook ..."
+echo "### Now running QPot Ansible Installation Playbook ..."
 echo
-rm ${HOME}/install_tpot.log > /dev/null 2>&1
-ANSIBLE_LOG_PATH=${HOME}/install_tpot.log ansible-playbook ${myANSIBLE_TPOT_PLAYBOOK} -i 127.0.0.1, -c local --tags "${myANSIBLE_TAG}" ${myANSIBLE_BECOME_OPTION}
-
-# Something went wrong
-if [ ! $? -eq 0 ];
-  then
+rm -f "${HOME}/install_qpot.log" > /dev/null 2>&1
+# Note: variable is myANSIBLE_QPOT_PLAYBOOK (set above); the previous spelling
+# myANSIBLE_TPOT_PLAYBOOK was a leftover from the T-Pot fork and produced an
+# empty playbook path that silently broke installation on every distro.
+if ! ANSIBLE_LOG_PATH="${HOME}/install_qpot.log" ansible-playbook "${myANSIBLE_QPOT_PLAYBOOK}" -i 127.0.0.1, -c local --tags "${myANSIBLE_TAG}" ${myANSIBLE_BECOME_OPTION}; then
     echo "### Something went wrong with the Playbook, please review the output and / or install_qpot.log for clues."
     echo "### Aborting."
     echo
     exit 1
-  else
-    echo "### Playbook was successful."
-    echo
 fi
+echo "### Playbook was successful."
+echo
 
 # Ask for QPot Installation Type
 echo
@@ -403,7 +423,22 @@ if [ "${myQPOT_TYPE}" == "HIVE" ];
         myWEB_PW="pass1"
         myWEB_PW2="pass2"
       fi
-      mySECURE=$(printf "%s" "$myWEB_PW" | /usr/sbin/cracklib-check | grep -c "OK")
+      # cracklib-check lives in /usr/sbin on Debian/Ubuntu/Fedora but in
+      # /usr/bin on Arch and openSUSE; rely on PATH and fall back to the
+      # absolute Debian-style path if the bare command is not found.
+      if command -v cracklib-check >/dev/null 2>&1; then
+        myCRACKLIB_CHECK=cracklib-check
+      elif [ -x /usr/sbin/cracklib-check ]; then
+        myCRACKLIB_CHECK=/usr/sbin/cracklib-check
+      else
+        echo "### Warning: cracklib-check not found, accepting password without strength check." >&2
+        myCRACKLIB_CHECK=""
+      fi
+      if [ -n "$myCRACKLIB_CHECK" ]; then
+        mySECURE=$(printf "%s" "$myWEB_PW" | "$myCRACKLIB_CHECK" | grep -c "OK")
+      else
+        mySECURE=1
+      fi
       if [ "$mySECURE" == "0" ] && [ "$myWEB_PW" == "$myWEB_PW2" ]; then
         while [[ ! "${myOK}" =~ [YyNn] ]]; do
           read -rp "### Keep insecure password? (y/n) " myOK
@@ -430,15 +465,28 @@ fi
 
 # Pull docker images
 echo "### Now pulling images ..."
-sudo docker compose -f /home/${myUSER}/qpotce/docker-compose.yml pull
+sudo docker compose -f "${HOME}/qpotce/docker-compose.yml" pull
 echo
 
 # Show running services
 echo "### Please review for possible honeypot port conflicts."
 echo "### While SSH is taken care of, other services such as"
-echo "### SMTP, HTTP, etc. might prevent T-Pot from starting."
+echo "### SMTP, HTTP, etc. might prevent QPot from starting."
 echo
-sudo grc netstat -tulpen
+# `grc` (generic colouriser) is optional and not on Arch by default.
+# `netstat` itself is provided by net-tools, which is also optional;
+# fall back to `ss` from iproute2 which is universally available.
+if command -v netstat >/dev/null 2>&1; then
+  if command -v grc >/dev/null 2>&1; then
+    sudo grc netstat -tulpen
+  else
+    sudo netstat -tulpen
+  fi
+elif command -v ss >/dev/null 2>&1; then
+  sudo ss -tulpen
+else
+  echo "### Warning: neither netstat nor ss available; skipping port check." >&2
+fi
 echo
 
 # Done

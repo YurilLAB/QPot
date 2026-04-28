@@ -1171,37 +1171,76 @@ func (m *Manager) LoadCluster() (*Cluster, error) {
 	return &cluster, nil
 }
 
-// LeaveCluster removes this node from the cluster
+// LeaveCluster removes this node from the cluster.
+//
+// Implementation note: we used to hold m.mu (write lock) for the entire
+// duration of the leave-notification fan-out, which meant a single dead
+// peer could block every other Manager method for up to 3 s × N peers.
+// Take a snapshot of the data we need under the lock, release it, do the
+// network I/O, then take the lock again to mutate state.
 func (m *Manager) LeaveCluster() error {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-
+	m.mu.RLock()
 	if m.cluster == nil {
+		m.mu.RUnlock()
 		return fmt.Errorf("not in a cluster")
 	}
-
-	// Notify other nodes with a short timeout so a dead peer doesn't block.
-	leaveClient := &http.Client{Timeout: 3 * time.Second}
+	if m.cluster.LocalNode == nil {
+		m.mu.RUnlock()
+		return fmt.Errorf("local node not initialized")
+	}
 	localNodeID := m.cluster.LocalNode.ID
-	leaveBody, _ := json.Marshal(map[string]string{"node_id": localNodeID})
+	type peerInfo struct {
+		id      string
+		address string
+		port    int
+	}
+	peers := make([]peerInfo, 0, len(m.cluster.Nodes))
 	for _, node := range m.cluster.Nodes {
 		if node.ID == localNodeID {
 			continue
 		}
-		url := fmt.Sprintf("http://%s:%d/api/v1/cluster/leave", node.Address, node.Port)
-		resp, err := leaveClient.Post(url, "application/json", bytes.NewReader(leaveBody))
+		peers = append(peers, peerInfo{id: node.ID, address: node.Address, port: node.Port})
+	}
+	plainPwd := m.plainPassword
+	m.mu.RUnlock()
+
+	// Notify other nodes with a short timeout so a dead peer doesn't block.
+	leaveClient := &http.Client{Timeout: 3 * time.Second}
+	leaveBody, err := json.Marshal(map[string]string{"node_id": localNodeID})
+	if err != nil {
+		return fmt.Errorf("marshal leave body: %w", err)
+	}
+	for _, peer := range peers {
+		url := fmt.Sprintf("http://%s:%d/api/v1/cluster/leave", peer.address, peer.port)
+		req, err := http.NewRequest(http.MethodPost, url, bytes.NewReader(leaveBody))
 		if err != nil {
-			slog.Debug("LeaveCluster: failed to notify peer", "node_id", node.ID, "error", err)
+			slog.Debug("LeaveCluster: build request failed", "node_id", peer.id, "error", err)
+			continue
+		}
+		req.Header.Set("Content-Type", "application/json")
+		// The /leave endpoint is now password-authenticated; without this
+		// header peers reject the notification and silently keep the node
+		// in their member list as 'suspect'.
+		if plainPwd != "" {
+			req.Header.Set("X-Cluster-Password", plainPwd)
+		}
+		resp, err := leaveClient.Do(req)
+		if err != nil {
+			slog.Debug("LeaveCluster: failed to notify peer", "node_id", peer.id, "error", err)
 			continue
 		}
 		resp.Body.Close()
 	}
 
-	// Remove cluster file
 	clusterPath := filepath.Join(m.dataPath, "cluster.json")
-	os.Remove(clusterPath)
+	if err := os.Remove(clusterPath); err != nil && !os.IsNotExist(err) {
+		slog.Warn("LeaveCluster: failed to remove cluster file", "path", clusterPath, "error", err)
+	}
 
+	m.mu.Lock()
 	m.cluster = nil
+	m.plainPassword = ""
+	m.mu.Unlock()
 	slog.Info("Left cluster")
 	return nil
 }
@@ -1226,10 +1265,16 @@ func generateID(prefix string, length int) (string, error) {
 }
 
 // hashPassword hashes a password using bcrypt with a random salt.
+// On a bcrypt failure (only realistically possible if the password is
+// longer than 72 bytes — bcrypt's hard limit) we log the error and return
+// the literal "invalid", which is not a valid bcrypt hash and will
+// therefore reject every subsequent password check. Without the log line
+// these failures were impossible to diagnose.
 func hashPassword(password string) string {
 	hash, err := bcrypt.GenerateFromPassword([]byte(password), bcrypt.DefaultCost)
 	if err != nil {
-		// Fall back to a hex-encoded error marker that will never match
+		slog.Error("Failed to bcrypt cluster password (length limit exceeded?)",
+			"password_len", len(password), "error", err)
 		return "invalid"
 	}
 	return string(hash)

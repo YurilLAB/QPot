@@ -4,6 +4,7 @@ package security
 import (
 	cryptorand "crypto/rand"
 	"fmt"
+	"log/slog"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -114,9 +115,13 @@ func (sb *Sandbox) GetDockerSecurityOptions(honeypot string, hpConfig config.Hon
 		opts = append(opts, fmt.Sprintf("--pids-limit=%d", limits.MaxPids))
 	}
 	if hpConfig.Resources.MaxFileDescriptors > 0 {
-		opts = append(opts, fmt.Sprintf("--ulimit nofile=%d:%d", 
-			hpConfig.Resources.MaxFileDescriptors, 
-			hpConfig.Resources.MaxFileDescriptors))
+		// docker expects --ulimit and its value as two separate argv entries;
+		// the previous single-string form ("--ulimit nofile=N:N") was passed
+		// as one argv element and silently rejected by docker.
+		opts = append(opts, "--ulimit",
+			fmt.Sprintf("nofile=%d:%d",
+				hpConfig.Resources.MaxFileDescriptors,
+				hpConfig.Resources.MaxFileDescriptors))
 	}
 
 	// Memory protections
@@ -305,16 +310,22 @@ func (sb *Sandbox) GetComposeSecurityExtensions(honeypot string, hpConfig config
 	return ext
 }
 
-// getSeccompProfile returns path to custom seccomp profile
+// getSeccompProfile returns path to custom seccomp profile.
+// On a write failure the empty string is returned so the caller can fall
+// back to the runtime default profile rather than handing docker a path
+// that doesn't exist (which would refuse to start the container).
 func (sb *Sandbox) getSeccompProfile(honeypot string) string {
 	if sb.config.RuntimeSecurity.SeccompProfile == "default" {
 		return "default.json"
 	}
-	
-	// Generate custom profile for this honeypot
+
 	profilePath := filepath.Join(os.TempDir(), fmt.Sprintf("qpot-seccomp-%s.json", honeypot))
 	profile := sb.generateSeccompProfile(honeypot)
-	os.WriteFile(profilePath, []byte(profile), 0644)
+	if err := os.WriteFile(profilePath, []byte(profile), 0640); err != nil {
+		slog.Warn("Failed to write seccomp profile, falling back to docker default",
+			"honeypot", honeypot, "path", profilePath, "error", err)
+		return ""
+	}
 	return profilePath
 }
 

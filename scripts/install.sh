@@ -48,22 +48,29 @@ detect_os() {
 
 check_prerequisites() {
     log_info "Checking prerequisites..."
-    
+
     # Check Docker
     if ! command -v docker &> /dev/null; then
         log_error "Docker is not installed. Please install Docker first:"
         echo "  https://docs.docker.com/get-docker/"
+        # Distro-specific hint for Arch (most users will install from extra).
+        if [ -r /etc/os-release ] && grep -q '^ID=arch' /etc/os-release; then
+            echo "  On Arch: sudo pacman -S docker docker-compose && sudo systemctl enable --now docker"
+        fi
         exit 1
     fi
-    
-    # Check Docker Compose
+
+    # Check Docker Compose. v2 is shipped as the `docker compose` subcommand
+    # on every supported distro now, but Arch users may still have v1
+    # (`docker-compose`) from an older AUR package; accept either.
     if ! docker compose version &> /dev/null && ! docker-compose --version &> /dev/null; then
         log_error "Docker Compose is not installed."
+        echo "  On Arch: sudo pacman -S docker-compose"
         exit 1
     fi
-    
+
     log_success "Docker found"
-    
+
     # Check if user is in docker group
     if ! groups | grep -q '\bdocker\b'; then
         log_warn "User is not in the 'docker' group. You may need to run with sudo or:"

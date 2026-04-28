@@ -43,6 +43,20 @@ type Config struct {
 	Stealth      StealthConfig     `yaml:"stealth"`
 	Alerts       AlertConfig       `yaml:"alerts"`
 	Intelligence IntelligenceConfig `yaml:"intelligence"`
+	Yuril        YurilConfig        `yaml:"yuril"`
+}
+
+// YurilConfig controls the forwarder that pushes classified IOCs into the
+// Yuril Security Suite. When Enabled is false the forwarder is never
+// constructed and QPot runs standalone.
+type YurilConfig struct {
+	Enabled    bool          `yaml:"enabled"`
+	Endpoint   string        `yaml:"endpoint"`     // e.g. https://tracking.local:8443/api/v1/ingest/intel
+	APIKey     string        `yaml:"api_key"`      // bearer token for the endpoint
+	Source     string        `yaml:"source"`       // producer label; defaults to "qpot_honeypot"
+	BatchSize  int           `yaml:"batch_size"`   // max indicators per POST; defaults to 200
+	Timeout    time.Duration `yaml:"timeout"`      // HTTP timeout; defaults to 10s
+	VerifyTLS  bool          `yaml:"verify_tls"`   // defaults to true
 }
 
 // DatabaseConfig contains database connection settings
@@ -222,9 +236,32 @@ var (
 	configs  = make(map[string]*Config)
 )
 
-// Default returns a default configuration for a new instance
+// userHomeOrFallback returns the user's home directory. When that lookup
+// fails, it falls back to UserConfigDir (XDG-aware on Linux,
+// %AppData% on Windows, ~/Library on macOS) and finally to the current
+// working directory. We never want to return "" because that produces
+// relative paths in DataPath, which then refuse to bind-mount in Docker.
+func userHomeOrFallback() string {
+	if home, err := os.UserHomeDir(); err == nil && home != "" {
+		return home
+	}
+	if cfgDir, err := os.UserConfigDir(); err == nil && cfgDir != "" {
+		return cfgDir
+	}
+	if cwd, err := os.Getwd(); err == nil && cwd != "" {
+		return cwd
+	}
+	return "."
+}
+
+// Default returns a default configuration for a new instance.
+// If os.UserHomeDir fails (e.g. on stripped-down containers where neither
+// $HOME nor /etc/passwd is set) we fall back to the OS-specific user
+// config directory, and ultimately to the current working directory, so
+// the returned Config always has an absolute, usable DataPath rather
+// than relative paths under "/.qpot/...".
 func Default(instanceName string) *Config {
-	homeDir, _ := os.UserHomeDir()
+	homeDir := userHomeOrFallback()
 	dataPath := filepath.Join(homeDir, ".qpot", "instances", instanceName)
 	configPath := filepath.Join(dataPath, "config.yaml")
 

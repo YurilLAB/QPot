@@ -4,8 +4,11 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
+	"net"
+	"net/http"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -47,7 +50,10 @@ func main() {
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
 	slog.SetDefault(logger)
 
-	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	// On Windows, only os.Interrupt is reliably delivered; SIGTERM is defined
+	// in syscall but never raised by the OS. Listening for both keeps the
+	// behaviour identical on Linux/macOS while still working on Windows.
+	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
 
 	if err := run(ctx); err != nil {
@@ -152,7 +158,9 @@ func newUpCommand() *cobra.Command {
 					slog.Warn("Failed to create web server", "error", err)
 				} else {
 					go func() {
-						if err := webSrv.Start(ctx); err != nil && err.Error() != "http: Server closed" {
+						// http.ErrServerClosed is the expected sentinel on
+						// graceful shutdown; anything else is a real error.
+						if err := webSrv.Start(ctx); err != nil && !errors.Is(err, http.ErrServerClosed) {
 							slog.Error("Web server error", "error", err)
 						}
 					}()
@@ -562,9 +570,23 @@ func showQPotIDPopup(id string, webPort int) {
 	title := "QPot Started"
 	message := fmt.Sprintf("Your QPot ID:\n%s\n\nWeb UI: http://localhost:%d\n\nSave this ID to track your honeypot!", id, webPort)
 
+	// id is generated from base32 ([a-z2-7] + the literal "qp_" prefix), so
+	// it cannot break out of any of the script literals below. webPort is an
+	// int. title is a constant. The popup is best-effort: console output
+	// (printed unconditionally below) is the source of truth.
+	tryStart := func(name string, args ...string) {
+		c := exec.Command(name, args...)
+		if err := c.Start(); err != nil {
+			slog.Debug("popup helper failed", "tool", name, "error", err)
+			return
+		}
+		// Reap the child so it doesn't linger as a zombie on Linux/macOS
+		// once the user dismisses the dialog.
+		go func() { _ = c.Wait() }()
+	}
+
 	switch runtime.GOOS {
 	case "windows":
-		// Windows notification using PowerShell
 		psCmd := fmt.Sprintf(`
 Add-Type -AssemblyName System.Windows.Forms
 $notify = New-Object System.Windows.Forms.NotifyIcon
@@ -577,38 +599,44 @@ Web UI: http://localhost:%d
 "@
 $notify.ShowBalloonTip(10000)
 `, title, id, webPort)
-		exec.Command("powershell", "-Command", psCmd).Start()
+		// Prefer pwsh (PowerShell 7+, the default on modern installs); fall
+		// back to legacy Windows PowerShell if it isn't on PATH.
+		shell := "powershell"
+		if _, err := exec.LookPath("pwsh"); err == nil {
+			shell = "pwsh"
+		}
+		tryStart(shell, "-NoProfile", "-Command", psCmd)
 
-		// Also show message box for persistence
 		msgCmd := fmt.Sprintf(`Add-Type -AssemblyName System.Windows.Forms; [System.Windows.Forms.MessageBox]::Show("QPot ID: %s`+"\n"+`Web UI: http://localhost:%d", "QPot Started", "OK", "Information")`, id, webPort)
 		go func() {
 			time.Sleep(500 * time.Millisecond)
-			exec.Command("powershell", "-Command", msgCmd).Start()
+			tryStart(shell, "-NoProfile", "-Command", msgCmd)
 		}()
 
 	case "darwin":
-		// macOS notification using osascript
 		script := fmt.Sprintf(`display notification "QPot ID: %s" with title "%s" subtitle "Web UI: http://localhost:%d"`, id, title, webPort)
-		exec.Command("osascript", "-e", script).Start()
+		tryStart("osascript", "-e", script)
 
-		// Also use alert
 		alertScript := fmt.Sprintf(`display alert "%s" message "QPot ID: %s\n\nWeb UI: http://localhost:%d\n\nSave this ID to access your honeypot!" as informational buttons {"Copy ID", "OK"} default button "OK"`, title, id, webPort)
 		go func() {
 			time.Sleep(500 * time.Millisecond)
-			exec.Command("osascript", "-e", alertScript).Start()
+			tryStart("osascript", "-e", alertScript)
 		}()
 
 	default:
-		// Linux - try multiple notification methods
-		// notify-send
-		exec.Command("notify-send", "-t", "10000", title, message).Start()
-		
-		// zenity
-		go func() {
-			time.Sleep(500 * time.Millisecond)
+		// Linux: try notify-send, then zenity, then kdialog. Headless or
+		// minimal installs (common on Arch) may have none of these — that's
+		// fine, the console box below still shows the ID.
+		switch {
+		case hasBinary("notify-send"):
+			tryStart("notify-send", "-t", "10000", title, message)
+		case hasBinary("zenity"):
 			zenityMsg := fmt.Sprintf("<big><b>Your QPot ID</b></big>\n\n<span font='monospace'>%s</span>\n\nWeb UI: http://localhost:%d\n\nSave this ID to track your honeypot!", id, webPort)
-			exec.Command("zenity", "--info", "--title=QPot Started", "--width=400", "--text="+zenityMsg).Start()
-		}()
+			tryStart("zenity", "--info", "--title=QPot Started", "--width=400", "--text="+zenityMsg)
+		case hasBinary("kdialog"):
+			tryStart("kdialog", "--title", "QPot Started",
+				"--msgbox", fmt.Sprintf("QPot ID: %s\nWeb UI: http://localhost:%d", id, webPort))
+		}
 	}
 
 	// Also print to console
@@ -725,7 +753,11 @@ func newClusterInitCommand() *cobra.Command {
 	cmd.Flags().StringVarP(&password, "password", "p", "", "Cluster password (min 8 chars)")
 	cmd.Flags().StringVar(&bindAddr, "bind-addr", "0.0.0.0", "Bind address for cluster communication")
 	cmd.Flags().IntVar(&bindPort, "bind-port", cluster.DefaultClusterPort, "Bind port for cluster communication")
-	cmd.MarkFlagRequired("name")
+	if err := cmd.MarkFlagRequired("name"); err != nil {
+		// Marking a known flag as required can only fail when the flag does
+		// not exist, which is a programmer error here.
+		panic(fmt.Errorf("cluster init: mark --name required: %w", err))
+	}
 
 	return cmd
 }
@@ -836,8 +868,12 @@ func newClusterJoinCommand() *cobra.Command {
 	cmd.Flags().IntVar(&nodePort, "node-port", cluster.DefaultClusterPort, "Port for cluster communication")
 	cmd.Flags().StringVar(&qpotID, "qpot-id", "", "QPot ID (auto-detected if not set)")
 	cmd.Flags().StringVar(&instanceName, "instance", "default", "QPot instance name")
-	cmd.MarkFlagRequired("id")
-	cmd.MarkFlagRequired("seed")
+	if err := cmd.MarkFlagRequired("id"); err != nil {
+		panic(fmt.Errorf("cluster join: mark --id required: %w", err))
+	}
+	if err := cmd.MarkFlagRequired("seed"); err != nil {
+		panic(fmt.Errorf("cluster join: mark --seed required: %w", err))
+	}
 
 	return cmd
 }
@@ -1015,17 +1051,65 @@ func newClusterNodesCommand() *cobra.Command {
 	return cmd
 }
 
-// getLocalIP attempts to get the local IP address
+// hasBinary reports whether name resolves on PATH. Used for best-effort
+// detection of optional desktop notification helpers.
+func hasBinary(name string) bool {
+	_, err := exec.LookPath(name)
+	return err == nil
+}
+
+// getLocalIP attempts to get the host's primary outbound IPv4 address.
+// It walks every up, non-loopback interface and returns the first usable
+// IPv4 it finds. Falls back to 127.0.0.1 only when nothing better is
+// available — that previous unconditional return broke cluster join's
+// auto-detection.
 func getLocalIP() string {
-	// This is a simplified implementation
-	// In production, use proper interface enumeration
+	ifaces, err := net.Interfaces()
+	if err != nil {
+		return "127.0.0.1"
+	}
+	for _, iface := range ifaces {
+		if iface.Flags&net.FlagUp == 0 || iface.Flags&net.FlagLoopback != 0 {
+			continue
+		}
+		addrs, err := iface.Addrs()
+		if err != nil {
+			continue
+		}
+		for _, addr := range addrs {
+			var ip net.IP
+			switch v := addr.(type) {
+			case *net.IPNet:
+				ip = v.IP
+			case *net.IPAddr:
+				ip = v.IP
+			}
+			if ip == nil || ip.IsLoopback() || ip.IsLinkLocalUnicast() {
+				continue
+			}
+			ip4 := ip.To4()
+			if ip4 == nil {
+				continue
+			}
+			return ip4.String()
+		}
+	}
 	return "127.0.0.1"
 }
 
-// truncate truncates a string to max length
+// truncate shortens s to at most maxLen characters, appending "..." when
+// truncated. Safely handles maxLen <= 3 (no room for the ellipsis) and
+// non-positive values, both of which previously caused a panic from a
+// negative slice index.
 func truncate(s string, maxLen int) string {
+	if maxLen <= 0 {
+		return ""
+	}
 	if len(s) <= maxLen {
 		return s
+	}
+	if maxLen <= 3 {
+		return s[:maxLen]
 	}
 	return s[:maxLen-3] + "..."
 }
@@ -1067,11 +1151,19 @@ func runDockerPS(ctx context.Context) ([]dockerContainerInfo, error) {
 		"--format", "{{.ID}}\t{{.Image}}\t{{.Status}}\t{{.Ports}}\t{{.Names}}",
 	}
 	cmd := exec.CommandContext(ctx, "docker", args...)
+	// Capture stderr alongside stdout so a "permission denied on docker.sock"
+	// or "daemon not running" message reaches the user instead of being
+	// dropped by exec.Cmd.Output().
+	var stderr strings.Builder
+	cmd.Stderr = &stderr
 	out, err := cmd.Output()
 	if err != nil {
-		// If docker is not installed, exec.Error with "executable file not found"
 		if isDockerNotFound(err) {
 			return nil, fmt.Errorf("docker not found: install Docker to use this command")
+		}
+		stderrMsg := strings.TrimSpace(stderr.String())
+		if stderrMsg != "" {
+			return nil, fmt.Errorf("docker ps failed: %w: %s", err, stderrMsg)
 		}
 		return nil, fmt.Errorf("docker ps failed: %w", err)
 	}
@@ -1107,15 +1199,25 @@ func runDockerPS(ctx context.Context) ([]dockerContainerInfo, error) {
 	return containers, nil
 }
 
-// isDockerNotFound returns true when the error indicates docker is not installed.
+// isDockerNotFound returns true when the error indicates the docker binary
+// is missing from PATH. We prefer the typed sentinel exec.ErrNotFound (set
+// by exec.LookPath / Cmd.Start when the binary cannot be resolved) over a
+// substring match, because a real docker error such as
+// "Error response from daemon: No such image" used to false-positive here
+// and report "docker not found" to the user.
 func isDockerNotFound(err error) bool {
 	if err == nil {
 		return false
 	}
-	msg := strings.ToLower(err.Error())
-	return strings.Contains(msg, "executable file not found") ||
-		strings.Contains(msg, "not found") ||
-		strings.Contains(msg, "no such file")
+	if errors.Is(err, exec.ErrNotFound) {
+		return true
+	}
+	// On Windows the error from a missing binary surfaces as os.PathError
+	// wrapping ERROR_FILE_NOT_FOUND; check that explicitly.
+	if errors.Is(err, os.ErrNotExist) {
+		return true
+	}
+	return false
 }
 
 // deriveHoneypot extracts the honeypot name from a QPot container name.
