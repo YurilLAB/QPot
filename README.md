@@ -441,6 +441,11 @@ qpot db migrate status           # Show schema version and pending migrations
 qpot db migrate up [--to N]      # Apply pending migrations (or migrate to version N)
 qpot db migrate down [--yes]     # Roll back the most recent migration
 
+# Yuril Security Suite integration
+qpot yuril setup                 # Interactive setup (endpoint, API key, TLS)
+qpot yuril test                  # Validate connectivity end-to-end
+qpot yuril status                # Show config and live forwarder stats
+
 # Utilities
 qpot logs [honeypot]             # View logs
 qpot id [--instance <name>]      # Show QPot ID
@@ -542,18 +547,43 @@ Add sensor nodes to the cluster:
 
 QPot ships first-class integration points with the Yuril Security ecosystem.
 
+### Quick setup
+
+```bash
+# Interactive: prompts for endpoint, API key (hidden), source label, TLS
+qpot yuril setup --instance default
+
+# Validate the integration end-to-end (auth + TLS + reachability)
+qpot yuril test --instance default
+
+# Show config and live forwarder stats from the running server
+qpot yuril status --instance default
+```
+
+`qpot yuril test` submits an empty test batch against the configured
+endpoint, distinguishes auth / TLS / network failures in its output, and
+returns a non-zero exit code on failure so you can wire it into CI.
+
 ### YurilTracking — Outbound IOC Forwarding
 
 Classified IOCs are pushed to a YurilTracking ingest endpoint as soon as the
 intelligence worker persists them. The forwarder batches up to 200 indicators
-per request, supports bearer-token auth, and handles TLS verification.
+per request, supports bearer-token auth, retries transient failures with
+exponential backoff (max 3 retries), refuses to retry 4xx responses (so a
+misconfigured request doesn't drown the receiver), and tracks
+`batches_sent` / `batches_failed` / `last_success_at` / `last_error` counters
+that are visible via `qpot yuril status` and `/api/yuril/health`.
 
-Configure in the instance config:
+Both directions send and accept an `X-QPot-API-Version` header so the wire
+format can evolve safely; mismatched versions return 400 instead of being
+silently misinterpreted.
+
+Configure manually (or use `qpot yuril setup`):
 
 ```yaml
 yuril:
   enabled: true
-  endpoint: https://tracking.yuril.local/api/v1/ingest/intel
+  endpoint: https://tracking.yuril.local/api/v1/ingest/intel  # replace with your URL
   api_key: ${YURIL_API_KEY}
   source: qpot_honeypot     # producer label sent with every batch
   batch_size: 200
@@ -572,8 +602,9 @@ auth is enabled.
 
 | Endpoint | Method | Description |
 |----------|--------|-------------|
-| `/api/yuril/intel` | POST | Push IOCs (ip / domain / url / hash) into QPot's IOC table. Inbound items are tagged `origin=yuril_inbound` so they're auditable. |
-| `/api/yuril/query` | GET  | Look up everything QPot knows about an indicator. Query params: `ip=`, `hash=`, `domain=` (at least one required). Returns recent attacker activity, matching IOCs, and counts. |
+| `/api/yuril/health` | GET  | Liveness probe. Returns QPot ID, instance, API version, database reachability, intelligence subsystem state, and live forwarder stats. The response also sets `X-QPot-API-Version`; if the caller sends a mismatched version, it gets a 400 instead of an ambiguous payload. |
+| `/api/yuril/intel`  | POST | Push IOCs (ip / domain / url / hash) into QPot's IOC table. Inbound items are tagged `origin=yuril_inbound` so they're auditable. Body capped at 1 MiB. |
+| `/api/yuril/query`  | GET  | Look up everything QPot knows about an indicator. Query params: `ip=`, `hash=`, `domain=` (at least one required). Returns recent attacker activity, matching IOCs, and counts. |
 
 Example: when YurilAntivirus quarantines a payload on an endpoint, it can
 push the file hash and the C2 domain back to QPot so future honeypot

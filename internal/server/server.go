@@ -30,14 +30,18 @@ var staticFS embed.FS
 
 // Server represents the web server
 type Server struct {
-	config     *config.Config
-	manager    *instance.Manager
-	database   database.Database
-	mux        *http.ServeMux
-	classifier *intelligence.Classifier
-	worker     *intelligence.Worker
-	ttpBuilder *intelligence.TTPBuilder
+	config      *config.Config
+	manager     *instance.Manager
+	database    database.Database
+	mux         *http.ServeMux
+	classifier  *intelligence.Classifier
+	worker      *intelligence.Worker
+	ttpBuilder  *intelligence.TTPBuilder
 	attckLoader *intelligence.ATTCKLoader
+	// forwarder is the configured Yuril outbound forwarder, kept here so
+	// the /api/yuril/health endpoint and `qpot yuril status` can expose
+	// its activity counters. nil when Yuril forwarding is disabled.
+	forwarder *yuril.Forwarder
 }
 
 // New creates a new web server.
@@ -90,6 +94,7 @@ func New(cfg *config.Config) (*Server, error) {
 				slog.Warn("Yuril forwarder disabled due to config error", "error", err)
 			} else if fwd != nil {
 				w = w.WithForwarder(fwd)
+				s.forwarder = fwd
 				slog.Info("Yuril forwarder enabled", "endpoint", cfg.Yuril.Endpoint)
 			}
 			s.worker = w
@@ -120,11 +125,12 @@ func (s *Server) setupRoutes() {
 	s.mux.HandleFunc("/api/intelligence", s.withQPotAuth(s.handleIntelligenceSummary))
 
 	// Yuril Security Suite integration routes — bidirectional intel sharing
-	// with YurilAntivirus / YurilTracking. Both endpoints require the QPot
+	// with YurilAntivirus / YurilTracking. All endpoints require the QPot
 	// ID so an attacker who somehow reaches the API cannot poison the IOC
 	// store or scrape attacker data.
 	s.mux.HandleFunc("/api/yuril/intel", s.withQPotAuth(s.handleYurilIntel))
 	s.mux.HandleFunc("/api/yuril/query", s.withQPotAuth(s.handleYurilQuery))
+	s.mux.HandleFunc("/api/yuril/health", s.withQPotAuth(s.handleYurilHealth))
 }
 
 // withQPotAuth middleware checks QPot ID authentication
@@ -857,6 +863,59 @@ func (s *Server) sendError(w http.ResponseWriter, code int, message string) {
 	})
 }
 
+// handleYurilHealth is a probe endpoint for the Yuril side to confirm
+// the integration is configured correctly: the QPot ID matches, the
+// database is reachable, the intelligence subsystem is up, and (when
+// applicable) the outbound forwarder is healthy. This is the endpoint
+// `qpot yuril test` hits and the one YurilTracking should use as a
+// liveness check before forwarding intel.
+func (s *Server) handleYurilHealth(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	// Negotiate API version: if the caller sent X-QPot-API-Version and it
+	// doesn't match ours, reply 400 so they fail loudly rather than send
+	// payloads we won't understand. An empty header means "I don't care".
+	if v := r.Header.Get("X-QPot-API-Version"); v != "" && v != yuril.APIVersion {
+		s.sendError(w, http.StatusBadRequest,
+			fmt.Sprintf("API version mismatch: client=%s server=%s", v, yuril.APIVersion))
+		return
+	}
+
+	dbOK := false
+	if s.database != nil {
+		// A short-timeout sanity query: if the DB is up but slow, don't
+		// hold the probe open forever.
+		ctx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
+		defer cancel()
+		_, err := s.database.GetStats(ctx, time.Now().Add(-time.Minute))
+		dbOK = err == nil
+	}
+
+	resp := map[string]interface{}{
+		"status":      "ok",
+		"qpot_id":     s.config.QPotID,
+		"instance":    s.config.InstanceName,
+		"api_version": yuril.APIVersion,
+		"database":    map[string]interface{}{"reachable": dbOK, "type": s.config.Database.Type},
+		"intel": map[string]interface{}{
+			"enabled":     s.config.Intelligence.Enabled,
+			"worker_up":   s.worker != nil,
+			"attck_loaded": s.attckLoader != nil && s.attckLoader.Loaded(),
+		},
+	}
+	if s.forwarder != nil {
+		resp["forwarder"] = s.forwarder.Stats()
+	} else {
+		resp["forwarder"] = map[string]interface{}{"enabled": false}
+	}
+
+	w.Header().Set("X-QPot-API-Version", yuril.APIVersion)
+	s.sendJSON(w, resp)
+}
+
 // yurilIntelRequest is the inbound payload for /api/yuril/intel. The
 // shape mirrors the outbound forwarder's IntelBatch so YurilAntivirus
 // can forward intel back to QPot using the same wire format it receives.
@@ -884,6 +943,12 @@ func (s *Server) handleYurilIntel(w http.ResponseWriter, r *http.Request) {
 		s.sendError(w, http.StatusServiceUnavailable, "database not available")
 		return
 	}
+	if v := r.Header.Get("X-QPot-API-Version"); v != "" && v != yuril.APIVersion {
+		s.sendError(w, http.StatusBadRequest,
+			fmt.Sprintf("API version mismatch: client=%s server=%s", v, yuril.APIVersion))
+		return
+	}
+	w.Header().Set("X-QPot-API-Version", yuril.APIVersion)
 
 	r.Body = http.MaxBytesReader(w, r.Body, 1<<20) // 1 MiB cap
 	var req yurilIntelRequest

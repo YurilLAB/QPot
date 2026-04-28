@@ -4,6 +4,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -25,6 +26,7 @@ import (
 	"github.com/qpot/qpot/internal/instance"
 	"github.com/qpot/qpot/internal/intelligence"
 	"github.com/qpot/qpot/internal/server"
+	"github.com/qpot/qpot/internal/yuril"
 	"github.com/spf13/cobra"
 	"golang.org/x/term"
 )
@@ -92,6 +94,7 @@ Each QPot instance has a unique ID (qp_*) for tracking and authentication.`,
 	rootCmd.AddCommand(newDockerCommand())
 	rootCmd.AddCommand(newConfigCommand())
 	rootCmd.AddCommand(newDBCommand())
+	rootCmd.AddCommand(newYurilCommand())
 
 	return rootCmd.ExecuteContext(ctx)
 }
@@ -1676,4 +1679,273 @@ func newDBMigrateDownCommand() *cobra.Command {
 	cmd.Flags().StringVarP(&instanceName, "instance", "i", "default", "instance name")
 	cmd.Flags().BoolVar(&yes, "yes", false, "skip confirmation prompt")
 	return cmd
+}
+
+// newYurilCommand wires the Yuril Security Suite integration to the CLI:
+// `setup` is an interactive helper so users don't hand-edit YAML, `test`
+// performs a real round-trip against the configured endpoint, and
+// `status` prints the configured wire and live forwarder stats when QPot
+// is running.
+func newYurilCommand() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "yuril",
+		Short: "Configure and inspect Yuril Security Suite integration",
+		Long: `Manage QPot's outbound forwarder to YurilTracking and the
+inbound bidirectional API used by YurilAntivirus.
+
+Use 'qpot yuril setup' to configure the integration interactively,
+'qpot yuril test' to validate connectivity end-to-end, and
+'qpot yuril status' to inspect the forwarder's live counters.`,
+	}
+
+	cmd.AddCommand(newYurilSetupCommand())
+	cmd.AddCommand(newYurilTestCommand())
+	cmd.AddCommand(newYurilStatusCommand())
+
+	return cmd
+}
+
+// readLineWithDefault prompts the user, returning their input or, on
+// empty input, the supplied default. Trims trailing whitespace.
+func readLineWithDefault(prompt, def string) string {
+	if def != "" {
+		fmt.Printf("%s [%s]: ", prompt, def)
+	} else {
+		fmt.Printf("%s: ", prompt)
+	}
+	var line string
+	fmt.Scanln(&line)
+	line = strings.TrimSpace(line)
+	if line == "" {
+		return def
+	}
+	return line
+}
+
+func newYurilSetupCommand() *cobra.Command {
+	var instanceName string
+	cmd := &cobra.Command{
+		Use:   "setup",
+		Short: "Interactively configure the Yuril forwarder",
+		Long:  "Walks through the Yuril forwarder settings and writes them into the instance config.",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if err := validateInstanceName(instanceName); err != nil {
+				return err
+			}
+
+			cfg, err := config.Load(instanceName)
+			if err != nil {
+				return fmt.Errorf("failed to load config: %w", err)
+			}
+
+			fmt.Println("QPot ↔ Yuril Security Suite — interactive setup")
+			fmt.Println("Press Enter to keep the value shown in [brackets].")
+			fmt.Println()
+
+			cfg.Yuril.Endpoint = readLineWithDefault(
+				"YurilTracking endpoint (https://...)", cfg.Yuril.Endpoint)
+			if cfg.Yuril.Endpoint == "" {
+				return fmt.Errorf("endpoint is required; aborting")
+			}
+			if !strings.HasPrefix(cfg.Yuril.Endpoint, "http://") &&
+				!strings.HasPrefix(cfg.Yuril.Endpoint, "https://") {
+				return fmt.Errorf("endpoint must start with http:// or https://")
+			}
+
+			fmt.Print("API key (input hidden, press Enter to skip): ")
+			pwBytes, err := term.ReadPassword(int(os.Stdin.Fd()))
+			fmt.Println()
+			if err != nil {
+				return fmt.Errorf("failed to read API key: %w", err)
+			}
+			if entered := strings.TrimSpace(string(pwBytes)); entered != "" {
+				cfg.Yuril.APIKey = entered
+			}
+
+			cfg.Yuril.Source = readLineWithDefault("Source label", firstNonEmpty(cfg.Yuril.Source, "qpot_honeypot"))
+
+			verifyDefault := "y"
+			if !cfg.Yuril.VerifyTLS && strings.HasPrefix(cfg.Yuril.Endpoint, "https://") {
+				verifyDefault = "n"
+			}
+			ans := strings.ToLower(readLineWithDefault("Verify TLS certificate? (y/n)", verifyDefault))
+			cfg.Yuril.VerifyTLS = ans == "y" || ans == "yes"
+
+			cfg.Yuril.Enabled = true
+			if err := config.Save(cfg); err != nil {
+				return fmt.Errorf("failed to save config: %w", err)
+			}
+
+			fmt.Println()
+			fmt.Println("[OK] Yuril forwarder configured.")
+			fmt.Printf("     Config file: %s\n", cfg.ConfigPath)
+			fmt.Println("     Run 'qpot yuril test' to validate connectivity.")
+			return nil
+		},
+	}
+	cmd.Flags().StringVarP(&instanceName, "instance", "i", "default", "instance name")
+	return cmd
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, v := range values {
+		if strings.TrimSpace(v) != "" {
+			return v
+		}
+	}
+	return ""
+}
+
+func newYurilTestCommand() *cobra.Command {
+	var instanceName string
+	cmd := &cobra.Command{
+		Use:   "test",
+		Short: "Validate Yuril forwarder connectivity end-to-end",
+		Long: `Loads the instance config, builds a Forwarder, and submits an empty
+test batch. Reports success, auth failure, TLS issues, or unreachable host
+distinctly so misconfigurations are easy to fix.`,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if err := validateInstanceName(instanceName); err != nil {
+				return err
+			}
+			cfg, err := config.Load(instanceName)
+			if err != nil {
+				return fmt.Errorf("failed to load config: %w", err)
+			}
+			if !cfg.Yuril.Enabled {
+				return fmt.Errorf("yuril forwarder is disabled in config; run 'qpot yuril setup' first")
+			}
+
+			fmt.Printf("Testing forwarder against %s ...\n", cfg.Yuril.Endpoint)
+			fwd, err := yuril.New(cfg.Yuril)
+			if err != nil {
+				return fmt.Errorf("forwarder init failed: %w", err)
+			}
+			if fwd == nil {
+				// Shouldn't happen given we checked Enabled, but defend
+				// anyway so the failure mode is a clear message.
+				return fmt.Errorf("forwarder is nil; double-check yuril.enabled in config")
+			}
+
+			ctx, cancel := context.WithTimeout(cmd.Context(), 15*time.Second)
+			defer cancel()
+
+			if err := fwd.Ping(ctx); err != nil {
+				fmt.Println("[FAIL] Forwarder test failed.")
+				fmt.Printf("       Error: %v\n", err)
+				fmt.Println("       Hints:")
+				fmt.Println("         - 401/403: check api_key.")
+				fmt.Println("         - x509 / TLS errors: set verify_tls=false for self-signed certs in dev,")
+				fmt.Println("           or import the Yuril CA into the system trust store.")
+				fmt.Println("         - Connection refused / timeout: check endpoint host and firewall.")
+				return err
+			}
+
+			stats := fwd.Stats()
+			fmt.Println("[OK] Yuril forwarder is reachable and authorized.")
+			fmt.Printf("     Endpoint: %s\n", stats.Endpoint)
+			fmt.Printf("     API version: %s\n", yuril.APIVersion)
+			return nil
+		},
+	}
+	cmd.Flags().StringVarP(&instanceName, "instance", "i", "default", "instance name")
+	return cmd
+}
+
+func newYurilStatusCommand() *cobra.Command {
+	var instanceName string
+	cmd := &cobra.Command{
+		Use:   "status",
+		Short: "Show Yuril integration configuration and live stats",
+		Long: `Shows the configured forwarder settings, the inbound endpoint URLs, and —
+when QPot's web server is running — the live forwarder activity counters via
+the /api/yuril/health endpoint.`,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if err := validateInstanceName(instanceName); err != nil {
+				return err
+			}
+			cfg, err := config.Load(instanceName)
+			if err != nil {
+				return fmt.Errorf("failed to load config: %w", err)
+			}
+			id, _ := instance.LoadID(instanceName)
+
+			fmt.Println("Yuril integration")
+			fmt.Println("=================")
+			fmt.Printf("Instance:        %s\n", cfg.InstanceName)
+			if id != nil {
+				fmt.Printf("QPot ID:         %s\n", id.ID)
+			}
+			fmt.Println()
+			fmt.Println("Outbound forwarder (qpot -> YurilTracking)")
+			fmt.Printf("  Enabled:       %v\n", cfg.Yuril.Enabled)
+			fmt.Printf("  Endpoint:      %s\n", maskIfEmpty(cfg.Yuril.Endpoint))
+			fmt.Printf("  Source label:  %s\n", maskIfEmpty(cfg.Yuril.Source))
+			fmt.Printf("  API key set:   %v\n", strings.TrimSpace(cfg.Yuril.APIKey) != "")
+			fmt.Printf("  Verify TLS:    %v\n", cfg.Yuril.VerifyTLS)
+			fmt.Println()
+
+			fmt.Println("Inbound API (YurilAntivirus -> qpot)")
+			webBase := fmt.Sprintf("http://%s:%d", cfg.WebUI.BindAddr, cfg.WebUI.Port)
+			fmt.Printf("  Health probe:  %s/api/yuril/health\n", webBase)
+			fmt.Printf("  Push intel:    %s/api/yuril/intel\n", webBase)
+			fmt.Printf("  Query intel:   %s/api/yuril/query?ip=<addr>\n", webBase)
+			fmt.Println("  Auth:          X-QPot-ID header (or ?qpot_id=)")
+			fmt.Println()
+
+			// Try to fetch live stats from the running server. Silently
+			// degrade to "server not running" if that fails — the static
+			// config is still useful on its own.
+			if id != nil {
+				live, err := fetchYurilHealth(cmd.Context(), webBase, id.ID)
+				if err != nil {
+					fmt.Println("Live stats: server not reachable (run 'qpot up' to enable).")
+				} else {
+					fmt.Println("Live stats:")
+					if b, mErr := json.MarshalIndent(live, "  ", "  "); mErr == nil {
+						fmt.Printf("  %s\n", string(b))
+					}
+				}
+			}
+			return nil
+		},
+	}
+	cmd.Flags().StringVarP(&instanceName, "instance", "i", "default", "instance name")
+	return cmd
+}
+
+func maskIfEmpty(s string) string {
+	if strings.TrimSpace(s) == "" {
+		return "(unset)"
+	}
+	return s
+}
+
+// fetchYurilHealth queries the running server's /api/yuril/health
+// endpoint with a short timeout. Returns nil + error when QPot isn't up.
+func fetchYurilHealth(ctx context.Context, baseURL, qpotID string) (map[string]interface{}, error) {
+	reqCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
+	defer cancel()
+
+	req, err := http.NewRequestWithContext(reqCtx, http.MethodGet, baseURL+"/api/yuril/health", nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("X-QPot-ID", qpotID)
+	req.Header.Set("X-QPot-API-Version", yuril.APIVersion)
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("health endpoint returned %d", resp.StatusCode)
+	}
+
+	var payload map[string]interface{}
+	if err := json.NewDecoder(resp.Body).Decode(&payload); err != nil {
+		return nil, fmt.Errorf("decode health: %w", err)
+	}
+	return payload, nil
 }

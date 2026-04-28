@@ -3,8 +3,11 @@ package config
 
 import (
 	"fmt"
+	"log/slog"
+	"net/url"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -522,11 +525,67 @@ func Load(instanceName string) (*Config, error) {
 		cfg.ConfigPath = configPath
 	}
 
+	// Surface obvious misconfigurations at load time. We log instead of
+	// returning an error so a broken sub-section (e.g. unreachable Yuril
+	// endpoint) doesn't prevent QPot from starting and serving honeypots —
+	// it's a defence-in-depth principle: the honeypot platform itself
+	// must keep running even when integrations are misconfigured.
+	for _, msg := range cfg.Validate() {
+		slog.Warn("Config validation", "instance", instanceName, "warning", msg)
+	}
+
 	configMu.Lock()
 	configs[instanceName] = &cfg
 	configMu.Unlock()
 
 	return &cfg, nil
+}
+
+// Validate returns a slice of human-readable warnings for any
+// misconfigurations it can spot statically. Empty slice means the
+// config looks sane. The intent is to fail loud, not to fail closed:
+// callers should log the warnings rather than refuse to start.
+func (c *Config) Validate() []string {
+	var warnings []string
+
+	// Yuril forwarder: if enabled, endpoint must be a parseable HTTP(S) URL.
+	if c.Yuril.Enabled {
+		ep := strings.TrimSpace(c.Yuril.Endpoint)
+		if ep == "" {
+			warnings = append(warnings, "yuril.enabled=true but yuril.endpoint is empty; forwarder will be disabled at runtime")
+		} else if u, err := url.Parse(ep); err != nil || (u.Scheme != "http" && u.Scheme != "https") {
+			warnings = append(warnings, fmt.Sprintf("yuril.endpoint %q is not a valid http(s) URL", ep))
+		} else if u.Scheme == "http" && c.Yuril.VerifyTLS {
+			warnings = append(warnings, "yuril.endpoint uses http:// (no TLS); set https:// for production")
+		}
+		if strings.TrimSpace(c.Yuril.APIKey) == "" {
+			warnings = append(warnings, "yuril.api_key is empty; the receiver may reject unauthenticated batches")
+		}
+	}
+
+	// Response hooks: enabled but with no actions configured is almost
+	// certainly a typo or a half-finished migration.
+	if c.Response.Enabled && len(c.Response.OnAttackDetected) == 0 {
+		warnings = append(warnings, "response.enabled=true but response.on_attack_detected is empty; nothing will fire")
+	}
+	for i, action := range c.Response.OnAttackDetected {
+		if strings.TrimSpace(action.Command) == "" {
+			warnings = append(warnings, fmt.Sprintf("response.on_attack_detected[%d] has empty command", i))
+		}
+	}
+
+	// Cluster TLS: enabling encryption without cert/key is the trap that
+	// previously caused silent fallback to plain HTTP.
+	// (Cluster config lives in a separate package, so we only catch the
+	// hint we have here — see internal/cluster for the runtime check.)
+
+	// Alerts: enabled webhook with no URL is a no-op.
+	if c.Alerts.Enabled && strings.TrimSpace(c.Alerts.WebhookURL) == "" &&
+		!c.Response.Enabled {
+		warnings = append(warnings, "alerts.enabled=true but no webhook_url and no response hooks; no alerting will happen")
+	}
+
+	return warnings
 }
 
 // Save saves configuration to disk
