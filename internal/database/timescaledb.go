@@ -252,8 +252,15 @@ func (ts *TimescaleDB) insertBatchFallback(ctx context.Context, events []*Event)
 	br := ts.pool.SendBatch(ctx, batch)
 	defer br.Close()
 
-	if _, err := br.Exec(); err != nil {
-		return fmt.Errorf("failed to execute batch: %w", err)
+	// pgx queues one statement per event; each must be read with Exec() to
+	// surface its result. Reading only the first result (then relying on
+	// Close) silently swallows errors on every subsequent insert, so a
+	// constraint violation on event N>1 would make InsertEvents falsely
+	// report success while the row was never persisted.
+	for i := range events {
+		if _, err := br.Exec(); err != nil {
+			return fmt.Errorf("failed to execute batch insert (event %d/%d): %w", i+1, len(events), err)
+		}
 	}
 
 	return nil
