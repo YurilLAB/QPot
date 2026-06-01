@@ -34,7 +34,7 @@
 |---------|-------|------|
 | Attack Map | Yes | Yes - Enhanced with QPot ID |
 | Kibana Dashboard | Yes | Yes - With ClickHouse support |
-| 20+ Honeypots | Yes | Yes - Same proven images |
+| Honeypots | ~28 | 26 - Same proven images (see coverage below) |
 | Per-Honeypot Resources | No | Yes - CPU/Mem/PID limits |
 | gVisor/Kata Sandboxing | No | Yes - Applied to honeypot containers when available |
 | ClickHouse Database | No | Yes - High-performance analytics |
@@ -54,6 +54,37 @@
 | Alert Webhooks | No | Yes - Slack/Discord/generic thresholds |
 | IOC Export | No | Yes - Attacker blocklist API |
 | GeoIP Enrichment | No | Yes - Optional MaxMind via Vector (`collector.geoip_db_path`) |
+
+### Honeypot Coverage
+
+QPot ships **26 honeypots**, all using the same upstream images T-Pot uses
+(preferring the rate-limit-free `ghcr.io/telekom-security/*` mirror). Run
+`qpot honeypot list` to see them with ports, risk level, and enable state:
+
+`adbhoney`, `beelzebub`, `ciscoasa`, `citrixhoneypot`, `conpot`, `cowrie`,
+`ddospot`, `dicompot`, `dionaea`, `elasticpot`, `endlessh`, `galah`, `go-pot`,
+`h0neytr4p`, `hellpot`, `heralding`, `honeyaml`, `ipphoney`, `log4pot`,
+`mailoney`, `medpot`, `miniprint`, `redishoneypot`, `sentrypeer`, `tanner`,
+`wordpot`.
+
+**Deliberately not included:** `glutton` and `honeytrap`. Both require
+`network_mode: host` plus the `NET_ADMIN` capability (they use TPROXY/transparent
+interception to catch traffic on every port). That directly contradicts QPot's
+two core safety guarantees — per-honeypot network isolation (each honeypot gets
+its own bridge network) and capability dropping (`cap_drop: ALL`, only
+`NET_BIND_SERVICE` added back). Rather than silently weaken the isolation model,
+QPot omits them; the broad protocol coverage they provide is largely covered by
+`dionaea`, `heralding`, and `cowrie`.
+
+**Analysis / sensor stack.** T-Pot bundles host-level sensors and a visualization
+stack (Suricata, p0f, Fatt, Spiderfoot, Ewsposter, the ELK stack, the attack
+map, nginx). QPot replaces these with its own integrated pipeline rather than
+running them as separate honeypot containers: **Vector** for collection,
+**ClickHouse** for storage, an **in-process Web UI** (served by the `qpot`
+binary — there is no separate web container), built-in **MITRE ATT&CK**
+classification and **IOC/TTP** extraction, and **Yuril Security Suite**
+integration. The vendored upstream sources for the omitted components remain
+under `docker/` for reference.
 
 ### Key Advantages
 
@@ -107,6 +138,25 @@ Built-in anti-fingerprinting features including fake hostnames, randomized respo
 
 ### Installation
 
+**One-line install (Linux / macOS):**
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/YurilLAB/QPot/main/scripts/install.sh | bash
+```
+
+**Windows (PowerShell):**
+
+```powershell
+irm https://raw.githubusercontent.com/YurilLAB/QPot/main/scripts/install.ps1 | iex
+```
+
+Both installers check for Docker / Docker Compose, install the `qpot` binary
+(downloading a release if available, otherwise **building from source** with Go),
+add it to your `PATH`, and create a default instance. The Linux script also
+prints distro-specific Docker hints (Arch/Debian/Fedora/Rocky/openSUSE).
+
+**From source (any platform with Go 1.25+):**
+
 ```bash
 # Clone the repository
 git clone https://github.com/YurilLAB/QPot.git
@@ -118,6 +168,12 @@ go build -o qpot ./cmd/qpot
 # Or use Make
 make build
 ```
+
+**Full multi-distro server install (T-Pot-style, Ansible):** for a dedicated
+sensor host, `sudo ./install.sh` runs the Ansible playbook across AlmaLinux,
+Arch, Debian, EndeavourOS, Fedora, Manjaro, openSUSE Tumbleweed, RHEL, Rocky,
+Raspbian, and Ubuntu, then prompts for the install type (Hive / Sensor / LLM /
+Mini / Mobile / Tarpit).
 
 ### Create and Start Instance
 
@@ -135,10 +191,12 @@ make build
 
 | Service | URL | Description |
 |---------|-----|-------------|
-| QPot Dashboard | http://localhost:8080 | Built-in web UI (QPot ID auth) |
-| Attack Map | https://localhost:64297/map | Real-time attack visualization |
-| Kibana | https://localhost:64297/kibana | Log analytics |
-| QPot API | https://localhost:64297/api | Management API |
+| QPot Dashboard | http://localhost:8080 | Built-in web UI (QPot ID auth), served in-process by the `qpot` binary |
+| QPot API | http://localhost:8080/api | Management & intelligence API (same listener, QPot ID auth) |
+
+> Unlike T-Pot, QPot does not run a separate nginx/Kibana/attack-map stack on
+> port 64297 — the dashboard, attack feed, and API are all served by the `qpot`
+> process itself on the Web UI port (default `8080`).
 
 The built-in **QPot Dashboard** (authenticated with your QPot ID) is organized
 into tabs:
