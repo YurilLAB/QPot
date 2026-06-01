@@ -349,7 +349,18 @@
             border-bottom: none;
         }
 
-        .log-time {
+        .log-line {
+            display: flex;
+            gap: 10px;
+            align-items: baseline;
+        }
+        .log-time { color: var(--text-secondary); min-width: 80px; }
+        .log-hp { color: var(--accent); min-width: 80px; }
+        .log-ip { min-width: 130px; }
+        .log-evt { color: var(--warning); min-width: 150px; }
+        .log-detail { color: var(--text-secondary); flex: 1; }
+
+        .log-time-legacy {
             color: var(--text-secondary);
         }
 
@@ -568,6 +579,7 @@
                 document.getElementById('auth-overlay').classList.add('hidden');
                 document.getElementById('main-content').classList.remove('hidden');
                 loadData();
+                startAutoRefresh();
             }
         }
 
@@ -588,6 +600,7 @@
             document.getElementById('auth-overlay').classList.add('hidden');
             document.getElementById('main-content').classList.remove('hidden');
             loadData();
+            startAutoRefresh();
         }
 
         // Copy QPot ID to clipboard
@@ -612,10 +625,49 @@
                 await Promise.all([
                     loadStatus(),
                     loadStats(),
-                    loadHoneypots()
+                    loadHoneypots(),
+                    loadEvents()
                 ]);
             } catch (error) {
                 console.error('Failed to load data:', error);
+            }
+        }
+
+        // escape untrusted strings (attacker-controlled event fields) before
+        // inserting into the DOM.
+        function esc(s) {
+            return String(s == null ? '' : s)
+                .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+                .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+        }
+
+        // Live attacker-activity feed (events over time / recent attacks).
+        async function loadEvents() {
+            const container = document.getElementById('logs');
+            try {
+                const response = await fetch(`${API_BASE}/events?limit=50`, {
+                    headers: { 'X-QPot-ID': currentQPotID }
+                });
+                if (!response.ok) { return; }
+                const data = await response.json();
+                const events = (data && data.events) || [];
+                if (events.length === 0) {
+                    container.innerHTML = '<div class="empty-state"><p>No recent activity</p></div>';
+                    return;
+                }
+                container.innerHTML = events.map(e => {
+                    const ts = e.timestamp ? new Date(e.timestamp).toLocaleTimeString() : '';
+                    const detail = e.command || (e.username ? `${e.username}:${e.password || ''}` : '');
+                    return `<div class="log-line">
+                        <span class="log-time">${esc(ts)}</span>
+                        <span class="log-hp">${esc(e.honeypot)}</span>
+                        <span class="log-ip">${esc(e.source_ip)}</span>
+                        <span class="log-evt">${esc(e.event_type)}</span>
+                        <span class="log-detail">${esc(detail)}</span>
+                    </div>`;
+                }).join('');
+            } catch (err) {
+                console.error('Failed to load events:', err);
             }
         }
 
@@ -731,7 +783,18 @@
         }
 
         function viewLogs() {
-            showToast('Logs view - coming soon');
+            loadEvents();
+            document.getElementById('logs').scrollIntoView({ behavior: 'smooth' });
+            showToast('Refreshed recent activity');
+        }
+
+        // Auto-refresh the dashboard so it stays live. Started after auth.
+        let autoRefreshTimer = null;
+        function startAutoRefresh() {
+            if (autoRefreshTimer) { return; }
+            autoRefreshTimer = setInterval(() => {
+                if (currentQPotID) { loadData(); }
+            }, 10000);
         }
 
         function exportData() {
