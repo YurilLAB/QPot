@@ -58,3 +58,24 @@ func TestClusterJoinBodyLimit(t *testing.T) {
 		t.Errorf("oversized join body was accepted (status 200); MaxBytesReader not enforced")
 	}
 }
+
+func TestValidPeerNode(t *testing.T) {
+	cases := []struct {
+		n    *Node
+		want bool
+	}{
+		{nil, false},
+		{&Node{ID: "", Address: "10.0.0.1", Port: 7946}, false},
+		{&Node{ID: "qn_x", Address: "", Port: 7946}, false},
+		{&Node{ID: "qn_x", Address: "10.0.0.1", Port: 0}, false},
+		{&Node{ID: "qn_x", Address: "10.0.0.1", Port: 70000}, false},
+		{&Node{ID: "qn_x", Address: "10.0.0.1", Port: -1}, false},
+		{&Node{ID: "qn_x", Address: "10.0.0.1", Port: 7946}, true},
+		{&Node{ID: "qn_x", Address: "host.example", Port: 443}, true},
+	}
+	for i, c := range cases {
+		if got := validPeerNode(c.n); got != c.want {
+			t.Errorf("case %d: validPeerNode = %v, want %v", i, got, c.want)
+		}
+	}
+}

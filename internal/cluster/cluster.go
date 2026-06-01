@@ -96,6 +96,9 @@ const (
 	maxSuspicionMult    = 100
 	maxGossipInterval   = 1 * time.Minute
 	maxSyncInterval     = 10 * time.Minute
+	// maxClusterNodes bounds the member map so a peer can't grow it without
+	// limit by gossiping fabricated node records (memory DoS).
+	maxClusterNodes = 4096
 )
 
 // sanitizeClusterConfig clamps all numeric/duration fields to sane bounds and
@@ -1025,12 +1028,17 @@ func (m *Manager) gossip() {
 		resp, err := gossipClient.Do(req)
 		if err != nil {
 			slog.Debug("Gossip: peer unreachable", "node_id", peer.id, "error", err)
-			// Mark node as suspect after failed gossip contact.
-			m.mu.Lock()
-			if node, ok := m.cluster.Nodes[peer.id]; ok && node.Status == NodeStatusHealthy {
-				node.Status = NodeStatusSuspect
-			}
-			m.mu.Unlock()
+			m.markSuspect(peer.id)
+			continue
+		}
+
+		// A non-200 (e.g. 401 auth failure, 5xx) is a failed contact, NOT a
+		// success — previously the status was ignored and such a peer was still
+		// marked healthy and its body merged.
+		if resp.StatusCode != http.StatusOK {
+			resp.Body.Close()
+			slog.Debug("Gossip: peer returned non-OK", "node_id", peer.id, "status", resp.StatusCode)
+			m.markSuspect(peer.id)
 			continue
 		}
 
@@ -1044,13 +1052,26 @@ func (m *Manager) gossip() {
 		// Merge peer's node knowledge into our own map.
 		now := time.Now()
 		m.mu.Lock()
+		// Re-check after the unlocked network I/O: a concurrent LeaveCluster
+		// can set m.cluster = nil.
+		if m.cluster == nil {
+			m.mu.Unlock()
+			return
+		}
 		for _, peerNode := range peerMsg.NodeDigest {
-			if peerNode.ID == localID {
+			if peerNode == nil || peerNode.ID == localID {
 				continue
 			}
 			existing, ok := m.cluster.Nodes[peerNode.ID]
 			if !ok {
-				// New node discovered via gossip.
+				// New node discovered via gossip. Bound the member map and
+				// reject records that can't yield a usable peer URL.
+				if len(m.cluster.Nodes) >= maxClusterNodes {
+					continue
+				}
+				if !validPeerNode(peerNode) {
+					continue
+				}
 				m.cluster.Nodes[peerNode.ID] = peerNode
 				slog.Info("Gossip: discovered new node", "node_id", peerNode.ID, "name", peerNode.Name)
 			} else if peerNode.LastSeen.After(existing.LastSeen) {
@@ -1070,6 +1091,12 @@ func (m *Manager) gossip() {
 
 	// Mark nodes that haven't been seen for a long time as failed.
 	m.mu.Lock()
+	if m.cluster == nil { // concurrent LeaveCluster
+		m.mu.Unlock()
+		return
+	}
+	// Config is sanitized at the join/load boundary, so SuspicionMult and
+	// GossipInterval are bounded and this product cannot overflow.
 	deadline := time.Now().Add(-3 * m.cluster.Config.GossipInterval * time.Duration(m.cluster.Config.SuspicionMult*10))
 	for _, node := range m.cluster.Nodes {
 		if node.ID == localID {
@@ -1081,6 +1108,33 @@ func (m *Manager) gossip() {
 		}
 	}
 	m.mu.Unlock()
+}
+
+// markSuspect transitions a healthy node to suspect after a failed contact.
+// Safe to call concurrently; a nil cluster (mid-leave) is a no-op.
+func (m *Manager) markSuspect(nodeID string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.cluster == nil {
+		return
+	}
+	if node, ok := m.cluster.Nodes[nodeID]; ok && node.Status == NodeStatusHealthy {
+		node.Status = NodeStatusSuspect
+	}
+}
+
+// validPeerNode reports whether a gossiped node record is usable: it must have
+// an ID, a non-empty address, and a port in the valid range. This blocks
+// fabricated records that would otherwise be stored and later interpolated into
+// outbound request URLs (SSRF / wasted dials).
+func validPeerNode(n *Node) bool {
+	if n == nil || n.ID == "" || strings.TrimSpace(n.Address) == "" {
+		return false
+	}
+	if n.Port < 1 || n.Port > 65535 {
+		return false
+	}
+	return true
 }
 
 // sync aggregates node statistics and shares threat intelligence with peers.
