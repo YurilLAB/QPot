@@ -5,7 +5,7 @@
 set -euo pipefail
 
 QPOT_VERSION="0.1.0"
-QPOT_REPO="https://github.com/qpot/qpot"
+QPOT_REPO="https://github.com/YurilLAB/QPot"
 INSTALL_DIR="${HOME}/.local/bin"
 DATA_DIR="${HOME}/.qpot"
 
@@ -78,30 +78,61 @@ check_prerequisites() {
     fi
 }
 
+# Build QPot from source. Used as a fallback when no prebuilt release is
+# available for this platform (or the download fails). Requires Go and git.
+build_from_source() {
+    local temp_dir=$1
+
+    if ! command -v go &> /dev/null; then
+        log_error "No prebuilt binary available and Go is not installed to build from source."
+        echo "  Install Go (https://go.dev/dl/) or download a release from:"
+        echo "  ${QPOT_REPO}/releases"
+        exit 1
+    fi
+    if ! command -v git &> /dev/null; then
+        log_error "git is required to build from source. Please install git."
+        exit 1
+    fi
+
+    log_info "Building QPot from source (Go $(go version | awk '{print $3}'))..."
+    git clone --depth 1 "${QPOT_REPO}.git" "${temp_dir}/src" >/dev/null 2>&1 || {
+        log_error "Failed to clone ${QPOT_REPO}.git"
+        exit 1
+    }
+    ( cd "${temp_dir}/src" && go build -o "${temp_dir}/qpot" ./cmd/qpot ) || {
+        log_error "go build failed"
+        exit 1
+    }
+    log_success "Built QPot from source"
+}
+
 download_qpot() {
     local platform=$1
     local binary_name="qpot_${QPOT_VERSION}_${platform}"
     local download_url="${QPOT_REPO}/releases/download/v${QPOT_VERSION}/${binary_name}.tar.gz"
     local temp_dir=$(mktemp -d)
-    
+
     log_info "Downloading QPot v${QPOT_VERSION}..."
-    
+
+    local downloaded=0
     if command -v curl &> /dev/null; then
-        curl -fsSL "$download_url" -o "${temp_dir}/qpot.tar.gz"
+        curl -fsSL "$download_url" -o "${temp_dir}/qpot.tar.gz" && downloaded=1
     elif command -v wget &> /dev/null; then
-        wget -q "$download_url" -O "${temp_dir}/qpot.tar.gz"
-    else
-        log_error "Neither curl nor wget is installed"
-        exit 1
+        wget -q "$download_url" -O "${temp_dir}/qpot.tar.gz" && downloaded=1
     fi
-    
-    tar -xzf "${temp_dir}/qpot.tar.gz" -C "$temp_dir"
-    
+
+    if [[ "$downloaded" == "1" ]] && tar -xzf "${temp_dir}/qpot.tar.gz" -C "$temp_dir" 2>/dev/null; then
+        log_success "Downloaded prebuilt binary"
+    else
+        log_warn "No prebuilt binary for ${platform} (v${QPOT_VERSION}); building from source"
+        build_from_source "$temp_dir"
+    fi
+
     # Create install directory
     mkdir -p "$INSTALL_DIR"
     cp "${temp_dir}/qpot" "$INSTALL_DIR/"
     chmod +x "${INSTALL_DIR}/qpot"
-    
+
     rm -rf "$temp_dir"
     log_success "QPot installed to ${INSTALL_DIR}/qpot"
 }

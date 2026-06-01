@@ -4,7 +4,7 @@
 $ErrorActionPreference = "Stop"
 
 $QPOT_VERSION = "0.1.0"
-$QPOT_REPO = "https://github.com/qpot/qpot"
+$QPOT_REPO = "https://github.com/YurilLAB/QPot"
 
 function Write-Header {
     param([string]$Text)
@@ -70,12 +70,35 @@ function Install-QPot {
     $binaryPath = "$binDir\qpot.exe"
 
     Write-Host "Downloading QPot..." -ForegroundColor Yellow
+    $downloaded = $false
     try {
         Invoke-WebRequest -Uri $binaryUrl -OutFile $binaryPath -UseBasicParsing
         Write-Host "  ✓ Downloaded qpot.exe" -ForegroundColor Green
+        $downloaded = $true
     } catch {
-        Write-Host "  ⚠ Could not download binary, will build from source" -ForegroundColor Yellow
-        # Would build from source here
+        Write-Host "  ⚠ No prebuilt binary available, building from source..." -ForegroundColor Yellow
+    }
+
+    if (-not $downloaded) {
+        if (-not (Test-Command "go")) {
+            Write-Error "No prebuilt binary available and Go is not installed to build from source.`n  Install Go (https://go.dev/dl/) or download a release from:`n  $QPOT_REPO/releases"
+            exit 1
+        }
+        if (-not (Test-Command "git")) {
+            Write-Error "git is required to build from source. Please install Git for Windows."
+            exit 1
+        }
+        $srcDir = "$installDir\src"
+        Write-Host "  Cloning $QPOT_REPO ..." -ForegroundColor Gray
+        & git clone --depth 1 "$QPOT_REPO.git" $srcDir 2>&1 | Out-Null
+        if ($LASTEXITCODE -ne 0) { Write-Error "Failed to clone $QPOT_REPO.git"; exit 1 }
+        Write-Host "  Building qpot.exe with Go..." -ForegroundColor Gray
+        Push-Location $srcDir
+        & go build -o $binaryPath .\cmd\qpot
+        $buildExit = $LASTEXITCODE
+        Pop-Location
+        if ($buildExit -ne 0) { Write-Error "go build failed"; exit 1 }
+        Write-Host "  ✓ Built qpot.exe from source" -ForegroundColor Green
     }
 
     # Create data directory

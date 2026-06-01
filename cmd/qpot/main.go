@@ -16,6 +16,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"runtime"
+	"sort"
 	"strings"
 	"syscall"
 	"time"
@@ -395,28 +396,48 @@ func newHoneypotCommand() *cobra.Command {
 		Use:   "list",
 		Short: "List available honeypots",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			honeypots := []struct {
-				Name        string
-				Description string
-				Risk        string
-				Port        int
-			}{
-				{"cowrie", "SSH/Telnet honeypot", "low", 2222},
-				{"dionaea", "Malware capture honeypot", "medium", 21},
-				{"conpot", "Industrial control systems honeypot", "low", 102},
-				{"tanner", "Web application honeypot", "low", 80},
-				{"adbhoney", "Android Debug Bridge honeypot", "low", 5555},
-				{"endlessh", "SSH tarpit (slows attackers)", "low", 22},
-				{"heralding", "Credential honeypot", "low", 110},
-				{"honeyaml", "API honeypot", "low", 3000},
+			// Short descriptions for every supported honeypot.
+			desc := map[string]string{
+				"cowrie": "SSH/Telnet medium-interaction shell", "dionaea": "Malware capture (SMB/FTP/MSSQL/SIP)",
+				"conpot": "ICS/SCADA (Modbus/S7comm/BACnet)", "tanner": "Web application (multi-service)",
+				"adbhoney": "Android Debug Bridge", "endlessh": "SSH tarpit",
+				"heralding": "Credential catcher (12 protocols)", "honeyaml": "YAML-defined API honeypot",
+				"elasticpot": "Elasticsearch", "ciscoasa": "Cisco ASA (CVE-2018-0101)",
+				"citrixhoneypot": "Citrix NetScaler (CVE-2019-19781)", "ddospot": "UDP amplification (NTP/DNS/SSDP)",
+				"ipphoney": "IPP / network printer", "mailoney": "SMTP",
+				"medpot": "HL7 / medical", "redishoneypot": "Redis",
+				"dicompot": "DICOM (medical imaging)",
+				"beelzebub": "LLM-backed SSH/HTTP (needs Ollama/API)", "galah": "LLM-backed web (needs Ollama/API)",
+				"go-pot": "HTTP tarpit", "h0neytr4p": "Web exploit trap", "hellpot": "HTTP tarpit",
+				"log4pot": "Log4Shell (CVE-2021-44228)", "miniprint": "Network printer (JetDirect)",
+				"sentrypeer": "SIP / VoIP", "wordpot": "WordPress",
 			}
 
-			fmt.Println("Available honeypots:")
-			fmt.Println("Name        Port  Risk   Description")
-			fmt.Println("----------- ----- ------ ----------------------------------------")
-			for _, hp := range honeypots {
-				fmt.Printf("%-11s %5d %-6s %s\n", hp.Name, hp.Port, hp.Risk, hp.Description)
+			// Source the actual config so ports/risk/enabled reflect this
+			// instance (falls back to defaults for an uncreated instance).
+			cfg, err := config.Load(instanceName)
+			if err != nil {
+				cfg = config.Default(instanceName)
 			}
+
+			names := make([]string, 0, len(cfg.Honeypots))
+			for n := range cfg.Honeypots {
+				names = append(names, n)
+			}
+			sort.Strings(names)
+
+			fmt.Printf("Available honeypots (instance %q):\n", instanceName)
+			fmt.Println("Name             Port  Risk     On  Description")
+			fmt.Println("---------------- ----- -------- --- -------------------------------------------")
+			for _, n := range names {
+				hp := cfg.Honeypots[n]
+				on := " "
+				if hp.Enabled {
+					on = "x"
+				}
+				fmt.Printf("%-16s %5d %-8s [%s] %s\n", n, hp.Port, hp.RiskLevel, on, desc[n])
+			}
+			fmt.Printf("\n%d honeypots supported. Enable one with: qpot honeypot enable <name>\n", len(names))
 			return nil
 		},
 	}

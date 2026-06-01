@@ -255,21 +255,30 @@ if [[ "${myANSIBLE_DISTRIBUTIONS[@]}" =~ "${myCURRENT_DISTRIBUTION}" ]];
     myANSIBLE_TAG=${myCURRENT_DISTRIBUTION}
 fi
 
-# Download qpot.yml if not found locally
-if [ ! -f installer/install/qpot.yml ] && [ ! -f qpot.yml ];
-  then
+# Resolve the QPot Ansible Installation Playbook. We accept either the
+# QPot-branded name (qpot.yml) or the upstream T-Pot name (tpot.yml), since the
+# playbook is a fork of T-Pot's. Prefer a local copy; only download as a last
+# resort.
+myANSIBLE_QPOT_PLAYBOOK=""
+for candidate in installer/install/qpot.yml qpot.yml installer/install/tpot.yml tpot.yml; do
+    if [ -f "$candidate" ]; then
+        myANSIBLE_QPOT_PLAYBOOK="$candidate"
+        break
+    fi
+done
+
+if [ -n "$myANSIBLE_QPOT_PLAYBOOK" ]; then
+    echo "### Using local QPot Ansible Installation Playbook (${myANSIBLE_QPOT_PLAYBOOK}) ... "
+    echo
+else
     echo "### Now downloading QPot Ansible Installation Playbook ... "
-    wget -qO qpot.yml https://raw.githubusercontent.com/telekom-security/qpotce/master/installer/install/qpot.yml
+    if ! wget -qO qpot.yml https://raw.githubusercontent.com/YurilLAB/QPot/main/installer/install/tpot.yml || [ ! -s qpot.yml ]; then
+        echo "### Failed to download the installation playbook. Please clone the repository and re-run this script."
+        echo "### Aborting."
+        exit 1
+    fi
     myANSIBLE_QPOT_PLAYBOOK="qpot.yml"
     echo
-  else
-    echo "### Using local QPot Ansible Installation Playbook ... "
-    if [ -f "installer/install/qpot.yml" ];
-      then
-        myANSIBLE_QPOT_PLAYBOOK="installer/install/qpot.yml"
-      else
-        myANSIBLE_QPOT_PLAYBOOK="qpot.yml"
-    fi
 fi
 
 # Check type of sudo access
