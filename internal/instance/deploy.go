@@ -78,6 +78,14 @@ func deployProfileFor(name string) honeypotDeploy {
 				// Mount our generated config there too so our settings (incl.
 				// auth_class=UserDB, which enforces the credential persona) win.
 				{HostSubdir: "etc/cowrie.cfg", ContainerPath: "/home/cowrie/cowrie/cowrie.cfg", File: true},
+				// Persona-consistent fake-filesystem files, mounted over the
+				// image's honeyfs so post-login recon (cat /etc/passwd, hostname,
+				// cat /etc/os-release) matches the login persona and distro.
+				{HostSubdir: "honeyfs/etc/passwd", ContainerPath: "/home/cowrie/cowrie/honeyfs/etc/passwd", File: true},
+				{HostSubdir: "honeyfs/etc/group", ContainerPath: "/home/cowrie/cowrie/honeyfs/etc/group", File: true},
+				{HostSubdir: "honeyfs/etc/hostname", ContainerPath: "/home/cowrie/cowrie/honeyfs/etc/hostname", File: true},
+				{HostSubdir: "honeyfs/etc/os-release", ContainerPath: "/home/cowrie/cowrie/honeyfs/etc/os-release", File: true},
+				{HostSubdir: "honeyfs/etc/issue", ContainerPath: "/home/cowrie/cowrie/honeyfs/etc/issue", File: true},
 			},
 			Ports:        []int{22, 23},
 			ConfigSubdir: "etc",

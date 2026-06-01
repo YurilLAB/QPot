@@ -676,6 +676,24 @@ func (g *ComposeGenerator) generateCowrieUserDB() string {
 	return renderCowrieUserDB(selectCredentialTemplate(explicit, seed))
 }
 
+// generateCowrieHoneyfs returns the per-instance honeyfs files (etc/passwd,
+// group, hostname, os-release, issue) keyed by their path under honeyfs/,
+// consistent with this instance's credential persona, distro profile, and
+// hostname. See honeyfs.go for the research basis.
+func (g *ComposeGenerator) generateCowrieHoneyfs() map[string]string {
+	seed := g.Config.QPotID
+	if seed == "" {
+		seed = g.Config.InstanceName
+	}
+	hp := g.Config.Honeypots["cowrie"]
+	persona := selectCredentialTemplate(hp.Stealth.CredentialTemplate, seed)
+	hostname := hp.Stealth.FakeHostname
+	if hostname == "" {
+		hostname = hostnameForSeed(seed)
+	}
+	return generateHoneyfs(persona, profileForSeed(seed), hostname)
+}
+
 // generateCowrieConfig generates TPOT-compatible Cowrie config.
 //
 // The system identity (hostname, advertised SSH version, kernel/uname fields)

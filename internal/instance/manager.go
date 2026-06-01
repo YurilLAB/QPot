@@ -625,6 +625,20 @@ func (m *Manager) generateServiceConfigs() error {
 				return fmt.Errorf("failed to write %s for honeypot %q: %w", filename, name, err)
 			}
 		}
+
+		// Cowrie gets a per-instance honeyfs layer so post-login recon is
+		// consistent with the login persona / distro identity (see honeyfs.go).
+		if name == "cowrie" {
+			for rel, content := range generator.generateCowrieHoneyfs() {
+				dest := filepath.Join(hpDir, "honeyfs", rel)
+				if err := os.MkdirAll(filepath.Dir(dest), 0755); err != nil {
+					return fmt.Errorf("failed to create honeyfs dir for cowrie: %w", err)
+				}
+				if err := os.WriteFile(dest, []byte(content), 0644); err != nil {
+					return fmt.Errorf("failed to write honeyfs/%s for cowrie: %w", rel, err)
+				}
+			}
+		}
 	}
 
 	return nil
