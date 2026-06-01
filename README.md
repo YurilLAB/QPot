@@ -140,11 +140,19 @@ make build
 | Kibana | https://localhost:64297/kibana | Log analytics |
 | QPot API | https://localhost:64297/api | Management API |
 
-The built-in **QPot Dashboard** (authenticated with your QPot ID) shows live
-status and stats, per-honeypot enable/disable controls, a real-time attacker
-**activity feed**, and a **Threat Intelligence** panel surfacing the top MITRE
-ATT&CK techniques, recent IOCs, and active TTP campaigns. It auto-refreshes and
-all attacker-controlled fields are escaped against XSS.
+The built-in **QPot Dashboard** (authenticated with your QPot ID) is organized
+into tabs:
+
+- **Dashboard** — live status/stats, per-honeypot enable/disable controls, a
+  real-time attacker **activity feed**, and a **Threat Intelligence** panel
+  (top MITRE ATT&CK techniques, recent IOCs, active TTP campaigns).
+- **Pairing / Networking** — manage the honeypot **group**: paired nodes, each
+  node's online status / uptime / total requests, and the group size and total
+  activity (see Cluster Management below).
+- **Security** — the security posture (sandbox runtime, auth, database) and
+  per-honeypot isolation.
+
+It auto-refreshes and all attacker-controlled fields are escaped against XSS.
 
 ---
 
@@ -498,9 +506,16 @@ qpot config [--instance <name>]  # Open instance config in $EDITOR (--print to s
 
 ---
 
-## Cluster Management
+## Cluster Management (Honeypot Groups / Pairing)
 
-QPot supports multi-instance clustering with password authentication for distributed honeypot deployments.
+QPot lets you **pair multiple honeypot nodes into a managed group** (a cluster)
+with password authentication. Members gossip their health and attack stats, and
+the **Pairing / Networking** tab in the web dashboard shows every paired
+honeypot's online status, uptime, and total requests, plus the group size and
+total group activity. Manage groups from the CLI or the UI.
+
+The `cluster` command has `group`, `pair`, and `networking` aliases, so
+`qpot group join` / `qpot pair status` work the same as `qpot cluster ...`.
 
 ### Initialize a Cluster
 
