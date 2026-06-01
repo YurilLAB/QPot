@@ -316,7 +316,12 @@ func (sb *Sandbox) GetComposeSecurityExtensions(honeypot string, hpConfig config
 // that doesn't exist (which would refuse to start the container).
 func (sb *Sandbox) getSeccompProfile(honeypot string) string {
 	if sb.config.RuntimeSecurity.SeccompProfile == "default" {
-		return "default.json"
+		// Docker has no "default" file: its built-in default profile is
+		// applied automatically when no seccomp security-opt is given. Return
+		// "" so the caller omits the flag. Emitting "seccomp=default.json"
+		// makes docker try to open a nonexistent file and refuse to start the
+		// container.
+		return ""
 	}
 
 	profilePath := filepath.Join(os.TempDir(), fmt.Sprintf("qpot-seccomp-%s.json", honeypot))
