@@ -235,9 +235,14 @@ func deployProfileFor(name string) honeypotDeploy {
 			Ports:   []int{8080},
 		}
 	case "h0neytr4p":
+		// Needs a writable payloads dir; the read-only root otherwise blocks
+		// its `mkdir /data`.
 		return honeypotDeploy{
-			Volumes: []deployVolume{{HostSubdir: "logs", ContainerPath: "/opt/h0neytr4p/log"}},
-			Ports:   []int{80, 443},
+			Volumes: []deployVolume{
+				{HostSubdir: "logs", ContainerPath: "/opt/h0neytr4p/log"},
+				{HostSubdir: "payloads", ContainerPath: "/data/h0neytr4p/payloads"},
+			},
+			Ports: []int{80, 443},
 		}
 	case "hellpot":
 		return honeypotDeploy{
