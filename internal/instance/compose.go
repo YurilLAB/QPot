@@ -594,23 +594,39 @@ func (g *ComposeGenerator) GenerateTPOTConfig(honeypot string) (map[string]strin
 	return configs, nil
 }
 
-// generateCowrieConfig generates TPOT-compatible Cowrie config
+// generateCowrieConfig generates TPOT-compatible Cowrie config.
+//
+// The system identity (hostname, advertised SSH version, kernel/uname fields)
+// is derived per-instance from a stable seed (the QPot ID) so it is unique to
+// this deployment and internally consistent, rather than the static defaults
+// every T-Pot Cowrie shares (which are themselves a fingerprint). Explicit
+// stealth overrides take precedence. See deception.go for the research basis.
 func (g *ComposeGenerator) generateCowrieConfig(hp config.HoneypotConfig) string {
+	seed := g.Config.QPotID
+	if seed == "" {
+		seed = g.Config.InstanceName
+	}
+	profile := profileForSeed(seed)
+
 	hostname := hp.Stealth.FakeHostname
 	if hostname == "" {
-		hostname = "server"
+		hostname = hostnameForSeed(seed)
 	}
-	
-	os := hp.Stealth.FakeOS
-	if os == "" {
-		os = "Ubuntu 22.04.3 LTS"
-	}
-	
+
 	kernel := hp.Stealth.FakeKernel
 	if kernel == "" {
-		kernel = "5.15.0-91-generic"
+		kernel = profile.KernelVersion
 	}
-	
+
+	// A non-empty BannerString explicitly overrides the advertised SSH
+	// version; otherwise use the per-instance profile's version (never the
+	// static T-Pot default). RandomizeSSHVersion remains honored as an
+	// explicit opt-in but per-instance derivation is the safe default.
+	sshVersion := hp.Stealth.BannerString
+	if sshVersion == "" {
+		sshVersion = profile.SSHVersion
+	}
+
 	return fmt.Sprintf(`[honeypot]
 hostname = %s
 log_path = log
@@ -629,10 +645,10 @@ timezone = UTC
 [shell]
 filesystem = share/cowrie/fs.pickle
 kernel_version = %s
-kernel_build_string = #91-Ubuntu SMP
-hardware_platform = x86_64
-operating_system = GNU/Linux
-ssh_version = OpenSSH_8.9p1 Ubuntu-3ubuntu0.10
+kernel_build_string = %s
+hardware_platform = %s
+operating_system = %s
+ssh_version = %s
 
 [ssh]
 enabled = true
@@ -648,7 +664,7 @@ listen_endpoints = tcp:2223:interface=0.0.0.0
 [output_jsonlog]
 enabled = true
 logfile = log/cowrie.json
-`, hostname, kernel)
+`, hostname, kernel, profile.KernelBuildString, profile.HardwarePlatform, profile.OperatingSystem, sshVersion)
 }
 
 // generateConpotConfig generates TPOT-compatible Conpot config

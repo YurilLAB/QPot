@@ -374,10 +374,13 @@ func Default(instanceName string) *Config {
 					MaxPids:         50,
 				},
 				Stealth: HoneypotStealth{
-					Enabled:             true,
-					FakeHostname:        "webserver",
-					FakeOS:              "Ubuntu 22.04.3 LTS",
-					FakeKernel:          "5.15.0-91-generic",
+					Enabled: true,
+					// Identity (hostname / OS / kernel / SSH version) is left
+					// unset on purpose: QPot derives it per-instance from the
+					// QPot ID so each deployment is unique. Hardcoding a shared
+					// default here would recreate the exact static-fingerprint
+					// problem that lets scanners spot stock T-Pot at a glance.
+					// Set these explicitly only to pin a specific identity.
 					RandomizeSSHVersion: true,
 					AddArtificialDelay:  true,
 					DelayRangeMs:        50,
@@ -738,6 +741,22 @@ func (c *Config) GetTPOTConfig(honeypot string) map[string]string {
 			}
 			if hp.Stealth.FakeKernel != "" {
 				config["FAKE_KERNEL"] = hp.Stealth.FakeKernel
+			}
+			// Previously dropped on the floor — wire the remaining stealth
+			// knobs through so honeypot images that read them actually receive
+			// them. Per-instance SSH-version randomization and a custom banner
+			// are the highest-value anti-fingerprinting signals.
+			if hp.Stealth.RandomizeSSHVersion {
+				config["RANDOMIZE_SSH_VERSION"] = "1"
+			}
+			if hp.Stealth.BannerString != "" {
+				config["BANNER_STRING"] = hp.Stealth.BannerString
+			}
+			if hp.Stealth.AddArtificialDelay {
+				config["ARTIFICIAL_DELAY"] = "1"
+				if hp.Stealth.DelayRangeMs > 0 {
+					config["DELAY_RANGE_MS"] = fmt.Sprintf("%d", hp.Stealth.DelayRangeMs)
+				}
 			}
 		}
 	}
