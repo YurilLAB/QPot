@@ -274,3 +274,18 @@ func TestExtractFTPYieldsDomain(t *testing.T) {
 		t.Error("ftp:// URL did not produce the expected domain IOC bad.org")
 	}
 }
+
+// TestExtractNoEmptyCommandIOC guards a fuzzer-found bug: a whitespace-only
+// command has byte length > 3 but trims to empty, which previously produced a
+// command IOC with an empty value.
+func TestExtractNoEmptyCommandIOC(t *testing.T) {
+	e := NewExtractor()
+	for _, cmd := range []string{"    ", "\t\t\t\t", "  a  ", "\n\n\n\n"} {
+		ev := &database.Event{Honeypot: "cowrie", EventType: "command", Command: cmd, Timestamp: time.Now().UTC()}
+		for _, i := range e.Extract(ev) {
+			if i.Type == IOCTypeCommand && strings.TrimSpace(i.Value) == "" {
+				t.Errorf("command %q produced an empty-value command IOC", cmd)
+			}
+		}
+	}
+}

@@ -6,31 +6,32 @@ import (
 	"regexp"
 	"strings"
 	"time"
+	"unicode"
 
 	"github.com/qpot/qpot/internal/database"
 )
 
 // IOC type constants.
 const (
-	IOCTypeIP        = "ip"
+	IOCTypeIP         = "ip"
 	IOCTypeCredential = "credential"
-	IOCTypeURL       = "url"
-	IOCTypeHash      = "hash"
-	IOCTypeCommand   = "command"
-	IOCTypeUserAgent = "user_agent"
-	IOCTypeDomain    = "domain"
+	IOCTypeURL        = "url"
+	IOCTypeHash       = "hash"
+	IOCTypeCommand    = "command"
+	IOCTypeUserAgent  = "user_agent"
+	IOCTypeDomain     = "domain"
 )
 
 // pre-compiled patterns for IOC extraction.
 var (
-	reURL      = regexp.MustCompile(`https?://[^\s"']+|ftp://[^\s"']+`)
-	reMD5      = regexp.MustCompile(`\b[0-9a-fA-F]{32}\b`)
-	reSHA1     = regexp.MustCompile(`\b[0-9a-fA-F]{40}\b`)
-	reSHA256   = regexp.MustCompile(`\b[0-9a-fA-F]{64}\b`)
+	reURL    = regexp.MustCompile(`https?://[^\s"']+|ftp://[^\s"']+`)
+	reMD5    = regexp.MustCompile(`\b[0-9a-fA-F]{32}\b`)
+	reSHA1   = regexp.MustCompile(`\b[0-9a-fA-F]{40}\b`)
+	reSHA256 = regexp.MustCompile(`\b[0-9a-fA-F]{64}\b`)
 	// reDomain must accept every scheme reURL does (incl. ftp), otherwise
 	// ftp:// downloads — a common ingress-tool-transfer pattern — yield a URL
 	// IOC but never a domain IOC.
-	reDomain   = regexp.MustCompile(`(?i)(?:https?|ftp)://([a-z0-9](?:[a-z0-9\-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9\-]{0,61}[a-z0-9])?)+)`)
+	reDomain = regexp.MustCompile(`(?i)(?:https?|ftp)://([a-z0-9](?:[a-z0-9\-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9\-]{0,61}[a-z0-9])?)+)`)
 )
 
 // urlTrailingCutset is stripped from the end of a URL extracted from a command
@@ -40,8 +41,17 @@ var (
 // contexts would produce different IOC values/IDs.
 const urlTrailingCutset = ".,;:!?)]}>'\"|&"
 
-// trimURL removes trailing shell punctuation that the URL regex over-captured.
+// trimURL cleans a URL captured from a command line. A URL cannot contain
+// whitespace or control characters, but the regex class [^\s"'] only excludes
+// Go's ASCII \s ([\t\n\f\r ]) — it still admits vertical tab, NBSP and other
+// Unicode whitespace/control runes. Cut at the first such rune, then strip
+// trailing shell punctuation the greedy class over-captured.
 func trimURL(u string) string {
+	if i := strings.IndexFunc(u, func(r rune) bool {
+		return unicode.IsSpace(r) || unicode.IsControl(r)
+	}); i >= 0 {
+		u = u[:i]
+	}
 	return strings.TrimRight(u, urlTrailingCutset)
 }
 
@@ -158,10 +168,14 @@ func (e *Extractor) Extract(event *database.Event) []*database.IOC {
 			}
 		}
 
-		// Interesting commands
-		if event.EventType == "command" && len(event.Command) > 3 {
+		// Interesting commands. Trim BEFORE the length check: a whitespace-only
+		// command (e.g. "    ") has byte length > 3 but trims to empty, which
+		// would otherwise produce an empty-value IOC (found by FuzzExtract).
+		if event.EventType == "command" {
 			cleaned := strings.ToLower(strings.TrimSpace(event.Command))
-			iocs = append(iocs, makeIOC(IOCTypeCommand, cleaned))
+			if len(cleaned) > 3 {
+				iocs = append(iocs, makeIOC(IOCTypeCommand, cleaned))
+			}
 		}
 	}
 
