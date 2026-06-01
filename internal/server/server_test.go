@@ -224,3 +224,28 @@ func TestIsKnownHoneypot(t *testing.T) {
 		}
 	}
 }
+
+// TestHandleClusterStandalone verifies the Pairing endpoint reports a standalone
+// node (no cluster.json) as not clustered rather than erroring.
+func TestHandleClusterStandalone(t *testing.T) {
+	s := &Server{config: &config.Config{QPotID: validTestID}, mux: http.NewServeMux()}
+	req := httptest.NewRequest(http.MethodGet, "/api/cluster", nil)
+	rec := httptest.NewRecorder()
+	s.handleCluster(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rec.Code)
+	}
+	if !strings.Contains(rec.Body.String(), `"clustered":false`) {
+		t.Errorf("standalone node should report clustered:false, got %s", rec.Body.String())
+	}
+}
+
+func TestHandleClusterRejectsNonGET(t *testing.T) {
+	s := &Server{config: &config.Config{QPotID: validTestID}, mux: http.NewServeMux()}
+	req := httptest.NewRequest(http.MethodPost, "/api/cluster", nil)
+	rec := httptest.NewRecorder()
+	s.handleCluster(rec, req)
+	if rec.Code != http.StatusMethodNotAllowed {
+		t.Errorf("POST /api/cluster: status %d, want 405", rec.Code)
+	}
+}

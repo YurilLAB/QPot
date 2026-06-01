@@ -21,6 +21,7 @@ import (
 	"github.com/qpot/qpot/internal/config"
 	"github.com/qpot/qpot/internal/database"
 	"github.com/qpot/qpot/internal/instance"
+	"github.com/qpot/qpot/internal/cluster"
 	"github.com/qpot/qpot/internal/intelligence"
 	"github.com/qpot/qpot/internal/yuril"
 )
@@ -38,6 +39,9 @@ type Server struct {
 	worker      *intelligence.Worker
 	ttpBuilder  *intelligence.TTPBuilder
 	attckLoader *intelligence.ATTCKLoader
+	// cluster exposes the honeypot "group" (paired QPot nodes) to the
+	// Pairing/Networking dashboard tab. nil when this node is standalone.
+	cluster *cluster.Manager
 	// forwarder is the configured Yuril outbound forwarder, kept here so
 	// the /api/yuril/health endpoint and `qpot yuril status` can expose
 	// its activity counters. nil when Yuril forwarding is disabled.
@@ -82,6 +86,13 @@ func New(cfg *config.Config) (*Server, error) {
 		manager:  mgr,
 		database: db,
 		mux:      http.NewServeMux(),
+	}
+
+	// Load the cluster ("group") membership if this node is paired. A missing
+	// cluster.json just means standalone — the Pairing tab will say so.
+	cm := cluster.NewManager(cfg.DataPath)
+	if c, err := cm.LoadCluster(); err == nil && c != nil {
+		s.cluster = cm
 	}
 
 	// Wire up the intelligence subsystem when enabled.
@@ -131,6 +142,9 @@ func (s *Server) setupRoutes() {
 	s.mux.HandleFunc("/api/iocs", s.withQPotAuth(s.handleIOCs))
 	s.mux.HandleFunc("/api/ttps", s.withQPotAuth(s.handleTTPs))
 	s.mux.HandleFunc("/api/intelligence", s.withQPotAuth(s.handleIntelligenceSummary))
+
+	// Pairing / Networking: the honeypot "group" (paired QPot nodes).
+	s.mux.HandleFunc("/api/cluster", s.withQPotAuth(s.handleCluster))
 
 	// Yuril Security Suite integration routes — bidirectional intel sharing
 	// with YurilAntivirus / YurilTracking. All endpoints require the QPot
@@ -890,6 +904,59 @@ func (s *Server) handleIntelligenceSummary(w http.ResponseWriter, r *http.Reques
 	}
 
 	s.sendJSON(w, summary)
+}
+
+// handleCluster returns the honeypot "group" (paired QPot nodes) for the
+// Pairing/Networking dashboard tab: the group summary plus per-node name,
+// online status, uptime, and total requests. When this node is standalone
+// (no cluster.json), it reports clustered=false.
+func (s *Server) handleCluster(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if s.cluster == nil {
+		s.sendJSON(w, map[string]interface{}{"clustered": false})
+		return
+	}
+
+	status := s.cluster.GetStatus()
+	nodes := s.cluster.GetNodes()
+
+	type nodeView struct {
+		Name         string `json:"name"`
+		Address      string `json:"address"`
+		Online       bool   `json:"online"`
+		Status       string `json:"status"`
+		UptimeSecs   int64  `json:"uptime_seconds"`
+		TotalEvents  int64  `json:"total_events"`
+		ActiveAttacks int64 `json:"active_attacks"`
+		IsLocal      bool   `json:"is_local"`
+	}
+	views := make([]nodeView, 0, len(nodes))
+	localID := ""
+	if status != nil {
+		localID = status.Leader // best-effort; local marking below uses QPotID match
+	}
+	_ = localID
+	for _, n := range nodes {
+		views = append(views, nodeView{
+			Name:          n.Name,
+			Address:       fmt.Sprintf("%s:%d", n.Address, n.Port),
+			Online:        n.Status == cluster.NodeStatusHealthy,
+			Status:        string(n.Status),
+			UptimeSecs:    int64(n.Stats.Uptime.Seconds()),
+			TotalEvents:   n.Stats.TotalEvents,
+			ActiveAttacks: n.Stats.ActiveAttacks,
+			IsLocal:       n.QPotID == s.config.QPotID,
+		})
+	}
+
+	s.sendJSON(w, map[string]interface{}{
+		"clustered": true,
+		"group":     status,
+		"nodes":     views,
+	})
 }
 
 // sendJSON sends a JSON response

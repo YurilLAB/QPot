@@ -661,9 +661,23 @@ $notify.ShowBalloonTip(10000)
 // newClusterCommand creates the cluster management command
 func newClusterCommand() *cobra.Command {
 	cmd := &cobra.Command{
-		Use:   "cluster",
-		Short: "Manage QPot clusters",
-		Long:  "Initialize, join, and manage multi-instance QPot clusters with password authentication",
+		Use:     "cluster",
+		Aliases: []string{"group", "pair", "networking"},
+		Short:   "Pair honeypots into a group and manage them together",
+		Long: `Pair multiple QPot honeypot nodes into a managed group (cluster).
+
+A group lets you manage many honeypot deployments together: members gossip
+their health and attack stats, and the Pairing/Networking tab in the web UI
+shows every node's online status, uptime, and total requests.
+
+Aliases: 'qpot group ...' and 'qpot pair ...' work the same as 'qpot cluster'.
+
+Typical flow:
+  qpot cluster init   --name mygroup    # create a group (prints the group ID + password)
+  qpot cluster join   --id <group-id>   # pair another node into the group
+  qpot cluster status                   # show the group summary
+  qpot cluster nodes                    # list paired honeypots
+  qpot cluster leave                    # unpair this node`,
 	}
 
 	cmd.AddCommand(newClusterInitCommand())
