@@ -584,8 +584,34 @@ func (m *Manager) generateServiceConfigs() error {
 		if err != nil {
 			return fmt.Errorf("failed to generate config for honeypot %q: %w", name, err)
 		}
+		// Config files must land inside the subdir the container mounts (e.g.
+		// cowrie reads cowrie.cfg/userdb.txt from etc/, which is bind-mounted),
+		// so honor the deployment profile's ConfigSubdir.
+		prof := deployProfileFor(name)
+		hpDir := filepath.Join(m.config.DataPath, "honeypots", name)
+		cfgDir := hpDir
+		if prof.ConfigSubdir != "" {
+			cfgDir = filepath.Join(hpDir, prof.ConfigSubdir)
+		}
+		// Ensure all profile volume subdirs (and the config dir) exist so the
+		// bind mounts resolve to real directories. They must be writable by the
+		// honeypot's in-container non-root user (e.g. uid 2000), which is not
+		// the host user that creates them, so use 0777. These dirs hold attacker
+		// logs / decoy SSH host keys / downloads — not QPot secrets.
+		for _, v := range prof.Volumes {
+			dir := filepath.Join(hpDir, v.HostSubdir)
+			if err := os.MkdirAll(dir, 0750); err != nil {
+				return fmt.Errorf("failed to create %s dir for honeypot %q: %w", v.HostSubdir, name, err)
+			}
+			if err := os.Chmod(dir, 0777); err != nil {
+				return fmt.Errorf("failed to chmod %s dir for honeypot %q: %w", v.HostSubdir, name, err)
+			}
+		}
+		if err := os.MkdirAll(cfgDir, 0750); err != nil {
+			return fmt.Errorf("failed to create config dir for honeypot %q: %w", name, err)
+		}
 		for filename, content := range cfgs {
-			dest := filepath.Join(m.config.DataPath, "honeypots", name, filename)
+			dest := filepath.Join(cfgDir, filename)
 			if err := os.WriteFile(dest, []byte(content), 0640); err != nil {
 				return fmt.Errorf("failed to write %s for honeypot %q: %w", filename, name, err)
 			}

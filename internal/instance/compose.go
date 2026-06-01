@@ -178,20 +178,25 @@ services:
     {{if $.Sandbox.ContainerRuntime}}# Stronger isolation runtime (gVisor/Kata) for this attacker-facing container
     runtime: {{$.Sandbox.ContainerRuntime}}
     {{end}}
+    {{- $d := deployFor .Name}}
     ports:
+    {{- if $d.Ports}}
+    {{- range $p := $d.Ports}}
+      - "{{$.Config.AllocatePort $p}}:{{$p}}"
+    {{- end}}
+    {{- else}}
       - "{{$.Config.AllocatePort .HP.Port}}:{{.HP.Port}}"
+    {{- end}}
     volumes:
-      # NOTE: the QPot ID (the API credential) is deliberately NOT mounted or
-      # passed to honeypot containers. Honeypots run attacker-controlled
-      # workloads; a honeypot-software RCE that can read /proc/self/environ or
-      # /run/secrets must not yield the credential that authenticates to the
-      # management API. Log tagging with the QPot ID is done by the Vector
-      # collector (see GenerateVectorConfig), not by the honeypots, so they
-      # have no need for it.
-      - {{$.Config.DataPath}}/honeypots/{{.Name}}/logs:/var/log/honeypot
-      - {{$.Config.DataPath}}/honeypots/{{.Name}}/data:/data
-      {{if eq .Name "cowrie"}}- {{$.Config.DataPath}}/honeypots/{{.Name}}/cowrie.cfg:/opt/cowrie/cowrie.cfg:ro{{end}}
-      {{if eq .Name "conpot"}}- {{$.Config.DataPath}}/honeypots/{{.Name}}/conpot.cfg:/opt/conpot/conpot.cfg:ro{{end}}
+      # The QPot ID (the API credential) is deliberately NOT mounted or passed
+      # to honeypot containers — they run attacker-controlled workloads, so a
+      # honeypot RCE must not yield the management-API credential. Log tagging is
+      # done by the Vector collector. Mounts below come from the per-honeypot
+      # deployment profile (deploy.go), derived from T-Pot's reference composes
+      # and verified by running the images.
+    {{- range $v := $d.Volumes}}
+      - {{$.Config.DataPath}}/honeypots/{{$.Name}}/{{$v.HostSubdir}}:{{$v.ContainerPath}}
+    {{- end}}
     networks:
       - qpot_internal
       - {{.Name}}_net
@@ -245,11 +250,8 @@ services:
       - SETUID
       - SETGID{{end}}
 
-    # User namespace
-    user: "1000:1000"
-
-    # PID namespace for process isolation
-    pid: "private"
+    # No user override: the database image runs as its own user; forcing a
+    # different uid breaks its data-directory ownership.
 
     # Hostname isolation
     hostname: "{{.Name}}-host"
@@ -297,39 +299,40 @@ services:
     {{if .Config.Security.ReadOnlyFilesystem}}read_only: true{{end}}
     {{if .Config.Security.NoNewPrivileges}}security_opt:
       - no-new-privileges:true{{end}}
+    {{- $dep := deployFor .Name}}
     {{if .Config.Security.DropCapabilities}}cap_drop:
       - ALL
     cap_add:
       - SETUID
       - SETGID
-      {{if and .HP.Port (lt .HP.Port 1024)}}- NET_BIND_SERVICE{{end}}{{end}}
+      {{if or $dep.NeedsNetBind (and .HP.Port (lt .HP.Port 1024))}}- NET_BIND_SERVICE{{end}}{{end}}
 
-    # User namespace
-    user: "1000:1000"
-
-    # PID namespace for process isolation
-    pid: "private"
+    # No user override: each honeypot image already runs as its own non-root
+    # user (e.g. cowrie=2000). Forcing a different uid breaks the image's file
+    # ownership and tmpfs uid assumptions (cowrie's /tmp/cowrie is uid 2000).
 
     # Hostname isolation
     hostname: {{if .FakeHostname}}"{{.FakeHostname}}"{{else if .Name}}"{{.Name}}-host"{{else}}"qpot-host"{{end}}
 
-    # Temporary filesystems for read-only containers
-    {{if .Config.Security.ReadOnlyFilesystem}}tmpfs:
+    # Temporary filesystems. A single tmpfs: block combines the read-only-root
+    # scratch mounts with any image-specific tmpfs the deployment profile
+    # requires (e.g. cowrie's /tmp/cowrie), so there is never a duplicate key.
+    {{- $dt := deployFor .Name}}
+    {{- if or .Config.Security.ReadOnlyFilesystem $dt.Tmpfs}}
+    tmpfs:
+    {{- if .Config.Security.ReadOnlyFilesystem}}
       - /tmp:noexec,nosuid,size=100m,mode=1777
       - /var/tmp:noexec,nosuid,size=50m,mode=1777
-      - /run:noexec,nosuid,size=10m,mode=1777{{end}}
+      - /run:noexec,nosuid,size=10m,mode=1777
+    {{- end}}
+    {{- range $t := $dt.Tmpfs}}
+      - {{$t}}
+    {{- end}}
+    {{- end}}
 
     # Memory and OOM settings
     mem_swappiness: 0
     oom_kill_disable: false
-
-    # Device restrictions
-    device_read_bps:
-      - path: /dev/null
-        rate: 1mb
-    device_write_bps:
-      - path: /dev/null
-        rate: 1mb
 
     # Logging configuration
     logging:
@@ -368,6 +371,7 @@ services:
 		},
 		"GetHoneypotImage": GetHoneypotImage,
 		"subnetFor": subnetForNetwork,
+		"deployFor": deployProfileFor,
 		"int": func(v interface{}) int {
 			switch i := v.(type) {
 			case int:
@@ -461,13 +465,14 @@ transforms:
       # honeypot can be recovered, and the DB requires it (NOT NULL).
       .honeypot = "unknown"
       if exists(.file) {
-        m, merr = parse_regex(string!(.file) ?? "", r'/honeypots/(?P<hp>[^/]+)/')
+        m, merr = parse_regex(string(.file) ?? "", r'/honeypots/(?P<hp>[^/]+)/')
         if merr == null {
           .honeypot = m.hp
         }
       }
 
-      # Normalise source IP from the common honeypot field names.
+      # Normalise source IP from the common honeypot field names. to_string is
+      # fallible on an unknown-typed field, so coalesce to a default.
       if exists(.src_ip) {
         .source_ip = to_string(.src_ip) ?? "0.0.0.0"
       } else if !exists(.source_ip) {
@@ -482,10 +487,12 @@ transforms:
         .event_type = "unknown"
       }
 
-      # Stamp QPot metadata LAST.
+      # Stamp QPot metadata LAST. The timestamp is formatted as ClickHouse's
+      # DateTime64 'basic' input format ("YYYY-MM-DD HH:MM:SS.fff"); a raw
+      # RFC3339 value (with T/Z) is rejected by the JSONEachRow parser (400).
       .qpot_id = "{{.Config.QPotID}}"
       .qpot_instance = "{{.Config.InstanceName}}"
-      .timestamp = now()
+      .timestamp = format_timestamp!(now(), "%Y-%m-%d %H:%M:%S%.3f")
 {{if .Config.Collector.GeoIPDBPath}}
   enrich_geoip:
     type: remap
@@ -513,14 +520,15 @@ transforms:
       # add_qpot_metadata (GeoIP is optional so Vector can start without an mmdb).
       - {{if .Config.Collector.GeoIPDBPath}}enrich_geoip{{else}}add_qpot_metadata{{end}}
     condition: |
-      # Filter out common scanner signatures if stealth mode enabled.
-      # Guard .message existence: after the JSON merge many events have no
-      # .message field, and match_any on a null aborts the condition.
-      {{if .Config.Stealth.BlockCommonProbes}}
-      !exists(.message) || !match_any(string!(.message), [{{range $i, $probe := .Config.Stealth.BlockedProbes}}{{if $i}}, {{end}}"{{$probe}}"{{end}}])
-      {{else}}
+      # Drop events whose message contains a known scanner signature (stealth).
+      # Substring match via contains() — match_any expects regexes, and
+      # contains avoids regex-escaping the operator-supplied probe strings.
+      {{- if .Config.Stealth.BlockCommonProbes}}
+      msg = downcase(string(.message) ?? "")
+      !({{range $i, $probe := .Config.Stealth.BlockedProbes}}{{if $i}} || {{end}}contains(msg, "{{$probe}}"){{end}})
+      {{- else}}
       true
-      {{end}}
+      {{- end}}
 
 sinks:
 {{if eq .Config.Database.Type "clickhouse"}}

@@ -38,7 +38,9 @@ func TestInitializeWritesServiceConfigs(t *testing.T) {
 		filepath.Join(dir, "vector.yaml"),
 	}
 	if _, ok := cfg.Honeypots["cowrie"]; ok && cfg.Honeypots["cowrie"].Enabled {
-		mustExist = append(mustExist, filepath.Join(dir, "honeypots", "cowrie", "cowrie.cfg"))
+		// cowrie.cfg lands in the etc/ subdir (the cowrie deployment profile's
+		// ConfigSubdir) so it's inside the directory the container mounts.
+		mustExist = append(mustExist, filepath.Join(dir, "honeypots", "cowrie", "etc", "cowrie.cfg"))
 	}
 
 	for _, p := range mustExist {
