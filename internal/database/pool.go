@@ -3,6 +3,7 @@ package database
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"sync"
@@ -35,30 +36,41 @@ func DefaultPoolConfig() *PoolConfig {
 // PooledConnection wraps a database connection with pool metadata
 type PooledConnection struct {
 	Database
-	id          string
-	pool        *Pool
-	createdAt   time.Time
-	lastUsedAt  time.Time
-	inUse       atomic.Bool
-	useCount    atomic.Int64
+	id        string
+	pool      *Pool
+	createdAt time.Time
+	// lastUsedAtNanos is the unix-nano timestamp of the last use. It is read by
+	// the maintenance/cleanup goroutine concurrently with Acquire/Release, so
+	// it must be accessed atomically rather than as a plain time.Time (a
+	// multi-word value whose unsynchronized read/write is a data race).
+	lastUsedAtNanos atomic.Int64
+	inUse           atomic.Bool
+	useCount        atomic.Int64
 }
+
+// setLastUsed records the current time as the connection's last-use instant.
+func (pc *PooledConnection) setLastUsed() { pc.lastUsedAtNanos.Store(time.Now().UnixNano()) }
+
+// lastUsed returns the connection's last-use instant.
+func (pc *PooledConnection) lastUsed() time.Time { return time.Unix(0, pc.lastUsedAtNanos.Load()) }
 
 // newPooledConnection creates a new pooled connection wrapper
 func newPooledConnection(id string, db Database, pool *Pool) *PooledConnection {
 	now := time.Now()
-	return &PooledConnection{
-		Database:   db,
-		id:         id,
-		pool:       pool,
-		createdAt:  now,
-		lastUsedAt: now,
+	pc := &PooledConnection{
+		Database:  db,
+		id:        id,
+		pool:      pool,
+		createdAt: now,
 	}
+	pc.lastUsedAtNanos.Store(now.UnixNano())
+	return pc
 }
 
 // Release returns the connection to the pool
 func (pc *PooledConnection) Release() {
 	if pc.inUse.CompareAndSwap(true, false) {
-		pc.lastUsedAt = time.Now()
+		pc.setLastUsed()
 		pc.useCount.Add(1)
 		pc.pool.release(pc)
 	}
@@ -74,11 +86,11 @@ func (pc *PooledConnection) Stats() ConnectionStats {
 	return ConnectionStats{
 		ID:         pc.id,
 		CreatedAt:  pc.createdAt,
-		LastUsedAt: pc.lastUsedAt,
+		LastUsedAt: pc.lastUsed(),
 		InUse:      pc.inUse.Load(),
 		UseCount:   pc.useCount.Load(),
 		Age:        time.Since(pc.createdAt),
-		IdleTime:   time.Since(pc.lastUsedAt),
+		IdleTime:   time.Since(pc.lastUsed()),
 	}
 }
 
@@ -165,7 +177,7 @@ func (p *Pool) Acquire(ctx context.Context) (*PooledConnection, error) {
 		select {
 		case conn := <-p.available:
 			if conn.inUse.CompareAndSwap(false, true) {
-				conn.lastUsedAt = time.Now()
+				conn.setLastUsed()
 				return conn, nil
 			}
 			// Already marked in-use by another goroutine — put it back and retry.
@@ -184,11 +196,16 @@ func (p *Pool) Acquire(ctx context.Context) (*PooledConnection, error) {
 		p.mu.Unlock()
 
 		if underLimit {
-			if err := p.createConnection(); err != nil {
+			err := p.createConnection()
+			if err == nil {
+				// New connection was added to available; loop back to pick it up.
+				continue
+			}
+			// Racing creators can momentarily push us to the cap; that's not a
+			// failure — fall through to the wait path for a freed connection.
+			if !errors.Is(err, errPoolAtCapacity) {
 				return nil, fmt.Errorf("failed to create connection: %w", err)
 			}
-			// New connection was added to available; loop back to pick it up.
-			continue
 		}
 
 		// At limit — wait for a connection to become available.
@@ -197,7 +214,7 @@ func (p *Pool) Acquire(ctx context.Context) (*PooledConnection, error) {
 		case conn := <-p.available:
 			cancel()
 			if conn.inUse.CompareAndSwap(false, true) {
-				conn.lastUsedAt = time.Now()
+				conn.setLastUsed()
 				return conn, nil
 			}
 			// Already taken; return it and loop.
@@ -258,8 +275,31 @@ func (p *Pool) release(conn *PooledConnection) {
 	}
 }
 
-// createConnection creates a new pooled connection
+// errPoolAtCapacity is returned by createConnection when the pool already holds
+// MaxOpenConns connections. Acquire treats it as "fall through to waiting"
+// rather than a hard failure.
+var errPoolAtCapacity = errors.New("connection pool at capacity")
+
+// createConnection creates a new pooled connection. It never lets the pool
+// exceed MaxOpenConns: the limit is re-checked under the lock immediately
+// before the connection is stored, so concurrent creators can't race past the
+// cap (the dial happens without the lock, so a stale pre-check is not enough).
 func (p *Pool) createConnection() error {
+	// Fast pre-check to avoid a pointless dial when already at capacity.
+	p.mu.Lock()
+	atCap := len(p.connections) >= p.config.MaxOpenConns
+	p.mu.Unlock()
+	if atCap {
+		return errPoolAtCapacity
+	}
+
+	// Don't start creating connections once the pool is shutting down.
+	select {
+	case <-p.ctx.Done():
+		return p.ctx.Err()
+	default:
+	}
+
 	db, err := p.factory()
 	if err != nil {
 		return err
@@ -277,6 +317,16 @@ func (p *Pool) createConnection() error {
 	)
 
 	p.mu.Lock()
+	// Authoritative re-check under the lock: another goroutine (or the pool
+	// shutting down) may have changed things while we were dialing.
+	if len(p.connections) >= p.config.MaxOpenConns || p.ctx.Err() != nil {
+		p.mu.Unlock()
+		db.Close() // discard — we raced past the cap or the pool is closing
+		if p.ctx.Err() != nil {
+			return p.ctx.Err()
+		}
+		return errPoolAtCapacity
+	}
 	p.connections = append(p.connections, conn)
 	p.stats.TotalCreated++
 	p.mu.Unlock()
@@ -343,7 +393,7 @@ func (p *Pool) cleanup() {
 		}
 
 		// Check max idle time
-		if p.config.ConnMaxIdleTime > 0 && now.Sub(conn.lastUsedAt) > p.config.ConnMaxIdleTime {
+		if p.config.ConnMaxIdleTime > 0 && now.Sub(conn.lastUsed()) > p.config.ConnMaxIdleTime {
 			toRemove = append(toRemove, conn)
 			continue
 		}
