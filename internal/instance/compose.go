@@ -161,29 +161,10 @@ services:
 {{template "honeypot" dict "Name" $name "HP" $hp "Config" $.Config "Sandbox" $.Sandbox}}
 {{end}}{{end}}
 
-  # Web UI with QPot ID authentication
-{{if .Config.WebUI.Enabled}}  webui:
-    image: ghcr.io/qpot/webui:latest
-    container_name: {{.Config.InstanceName}}_webui
-    restart: unless-stopped
-    environment:
-      QPOT_ID: {{.Config.QPotID}}
-      QPOT_INSTANCE: {{.Config.InstanceName}}
-      QPOT_DATABASE_TYPE: {{.Config.Database.Type}}
-      QPOT_DATABASE_HOST: database
-      QPOT_ID_AUTH: "{{.Config.WebUI.QPotIDAuth}}"
-    volumes:
-      - {{.Config.DataPath}}/qpot.id:/run/secrets/qpot_id:ro
-    ports:
-      - "{{.Config.WebUI.BindAddr}}:{{.Config.WebUI.Port}}:8080"
-    networks:
-      - qpot_internal
-    depends_on:
-      database:
-        condition: service_healthy
-    secrets:
-      - qpot_id
-{{end}}
+  # Note: the Web UI is served in-process by the qpot binary itself ("qpot up"
+  # starts an HTTP server on Config.WebUI.Port). There is no separate web UI
+  # container — adding one here would both duplicate that listener (port
+  # conflict) and depend on an image that isn't published.
 
 {{define "honeypot"}}
   # Honeypot: {{.Name}}
@@ -341,14 +322,10 @@ services:
     # scratch mounts with any image-specific tmpfs the deployment profile
     # requires (e.g. cowrie's /tmp/cowrie), so there is never a duplicate key.
     {{- $dt := deployFor .Name}}
-    {{- if or .Config.Security.ReadOnlyFilesystem $dt.Tmpfs}}
+    {{- $tmpfs := mergedTmpfs .Config.Security.ReadOnlyFilesystem $dt}}
+    {{- if $tmpfs}}
     tmpfs:
-    {{- if .Config.Security.ReadOnlyFilesystem}}
-      - /tmp:noexec,nosuid,size=100m,mode=1777
-      - /var/tmp:noexec,nosuid,size=50m,mode=1777
-      - /run:noexec,nosuid,size=10m,mode=1777
-    {{- end}}
-    {{- range $t := $dt.Tmpfs}}
+    {{- range $t := $tmpfs}}
       - {{$t}}
     {{- end}}
     {{- end}}
@@ -396,6 +373,42 @@ services:
 		"subnetFor": subnetForNetwork,
 		"bridgeName": bridgeName,
 		"deployFor": deployProfileFor,
+		// mergedTmpfs combines the read-only-root scratch mounts with the
+		// per-honeypot profile's tmpfs, deduplicated by target path. A profile
+		// that needs /tmp owned by a specific uid (e.g. log4pot) would otherwise
+		// collide with the default "/tmp" mount and make compose reject the file
+		// ("target /tmp already mounted"). Profile entries win on conflict.
+		"mergedTmpfs": func(readonly bool, d honeypotDeploy) []string {
+			target := func(entry string) string {
+				if i := strings.IndexByte(entry, ':'); i >= 0 {
+					return entry[:i]
+				}
+				return entry
+			}
+			seen := map[string]bool{}
+			var out []string
+			for _, t := range d.Tmpfs {
+				if seen[target(t)] {
+					continue
+				}
+				seen[target(t)] = true
+				out = append(out, t)
+			}
+			if readonly {
+				for _, t := range []string{
+					"/tmp:noexec,nosuid,size=100m,mode=1777",
+					"/var/tmp:noexec,nosuid,size=50m,mode=1777",
+					"/run:noexec,nosuid,size=10m,mode=1777",
+				} {
+					if seen[target(t)] {
+						continue
+					}
+					seen[target(t)] = true
+					out = append(out, t)
+				}
+			}
+			return out
+		},
 		"int": func(v interface{}) int {
 			switch i := v.(type) {
 			case int:

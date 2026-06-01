@@ -213,6 +213,16 @@ func (m *Manager) Start(ctx context.Context, detach bool) error {
 		return fmt.Errorf("instance is already running")
 	}
 
+	// Regenerate the compose file and service configs from the current
+	// configuration before starting. The compose file is otherwise only written
+	// at instance-create time, so honeypots enabled/disabled afterwards (via
+	// `qpot honeypot enable/disable`) would never be reflected when `qpot up`
+	// runs. Re-running Initialize is idempotent (mkdir -p, save config, render
+	// templates) and keeps the running stack in sync with config.yaml.
+	if err := m.Initialize(ctx); err != nil {
+		return fmt.Errorf("failed to prepare instance for start: %w", err)
+	}
+
 	// Eagerly initialize the database connection when starting.
 	if _, err := m.db(); err != nil {
 		slog.Warn("Database connection could not be established at start", "error", err)

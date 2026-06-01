@@ -88,6 +88,87 @@ func TestComposeCowrieRuntime(t *testing.T) {
 	}
 }
 
+// TestComposeTmpfsNoDuplicateTarget guards against the compose-rejecting
+// "target /tmp already mounted" error: a honeypot whose deploy profile mounts a
+// tmpfs at /tmp (e.g. log4pot) must not also emit the default read-only-root
+// /tmp mount. We assert each service's tmpfs block has unique targets.
+func TestComposeTmpfsNoDuplicateTarget(t *testing.T) {
+	cfg := config.Default("tmpfs-dedup")
+	cfg.QPotID = "qp_tmpfsdeduptmpfsdedup001"
+	cfg.Security.ReadOnlyFilesystem = true
+	// Enable a honeypot that mounts /tmp directly so it collides with the
+	// read-only-root default unless deduplicated.
+	for _, name := range []string{"log4pot", "cowrie"} {
+		hp := cfg.Honeypots[name]
+		hp.Enabled = true
+		cfg.Honeypots[name] = hp
+	}
+	sb, _ := security.NewSandbox(&cfg.Security)
+	g := &ComposeGenerator{Config: cfg, Sandbox: sb}
+	out, err := g.Generate()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Walk the rendered YAML, tracking the current service and the tmpfs targets
+	// seen within its tmpfs: block.
+	var inTmpfs bool
+	var svc string
+	seen := map[string]bool{}
+	for _, raw := range strings.Split(out, "\n") {
+		line := strings.TrimRight(raw, " ")
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "container_name:") {
+			svc = strings.TrimSpace(strings.TrimPrefix(trimmed, "container_name:"))
+			inTmpfs = false
+			seen = map[string]bool{}
+			continue
+		}
+		if trimmed == "tmpfs:" {
+			inTmpfs = true
+			continue
+		}
+		if inTmpfs {
+			if strings.HasPrefix(trimmed, "- ") {
+				entry := strings.TrimPrefix(trimmed, "- ")
+				target := entry
+				if i := strings.IndexByte(entry, ':'); i >= 0 {
+					target = entry[:i]
+				}
+				if seen[target] {
+					t.Errorf("service %s has duplicate tmpfs target %q", svc, target)
+				}
+				seen[target] = true
+				continue
+			}
+			// Any non-list, non-blank line ends the tmpfs block.
+			if trimmed != "" && !strings.HasPrefix(trimmed, "#") {
+				inTmpfs = false
+			}
+		}
+	}
+}
+
+// TestComposeHasNoPhantomWebUIService verifies the compose no longer emits a
+// separate web UI container. The Web UI is served in-process by the qpot binary;
+// a webui service referenced an unpublished image and broke `docker compose up`.
+func TestComposeHasNoPhantomWebUIService(t *testing.T) {
+	cfg := config.Default("no-webui")
+	cfg.QPotID = "qp_nowebuinowebuinowebui001"
+	cfg.WebUI.Enabled = true
+	sb, _ := security.NewSandbox(&cfg.Security)
+	g := &ComposeGenerator{Config: cfg, Sandbox: sb}
+	out, err := g.Generate()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, bad := range []string{"ghcr.io/qpot/webui", "container_name: no-webui_webui"} {
+		if strings.Contains(out, bad) {
+			t.Errorf("compose still contains phantom web UI reference %q", bad)
+		}
+	}
+}
+
 func TestBridgeNameWithinLinuxLimit(t *testing.T) {
 	// Linux interface names are capped at 15 chars; br-<honeypot> overflows for
 	// names >12 chars and docker rejects the network.
