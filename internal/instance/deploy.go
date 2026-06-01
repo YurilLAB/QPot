@@ -91,6 +91,24 @@ func deployProfileFor(name string) honeypotDeploy {
 			},
 			Ports: []int{2222},
 		}
+	case "redishoneypot":
+		// Redis honeypot: single TCP port 6379, logs to /var/log/redishoneypot.
+		// Derived from docker/redishoneypot/docker-compose.yml.
+		return honeypotDeploy{
+			Volumes: []deployVolume{
+				{HostSubdir: "logs", ContainerPath: "/var/log/redishoneypot"},
+			},
+			Ports: []int{6379},
+		}
+	case "adbhoney":
+		// Android Debug Bridge honeypot: port 5555, logs to /opt/adbhoney/log.
+		// Derived from docker/adbhoney/docker-compose.yml.
+		return honeypotDeploy{
+			Volumes: []deployVolume{
+				{HostSubdir: "logs", ContainerPath: "/opt/adbhoney/log"},
+			},
+			Ports: []int{5555},
+		}
 	default:
 		// Generic fallback for honeypots without a verified profile.
 		return honeypotDeploy{

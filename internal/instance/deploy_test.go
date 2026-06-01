@@ -87,3 +87,38 @@ func TestComposeCowrieRuntime(t *testing.T) {
 		}
 	}
 }
+
+func TestBridgeNameWithinLinuxLimit(t *testing.T) {
+	// Linux interface names are capped at 15 chars; br-<honeypot> overflows for
+	// names >12 chars and docker rejects the network.
+	for _, hp := range []string{"cowrie", "endlessh", "redishoneypot", "citrixhoneypot", "redishoneypot"} {
+		bn := bridgeName(hp)
+		if len(bn) > 15 {
+			t.Errorf("bridgeName(%q)=%q is %d chars (>15)", hp, bn, len(bn))
+		}
+	}
+	// Long names must still be unique to each other.
+	if bridgeName("redishoneypot") == bridgeName("citrixhoneypot") {
+		t.Error("bridge names collide for distinct honeypots")
+	}
+	// Short names keep the readable form.
+	if bridgeName("cowrie") != "br-cowrie" {
+		t.Errorf("short bridge name changed: %q", bridgeName("cowrie"))
+	}
+}
+
+func TestDeployProfilesRedisAdbhoney(t *testing.T) {
+	r := deployProfileFor("redishoneypot")
+	if len(r.Ports) != 1 || r.Ports[0] != 6379 {
+		t.Errorf("redishoneypot ports = %v, want [6379]", r.Ports)
+	}
+	a := deployProfileFor("adbhoney")
+	if len(a.Ports) != 1 || a.Ports[0] != 5555 {
+		t.Errorf("adbhoney ports = %v, want [5555]", a.Ports)
+	}
+	for _, p := range []honeypotDeploy{r, a} {
+		if len(p.Volumes) == 0 || p.Volumes[0].HostSubdir != "logs" {
+			t.Errorf("profile missing logs volume: %+v", p.Volumes)
+		}
+	}
+}

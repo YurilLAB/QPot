@@ -18,6 +18,22 @@ type ComposeGenerator struct {
 	Sandbox *security.Sandbox
 }
 
+// bridgeName builds the Linux bridge interface name for a honeypot network.
+// Linux interface names are capped at 15 chars (IFNAMSIZ), so "br-<honeypot>"
+// overflows for names >12 chars (e.g. redishoneypot, citrixhoneypot) and Docker
+// rejects the network with "numerical result out of range". When too long, use
+// a stable short hash suffix so the name stays <=15 chars and unique.
+func bridgeName(honeypot string) string {
+	const max = 15
+	name := "br-" + honeypot
+	if len(name) <= max {
+		return name
+	}
+	h := fnv.New32a()
+	_, _ = h.Write([]byte(honeypot))
+	return fmt.Sprintf("br-%s%04x", honeypot[:8], h.Sum32()&0xffff)
+}
+
 // subnetForNetwork computes a unique, stable /24 subnet for a Docker bridge
 // network given an (instanceName, networkName) pair. The result always falls
 // in the 172.20.x.y/24 range (RFC 1918) which Docker uses by default.
@@ -45,7 +61,7 @@ networks:
   {{$name}}_net:
     driver: bridge
     driver_opts:
-      com.docker.network.bridge.name: br-{{$name}}
+      com.docker.network.bridge.name: {{bridgeName $name}}
 {{if $.Config.Security.NetworkIsolation.RandomizeMAC}}
     ipam:
       config:
@@ -371,6 +387,7 @@ services:
 		},
 		"GetHoneypotImage": GetHoneypotImage,
 		"subnetFor": subnetForNetwork,
+		"bridgeName": bridgeName,
 		"deployFor": deployProfileFor,
 		"int": func(v interface{}) int {
 			switch i := v.(type) {
