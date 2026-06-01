@@ -352,7 +352,21 @@ func (m *Manager) Status(ctx context.Context) (*Status, error) {
 }
 
 // StartHoneypot starts a specific honeypot
+// isConfiguredHoneypot guards docker compose invocations against argument
+// injection: only names defined in the instance config may be passed as a
+// service argument to docker.
+func (m *Manager) isConfiguredHoneypot(name string) bool {
+	if name == "" {
+		return false
+	}
+	_, ok := m.config.Honeypots[name]
+	return ok
+}
+
 func (m *Manager) StartHoneypot(ctx context.Context, name string) error {
+	if !m.isConfiguredHoneypot(name) {
+		return fmt.Errorf("unknown honeypot: %q", name)
+	}
 	slog.Info("Starting honeypot", "name", name, "instance", m.config.InstanceName)
 
 	composeFile := m.config.GetDockerComposePath()
@@ -369,6 +383,9 @@ func (m *Manager) StartHoneypot(ctx context.Context, name string) error {
 
 // StopHoneypot stops a specific honeypot
 func (m *Manager) StopHoneypot(ctx context.Context, name string) error {
+	if !m.isConfiguredHoneypot(name) {
+		return fmt.Errorf("unknown honeypot: %q", name)
+	}
 	slog.Info("Stopping honeypot", "name", name, "instance", m.config.InstanceName)
 
 	composeFile := m.config.GetDockerComposePath()
@@ -385,6 +402,12 @@ func (m *Manager) StopHoneypot(ctx context.Context, name string) error {
 
 // GetLogs returns logs for a honeypot or all honeypots
 func (m *Manager) GetLogs(ctx context.Context, honeypot string, follow bool, tail int) (<-chan string, error) {
+	// Empty means "all honeypots"; any specific name must be configured so it
+	// can't be injected as a flag into `docker compose logs`.
+	if honeypot != "" && !m.isConfiguredHoneypot(honeypot) {
+		return nil, fmt.Errorf("unknown honeypot: %q", honeypot)
+	}
+
 	logs := make(chan string, 100)
 
 	composeFile := m.config.GetDockerComposePath()

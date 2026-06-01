@@ -497,22 +497,32 @@ func (s *Server) handleHoneypots(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
+		// Validate the name against the configured honeypots before it ever
+		// reaches a `docker compose <subcommand> <name>` argv. Without this an
+		// authenticated caller could pass a "-"-prefixed value that docker
+		// interprets as a flag (argument injection) or trigger spurious
+		// compose invocations on arbitrary strings.
+		if !s.isKnownHoneypot(req.Name) {
+			s.sendError(w, http.StatusBadRequest, "unknown honeypot")
+			return
+		}
+
 		if req.Enabled {
 			s.config.EnableHoneypot(req.Name)
 			if err := s.manager.StartHoneypot(ctx, req.Name); err != nil {
-				s.sendError(w, http.StatusInternalServerError, err.Error())
+				s.sendInternalError(w, "start honeypot failed", err)
 				return
 			}
 		} else {
 			s.config.DisableHoneypot(req.Name)
 			if err := s.manager.StopHoneypot(ctx, req.Name); err != nil {
-				s.sendError(w, http.StatusInternalServerError, err.Error())
+				s.sendInternalError(w, "stop honeypot failed", err)
 				return
 			}
 		}
 
 		if err := config.Save(s.config); err != nil {
-			s.sendError(w, http.StatusInternalServerError, err.Error())
+			s.sendInternalError(w, "save config failed", err)
 			return
 		}
 
@@ -594,9 +604,20 @@ func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
 
 // handleLogs returns logs
 func (s *Server) handleLogs(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
 	ctx := r.Context()
 
+	// An empty honeypot means "all"; a non-empty value must be a known
+	// honeypot so it can't be injected as a flag into `docker compose logs`.
 	honeypot := r.URL.Query().Get("honeypot")
+	if honeypot != "" && !s.isKnownHoneypot(honeypot) {
+		s.sendError(w, http.StatusBadRequest, "unknown honeypot")
+		return
+	}
+
 	tail := 100
 	if t := r.URL.Query().Get("tail"); t != "" {
 		if n, err := strconv.Atoi(t); err == nil && n > 0 {
@@ -609,12 +630,17 @@ func (s *Server) handleLogs(w http.ResponseWriter, r *http.Request) {
 
 	logs, err := s.manager.GetLogs(ctx, honeypot, false, tail)
 	if err != nil {
-		s.sendError(w, http.StatusInternalServerError, err.Error())
+		s.sendInternalError(w, "get logs failed", err)
 		return
 	}
 
-	var lines []string
+	// Bound the buffered output so an enormous log stream can't exhaust memory.
+	const maxLogLines = 10000
+	lines := make([]string, 0, tail)
 	for line := range logs {
+		if len(lines) >= maxLogLines {
+			break
+		}
 		lines = append(lines, line)
 	}
 
@@ -753,13 +779,21 @@ func (s *Server) handleIOCs(w http.ResponseWriter, r *http.Request) {
 	if hp := r.URL.Query().Get("honeypot"); hp != "" {
 		filter.Honeypots = []string{hp}
 	}
+	// Clamp the limit to a sane range. A missing/invalid/<=0 value keeps the
+	// default; an unbounded value would let a caller pull the entire IOC table
+	// into memory (and limit<=0 omits the SQL LIMIT clause entirely).
 	if l := r.URL.Query().Get("limit"); l != "" {
-		fmt.Sscanf(l, "%d", &filter.Limit)
+		if n, err := strconv.Atoi(l); err == nil && n > 0 {
+			if n > 1000 {
+				n = 1000
+			}
+			filter.Limit = n
+		}
 	}
 
 	iocs, err := s.database.GetIOCs(ctx, filter)
 	if err != nil {
-		s.sendError(w, http.StatusInternalServerError, err.Error())
+		s.sendInternalError(w, "get iocs failed", err)
 		return
 	}
 
@@ -856,14 +890,38 @@ func (s *Server) sendJSON(w http.ResponseWriter, data interface{}) {
 	json.NewEncoder(w).Encode(data)
 }
 
-// sendError sends an error response
+// isKnownHoneypot reports whether name matches a honeypot defined in the
+// instance config. Used as an allow-list before any honeypot name reaches a
+// docker compose argv.
+func (s *Server) isKnownHoneypot(name string) bool {
+	if name == "" {
+		return false
+	}
+	_, ok := s.config.Honeypots[name]
+	return ok
+}
+
+// sendError sends an error response.
+//
+// Security: this must NOT include the QPot ID. sendError is invoked by the
+// auth middleware on 401/403 failures, i.e. for UNAUTHENTICATED clients, so
+// embedding s.config.QPotID here would hand the API credential to anyone who
+// hits a protected endpoint without (or with a wrong) credential — a complete
+// auth bypass.
 func (s *Server) sendError(w http.ResponseWriter, code int, message string) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(code)
 	json.NewEncoder(w).Encode(map[string]string{
-		"error":   message,
-		"qpot_id": s.config.QPotID,
+		"error": message,
 	})
+}
+
+// sendInternalError logs the real error server-side and returns a generic
+// message to the client, so internal details (DB schema, docker output, file
+// paths) are never echoed to API callers.
+func (s *Server) sendInternalError(w http.ResponseWriter, context string, err error) {
+	slog.Error(context, "error", err)
+	s.sendError(w, http.StatusInternalServerError, "internal error")
 }
 
 // handleYurilHealth is a probe endpoint for the Yuril side to confirm

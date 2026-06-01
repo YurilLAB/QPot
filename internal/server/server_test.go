@@ -176,3 +176,51 @@ func readBody(t *testing.T, resp *http.Response) string {
 	}
 	return string(b)
 }
+
+// TestAuthErrorDoesNotLeakCredential is the critical regression guard: an
+// unauthenticated (or wrongly-authenticated) request must never receive the
+// QPot ID credential back in the error body. sendError previously embedded it,
+// turning every protected endpoint into a credential oracle.
+func TestAuthErrorDoesNotLeakCredential(t *testing.T) {
+	s := newTestServer(true)
+	h := s.withQPotAuth(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(200) })
+
+	cases := []struct {
+		name   string
+		header string
+	}{
+		{"no credential", ""},
+		{"wrong credential", "qp_zzzzzzzzzzzzzzzzzzzzzzzz"},
+		{"malformed credential", "not-a-qpot-id"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodGet, "/api/status", nil)
+			if tc.header != "" {
+				req.Header.Set("X-QPot-ID", tc.header)
+			}
+			rec := httptest.NewRecorder()
+			h(rec, req)
+			if rec.Code == http.StatusOK {
+				t.Fatalf("expected auth failure, got 200")
+			}
+			if strings.Contains(rec.Body.String(), validTestID) {
+				t.Errorf("auth-failure body leaked the QPot ID: %s", rec.Body.String())
+			}
+		})
+	}
+}
+
+func TestIsKnownHoneypot(t *testing.T) {
+	s := &Server{config: &config.Config{Honeypots: map[string]config.HoneypotConfig{
+		"cowrie": {}, "dionaea": {},
+	}}}
+	for name, want := range map[string]bool{
+		"cowrie": true, "dionaea": true,
+		"": false, "--help": false, "unknown": false, "cowrie; rm": false,
+	} {
+		if got := s.isKnownHoneypot(name); got != want {
+			t.Errorf("isKnownHoneypot(%q) = %v, want %v", name, got, want)
+		}
+	}
+}
