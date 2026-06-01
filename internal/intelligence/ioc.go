@@ -27,8 +27,23 @@ var (
 	reMD5      = regexp.MustCompile(`\b[0-9a-fA-F]{32}\b`)
 	reSHA1     = regexp.MustCompile(`\b[0-9a-fA-F]{40}\b`)
 	reSHA256   = regexp.MustCompile(`\b[0-9a-fA-F]{64}\b`)
-	reDomain   = regexp.MustCompile(`(?i)https?://([a-z0-9](?:[a-z0-9\-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9\-]{0,61}[a-z0-9])?)+)`)
+	// reDomain must accept every scheme reURL does (incl. ftp), otherwise
+	// ftp:// downloads — a common ingress-tool-transfer pattern — yield a URL
+	// IOC but never a domain IOC.
+	reDomain   = regexp.MustCompile(`(?i)(?:https?|ftp)://([a-z0-9](?:[a-z0-9\-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9\-]{0,61}[a-z0-9])?)+)`)
 )
+
+// urlTrailingCutset is stripped from the end of a URL extracted from a command
+// line. The greedy [^\s"']+ class otherwise swallows trailing shell
+// punctuation (e.g. "http://evil.com/x.sh;" or ".../a)"), which corrupts the
+// URL IOC and defeats de-duplication because the same URL in different command
+// contexts would produce different IOC values/IDs.
+const urlTrailingCutset = ".,;:!?)]}>'\"|&"
+
+// trimURL removes trailing shell punctuation that the URL regex over-captured.
+func trimURL(u string) string {
+	return strings.TrimRight(u, urlTrailingCutset)
+}
 
 // privateNets lists RFC1918 and loopback ranges used to skip private IPs.
 var privateNets []*net.IPNet
@@ -105,6 +120,10 @@ func (e *Extractor) Extract(event *database.Event) []*database.IOC {
 	// URLs from command
 	if event.Command != "" {
 		for _, u := range reURL.FindAllString(event.Command, -1) {
+			u = trimURL(u)
+			if u == "" {
+				continue
+			}
 			iocs = append(iocs, makeIOC(IOCTypeURL, u))
 
 			// Extract domain from URL
