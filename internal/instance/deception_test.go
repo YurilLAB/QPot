@@ -119,3 +119,34 @@ func TestGetTPOTConfigWiresStealthKnobs(t *testing.T) {
 		}
 	}
 }
+
+// TestCowrieUserDBNoDefaultTell guards the research-backed removal of the
+// phil/richard Cowrie userdb tell, and that the accept-policy is per-instance.
+func TestCowrieUserDBNoDefaultTell(t *testing.T) {
+	mk := func(id string) string {
+		cfg := config.Default("udb")
+		cfg.QPotID = id
+		g := &ComposeGenerator{Config: cfg}
+		return g.generateCowrieUserDB()
+	}
+	a := mk("qp_useruseruseruseruser01")
+	b := mk("qp_xxxxxxxxxxxxxxxxxxxxx02")
+
+	for _, db := range []string{a, b} {
+		for _, tell := range []string{"phil:", "richard:", "fout:"} {
+			if strings.Contains(db, tell) {
+				t.Errorf("userdb contains the default honeypot tell %q", tell)
+			}
+		}
+		// Must deny user-as-password for root (anti-probe) and accept some creds.
+		if !strings.Contains(db, "root:x:!root") {
+			t.Error("userdb should deny root:root (user==password probe)")
+		}
+		if !strings.Contains(db, "root:x:") {
+			t.Error("userdb should define accept rules for root")
+		}
+	}
+	if a == b {
+		t.Error("userdb accept-policy should vary per instance, not be a static signature")
+	}
+}

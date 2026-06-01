@@ -629,11 +629,67 @@ func (g *ComposeGenerator) GenerateTPOTConfig(honeypot string) (map[string]strin
 	switch honeypot {
 	case "cowrie":
 		configs["cowrie.cfg"] = g.generateCowrieConfig(hp)
+		configs["userdb.txt"] = g.generateCowrieUserDB()
 	case "conpot":
 		configs["conpot.cfg"] = g.generateConpotConfig(hp)
 	}
-	
+
 	return configs, nil
+}
+
+// cowrieWeakPasswords is a pool of credentials commonly attempted by SSH/telnet
+// bots. A per-instance subset is accepted so attackers using real-world weak
+// creds get a shell (maximizing captured interaction) without QPot accepting
+// literally everything (which is itself a tell).
+var cowrieWeakPasswords = []string{
+	"123456", "password", "admin", "root", "12345", "1234", "123456789",
+	"qwerty", "111111", "admin123", "password123", "P@ssw0rd", "toor",
+	"changeme", "letmein", "welcome", "raspberry", "ubuntu", "test", "guest",
+}
+
+// cowrieUsers are common login names bots target.
+var cowrieUsers = []string{"root", "admin", "user", "test", "ubuntu", "oracle", "pi", "git"}
+
+// generateCowrieUserDB builds a per-instance Cowrie userdb.txt.
+//
+// Research basis (cryptax "Customizing Cowrie"; Cowrie issue #1102): the single
+// most-cited Cowrie tell is its default userdb, which lets an attacker log in as
+// "phil"/"richard" with ANY password to confirm a honeypot. We never emit those
+// users. Instead each instance accepts a deterministic, per-seed subset of
+// common weak passwords for common usernames, so credential-stuffing bots
+// succeed (good intel) while the accept-policy is not the static upstream
+// default. Cowrie reads this from etc/userdb.txt; format is
+// "username:x:password" where '*' = any, '!x' = deny x.
+func (g *ComposeGenerator) generateCowrieUserDB() string {
+	seed := g.Config.QPotID
+	if seed == "" {
+		seed = g.Config.InstanceName
+	}
+
+	var b strings.Builder
+	b.WriteString("# QPot-generated Cowrie userdb (no default phil/richard tell)\n")
+	b.WriteString("# format: username:x:password   ('*' = any, '!x' = deny x)\n")
+
+	// Pick a per-instance subset of weak passwords (between 6 and len) so the
+	// accepted set varies by deployment.
+	n := len(cowrieWeakPasswords)
+	start := seededIndex(seed, n)
+	count := 6 + seededIndex("cnt:"+seed, 7) // 6..12 accepted passwords
+
+	accepted := make([]string, 0, count)
+	for i := 0; i < count; i++ {
+		accepted = append(accepted, cowrieWeakPasswords[(start+i)%n])
+	}
+
+	for _, u := range cowrieUsers {
+		// Deny the username-as-password (a common honeypot-detection probe is
+		// to try user==password and see if it always works).
+		b.WriteString(u + ":x:!" + u + "\n")
+		for _, p := range accepted {
+			b.WriteString(u + ":x:" + p + "\n")
+		}
+	}
+	return b.String()
 }
 
 // generateCowrieConfig generates TPOT-compatible Cowrie config.
