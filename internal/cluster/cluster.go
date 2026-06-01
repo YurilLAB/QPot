@@ -84,6 +84,49 @@ func DefaultClusterConfig() *ClusterConfig {
 	}
 }
 
+// Cluster safety bounds. Cluster config can arrive over the wire from a seed
+// node (JoinResponse.Config) or be reloaded from disk, so every numeric/duration
+// field that feeds a timer or arithmetic must be clamped before use. Without
+// this, a hostile/garbage seed can set GossipInterval=0 (panics time.NewTicker)
+// or a huge SuspicionMult (overflows the failure-detection deadline to a
+// negative/huge value, corrupting membership).
+const (
+	maxClusterBodyBytes = 1 << 20 // 1 MiB cap on any cluster HTTP request/response body
+	minSuspicionMult    = 1
+	maxSuspicionMult    = 100
+	maxGossipInterval   = 1 * time.Minute
+	maxSyncInterval     = 10 * time.Minute
+)
+
+// sanitizeClusterConfig clamps all numeric/duration fields to sane bounds and
+// substitutes the default config for a nil input. This is the trust boundary
+// for any ClusterConfig that did not originate locally.
+func sanitizeClusterConfig(c *ClusterConfig) *ClusterConfig {
+	d := DefaultClusterConfig()
+	if c == nil {
+		return d
+	}
+	if c.GossipInterval <= 0 || c.GossipInterval > maxGossipInterval {
+		c.GossipInterval = d.GossipInterval
+	}
+	if c.SyncInterval <= 0 || c.SyncInterval > maxSyncInterval {
+		c.SyncInterval = d.SyncInterval
+	}
+	if c.ProbeInterval <= 0 {
+		c.ProbeInterval = d.ProbeInterval
+	}
+	if c.ProbeTimeout <= 0 {
+		c.ProbeTimeout = d.ProbeTimeout
+	}
+	if c.SuspicionMult < minSuspicionMult || c.SuspicionMult > maxSuspicionMult {
+		c.SuspicionMult = d.SuspicionMult
+	}
+	if c.RetransmitMult < 1 {
+		c.RetransmitMult = d.RetransmitMult
+	}
+	return c
+}
+
 // Node represents a cluster member
 type Node struct {
 	ID           string            `json:"id" yaml:"id"`
@@ -462,7 +505,7 @@ func (m *Manager) attemptJoin(seedAddr, clusterID, password string, localNode *N
 	}
 	defer resp.Body.Close()
 
-	body, err := io.ReadAll(resp.Body)
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxClusterBodyBytes))
 	if err != nil {
 		return nil, fmt.Errorf("failed to read response: %w", err)
 	}
@@ -491,7 +534,10 @@ func (m *Manager) attemptJoin(seedAddr, clusterID, password string, localNode *N
 		UpdatedAt:     now,
 		LocalNode:     localNode,
 		Nodes:         make(map[string]*Node),
-		Config:        joinResp.Config,
+		// The seed's Config is untrusted wire input: a nil or out-of-range
+		// value would panic time.NewTicker in Start or overflow the
+		// failure-detection deadline in gossip(). Clamp it.
+		Config:        sanitizeClusterConfig(joinResp.Config),
 		isInitialized: true,
 	}
 
@@ -818,6 +864,7 @@ func (m *Manager) handleJoinHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	r.Body = http.MaxBytesReader(w, r.Body, maxClusterBodyBytes)
 	body, err := io.ReadAll(r.Body)
 	if err != nil {
 		http.Error(w, "Failed to read body", http.StatusBadRequest)
@@ -861,6 +908,7 @@ func (m *Manager) handleLeaveHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	r.Body = http.MaxBytesReader(w, r.Body, maxClusterBodyBytes)
 	body, err := io.ReadAll(r.Body)
 	if err != nil {
 		http.Error(w, "Failed to read body", http.StatusBadRequest)
@@ -987,7 +1035,7 @@ func (m *Manager) gossip() {
 		}
 
 		var peerMsg GossipMessage
-		if err := json.NewDecoder(resp.Body).Decode(&peerMsg); err != nil {
+		if err := json.NewDecoder(io.LimitReader(resp.Body, maxClusterBodyBytes)).Decode(&peerMsg); err != nil {
 			resp.Body.Close()
 			continue
 		}
@@ -1092,7 +1140,7 @@ func (m *Manager) sync() {
 				}
 
 				var peerIntel ThreatIntel
-				if err := json.NewDecoder(resp.Body).Decode(&peerIntel); err != nil {
+				if err := json.NewDecoder(io.LimitReader(resp.Body, maxClusterBodyBytes)).Decode(&peerIntel); err != nil {
 					resp.Body.Close()
 					continue
 				}
@@ -1136,6 +1184,7 @@ func (m *Manager) handleGossipHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	r.Body = http.MaxBytesReader(w, r.Body, maxClusterBodyBytes)
 	body, err := io.ReadAll(r.Body)
 	if err != nil {
 		http.Error(w, "Failed to read body", http.StatusBadRequest)
@@ -1204,6 +1253,7 @@ func (m *Manager) handleIntelHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	r.Body = http.MaxBytesReader(w, r.Body, maxClusterBodyBytes)
 	body, err := io.ReadAll(r.Body)
 	if err != nil {
 		http.Error(w, "Failed to read body", http.StatusBadRequest)
@@ -1265,6 +1315,10 @@ func (m *Manager) LoadCluster() (*Cluster, error) {
 	if err := json.Unmarshal(data, &cluster); err != nil {
 		return nil, err
 	}
+
+	// Clamp the persisted config: it may have been written by an older/buggy
+	// version or tampered with on disk, and feeds tickers/deadlines.
+	cluster.Config = sanitizeClusterConfig(cluster.Config)
 
 	// Preserve the nodes map that was deserialized from JSON.
 	// Only create a new map when there are no nodes at all.
