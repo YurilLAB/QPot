@@ -349,6 +349,16 @@
             border-bottom: none;
         }
 
+        .intel-summary { font-size: 12px; font-weight: normal; color: var(--text-secondary); margin-left: 10px; }
+        .intel-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 16px; }
+        .intel-panel h3 { font-size: 13px; margin: 0 0 8px 0; color: var(--text-secondary); text-transform: uppercase; letter-spacing: 0.5px; }
+        .intel-list { max-height: 280px; overflow-y: auto; font-size: 12px; }
+        .intel-row { display: flex; gap: 8px; align-items: baseline; padding: 5px 0; border-bottom: 1px solid var(--border); }
+        .intel-row:last-child { border-bottom: none; }
+        .intel-tag { color: var(--accent); font-family: monospace; white-space: nowrap; }
+        .intel-name { flex: 1; word-break: break-all; }
+        .intel-count { color: var(--warning); font-weight: 600; }
+
         .log-line {
             display: flex;
             gap: 10px;
@@ -557,6 +567,24 @@
         </div>
 
         <div class="card">
+            <h2>Threat Intelligence <span id="intel-summary" class="intel-summary"></span></h2>
+            <div class="intel-grid">
+                <div class="intel-panel">
+                    <h3>Top MITRE ATT&amp;CK Techniques</h3>
+                    <div id="intel-techniques" class="intel-list"><div class="empty-state"><p>No techniques observed</p></div></div>
+                </div>
+                <div class="intel-panel">
+                    <h3>Recent IOCs</h3>
+                    <div id="intel-iocs" class="intel-list"><div class="empty-state"><p>No IOCs</p></div></div>
+                </div>
+                <div class="intel-panel">
+                    <h3>Active Campaigns (TTP)</h3>
+                    <div id="intel-ttps" class="intel-list"><div class="empty-state"><p>No campaigns</p></div></div>
+                </div>
+            </div>
+        </div>
+
+        <div class="card">
             <h2>Recent Activity</h2>
             <div class="logs-container" id="logs">
                 <div class="empty-state">
@@ -626,7 +654,8 @@
                     loadStatus(),
                     loadStats(),
                     loadHoneypots(),
-                    loadEvents()
+                    loadEvents(),
+                    loadIntelligence()
                 ]);
             } catch (error) {
                 console.error('Failed to load data:', error);
@@ -639,6 +668,47 @@
             return String(s == null ? '' : s)
                 .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
                 .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+        }
+
+        // Threat intelligence: MITRE ATT&CK techniques, IOCs, and TTP campaigns
+        // (QPot's headline differentiators over stock T-Pot).
+        async function loadIntelligence() {
+            const hdr = { headers: { 'X-QPot-ID': currentQPotID } };
+            const getJSON = async (p) => {
+                try { const r = await fetch(`${API_BASE}${p}`, hdr); return r.ok ? await r.json() : null; }
+                catch (e) { return null; }
+            };
+            const [summary, techs, iocs, ttps] = await Promise.all([
+                getJSON('/intelligence'), getJSON('/techniques'),
+                getJSON('/iocs?limit=15'), getJSON('/ttps')
+            ]);
+
+            if (summary) {
+                document.getElementById('intel-summary').textContent =
+                    `${summary.techniques_observed||0} techniques · ${summary.iocs_total||0} IOCs · ${summary.active_sessions||0} campaigns`;
+            }
+
+            const techEl = document.getElementById('intel-techniques');
+            if (Array.isArray(techs) && techs.length) {
+                techEl.innerHTML = techs.slice(0, 12).map(t => `<div class="intel-row">
+                    <span class="intel-tag">${esc(t.technique_id)}</span>
+                    <span class="intel-name">${esc(t.technique_name)}</span>
+                    <span class="intel-count">${esc(t.count)}</span></div>`).join('');
+            }
+            const iocEl = document.getElementById('intel-iocs');
+            if (Array.isArray(iocs) && iocs.length) {
+                iocEl.innerHTML = iocs.slice(0, 15).map(i => `<div class="intel-row">
+                    <span class="intel-tag">${esc(i.type)}</span>
+                    <span class="intel-name">${esc(i.value)}</span>
+                    <span class="intel-count">${esc(i.count)}</span></div>`).join('');
+            }
+            const ttpEl = document.getElementById('intel-ttps');
+            if (Array.isArray(ttps) && ttps.length) {
+                ttpEl.innerHTML = ttps.slice(0, 12).map(s => `<div class="intel-row">
+                    <span class="intel-tag">${esc((s.source_ips&&s.source_ips[0])||'?')}</span>
+                    <span class="intel-name">${esc((s.techniques||[]).length)} techniques · ${esc((s.kill_chain_stages||[]).join(', '))}</span>
+                    <span class="intel-count">${esc(s.event_count)}</span></div>`).join('');
+            }
         }
 
         // Live attacker-activity feed (events over time / recent attacks).
