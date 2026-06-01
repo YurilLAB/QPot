@@ -175,9 +175,15 @@ services:
     ports:
       - "{{$.Config.AllocatePort .HP.Port}}:{{.HP.Port}}"
     volumes:
+      # NOTE: the QPot ID (the API credential) is deliberately NOT mounted or
+      # passed to honeypot containers. Honeypots run attacker-controlled
+      # workloads; a honeypot-software RCE that can read /proc/self/environ or
+      # /run/secrets must not yield the credential that authenticates to the
+      # management API. Log tagging with the QPot ID is done by the Vector
+      # collector (see GenerateVectorConfig), not by the honeypots, so they
+      # have no need for it.
       - {{$.Config.DataPath}}/honeypots/{{.Name}}/logs:/var/log/honeypot
       - {{$.Config.DataPath}}/honeypots/{{.Name}}/data:/data
-      - {{$.Config.DataPath}}/qpot.id:/run/secrets/qpot_id:ro
       {{if eq .Name "cowrie"}}- {{$.Config.DataPath}}/honeypots/{{.Name}}/cowrie.cfg:/opt/cowrie/cowrie.cfg:ro{{end}}
       {{if eq .Name "conpot"}}- {{$.Config.DataPath}}/honeypots/{{.Name}}/conpot.cfg:/opt/conpot/conpot.cfg:ro{{end}}
     networks:
@@ -186,7 +192,6 @@ services:
     environment:
       - HONEYPOT_NAME={{.Name}}
       - LOG_LEVEL=info
-      - QPOT_ID={{$.Config.QPotID}}
       - QPOT_INSTANCE={{$.Config.InstanceName}}
       {{if .HP.Sandbox}}- SANDBOX_MODE=1{{end}}
       {{if .HP.Stealth.Enabled}}- STEALTH_MODE=1{{end}}
@@ -206,8 +211,6 @@ services:
       timeout: 10s
       retries: 3
       start_period: 15s
-    secrets:
-      - qpot_id
 {{end}}
 
 {{define "dbsecurity"}}
@@ -328,8 +331,8 @@ services:
       options:
         max-size: "10m"
         max-file: "3"
-        labels: "qpot.instance,qpot.honeypot,qpot.id"
-        env: "QPOT_ID,QPOT_INSTANCE,HONEYPOT_NAME"
+        labels: "qpot.instance,qpot.honeypot"
+        env: "QPOT_INSTANCE,HONEYPOT_NAME"
 {{end}}
 `
 
