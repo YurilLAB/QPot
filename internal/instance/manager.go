@@ -599,7 +599,12 @@ func (m *Manager) generateServiceConfigs() error {
 		// the host user that creates them, so use 0777. These dirs hold attacker
 		// logs / decoy SSH host keys / downloads — not QPot secrets.
 		for _, v := range prof.Volumes {
+			// File mounts (e.g. a generated cowrie.cfg) only need their parent
+			// directory; the file itself is written by the config loop below.
 			dir := filepath.Join(hpDir, v.HostSubdir)
+			if v.File {
+				dir = filepath.Dir(dir)
+			}
 			if err := os.MkdirAll(dir, 0750); err != nil {
 				return fmt.Errorf("failed to create %s dir for honeypot %q: %w", v.HostSubdir, name, err)
 			}
@@ -612,7 +617,11 @@ func (m *Manager) generateServiceConfigs() error {
 		}
 		for filename, content := range cfgs {
 			dest := filepath.Join(cfgDir, filename)
-			if err := os.WriteFile(dest, []byte(content), 0640); err != nil {
+			// World-readable (0644): these are decoy configs (cowrie.cfg,
+			// userdb.txt) with no real secrets, and the honeypot runs as a
+			// non-root user that must be able to read them — otherwise the
+			// honeypot silently falls back to its baked-in defaults.
+			if err := os.WriteFile(dest, []byte(content), 0644); err != nil {
 				return fmt.Errorf("failed to write %s for honeypot %q: %w", filename, name, err)
 			}
 		}

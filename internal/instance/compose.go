@@ -637,59 +637,26 @@ func (g *ComposeGenerator) GenerateTPOTConfig(honeypot string) (map[string]strin
 	return configs, nil
 }
 
-// cowrieWeakPasswords is a pool of credentials commonly attempted by SSH/telnet
-// bots. A per-instance subset is accepted so attackers using real-world weak
-// creds get a shell (maximizing captured interaction) without QPot accepting
-// literally everything (which is itself a tell).
-var cowrieWeakPasswords = []string{
-	"123456", "password", "admin", "root", "12345", "1234", "123456789",
-	"qwerty", "111111", "admin123", "password123", "P@ssw0rd", "toor",
-	"changeme", "letmein", "welcome", "raspberry", "ubuntu", "test", "guest",
-}
-
-// cowrieUsers are common login names bots target.
-var cowrieUsers = []string{"root", "admin", "user", "test", "ubuntu", "oracle", "pi", "git"}
-
-// generateCowrieUserDB builds a per-instance Cowrie userdb.txt.
+// generateCowrieUserDB builds a per-instance Cowrie userdb.txt from a realistic
+// system persona (see credentials.go).
 //
-// Research basis (cryptax "Customizing Cowrie"; Cowrie issue #1102): the single
-// most-cited Cowrie tell is its default userdb, which lets an attacker log in as
-// "phil"/"richard" with ANY password to confirm a honeypot. We never emit those
-// users. Instead each instance accepts a deterministic, per-seed subset of
-// common weak passwords for common usernames, so credential-stuffing bots
-// succeed (good intel) while the accept-policy is not the static upstream
-// default. Cowrie reads this from etc/userdb.txt; format is
-// "username:x:password" where '*' = any, '!x' = deny x.
+// Research basis (cryptax "Customizing Cowrie"; Cowrie #1102; SANS ISC / F5 Labs
+// credential studies): the most-cited Cowrie tell is its default userdb
+// (phil/richard/pi:raspberry accept any password). QPot never emits those.
+// Instead each instance is assigned a believable persona (corporate Ubuntu, IoT
+// camera, DB server, ...) — explicitly via stealth.credential_template, else
+// auto-selected per instance from the seed — and only that persona's exact
+// credentials succeed. Cowrie reads this from etc/userdb.txt.
 func (g *ComposeGenerator) generateCowrieUserDB() string {
 	seed := g.Config.QPotID
 	if seed == "" {
 		seed = g.Config.InstanceName
 	}
-
-	var b strings.Builder
-	b.WriteString("# QPot-generated Cowrie userdb (no default phil/richard tell)\n")
-	b.WriteString("# format: username:x:password   ('*' = any, '!x' = deny x)\n")
-
-	// Pick a per-instance subset of weak passwords (between 6 and len) so the
-	// accepted set varies by deployment.
-	n := len(cowrieWeakPasswords)
-	start := seededIndex(seed, n)
-	count := 6 + seededIndex("cnt:"+seed, 7) // 6..12 accepted passwords
-
-	accepted := make([]string, 0, count)
-	for i := 0; i < count; i++ {
-		accepted = append(accepted, cowrieWeakPasswords[(start+i)%n])
+	explicit := ""
+	if hp, ok := g.Config.Honeypots["cowrie"]; ok {
+		explicit = hp.Stealth.CredentialTemplate
 	}
-
-	for _, u := range cowrieUsers {
-		// Deny the username-as-password (a common honeypot-detection probe is
-		// to try user==password and see if it always works).
-		b.WriteString(u + ":x:!" + u + "\n")
-		for _, p := range accepted {
-			b.WriteString(u + ":x:" + p + "\n")
-		}
-	}
-	return b.String()
+	return renderCowrieUserDB(selectCredentialTemplate(explicit, seed))
 }
 
 // generateCowrieConfig generates TPOT-compatible Cowrie config.
@@ -725,6 +692,13 @@ func (g *ComposeGenerator) generateCowrieConfig(hp config.HoneypotConfig) string
 		sshVersion = profile.SSHVersion
 	}
 
+	// These values are interpolated into a single line each of an INI-style
+	// config. Strip control characters/newlines (and cap length) so a stealth
+	// value can't inject extra config directives or break the file.
+	hostname = sanitizeConfigValue(hostname)
+	kernel = sanitizeConfigValue(kernel)
+	sshVersion = sanitizeConfigValue(sshVersion)
+
 	return fmt.Sprintf(`[honeypot]
 hostname = %s
 log_path = log
@@ -739,6 +713,13 @@ interactive_timeout = 180
 authentication_timeout = 120
 backend = shell
 timezone = UTC
+# Enforce the generated credential persona (etc/userdb.txt). The T-Pot image
+# defaults to AuthRandom (accept after a random number of tries), which ignores
+# userdb and makes credential behavior inconsistent - a honeypot tell and it
+# means our personas would not actually be enforced. etc_path pins where
+# UserDB reads userdb.txt from (the mounted etc dir).
+auth_class = UserDB
+etc_path = etc
 
 [shell]
 filesystem = share/cowrie/fs.pickle
@@ -750,14 +731,17 @@ ssh_version = %s
 
 [ssh]
 enabled = true
-listen_endpoints = tcp:2222:interface=0.0.0.0
+# Listen on the standard privileged ports (the deployment profile maps host
+# ports here and grants NET_BIND_SERVICE). A real server runs SSH on 22 /
+# Telnet on 23, so this is also more convincing than the 2222/2223 default.
+listen_endpoints = tcp:22:interface=0.0.0.0
 sftp_enabled = true
 forwarding = false
 auth_keyboard_interactive_enabled = true
 
 [telnet]
 enabled = true
-listen_endpoints = tcp:2223:interface=0.0.0.0
+listen_endpoints = tcp:23:interface=0.0.0.0
 
 [output_jsonlog]
 enabled = true

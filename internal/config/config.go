@@ -235,6 +235,11 @@ type HoneypotStealth struct {
 	DelayRangeMs         int    `yaml:"delay_range_ms"`
 	FakeServices         []string `yaml:"fake_services"`
 	BannerString         string   `yaml:"banner_string"`
+	// CredentialTemplate names a realistic login persona (see credential
+	// templates) for honeypots that authenticate users (Cowrie). Empty means
+	// QPot auto-selects one per instance from the QPot ID, so each deployment
+	// looks like a distinct real system.
+	CredentialTemplate   string   `yaml:"credential_template"`
 }
 
 // StealthConfig contains global stealth settings

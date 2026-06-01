@@ -133,20 +133,62 @@ func TestCowrieUserDBNoDefaultTell(t *testing.T) {
 	b := mk("qp_xxxxxxxxxxxxxxxxxxxxx02")
 
 	for _, db := range []string{a, b} {
-		for _, tell := range []string{"phil:", "richard:", "fout:"} {
+		for _, tell := range []string{"phil:", "richard:", "fout:", "pi:x:raspberry"} {
 			if strings.Contains(db, tell) {
 				t.Errorf("userdb contains the default honeypot tell %q", tell)
 			}
 		}
-		// Must deny user-as-password for root (anti-probe) and accept some creds.
-		if !strings.Contains(db, "root:x:!root") {
-			t.Error("userdb should deny root:root (user==password probe)")
+		// No wildcard: "any password works for every account" is itself a tell.
+		if strings.Contains(db, ":x:*") {
+			t.Error("userdb uses a wildcard password (any-password-works tell)")
 		}
-		if !strings.Contains(db, "root:x:") {
-			t.Error("userdb should define accept rules for root")
+		// Must contain at least one concrete credential line.
+		if !strings.Contains(db, ":x:") {
+			t.Error("userdb has no credential lines")
 		}
 	}
-	if a == b {
-		t.Error("userdb accept-policy should vary per instance, not be a static signature")
+	// Two different instances should usually get different personas (10 of
+	// them) — assert variation across a spread of seeds.
+	seen := map[string]bool{}
+	for _, id := range []string{"qp_a1", "qp_b2", "qp_c3", "qp_d4", "qp_e5", "qp_f6"} {
+		seen[mk(id)] = true
+	}
+	if len(seen) < 2 {
+		t.Error("credential persona does not vary across instances")
+	}
+}
+
+// TestCredentialTemplates validates the 10 personas are realistic and free of
+// known honeypot tells.
+func TestCredentialTemplates(t *testing.T) {
+	if len(credentialTemplates) < 10 {
+		t.Fatalf("expected >=10 credential personas, got %d", len(credentialTemplates))
+	}
+	names := map[string]bool{}
+	for _, tmpl := range credentialTemplates {
+		if names[tmpl.Name] {
+			t.Errorf("duplicate persona name %q", tmpl.Name)
+		}
+		names[tmpl.Name] = true
+		if len(tmpl.Users) < 3 || len(tmpl.Users) > 6 {
+			t.Errorf("persona %q has %d users; realistic boxes have ~3-6", tmpl.Name, len(tmpl.Users))
+		}
+		for _, u := range tmpl.Users {
+			if u.Username == "" || len(u.Passwords) == 0 {
+				t.Errorf("persona %q has an account with no username/passwords", tmpl.Name)
+			}
+			for _, bait := range []string{"phil", "richard", "hacker", "honeypot", "decoy"} {
+				if u.Username == bait {
+					t.Errorf("persona %q uses bait username %q", tmpl.Name, bait)
+				}
+			}
+		}
+	}
+	// Explicit selection by name works; unknown name falls back to auto-select.
+	if got := selectCredentialTemplate("iot-camera", "seed").Name; got != "iot-camera" {
+		t.Errorf("explicit template selection failed: got %q", got)
+	}
+	if got := selectCredentialTemplate("does-not-exist", "seed").Name; got == "" {
+		t.Error("unknown template name should fall back to a valid persona")
 	}
 }

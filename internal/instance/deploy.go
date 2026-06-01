@@ -9,11 +9,15 @@ package instance
 // from T-Pot's reference compose files (vendored under docker/<name>/) and the
 // cowrie/endlessh profiles are verified by actually running the images.
 
-// deployVolume maps a host subdirectory (under {DataPath}/honeypots/<name>) to
-// a path inside the honeypot container.
+// deployVolume maps a host path (under {DataPath}/honeypots/<name>) to a path
+// inside the honeypot container.
 type deployVolume struct {
 	HostSubdir    string
 	ContainerPath string
+	// File indicates HostSubdir is a single file (e.g. a generated config),
+	// not a directory — so setup creates its parent dir and writes the file,
+	// rather than creating a directory at that path.
+	File bool
 }
 
 // honeypotDeploy is the deployment profile for one honeypot image.
@@ -69,6 +73,11 @@ func deployProfileFor(name string) honeypotDeploy {
 				{HostSubdir: "etc", ContainerPath: "/home/cowrie/cowrie/etc"},
 				{HostSubdir: "logs", ContainerPath: "/home/cowrie/cowrie/log"},
 				{HostSubdir: "dl", ContainerPath: "/home/cowrie/cowrie/dl"},
+				// The image bakes cowrie.cfg in the working dir, which cowrie
+				// reads LAST and thus takes precedence over etc/cowrie.cfg.
+				// Mount our generated config there too so our settings (incl.
+				// auth_class=UserDB, which enforces the credential persona) win.
+				{HostSubdir: "etc/cowrie.cfg", ContainerPath: "/home/cowrie/cowrie/cowrie.cfg", File: true},
 			},
 			Ports:        []int{22, 23},
 			ConfigSubdir: "etc",
