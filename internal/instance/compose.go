@@ -850,6 +850,16 @@ func GetHoneypotImage(name string) string {
 		"mailoney":   "ghcr.io/telekom-security/mailoney:24.04.1",
 		"medpot":     "ghcr.io/telekom-security/medpot:24.04.1",
 		"redishoneypot": "ghcr.io/telekom-security/redishoneypot:24.04.1",
+		// Newer / 2024-2026 honeypots vendored under docker/.
+		"beelzebub":  "ghcr.io/telekom-security/beelzebub:24.04.1",  // LLM SSH/HTTP/TCP
+		"galah":      "ghcr.io/telekom-security/galah:24.04.1",      // LLM web
+		"go-pot":     "ghcr.io/telekom-security/go-pot:24.04.1",     // HTTP tarpit
+		"h0neytr4p":  "ghcr.io/telekom-security/h0neytr4p:24.04.1",  // web
+		"hellpot":    "ghcr.io/telekom-security/hellpot:24.04.1",    // HTTP tarpit
+		"log4pot":    "ghcr.io/telekom-security/log4pot:24.04.1",    // Log4Shell
+		"miniprint":  "ghcr.io/telekom-security/miniprint:24.04.1",  // printer (JetDirect)
+		"sentrypeer": "ghcr.io/telekom-security/sentrypeer:24.04.1", // SIP/VoIP
+		"wordpot":    "ghcr.io/telekom-security/wordpot:24.04.1",    // WordPress
 	}
 
 	if img, ok := images[name]; ok {
@@ -866,6 +876,8 @@ func (g *ComposeGenerator) ValidateHoneypot(name string) error {
 		"endlessh", "heralding", "honeyaml", "elasticpot",
 		"ciscoasa", "citrixhoneypot", "ddospot", "ipphoney",
 		"mailoney", "medpot", "redishoneypot",
+		"beelzebub", "galah", "go-pot", "h0neytr4p", "hellpot",
+		"log4pot", "miniprint", "sentrypeer", "wordpot",
 	}
 
 	for _, s := range supported {

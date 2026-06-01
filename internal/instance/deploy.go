@@ -204,6 +204,67 @@ func deployProfileFor(name string) honeypotDeploy {
 			Volumes: []deployVolume{{HostSubdir: "logs", ContainerPath: "/opt/honeyaml/log"}},
 			Ports:   []int{8080},
 		}
+	case "tanner":
+		// Web honeypot. NOTE: upstream Tanner is a multi-service stack
+		// (snare + tanner + redis + phpox); this single-container profile is
+		// best-effort and the full stack is not yet orchestrated by QPot.
+		return honeypotDeploy{
+			Tmpfs:   []string{"/tmp/tanner:uid=2000,gid=2000"},
+			Volumes: []deployVolume{{HostSubdir: "logs", ContainerPath: "/var/log/tanner"}},
+			Ports:   []int{80},
+		}
+
+	// Newer / 2024-2026 honeypots (vendored under docker/). Derived from their
+	// reference composes.
+	case "beelzebub":
+		// LLM-backed SSH/HTTP/TCP. Runs without an LLM provider (static replies)
+		// but is most convincing with Ollama configured.
+		return honeypotDeploy{
+			Volumes: []deployVolume{{HostSubdir: "logs", ContainerPath: "/opt/beelzebub/configurations/log"}},
+			Ports:   []int{22, 80, 2222, 3306, 8080},
+		}
+	case "galah":
+		// LLM-backed dynamic web honeypot.
+		return honeypotDeploy{
+			Volumes: []deployVolume{{HostSubdir: "logs", ContainerPath: "/opt/galah/log"}},
+			Ports:   []int{80, 443, 8080, 8443},
+		}
+	case "go-pot":
+		return honeypotDeploy{
+			Volumes: []deployVolume{{HostSubdir: "logs", ContainerPath: "/opt/go-pot/log"}},
+			Ports:   []int{8080},
+		}
+	case "h0neytr4p":
+		return honeypotDeploy{
+			Volumes: []deployVolume{{HostSubdir: "logs", ContainerPath: "/opt/h0neytr4p/log"}},
+			Ports:   []int{80, 443},
+		}
+	case "hellpot":
+		return honeypotDeploy{
+			Volumes: []deployVolume{{HostSubdir: "logs", ContainerPath: "/var/log/hellpot"}},
+			Ports:   []int{8080},
+		}
+	case "log4pot":
+		return honeypotDeploy{
+			Tmpfs:   []string{"/tmp:uid=2000,gid=2000"},
+			Volumes: []deployVolume{{HostSubdir: "logs", ContainerPath: "/var/log/log4pot/log"}},
+			Ports:   []int{8080},
+		}
+	case "miniprint":
+		return honeypotDeploy{
+			Volumes: []deployVolume{{HostSubdir: "logs", ContainerPath: "/opt/miniprint/log"}},
+			Ports:   []int{9100},
+		}
+	case "sentrypeer":
+		return honeypotDeploy{
+			Volumes:  []deployVolume{{HostSubdir: "logs", ContainerPath: "/var/log/sentrypeer"}},
+			UDPPorts: []int{4222, 5060},
+		}
+	case "wordpot":
+		return honeypotDeploy{
+			Volumes: []deployVolume{{HostSubdir: "logs", ContainerPath: "/opt/wordpot/logs"}},
+			Ports:   []int{80},
+		}
 
 	default:
 		// Generic fallback for honeypots without a verified profile.

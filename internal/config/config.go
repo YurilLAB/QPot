@@ -454,6 +454,32 @@ func Default(instanceName string) *Config {
 					MaxPids:         20,
 				},
 			},
+			// All other supported honeypots, disabled by default. Enable with
+			// `qpot honeypot enable <name>`. The port shown is the honeypot's
+			// primary service; its full port set comes from the deploy profile.
+			"heralding":      {Enabled: false, Port: 22, RiskLevel: "high", Sandbox: true},
+			"mailoney":       {Enabled: false, Port: 25, RiskLevel: "medium", Sandbox: true},
+			"ddospot":        {Enabled: false, Port: 53, RiskLevel: "low", Sandbox: true},
+			"ciscoasa":       {Enabled: false, Port: 8443, RiskLevel: "medium", Sandbox: true},
+			"citrixhoneypot": {Enabled: false, Port: 443, RiskLevel: "high", Sandbox: true},
+			"elasticpot":     {Enabled: false, Port: 9200, RiskLevel: "medium", Sandbox: true},
+			"ipphoney":       {Enabled: false, Port: 631, RiskLevel: "low", Sandbox: true},
+			"medpot":         {Enabled: false, Port: 2575, RiskLevel: "low", Sandbox: true},
+			"dicompot":       {Enabled: false, Port: 11112, RiskLevel: "low", Sandbox: true},
+			"honeyaml":       {Enabled: false, Port: 8080, RiskLevel: "low", Sandbox: true},
+			"tanner":         {Enabled: false, Port: 80, RiskLevel: "medium", Sandbox: true},
+			"redishoneypot":  {Enabled: false, Port: 6379, RiskLevel: "low", Sandbox: true},
+			// Newer / 2024-2026 honeypots. beelzebub and galah are LLM-backed and
+			// need an Ollama/API provider configured to be fully convincing.
+			"beelzebub":  {Enabled: false, Port: 22, RiskLevel: "high", Sandbox: true},
+			"galah":      {Enabled: false, Port: 8080, RiskLevel: "medium", Sandbox: true},
+			"go-pot":     {Enabled: false, Port: 8080, RiskLevel: "low", Sandbox: true},
+			"h0neytr4p":  {Enabled: false, Port: 80, RiskLevel: "medium", Sandbox: true},
+			"hellpot":    {Enabled: false, Port: 8080, RiskLevel: "low", Sandbox: true},
+			"log4pot":    {Enabled: false, Port: 8080, RiskLevel: "high", Sandbox: true},
+			"miniprint":  {Enabled: false, Port: 9100, RiskLevel: "low", Sandbox: true},
+			"sentrypeer": {Enabled: false, Port: 5060, RiskLevel: "medium", Sandbox: true},
+			"wordpot":    {Enabled: false, Port: 80, RiskLevel: "medium", Sandbox: true},
 		},
 		Ports: PortConfig{
 			BasePort:     10000,

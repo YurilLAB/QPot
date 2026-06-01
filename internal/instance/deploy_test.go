@@ -166,3 +166,44 @@ func TestDionaeaUDPAndNetBind(t *testing.T) {
 		t.Error("dionaea binds privileged ports (21, 443) and needs NET_BIND_SERVICE")
 	}
 }
+
+// allSupportedHoneypots is every honeypot QPot ships an image for.
+var allSupportedHoneypots = []string{
+	"cowrie", "dionaea", "conpot", "tanner", "adbhoney", "endlessh",
+	"heralding", "honeyaml", "elasticpot", "ciscoasa", "citrixhoneypot",
+	"ddospot", "ipphoney", "mailoney", "medpot", "redishoneypot",
+	"beelzebub", "galah", "go-pot", "h0neytr4p", "hellpot", "log4pot",
+	"miniprint", "sentrypeer", "wordpot",
+}
+
+// TestEverySupportedHoneypotIsFullyWired guards that every shipped honeypot has
+// an image, passes ValidateHoneypot, has a deploy profile with at least one
+// port + a logs volume, and is present in config.Default so it can be enabled.
+func TestEverySupportedHoneypotIsFullyWired(t *testing.T) {
+	cfg := config.Default("wired")
+	g := &ComposeGenerator{Config: cfg}
+	for _, n := range allSupportedHoneypots {
+		if GetHoneypotImage(n) == "" {
+			t.Errorf("%s: no image", n)
+		}
+		if err := g.ValidateHoneypot(n); err != nil {
+			t.Errorf("%s: ValidateHoneypot: %v", n, err)
+		}
+		d := deployProfileFor(n)
+		if len(d.Ports) == 0 && len(d.UDPPorts) == 0 {
+			t.Errorf("%s: deploy profile exposes no ports", n)
+		}
+		var hasLogs bool
+		for _, v := range d.Volumes {
+			if v.HostSubdir == "logs" {
+				hasLogs = true
+			}
+		}
+		if !hasLogs {
+			t.Errorf("%s: no logs volume", n)
+		}
+		if _, ok := cfg.Honeypots[n]; !ok {
+			t.Errorf("%s: missing from config.Default (cannot be enabled)", n)
+		}
+	}
+}
