@@ -192,6 +192,14 @@ func (m *Manager) Initialize(ctx context.Context) error {
 		return fmt.Errorf("failed to generate docker-compose: %w", err)
 	}
 
+	// Generate the auxiliary config files the compose file mounts into the
+	// collector and honeypot containers (Vector pipeline + per-honeypot TPOT
+	// configs). Without these the bind mounts point at non-existent files and
+	// the log-collection pipeline never starts.
+	if err := m.generateServiceConfigs(); err != nil {
+		return fmt.Errorf("failed to generate service configs: %w", err)
+	}
+
 	slog.Info("Instance initialized successfully", "name", m.config.InstanceName)
 	return nil
 }
@@ -537,6 +545,48 @@ func (m *Manager) generateDockerCompose() error {
 	composePath := m.config.GetDockerComposePath()
 	if err := os.WriteFile(composePath, []byte(compose), 0640); err != nil {
 		return fmt.Errorf("failed to write docker-compose.yml: %w", err)
+	}
+
+	return nil
+}
+
+// generateServiceConfigs writes the auxiliary config files that the generated
+// docker-compose.yml mounts into containers: the Vector collector pipeline
+// (vector.toml) and any per-honeypot TPOT config (e.g. cowrie.cfg, conpot.cfg).
+// These generators existed but were never invoked, so the mounts previously
+// resolved to missing files and the log pipeline could not run.
+func (m *Manager) generateServiceConfigs() error {
+	generator := &ComposeGenerator{
+		Config:  m.config,
+		Sandbox: m.sandbox,
+	}
+
+	// Vector collector pipeline config.
+	vectorCfg, err := generator.GenerateVectorConfig()
+	if err != nil {
+		return fmt.Errorf("failed to generate vector config: %w", err)
+	}
+	vectorPath := filepath.Join(m.config.DataPath, "vector.toml")
+	if err := os.WriteFile(vectorPath, []byte(vectorCfg), 0640); err != nil {
+		return fmt.Errorf("failed to write vector.toml: %w", err)
+	}
+
+	// Per-honeypot TPOT configs. Honeypots without a specific config simply
+	// return an empty set and write nothing.
+	for name, hp := range m.config.Honeypots {
+		if !hp.Enabled {
+			continue
+		}
+		cfgs, err := generator.GenerateTPOTConfig(name)
+		if err != nil {
+			return fmt.Errorf("failed to generate config for honeypot %q: %w", name, err)
+		}
+		for filename, content := range cfgs {
+			dest := filepath.Join(m.config.DataPath, "honeypots", name, filename)
+			if err := os.WriteFile(dest, []byte(content), 0640); err != nil {
+				return fmt.Errorf("failed to write %s for honeypot %q: %w", filename, name, err)
+			}
+		}
 	}
 
 	return nil
