@@ -170,32 +170,35 @@ func (s *Server) withQPotAuth(next http.HandlerFunc) http.HandlerFunc {
 	}
 }
 
-// handleStatic serves static files
+// handleStatic serves static files.
+//
+// Security: this handler is reached WITHOUT authentication (authMiddleware
+// deliberately skips "/" and "/static/"). It must therefore never embed the
+// QPot ID — that value is the API credential checked by withQPotAuth, and the
+// dashboard treats it like a password: the operator pastes it into the login
+// overlay (stored client-side in localStorage) and the JS sends it as the
+// X-QPot-ID header. Injecting it into this page would hand the credential to
+// any unauthenticated visitor, defeating the auth model entirely.
 func (s *Server) handleStatic(w http.ResponseWriter, r *http.Request) {
-	if r.URL.Path == "/" {
-		r.URL.Path = "/static/index.html"
+	// Only GET/HEAD make sense for static assets.
+	if r.Method != http.MethodGet && r.Method != http.MethodHead {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
 	}
-	
-	// Inject QPot ID into the HTML
-	if r.URL.Path == "/static/index.html" {
+
+	if r.URL.Path == "/" || r.URL.Path == "/static/index.html" {
 		data, err := staticFS.ReadFile("static/index.html")
 		if err != nil {
 			http.Error(w, "File not found", http.StatusNotFound)
 			return
 		}
-		
-		html := string(data)
-		// Inject the QPot ID as a script variable (JSON-encoded to prevent XSS).
-		idJSON, _ := json.Marshal(s.config.QPotID)
-		injection := fmt.Sprintf(`<script>window.QPOT_ID = %s;</script>`, idJSON)
-		html = strings.Replace(html, "<head>", "<head>\n"+injection, 1)
-		
-		w.Header().Set("Content-Type", "text/html")
-		w.Write([]byte(html))
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		w.Write(data)
 		return
 	}
-	
-	// Serve other static files normally
+
+	// Serve other static files normally. http.FS cleans the path and the
+	// embedded FS is read-only and rooted, so "../" traversal is not possible.
 	http.FileServer(http.FS(staticFS)).ServeHTTP(w, r)
 }
 
