@@ -31,6 +31,28 @@ type Sandbox struct {
 	available   bool
 }
 
+// ContainerRuntime returns the Docker runtime that should be set on honeypot
+// containers for the active sandbox, or "" to use the default runtime.
+//
+// It returns a non-empty runtime only when the requested runtime-based sandbox
+// is actually AVAILABLE on the host (NewSandbox falls back to SandboxNone when
+// it is not). This makes it safe to render unconditionally into compose: if the
+// operator asked for gVisor but runsc isn't installed, we emit no runtime line
+// rather than producing a compose file that docker refuses to start.
+func (sb *Sandbox) ContainerRuntime() string {
+	if !sb.available {
+		return ""
+	}
+	switch sb.sandboxType {
+	case SandboxGVisor:
+		return "runsc"
+	case SandboxKata:
+		return "kata-runtime"
+	default:
+		return ""
+	}
+}
+
 // NewSandbox creates a new sandbox manager
 func NewSandbox(cfg *config.SecurityConfig) (*Sandbox, error) {
 	sb := &Sandbox{

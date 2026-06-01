@@ -172,6 +172,9 @@ services:
     image: {{GetHoneypotImage .Name}}
     container_name: {{$.Config.InstanceName}}_{{.Name}}
     restart: on-failure:{{$.Config.Security.ResourceLimits.RestartAttempts}}
+    {{if $.Sandbox.ContainerRuntime}}# Stronger isolation runtime (gVisor/Kata) for this attacker-facing container
+    runtime: {{$.Sandbox.ContainerRuntime}}
+    {{end}}
     ports:
       - "{{$.Config.AllocatePort .HP.Port}}:{{.HP.Port}}"
     volumes:
