@@ -3,8 +3,11 @@ package instance
 
 import (
 	"bufio"
+	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
+	"io"
 	"log/slog"
 	"os"
 	"os/exec"
@@ -17,6 +20,57 @@ import (
 	"github.com/qpot/qpot/internal/database"
 	"github.com/qpot/qpot/internal/security"
 )
+
+// composePSEntry is one container row from `docker compose ps --format json`.
+// Field tags are matched case-insensitively, so they cover docker compose v2's
+// capitalised keys ("Service", "State", "Health").
+type composePSEntry struct {
+	Service string `json:"service"`
+	Name    string `json:"name"`
+	State   string `json:"state"`
+	Health  string `json:"health"`
+}
+
+// parseComposePS parses `docker compose ps --format json` output into a map
+// keyed by compose service name (which equals the honeypot name). It accepts
+// both the JSON-array form and the newline-delimited (JSONL) form that
+// different docker compose versions emit.
+func parseComposePS(output []byte) map[string]composePSEntry {
+	out := make(map[string]composePSEntry)
+	trimmed := bytes.TrimSpace(output)
+	if len(trimmed) == 0 {
+		return out
+	}
+
+	if trimmed[0] == '[' {
+		var arr []composePSEntry
+		if err := json.Unmarshal(trimmed, &arr); err == nil {
+			for _, e := range arr {
+				if e.Service != "" {
+					out[e.Service] = e
+				}
+			}
+		}
+		return out
+	}
+
+	// JSONL / whitespace-separated objects.
+	dec := json.NewDecoder(bytes.NewReader(trimmed))
+	for {
+		var e composePSEntry
+		if err := dec.Decode(&e); err != nil {
+			if err == io.EOF {
+				break
+			}
+			// Malformed trailing data — return whatever parsed so far.
+			break
+		}
+		if e.Service != "" {
+			out[e.Service] = e
+		}
+	}
+	return out
+}
 
 // Manager handles QPot instance lifecycle
 type Manager struct {
@@ -256,7 +310,12 @@ func (m *Manager) Status(ctx context.Context) (*Status, error) {
 		return nil, fmt.Errorf("failed to get container status: %w", err)
 	}
 
-	// Parse container status (simplified)
+	// Parse container status by matching the exact compose service name and
+	// its reported state. A previous substring match on the raw JSON blob
+	// produced false positives (one honeypot's name appearing inside another
+	// container's name/image/label) and reported stopped-but-present
+	// containers as healthy.
+	entries := parseComposePS(output)
 	for name, hp := range m.config.Honeypots {
 		hs := HoneypotStatus{
 			Name: name,
@@ -264,16 +323,26 @@ func (m *Manager) Status(ctx context.Context) (*Status, error) {
 			Risk: hp.RiskLevel,
 		}
 
-		if hp.Enabled {
-			// Check if container is running
-			if strings.Contains(string(output), name) {
-				hs.Running = true
-				hs.Status = "healthy"
-			} else {
-				hs.Status = "stopped"
-			}
-		} else {
+		if !hp.Enabled {
 			hs.Status = "disabled"
+			status.Honeypots = append(status.Honeypots, hs)
+			continue
+		}
+
+		entry, present := entries[name]
+		switch {
+		case present && strings.EqualFold(entry.State, "running"):
+			hs.Running = true
+			switch strings.ToLower(entry.Health) {
+			case "unhealthy":
+				hs.Status = "unhealthy"
+			case "starting":
+				hs.Status = "starting"
+			default: // "healthy" or no healthcheck configured
+				hs.Status = "healthy"
+			}
+		default:
+			hs.Status = "stopped"
 		}
 
 		status.Honeypots = append(status.Honeypots, hs)
