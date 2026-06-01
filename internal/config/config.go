@@ -490,8 +490,28 @@ func Default(instanceName string) *Config {
 	}
 }
 
+// ValidateInstanceName rejects names that are not a single safe path component.
+// The instance name is interpolated into a filesystem path
+// (~/.qpot/instances/<name>/...), so a name containing a path separator or ".."
+// would escape the instances directory (e.g. "../../etc"). This is the defense
+// boundary for every command that resolves an instance by name.
+func ValidateInstanceName(name string) error {
+	if name == "" {
+		return fmt.Errorf("instance name must not be empty")
+	}
+	if name == "." || name == ".." || name != filepath.Base(name) ||
+		strings.ContainsAny(name, `/\`) || strings.Contains(name, "..") {
+		return fmt.Errorf("invalid instance name %q: must be a single path component without separators or '..'", name)
+	}
+	return nil
+}
+
 // Load loads configuration for an instance
 func Load(instanceName string) (*Config, error) {
+	if err := ValidateInstanceName(instanceName); err != nil {
+		return nil, err
+	}
+
 	configMu.RLock()
 	if cfg, ok := configs[instanceName]; ok {
 		configMu.RUnlock()

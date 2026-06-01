@@ -248,3 +248,27 @@ func TestLoadClampsIntelligenceDefaults(t *testing.T) {
 		t.Errorf("InactivityWindow not clamped on load: got %v", cfg.Intelligence.InactivityWindow)
 	}
 }
+
+// TestValidateInstanceNameRejectsTraversal guards the path-traversal fix: a name
+// that is not a single safe path component must be rejected before it is
+// interpolated into ~/.qpot/instances/<name>/...
+func TestValidateInstanceNameRejectsTraversal(t *testing.T) {
+	bad := []string{
+		"", ".", "..", "../etc", "../../etc/passwd", "a/b", `a\b`,
+		"foo/..", "..foo/..", "/etc", "x/../../y",
+	}
+	for _, n := range bad {
+		if err := ValidateInstanceName(n); err == nil {
+			t.Errorf("ValidateInstanceName(%q) = nil, want error", n)
+		}
+		if _, err := Load(n); err == nil {
+			t.Errorf("Load(%q) = nil error, want rejection", n)
+		}
+	}
+	good := []string{"default", "test", "my-instance_1", "savetest"}
+	for _, n := range good {
+		if err := ValidateInstanceName(n); err != nil {
+			t.Errorf("ValidateInstanceName(%q) = %v, want nil", n, err)
+		}
+	}
+}

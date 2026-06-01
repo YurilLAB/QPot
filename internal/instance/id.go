@@ -8,6 +8,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/qpot/qpot/internal/config"
 )
 
 const (
@@ -46,6 +48,12 @@ func GenerateID(instanceName string) (*QPotID, error) {
 
 // LoadID loads the QPot ID from disk
 func LoadID(instanceName string) (*QPotID, error) {
+	// The name is interpolated into a filesystem path, so reject anything that
+	// isn't a single safe path component to prevent traversal (e.g. "../../x").
+	if err := config.ValidateInstanceName(instanceName); err != nil {
+		return nil, err
+	}
+
 	homeDir, err := os.UserHomeDir()
 	if err != nil {
 		return nil, err
