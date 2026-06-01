@@ -126,11 +126,14 @@ services:
     image: timberio/vector:latest-alpine
     container_name: {{.Config.InstanceName}}_collector
     restart: unless-stopped
+    # Point Vector explicitly at the YAML config so parser selection never
+    # depends on the image's default config path/extension.
+    command: ["--config", "/etc/vector/vector.yaml"]
     environment:
       QPOT_ID: {{.Config.QPotID}}
       QPOT_INSTANCE: {{.Config.InstanceName}}
     volumes:
-      - {{.Config.DataPath}}/vector.toml:/etc/vector/vector.toml:ro
+      - {{.Config.DataPath}}/vector.yaml:/etc/vector/vector.yaml:ro
       - qpot_data:/data:ro
       - {{.Config.DataPath}}/qpot.id:/run/secrets/qpot_id:ro
     networks:
@@ -443,24 +446,46 @@ transforms:
 {{- range $name, $hp := .Config.Honeypots}}{{if $hp.Enabled}}
       - {{$name}}_logs{{end}}{{end}}
     source: |
+      # Parse the honeypot's JSON payload FIRST so its fields are present;
+      # our own metadata is stamped afterwards so an attacker-controlled log
+      # line can never clobber qpot_id / timestamp / honeypot.
+      if is_string(.message) && starts_with(strip_whitespace(string!(.message)), "{") {
+        parsed, perr = parse_json(string!(.message))
+        if perr == null {
+          . = merge(., object(parsed) ?? {})
+        }
+      }
+
+      # Derive the honeypot name from the source file path
+      # (/data/honeypots/<name>/logs/...). This is the only place the per-event
+      # honeypot can be recovered, and the DB requires it (NOT NULL).
+      .honeypot = "unknown"
+      if exists(.file) {
+        m, merr = parse_regex(string!(.file) ?? "", r'/honeypots/(?P<hp>[^/]+)/')
+        if merr == null {
+          .honeypot = m.hp
+        }
+      }
+
+      # Normalise source IP from the common honeypot field names.
+      if exists(.src_ip) {
+        .source_ip = to_string(.src_ip) ?? "0.0.0.0"
+      } else if !exists(.source_ip) {
+        .source_ip = "0.0.0.0"
+      }
+
+      # Normalise event type (cowrie uses "eventid"); the column is otherwise
+      # empty and all GROUP BY event_type aggregations would be blank.
+      if exists(.eventid) {
+        .event_type = to_string(.eventid) ?? "unknown"
+      } else if !exists(.event_type) {
+        .event_type = "unknown"
+      }
+
+      # Stamp QPot metadata LAST.
       .qpot_id = "{{.Config.QPotID}}"
       .qpot_instance = "{{.Config.InstanceName}}"
       .timestamp = now()
-      
-      # Parse JSON logs if present
-      if is_string(.message) && starts_with(strip_whitespace(.message), "{") {
-        parsed = parse_json!(.message)
-        . = merge(., parsed)
-      }
-      
-      # Extract source IP if present
-      if exists(.src_ip) {
-        .source_ip = .src_ip
-      } else if exists(.source_ip) {
-        # Already present
-      } else {
-        .source_ip = "0.0.0.0"
-      }
 
   enrich_geoip:
     type: remap
@@ -486,9 +511,11 @@ transforms:
     inputs:
       - enrich_geoip
     condition: |
-      # Filter out common scanner signatures if stealth mode enabled
+      # Filter out common scanner signatures if stealth mode enabled.
+      # Guard .message existence: after the JSON merge many events have no
+      # .message field, and match_any on a null aborts the condition.
       {{if .Config.Stealth.BlockCommonProbes}}
-      !match_any(.message, [{{range $i, $probe := .Config.Stealth.BlockedProbes}}{{if $i}}, {{end}}"{{$probe}}"{{end}}])
+      !exists(.message) || !match_any(string!(.message), [{{range $i, $probe := .Config.Stealth.BlockedProbes}}{{if $i}}, {{end}}"{{$probe}}"{{end}}])
       {{else}}
       true
       {{end}}
@@ -502,12 +529,15 @@ sinks:
     endpoint: "http://database:8123"
     database: {{.Config.Database.Database}}
     table: events
+    # The enriched event carries fields that are not columns in the events
+    # table (qpot_id, the honeypot's own eventid/session/etc.). Without this,
+    # ClickHouse rejects the whole insert on the first unknown column and all
+    # events are dropped. qpot_id is re-attached by the API at read time.
+    skip_unknown_fields: true
     auth:
       strategy: basic
       user: {{.Config.Database.Username}}
-      password: {{.Config.Database.Password}}
-    encoding:
-      timestamp_format: unix
+      password: "{{.Config.Database.Password}}"
     batch:
       max_bytes: 1049000
       timeout_secs: 5
@@ -521,9 +551,11 @@ sinks:
     endpoint: "postgres://{{.Config.Database.Username}}:{{.Config.Database.Password}}@database:5432/{{.Config.Database.Database}}"
     table: events
     encoding:
+      # Only columns that actually exist in the events table. qpot_id /
+      # qpot_instance are intentionally excluded — there are no such columns
+      # (the API attaches qpot_id at read time); including them broke the
+      # INSERT.
       only_fields:
-        - qpot_id
-        - qpot_instance
         - timestamp
         - honeypot
         - source_ip

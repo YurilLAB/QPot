@@ -11,8 +11,8 @@ import (
 
 // TestInitializeWritesServiceConfigs verifies the previously-missing wiring:
 // after Initialize, the files the compose mounts (docker-compose.yml,
-// vector.toml, and per-honeypot TPOT configs) actually exist on disk. Without
-// vector.toml the log-collection pipeline can't start.
+// vector.yaml, and per-honeypot TPOT configs) actually exist on disk. Without
+// vector.yaml the log-collection pipeline can't start.
 func TestInitializeWritesServiceConfigs(t *testing.T) {
 	dir := t.TempDir()
 	cfg := config.Default("svccfg-test")
@@ -35,7 +35,7 @@ func TestInitializeWritesServiceConfigs(t *testing.T) {
 
 	mustExist := []string{
 		filepath.Join(dir, "docker-compose.yml"),
-		filepath.Join(dir, "vector.toml"),
+		filepath.Join(dir, "vector.yaml"),
 	}
 	if _, ok := cfg.Honeypots["cowrie"]; ok && cfg.Honeypots["cowrie"].Enabled {
 		mustExist = append(mustExist, filepath.Join(dir, "honeypots", "cowrie", "cowrie.cfg"))

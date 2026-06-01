@@ -566,9 +566,12 @@ func (m *Manager) generateServiceConfigs() error {
 	if err != nil {
 		return fmt.Errorf("failed to generate vector config: %w", err)
 	}
-	vectorPath := filepath.Join(m.config.DataPath, "vector.toml")
+	// Written as YAML (the config content is YAML); the filename extension
+	// matters because Vector selects its parser from it — a .toml name made
+	// Vector parse this YAML as TOML and fail to start, collecting nothing.
+	vectorPath := filepath.Join(m.config.DataPath, "vector.yaml")
 	if err := os.WriteFile(vectorPath, []byte(vectorCfg), 0640); err != nil {
-		return fmt.Errorf("failed to write vector.toml: %w", err)
+		return fmt.Errorf("failed to write vector.yaml: %w", err)
 	}
 
 	// Per-honeypot TPOT configs. Honeypots without a specific config simply
