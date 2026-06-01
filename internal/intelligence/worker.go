@@ -26,8 +26,24 @@ type Worker struct {
 	forwarder  Forwarder
 }
 
-// NewWorker creates a Worker with the given settings.
+// Sane fallbacks so a Worker built from a partially-specified config never
+// runs with a zero interval (which would panic time.NewTicker) or a zero
+// batch size (which would silently classify nothing).
+const (
+	defaultWorkerInterval  = 15 * time.Minute
+	defaultWorkerBatchSize = 500
+)
+
+// NewWorker creates a Worker with the given settings. Non-positive interval
+// or batch size are clamped to safe defaults: a zero interval would panic
+// time.NewTicker in Run, and a zero batch size would make the worker a no-op.
 func NewWorker(classifier *Classifier, db database.Database, interval time.Duration, batchSize int) *Worker {
+	if interval <= 0 {
+		interval = defaultWorkerInterval
+	}
+	if batchSize <= 0 {
+		batchSize = defaultWorkerBatchSize
+	}
 	return &Worker{
 		classifier: classifier,
 		db:         db,

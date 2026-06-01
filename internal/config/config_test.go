@@ -206,3 +206,45 @@ func TestGetTPOTConfig(t *testing.T) {
 		t.Errorf("FAKE_OS = %q, want Ubuntu 22.04", tpotCfg["FAKE_OS"])
 	}
 }
+
+// TestLoadClampsIntelligenceDefaults verifies that a config file which enables
+// intelligence but omits the worker tunables gets safe defaults merged on
+// load. A zero WorkerInterval would otherwise panic time.NewTicker in the
+// worker, and a zero WorkerBatchSize would make classification a silent no-op.
+func TestLoadClampsIntelligenceDefaults(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	const inst = "clamp-test-instance"
+	dir := filepath.Join(home, ".qpot", "instances", inst)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// Minimal config: intelligence enabled, no worker tunables.
+	yaml := "instance_name: " + inst + "\nintelligence:\n  enabled: true\n"
+	if err := os.WriteFile(filepath.Join(dir, "config.yaml"), []byte(yaml), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Ensure Load reads from disk, not the in-memory cache.
+	configMu.Lock()
+	delete(configs, inst)
+	configMu.Unlock()
+
+	cfg, err := Load(inst)
+	if err != nil {
+		t.Fatalf("Load failed: %v", err)
+	}
+	if !cfg.Intelligence.Enabled {
+		t.Fatal("precondition: intelligence should be enabled from the file")
+	}
+	if cfg.Intelligence.WorkerInterval <= 0 {
+		t.Errorf("WorkerInterval not clamped on load: got %v", cfg.Intelligence.WorkerInterval)
+	}
+	if cfg.Intelligence.WorkerBatchSize <= 0 {
+		t.Errorf("WorkerBatchSize not clamped on load: got %d", cfg.Intelligence.WorkerBatchSize)
+	}
+	if cfg.Intelligence.InactivityWindow <= 0 {
+		t.Errorf("InactivityWindow not clamped on load: got %v", cfg.Intelligence.InactivityWindow)
+	}
+}

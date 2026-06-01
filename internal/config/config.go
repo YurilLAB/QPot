@@ -525,6 +525,20 @@ func Load(instanceName string) (*Config, error) {
 		cfg.ConfigPath = configPath
 	}
 
+	// yaml.Unmarshal does not merge defaults, so a hand-written config that
+	// enables intelligence but omits the worker tunables would leave them at
+	// the zero value. A zero WorkerInterval panics time.NewTicker, and a zero
+	// WorkerBatchSize makes the classifier a silent no-op. Clamp them here.
+	if cfg.Intelligence.WorkerInterval <= 0 {
+		cfg.Intelligence.WorkerInterval = 15 * time.Minute
+	}
+	if cfg.Intelligence.WorkerBatchSize <= 0 {
+		cfg.Intelligence.WorkerBatchSize = 500
+	}
+	if cfg.Intelligence.InactivityWindow <= 0 {
+		cfg.Intelligence.InactivityWindow = 30 * time.Minute
+	}
+
 	// Surface obvious misconfigurations at load time. We log instead of
 	// returning an error so a broken sub-section (e.g. unreachable Yuril
 	// endpoint) doesn't prevent QPot from starting and serving honeypots —

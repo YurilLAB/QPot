@@ -298,3 +298,39 @@ func TestWorkerForwardFailureNonFatal(t *testing.T) {
 		t.Errorf("runOnce returned %d, want 1 even when forwarding fails", n)
 	}
 }
+
+// TestWorkerZeroIntervalDoesNotPanic guards against the time.NewTicker(0)
+// panic that crashed the server when a loaded config left worker_interval at
+// its zero value.
+func TestWorkerZeroIntervalDoesNotPanic(t *testing.T) {
+	loader := NewATTCKLoader(t.TempDir())
+	loader.loadEmbedded()
+	classifier := NewClassifier(loader, NewTTPBuilder(30*time.Minute))
+
+	// interval=0, batchSize=0 — both previously dangerous.
+	w := NewWorker(classifier, &fakeDB{}, 0, 0)
+	if w.interval <= 0 {
+		t.Fatalf("interval not clamped: got %v", w.interval)
+	}
+	if w.batchSize <= 0 {
+		t.Fatalf("batchSize not clamped: got %d", w.batchSize)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				t.Errorf("Run panicked with clamped interval: %v", r)
+			}
+			close(done)
+		}()
+		w.Run(ctx) // must not panic on NewTicker
+	}()
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Error("Run did not return after cancel")
+	}
+}
