@@ -36,9 +36,12 @@
 | Kibana Dashboard | Yes | Yes - With ClickHouse support |
 | 20+ Honeypots | Yes | Yes - Same proven images |
 | Per-Honeypot Resources | No | Yes - CPU/Mem/PID limits |
-| gVisor/Kata Sandboxing | No | Yes - Container isolation |
+| gVisor/Kata Sandboxing | No | Yes - Applied to honeypot containers when available |
 | ClickHouse Database | No | Yes - High-performance analytics |
 | QPot ID Tracking | No | Yes - Instance identification |
+| Per-Instance Identity | No (identical everywhere) | Yes - Unique SSH version/hostname/kernel per instance |
+| Credential Personas | No (default phil/richard tell) | Yes - 16 realistic personas, UserDB-enforced |
+| Consistent Fake Filesystem | No (stock, identical) | Yes - /etc/passwd, os-release match the persona |
 | Stealth Mode | No | Yes - Anti-fingerprinting |
 | Yuril Integration | No | Yes - Native ecosystem support |
 | Database Migrations | No | Yes - Versioned schema management |
@@ -50,7 +53,7 @@
 | TTP Session Analysis | No | Yes - Behavioral campaign fingerprinting |
 | Alert Webhooks | No | Yes - Slack/Discord/generic thresholds |
 | IOC Export | No | Yes - Attacker blocklist API |
-| GeoIP Enrichment | No | Yes - MaxMind via Vector pipeline |
+| GeoIP Enrichment | No | Yes - Optional MaxMind via Vector (`collector.geoip_db_path`) |
 
 ### Key Advantages
 
@@ -132,10 +135,16 @@ make build
 
 | Service | URL | Description |
 |---------|-----|-------------|
-| Landing Page | https://localhost:64297 | QPot branded entry point |
+| QPot Dashboard | http://localhost:8080 | Built-in web UI (QPot ID auth) |
 | Attack Map | https://localhost:64297/map | Real-time attack visualization |
 | Kibana | https://localhost:64297/kibana | Log analytics |
 | QPot API | https://localhost:64297/api | Management API |
+
+The built-in **QPot Dashboard** (authenticated with your QPot ID) shows live
+status and stats, per-honeypot enable/disable controls, a real-time attacker
+**activity feed**, and a **Threat Intelligence** panel surfacing the top MITRE
+ATT&CK techniques, recent IOCs, and active TTP campaigns. It auto-refreshes and
+all attacker-controlled fields are escaped against XSS.
 
 ---
 
@@ -214,19 +223,54 @@ database:
   port: 9200
 ```
 
-### Stealth Mode
+### Deception & Anti-Fingerprinting
+
+A stock T-Pot deployment ships **globally identical** honeypot identity strings —
+every instance advertises the same Cowrie hostname, the same SSH version, the
+same `userdb` (including the well-known `phil`/`richard` accounts), and the same
+fake filesystem. Those constants *are* the fingerprint. QPot makes each
+deployment look like a distinct, internally-consistent real system, derived
+deterministically from the instance's unique QPot ID:
+
+- **Per-instance identity** — a realistic, self-consistent distro profile (SSH
+  version + kernel + `uname` fields) and hostname are chosen per instance, so no
+  two QPot deployments (and no QPot-vs-T-Pot) share a signature.
+- **Credential personas** — 16 research-backed login personas (corporate Ubuntu,
+  IoT camera, DB server, edge router, VoIP/PBX, CCTV/NVR, cloud-default,
+  abandoned VPS, …), each with believable accounts and weak-but-real passwords
+  drawn from SANS ISC / F5 Labs brute-force corpora. One persona is
+  auto-selected per instance (or pinned via `credential_template`). The default
+  `phil`/`richard` tell is removed and `auth_class = UserDB` is enforced, so only
+  a persona's exact credentials succeed (no "any password works").
+- **Consistent fake filesystem** — Cowrie's `/etc/passwd`, `/etc/group`,
+  `/etc/os-release`, `/etc/hostname`, and `/etc/issue` are generated from the
+  *same* persona + distro seed, so post-login recon (`cat /etc/passwd`,
+  `cat /etc/os-release`, `hostname`) agrees with the login persona and the
+  advertised SSH banner — closing the dominant "logged-in user is absent from
+  /etc/passwd" tell.
+- **gVisor / Kata** isolation runtime is actually applied to honeypot containers
+  when available; response timing can be jittered.
 
 ```yaml
-stealth:
-  enabled: true
-  fake_hostname: webserver-prod-01
-  fake_os: "Ubuntu 22.04.3 LTS"
-  fake_kernel: "5.15.0-91-generic"
-  randomize_response_time: true
-  add_artificial_delay: true
-  delay_range_ms: 50-200
-  block_scanner_probes: true
+honeypots:
+  cowrie:
+    stealth:
+      enabled: true
+      # All identity fields are optional. Left unset, QPot derives a unique,
+      # internally-consistent identity + credential persona per instance.
+      credential_template: "web-hosting"   # optional: pin a persona
+      fake_hostname: ""                      # optional override
+      randomize_ssh_version: true
+      add_artificial_delay: true
+      delay_range_ms: 50
 ```
+
+> **Honest limitation:** config-level deception defeats keyword/Shodan/script
+> detection and default-config tells (the bulk of real-world automated
+> fingerprinting), but it does **not** defeat single-packet protocol
+> fingerprinting (Vetterl & Clayton, WOOT'18), which is rooted in the honeypot's
+> Python transport libraries. Only a high-interaction / real-OpenSSH proxy mode
+> addresses that class.
 
 ### Database Migrations
 
