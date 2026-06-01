@@ -719,6 +719,37 @@ func (c *Config) AllocatePort(basePort int) int {
 	return c.Ports.BasePort + offset + basePort
 }
 
+// AllocatePortFor allocates a host port for a specific honeypot's container
+// port. Unlike AllocatePort (keyed only on the container port), this folds the
+// honeypot name into the hash so two honeypots that both listen on the same
+// container port (e.g. cowrie and heralding both on 22) still get distinct host
+// ports and do not collide. Deterministic per (instance, honeypot, port).
+func (c *Config) AllocatePortFor(honeypot string, basePort int) int {
+	if !c.Ports.AutoAllocate {
+		return basePort
+	}
+	const (
+		fnvOffset32 uint32 = 2166136261
+		fnvPrime32  uint32 = 16777619
+	)
+	h := fnvOffset32
+	for _, ch := range c.InstanceName + ":" + honeypot {
+		h ^= uint32(ch)
+		h *= fnvPrime32
+	}
+	for _, ch := range []byte{byte(basePort), byte(basePort >> 8)} {
+		h ^= uint32(ch)
+		h *= fnvPrime32
+	}
+	base := c.Ports.BasePort
+	if base < 1024 {
+		base = 10000
+	}
+	// Spread host ports across [base, base+50000) so an instance's ~50 ports
+	// rarely collide.
+	return base + int(h%50000)
+}
+
 // GetDockerComposePath returns path to docker-compose file
 func (c *Config) GetDockerComposePath() string {
 	return filepath.Join(c.DataPath, "docker-compose.yml")

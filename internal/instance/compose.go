@@ -195,13 +195,17 @@ services:
     runtime: {{$.Sandbox.ContainerRuntime}}
     {{end}}
     {{- $d := deployFor .Name}}
+    {{- $hpName := .Name}}
     ports:
-    {{- if $d.Ports}}
+    {{- if or $d.Ports $d.UDPPorts}}
     {{- range $p := $d.Ports}}
-      - "{{$.Config.AllocatePort $p}}:{{$p}}"
+      - "{{$.Config.AllocatePortFor $hpName $p}}:{{$p}}"
+    {{- end}}
+    {{- range $p := $d.UDPPorts}}
+      - "{{$.Config.AllocatePortFor $hpName $p}}:{{$p}}/udp"
     {{- end}}
     {{- else}}
-      - "{{$.Config.AllocatePort .HP.Port}}:{{.HP.Port}}"
+      - "{{$.Config.AllocatePortFor $hpName .HP.Port}}:{{.HP.Port}}"
     {{- end}}
     volumes:
       # The QPot ID (the API credential) is deliberately NOT mounted or passed
@@ -231,6 +235,9 @@ services:
       # TPOT-compatible environment variables
       - TPOT_HONEYPOT={{.Name}}
       - TPOT_INSTANCE={{$.Config.InstanceName}}
+      {{- range $k, $v := $d.Env}}
+      - {{$k}}={{$v}}
+      {{- end}}
     {{template "security" dict "Config" $.Config "HP" .HP "GlobalLimits" $.Config.Security.ResourceLimits "Name" .Name "FakeHostname" .HP.Stealth.FakeHostname}}
     healthcheck:
       test: ["CMD-SHELL", "netstat -tln 2>/dev/null | grep -q ':{{.HP.Port}}' || ss -tln | grep -q ':{{.HP.Port}}'"]

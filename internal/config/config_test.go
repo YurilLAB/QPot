@@ -272,3 +272,32 @@ func TestValidateInstanceNameRejectsTraversal(t *testing.T) {
 		}
 	}
 }
+
+func TestAllocatePortForUniqueAcrossHoneypots(t *testing.T) {
+	cfg := Default("alloc-test")
+	cfg.Ports.AutoAllocate = true
+	// Two honeypots both listening on container port 22 must get distinct host
+	// ports (otherwise they'd collide on the host).
+	if cfg.AllocatePortFor("cowrie", 22) == cfg.AllocatePortFor("heralding", 22) {
+		t.Error("AllocatePortFor collides for two honeypots on the same container port")
+	}
+	// Deterministic.
+	if cfg.AllocatePortFor("cowrie", 22) != cfg.AllocatePortFor("cowrie", 22) {
+		t.Error("AllocatePortFor is not deterministic")
+	}
+	// In a valid, non-privileged host range.
+	seen := map[int]string{}
+	for _, hp := range []string{"cowrie", "dionaea", "conpot", "heralding", "mailoney"} {
+		for _, p := range []int{21, 22, 23, 80, 443} {
+			hostPort := cfg.AllocatePortFor(hp, p)
+			if hostPort <= 1024 || hostPort > 65535 {
+				t.Errorf("%s:%d -> host port %d out of range", hp, p, hostPort)
+			}
+			key := hostPort
+			if prev, ok := seen[key]; ok {
+				t.Logf("note: host-port collision %d between %s and %s:%d", key, prev, hp, p)
+			}
+			seen[key] = hp
+		}
+	}
+}

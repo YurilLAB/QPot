@@ -30,14 +30,21 @@ type honeypotDeploy struct {
 	// ({DataPath}/honeypots/<name>/logs), so each honeypot's log path must mount
 	// from that subdir.
 	Volumes []deployVolume
-	// Ports are the container ports to publish. Each is given a deterministic
-	// host port via Config.AllocatePort. Empty means "use the honeypot's
-	// configured HP.Port" (generic fallback).
+	// Ports are the TCP container ports to publish. Each is given a
+	// deterministic host port via Config.AllocatePortFor. Empty means "use the
+	// honeypot's configured HP.Port" (generic fallback).
 	Ports []int
+	// UDPPorts are the UDP container ports to publish (e.g. ddospot, conpot
+	// SNMP/BACnet). Rendered with a /udp suffix.
+	UDPPorts []int
 	// ConfigSubdir is the host subdir into which generated config files
 	// (cowrie.cfg, userdb.txt, ...) are written. It must be one of the Volumes'
 	// HostSubdir so the files land inside a mounted directory.
 	ConfigSubdir string
+	// Env are image-specific environment variables the honeypot's entrypoint
+	// requires (e.g. conpot's CONPOT_* args). Keys are sorted for deterministic
+	// output.
+	Env map[string]string
 }
 
 // NeedsNetBind reports whether the honeypot binds a privileged port (<1024)
@@ -46,7 +53,7 @@ type honeypotDeploy struct {
 // binary carrying file capabilities fails with EPERM under cap_drop=ALL. This
 // is keyed on the container-internal ports, not the host-facing HP.Port.
 func (d honeypotDeploy) NeedsNetBind() bool {
-	for _, p := range d.Ports {
+	for _, p := range append(append([]int{}, d.Ports...), d.UDPPorts...) {
 		if p > 0 && p < 1024 {
 			return true
 		}
@@ -117,6 +124,87 @@ func deployProfileFor(name string) honeypotDeploy {
 			},
 			Ports: []int{5555},
 		}
+
+	// The profiles below are derived from T-Pot's tested reference composes
+	// (docker/<name>/docker-compose.yml): the in-container log path, the ports
+	// each honeypot listens on, and any required tmpfs.
+	case "dionaea":
+		return honeypotDeploy{
+			Volumes:  []deployVolume{{HostSubdir: "logs", ContainerPath: "/opt/dionaea/var/log"}},
+			Ports:    []int{20, 21, 42, 81, 135, 443, 445, 1433, 1723, 1883, 3306, 5060, 5061, 27017},
+			UDPPorts: []int{69, 5060},
+		}
+	case "conpot":
+		// conpot's CMD references CONPOT_* env vars; without them the entrypoint
+		// passes empty args (--mibcache <empty>) and crashes. The "default"
+		// template emulates a Siemens S7-200 over the ICS ports below.
+		return honeypotDeploy{
+			Tmpfs:   []string{"/tmp/conpot:uid=2000,gid=2000"},
+			Volumes: []deployVolume{{HostSubdir: "logs", ContainerPath: "/var/log/conpot"}},
+			Ports:   []int{21, 80, 102, 1025, 2404, 10001, 44818, 50100},
+			UDPPorts: []int{69, 161, 623, 47808},
+			Env: map[string]string{
+				"CONPOT_TMP":      "/tmp/conpot",
+				"CONPOT_TEMPLATE":  "default",
+				"CONPOT_CONFIG":    "/etc/conpot/conpot.cfg",
+				"CONPOT_LOG":       "/var/log/conpot/conpot.log",
+				"CONPOT_JSON_LOG":  "/var/log/conpot/conpot.json",
+			},
+		}
+	case "heralding":
+		return honeypotDeploy{
+			Tmpfs:   []string{"/tmp/heralding:uid=2000,gid=2000"},
+			Volumes: []deployVolume{{HostSubdir: "logs", ContainerPath: "/var/log/heralding"}},
+			Ports:   []int{21, 22, 23, 25, 80, 110, 143, 443, 465, 993, 995, 1080, 3306, 3389, 5432, 5900},
+		}
+	case "mailoney":
+		return honeypotDeploy{
+			Volumes: []deployVolume{{HostSubdir: "logs", ContainerPath: "/opt/mailoney/logs"}},
+			Ports:   []int{25},
+		}
+	case "ddospot":
+		return honeypotDeploy{
+			Volumes:  []deployVolume{{HostSubdir: "logs", ContainerPath: "/opt/ddospot/ddospot/logs"}},
+			UDPPorts: []int{19, 53, 123, 161, 1900},
+		}
+	case "ciscoasa":
+		return honeypotDeploy{
+			Tmpfs:    []string{"/tmp/ciscoasa:uid=2000,gid=2000"},
+			Volumes:  []deployVolume{{HostSubdir: "logs", ContainerPath: "/var/log/ciscoasa"}},
+			Ports:    []int{8443},
+			UDPPorts: []int{5000},
+		}
+	case "citrixhoneypot":
+		return honeypotDeploy{
+			Volumes: []deployVolume{{HostSubdir: "logs", ContainerPath: "/opt/citrixhoneypot/logs"}},
+			Ports:   []int{443},
+		}
+	case "elasticpot":
+		return honeypotDeploy{
+			Volumes: []deployVolume{{HostSubdir: "logs", ContainerPath: "/opt/elasticpot/log"}},
+			Ports:   []int{9200},
+		}
+	case "ipphoney":
+		return honeypotDeploy{
+			Volumes: []deployVolume{{HostSubdir: "logs", ContainerPath: "/opt/ipphoney/log"}},
+			Ports:   []int{631},
+		}
+	case "medpot":
+		return honeypotDeploy{
+			Volumes: []deployVolume{{HostSubdir: "logs", ContainerPath: "/var/log/medpot"}},
+			Ports:   []int{2575},
+		}
+	case "dicompot":
+		return honeypotDeploy{
+			Volumes: []deployVolume{{HostSubdir: "logs", ContainerPath: "/var/log/dicompot"}},
+			Ports:   []int{11112},
+		}
+	case "honeyaml":
+		return honeypotDeploy{
+			Volumes: []deployVolume{{HostSubdir: "logs", ContainerPath: "/opt/honeyaml/log"}},
+			Ports:   []int{8080},
+		}
+
 	default:
 		// Generic fallback for honeypots without a verified profile.
 		return honeypotDeploy{

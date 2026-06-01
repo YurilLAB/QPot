@@ -122,3 +122,47 @@ func TestDeployProfilesRedisAdbhoney(t *testing.T) {
 		}
 	}
 }
+
+
+func TestAllHoneypotsHaveProfiles(t *testing.T) {
+	// Every honeypot QPot ships an image for must have a non-generic deploy
+	// profile (a logs volume) so it actually runs.
+	for _, hp := range []string{
+		"cowrie", "endlessh", "redishoneypot", "adbhoney", "dionaea", "conpot",
+		"heralding", "mailoney", "ddospot", "ciscoasa", "citrixhoneypot",
+		"elasticpot", "ipphoney", "medpot", "dicompot", "honeyaml",
+	} {
+		d := deployProfileFor(hp)
+		if len(d.Ports) == 0 && len(d.UDPPorts) == 0 {
+			t.Errorf("%s: profile exposes no ports", hp)
+		}
+		var hasLogs bool
+		for _, v := range d.Volumes {
+			if v.HostSubdir == "logs" {
+				hasLogs = true
+			}
+		}
+		if !hasLogs {
+			t.Errorf("%s: profile has no logs volume (collector can't read it)", hp)
+		}
+	}
+}
+
+func TestConpotHasRequiredEnv(t *testing.T) {
+	d := deployProfileFor("conpot")
+	for _, k := range []string{"CONPOT_TEMPLATE", "CONPOT_CONFIG", "CONPOT_TMP", "CONPOT_LOG"} {
+		if d.Env[k] == "" {
+			t.Errorf("conpot profile missing required env %q", k)
+		}
+	}
+}
+
+func TestDionaeaUDPAndNetBind(t *testing.T) {
+	d := deployProfileFor("dionaea")
+	if len(d.UDPPorts) == 0 {
+		t.Error("dionaea should expose UDP ports")
+	}
+	if !d.NeedsNetBind() {
+		t.Error("dionaea binds privileged ports (21, 443) and needs NET_BIND_SERVICE")
+	}
+}
