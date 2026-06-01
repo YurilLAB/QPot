@@ -854,7 +854,7 @@ func GetHoneypotImage(name string) string {
 		"adbhoney":   "ghcr.io/telekom-security/adbhoney:24.04.1",
 		"endlessh":   "ghcr.io/telekom-security/endlessh:24.04.1",
 		"heralding":  "ghcr.io/telekom-security/heralding:24.04.1",
-		"honeyaml":   "mmta/honeyaml:latest",
+		"honeyaml":   "ghcr.io/telekom-security/honeyaml:24.04.1",
 		"elasticpot": "ghcr.io/telekom-security/elasticpot:24.04.1",
 		"ciscoasa":   "ghcr.io/telekom-security/ciscoasa:24.04.1",
 		"citrixhoneypot": "ghcr.io/telekom-security/citrixhoneypot:24.04.1",
@@ -862,6 +862,7 @@ func GetHoneypotImage(name string) string {
 		"ipphoney":   "ghcr.io/telekom-security/ipphoney:24.04.1",
 		"mailoney":   "ghcr.io/telekom-security/mailoney:24.04.1",
 		"medpot":     "ghcr.io/telekom-security/medpot:24.04.1",
+		"dicompot":   "ghcr.io/telekom-security/dicompot:24.04.1",
 		"redishoneypot": "ghcr.io/telekom-security/redishoneypot:24.04.1",
 		// Newer / 2024-2026 honeypots vendored under docker/.
 		"beelzebub":  "ghcr.io/telekom-security/beelzebub:24.04.1",  // LLM SSH/HTTP/TCP
@@ -888,7 +889,7 @@ func (g *ComposeGenerator) ValidateHoneypot(name string) error {
 		"cowrie", "dionaea", "conpot", "tanner", "adbhoney",
 		"endlessh", "heralding", "honeyaml", "elasticpot",
 		"ciscoasa", "citrixhoneypot", "ddospot", "ipphoney",
-		"mailoney", "medpot", "redishoneypot",
+		"mailoney", "medpot", "dicompot", "redishoneypot",
 		"beelzebub", "galah", "go-pot", "h0neytr4p", "hellpot",
 		"log4pot", "miniprint", "sentrypeer", "wordpot",
 	}

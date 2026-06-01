@@ -250,10 +250,17 @@ func deployProfileFor(name string) honeypotDeploy {
 			Ports:   []int{8080},
 		}
 	case "log4pot":
+		// log4pot writes captured payloads to /var/log/log4pot/payloads via
+		// os.mkdir at startup; with a read-only root that directory must be a
+		// writable mount or the server crashes before binding. Mirror T-Pot's
+		// reference compose (log + payloads).
 		return honeypotDeploy{
-			Tmpfs:   []string{"/tmp:uid=2000,gid=2000"},
-			Volumes: []deployVolume{{HostSubdir: "logs", ContainerPath: "/var/log/log4pot/log"}},
-			Ports:   []int{8080},
+			Tmpfs: []string{"/tmp:uid=2000,gid=2000"},
+			Volumes: []deployVolume{
+				{HostSubdir: "logs", ContainerPath: "/var/log/log4pot/log"},
+				{HostSubdir: "payloads", ContainerPath: "/var/log/log4pot/payloads"},
+			},
+			Ports: []int{8080},
 		}
 	case "miniprint":
 		return honeypotDeploy{

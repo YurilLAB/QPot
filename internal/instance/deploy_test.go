@@ -252,9 +252,29 @@ func TestDionaeaUDPAndNetBind(t *testing.T) {
 var allSupportedHoneypots = []string{
 	"cowrie", "dionaea", "conpot", "tanner", "adbhoney", "endlessh",
 	"heralding", "honeyaml", "elasticpot", "ciscoasa", "citrixhoneypot",
-	"ddospot", "ipphoney", "mailoney", "medpot", "redishoneypot",
+	"ddospot", "ipphoney", "mailoney", "medpot", "dicompot", "redishoneypot",
 	"beelzebub", "galah", "go-pot", "h0neytr4p", "hellpot", "log4pot",
 	"miniprint", "sentrypeer", "wordpot",
+}
+
+// TestEveryConfigHoneypotIsWired guards the inverse direction: every honeypot
+// that ships in config.Default (and is therefore enable-able by a user) must
+// pass ValidateHoneypot and resolve to a real, pullable image. dicompot
+// regressed this — it was in config.Default but missing from both the image map
+// and the supported list, so enabling it produced a dead "qpot/dicompot:latest"
+// pull.
+func TestEveryConfigHoneypotIsWired(t *testing.T) {
+	cfg := config.Default("config-wired")
+	g := &ComposeGenerator{Config: cfg}
+	for name := range cfg.Honeypots {
+		if err := g.ValidateHoneypot(name); err != nil {
+			t.Errorf("%s is in config.Default but ValidateHoneypot fails: %v", name, err)
+		}
+		img := GetHoneypotImage(name)
+		if img == "" || strings.HasPrefix(img, "qpot/") {
+			t.Errorf("%s is in config.Default but has no published image (got %q)", name, img)
+		}
+	}
 }
 
 // TestEverySupportedHoneypotIsFullyWired guards that every shipped honeypot has
@@ -264,8 +284,16 @@ func TestEverySupportedHoneypotIsFullyWired(t *testing.T) {
 	cfg := config.Default("wired")
 	g := &ComposeGenerator{Config: cfg}
 	for _, n := range allSupportedHoneypots {
-		if GetHoneypotImage(n) == "" {
+		img := GetHoneypotImage(n)
+		if img == "" {
 			t.Errorf("%s: no image", n)
+		}
+		// Guard against silently falling through to the "qpot/<name>:latest"
+		// default, which is not a published image — every supported honeypot
+		// must have an explicit, pullable image mapping (this is the bug that
+		// left dicompot resolving to the nonexistent qpot/dicompot:latest).
+		if strings.HasPrefix(img, "qpot/") {
+			t.Errorf("%s: resolves to unpublished default image %q; add it to GetHoneypotImage", n, img)
 		}
 		if err := g.ValidateHoneypot(n); err != nil {
 			t.Errorf("%s: ValidateHoneypot: %v", n, err)
