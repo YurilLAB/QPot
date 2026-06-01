@@ -1,6 +1,7 @@
 package server
 
 import (
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -102,4 +103,76 @@ func TestWithQPotAuthDisabled(t *testing.T) {
 	if !called {
 		t.Error("handler not called when QPotIDAuth disabled")
 	}
+}
+
+// TestServerEndToEnd brings up the real server (via New) over httptest and
+// exercises the full handler chain: static UI serving, auth gating on the API,
+// and that the unauthenticated dashboard never carries the credential. This is
+// the closest we can get to "is the web UI actually working" without Docker.
+func TestServerEndToEnd(t *testing.T) {
+	cfg := config.Default("e2e-test")
+	cfg.QPotID = validTestID
+	cfg.WebUI.QPotIDAuth = true
+	// Point the DB at nowhere so New's connect attempt fails fast and the
+	// server comes up DB-less (endpoints that need it will 5xx, which is fine
+	// for this test — we only assert routing + auth here).
+	cfg.Database.Host = "127.0.0.1"
+	cfg.Database.Port = 1 // unused port → connection refused
+
+	s, err := New(cfg)
+	if err != nil {
+		t.Fatalf("server.New failed: %v", err)
+	}
+
+	ts := httptest.NewServer(s.authMiddleware(s.mux))
+	defer ts.Close()
+	client := ts.Client()
+
+	// 1. Dashboard loads without auth and does not leak the credential.
+	resp, err := client.Get(ts.URL + "/")
+	if err != nil {
+		t.Fatalf("GET /: %v", err)
+	}
+	body := readBody(t, resp)
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("GET /: status %d, want 200", resp.StatusCode)
+	}
+	if !strings.Contains(body, "<html") && !strings.Contains(body, "<!DOCTYPE") {
+		t.Error("GET / did not return HTML dashboard")
+	}
+	if strings.Contains(body, validTestID) {
+		t.Error("GET / leaked the QPot ID credential")
+	}
+
+	// 2. API requires auth.
+	resp, err = client.Get(ts.URL + "/api/status")
+	if err != nil {
+		t.Fatalf("GET /api/status: %v", err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Errorf("unauthenticated GET /api/status: status %d, want 401", resp.StatusCode)
+	}
+
+	// 3. Wrong credential is rejected.
+	req, _ := http.NewRequest(http.MethodGet, ts.URL+"/api/status", nil)
+	req.Header.Set("X-QPot-ID", "qp_zzzzzzzzzzzzzzzzzzzzzzzz")
+	resp, err = client.Do(req)
+	if err != nil {
+		t.Fatalf("GET /api/status (wrong id): %v", err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusForbidden {
+		t.Errorf("wrong-credential GET /api/status: status %d, want 403", resp.StatusCode)
+	}
+}
+
+func readBody(t *testing.T, resp *http.Response) string {
+	t.Helper()
+	defer resp.Body.Close()
+	b, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("read body: %v", err)
+	}
+	return string(b)
 }
