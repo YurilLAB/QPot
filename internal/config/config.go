@@ -74,6 +74,16 @@ type Config struct {
 	Intelligence IntelligenceConfig `yaml:"intelligence"`
 	Yuril        YurilConfig        `yaml:"yuril"`
 	Response     ResponseConfig    `yaml:"response"`
+	Collector    CollectorConfig    `yaml:"collector"`
+}
+
+// CollectorConfig configures the Vector log collector.
+type CollectorConfig struct {
+	// GeoIPDBPath is the path, inside the collector container, to a MaxMind
+	// GeoLite2 .mmdb file. When empty, GeoIP enrichment is disabled and the
+	// Vector pipeline omits the enrichment table entirely — otherwise Vector
+	// refuses to start because the enrichment-table file does not exist.
+	GeoIPDBPath string `yaml:"geoip_db_path"`
 }
 
 // YurilConfig controls the forwarder that pushes classified IOCs into the

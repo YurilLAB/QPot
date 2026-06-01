@@ -417,12 +417,12 @@ data_dir: "/var/lib/vector"
 api:
   enabled: true
   address: "127.0.0.1:8686"
-
+{{if .Config.Collector.GeoIPDBPath}}
 enrichment_tables:
   qpot_geoip:
     type: "geoip"
-    path: "/usr/share/GeoIP/GeoLite2-City.mmdb"
-
+    path: "{{.Config.Collector.GeoIPDBPath}}"
+{{end}}
 sources:
 {{- range $name, $hp := .Config.Honeypots}}
 {{- if $hp.Enabled}}
@@ -486,7 +486,7 @@ transforms:
       .qpot_id = "{{.Config.QPotID}}"
       .qpot_instance = "{{.Config.InstanceName}}"
       .timestamp = now()
-
+{{if .Config.Collector.GeoIPDBPath}}
   enrich_geoip:
     type: remap
     inputs:
@@ -505,11 +505,13 @@ transforms:
           .asn = "unknown"
         }
       }
-
+{{end}}
   filter_stealth:
     type: filter
     inputs:
-      - enrich_geoip
+      # Feeds from enrich_geoip when GeoIP is configured, else directly from
+      # add_qpot_metadata (GeoIP is optional so Vector can start without an mmdb).
+      - {{if .Config.Collector.GeoIPDBPath}}enrich_geoip{{else}}add_qpot_metadata{{end}}
     condition: |
       # Filter out common scanner signatures if stealth mode enabled.
       # Guard .message existence: after the JSON merge many events have no
