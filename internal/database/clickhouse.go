@@ -89,7 +89,12 @@ func (ch *ClickHouse) InitializeSchema(ctx context.Context) error {
 		CREATE TABLE IF NOT EXISTS events (
 			timestamp DateTime64(3),
 			honeypot LowCardinality(String),
-			source_ip IPv4,
+			-- String (not IPv4): honeypots see IPv6 attackers and the pipeline
+			-- emits empty/placeholder IPs. The clickhouse-go IPv4 column PANICS
+			-- on a non-IPv4 value (As4 called on IPv6 address), and IPv4 also
+			-- can't store IPv6 at all. String matches Event.SourceIP and the
+			-- iocs table's source_ip.
+			source_ip String,
 			source_port UInt16,
 			dest_port UInt16,
 			protocol LowCardinality(String),
@@ -112,7 +117,7 @@ func (ch *ClickHouse) InitializeSchema(ctx context.Context) error {
 		) ENGINE = MergeTree()
 		PARTITION BY toYYYYMM(timestamp)
 		ORDER BY (timestamp, honeypot, source_ip)
-		TTL timestamp + INTERVAL 90 DAY
+		TTL toDateTime(timestamp) + INTERVAL 90 DAY
 		SETTINGS index_granularity = 8192
 	`
 
@@ -323,12 +328,15 @@ func (ch *ClickHouse) GetEvents(ctx context.Context, filter EventFilter) ([]*Eve
 		var event Event
 		var payloadStr string
 		var classified uint8
+		// Ports are UInt16 in ClickHouse; clickhouse-go cannot scan UInt16 into
+		// a Go *int, so scan into uint16 and widen.
+		var sourcePort, destPort uint16
 		err := rows.Scan(
 			&event.Timestamp,
 			&event.Honeypot,
 			&event.SourceIP,
-			&event.SourcePort,
-			&event.DestPort,
+			&sourcePort,
+			&destPort,
 			&event.Protocol,
 			&event.EventType,
 			&event.Username,
@@ -350,6 +358,8 @@ func (ch *ClickHouse) GetEvents(ctx context.Context, filter EventFilter) ([]*Eve
 		if err != nil {
 			return nil, fmt.Errorf("failed to scan event: %w", err)
 		}
+		event.SourcePort = int(sourcePort)
+		event.DestPort = int(destPort)
 		event.Payload = []byte(payloadStr)
 		event.Classified = classified != 0
 		events = append(events, &event)
@@ -372,21 +382,27 @@ func (ch *ClickHouse) GetStats(ctx context.Context, since time.Time) (*Stats, er
 
 	stats := &Stats{}
 
+	// ClickHouse count()/uniqExact() return UInt64, which clickhouse-go cannot
+	// scan into a Go *int64; scan into uint64 and widen.
+	var totalEvents, uniqueIPs uint64
+
 	// Total events
-	err := ch.conn.QueryRow(ctx, 
-		"SELECT count() FROM events WHERE timestamp >= ?", 
-		since).Scan(&stats.TotalEvents)
+	err := ch.conn.QueryRow(ctx,
+		"SELECT count() FROM events WHERE timestamp >= ?",
+		since).Scan(&totalEvents)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get total events: %w", err)
 	}
+	stats.TotalEvents = int64(totalEvents)
 
 	// Unique IPs
 	err = ch.conn.QueryRow(ctx,
 		"SELECT uniqExact(source_ip) FROM events WHERE timestamp >= ?",
-		since).Scan(&stats.UniqueIPs)
+		since).Scan(&uniqueIPs)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get unique IPs: %w", err)
 	}
+	stats.UniqueIPs = int64(uniqueIPs)
 
 	// Top countries
 	countryRows, err := ch.conn.Query(ctx,
@@ -399,9 +415,11 @@ func (ch *ClickHouse) GetStats(ctx context.Context, since time.Time) (*Stats, er
 
 	for countryRows.Next() {
 		var cc CountryCount
-		if err := countryRows.Scan(&cc.Country, &cc.Count); err != nil {
+		var cnt uint64
+		if err := countryRows.Scan(&cc.Country, &cnt); err != nil {
 			return nil, err
 		}
+		cc.Count = int64(cnt)
 		stats.TopCountries = append(stats.TopCountries, cc)
 	}
 
@@ -416,9 +434,11 @@ func (ch *ClickHouse) GetStats(ctx context.Context, since time.Time) (*Stats, er
 
 	for hpRows.Next() {
 		var hc HoneypotCount
-		if err := hpRows.Scan(&hc.Honeypot, &hc.Count); err != nil {
+		var cnt uint64
+		if err := hpRows.Scan(&hc.Honeypot, &cnt); err != nil {
 			return nil, err
 		}
+		hc.Count = int64(cnt)
 		stats.TopHoneypots = append(stats.TopHoneypots, hc)
 	}
 
@@ -460,13 +480,14 @@ func (ch *ClickHouse) GetTopAttackers(ctx context.Context, limit int, since time
 		var honeypots []string
 		var usernames []string
 		var passwords []string
+		var attackCount uint64 // count() is UInt64
 
 		err := rows.Scan(
 			&a.SourceIP,
 			&a.Country,
 			&a.FirstSeen,
 			&a.LastSeen,
-			&a.AttackCount,
+			&attackCount,
 			&honeypots,
 			&usernames,
 			&passwords,
@@ -475,6 +496,7 @@ func (ch *ClickHouse) GetTopAttackers(ctx context.Context, limit int, since time
 			return nil, err
 		}
 
+		a.AttackCount = int64(attackCount)
 		a.Honeypots = honeypots
 		a.Usernames = usernames
 		a.Passwords = passwords
@@ -492,12 +514,15 @@ func (ch *ClickHouse) GetHoneypotStats(ctx context.Context, honeypot string, sin
 
 	stats := &HoneypotStats{Honeypot: honeypot}
 
+	var totalEvents, uniqueIPs uint64 // count()/uniqExact() are UInt64
 	err := ch.conn.QueryRow(ctx,
 		"SELECT count(), uniqExact(source_ip) FROM events WHERE honeypot = ? AND timestamp >= ?",
-		honeypot, since).Scan(&stats.TotalEvents, &stats.UniqueIPs)
+		honeypot, since).Scan(&totalEvents, &uniqueIPs)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get honeypot totals: %w", err)
 	}
+	stats.TotalEvents = int64(totalEvents)
+	stats.UniqueIPs = int64(uniqueIPs)
 
 	usernameRows, err := ch.conn.Query(ctx,
 		"SELECT username, count() FROM events WHERE honeypot = ? AND timestamp >= ? AND username != '' GROUP BY username ORDER BY count() DESC LIMIT 20",
@@ -508,9 +533,11 @@ func (ch *ClickHouse) GetHoneypotStats(ctx context.Context, honeypot string, sin
 	defer usernameRows.Close()
 	for usernameRows.Next() {
 		var cc CredentialCount
-		if err := usernameRows.Scan(&cc.Value, &cc.Count); err != nil {
+		var cnt uint64
+		if err := usernameRows.Scan(&cc.Value, &cnt); err != nil {
 			return nil, err
 		}
+		cc.Count = int64(cnt)
 		stats.TopUsernames = append(stats.TopUsernames, cc)
 	}
 
@@ -523,9 +550,11 @@ func (ch *ClickHouse) GetHoneypotStats(ctx context.Context, honeypot string, sin
 	defer passwordRows.Close()
 	for passwordRows.Next() {
 		var cc CredentialCount
-		if err := passwordRows.Scan(&cc.Value, &cc.Count); err != nil {
+		var cnt uint64
+		if err := passwordRows.Scan(&cc.Value, &cnt); err != nil {
 			return nil, err
 		}
+		cc.Count = int64(cnt)
 		stats.TopPasswords = append(stats.TopPasswords, cc)
 	}
 
@@ -538,9 +567,11 @@ func (ch *ClickHouse) GetHoneypotStats(ctx context.Context, honeypot string, sin
 	defer commandRows.Close()
 	for commandRows.Next() {
 		var cc CommandCount
-		if err := commandRows.Scan(&cc.Command, &cc.Count); err != nil {
+		var cnt uint64
+		if err := commandRows.Scan(&cc.Command, &cnt); err != nil {
 			return nil, err
 		}
+		cc.Count = int64(cnt)
 		stats.Commands = append(stats.Commands, cc)
 	}
 
@@ -952,13 +983,15 @@ func (ch *ClickHouse) GetIOCs(ctx context.Context, filter IOCFilter) ([]*IOC, er
 	var iocs []*IOC
 	for rows.Next() {
 		var ioc IOC
+		var count uint64 // count is UInt64
 		if err := rows.Scan(
 			&ioc.ID, &ioc.Type, &ioc.Value, &ioc.Honeypot,
 			&ioc.SourceIP, &ioc.TechniqueID, &ioc.FirstSeen,
-			&ioc.LastSeen, &ioc.Count, &ioc.Metadata,
+			&ioc.LastSeen, &count, &ioc.Metadata,
 		); err != nil {
 			return nil, fmt.Errorf("failed to scan ioc: %w", err)
 		}
+		ioc.Count = int64(count)
 		iocs = append(iocs, &ioc)
 	}
 	return iocs, nil
@@ -1017,13 +1050,17 @@ func (ch *ClickHouse) GetTTPSessions(ctx context.Context, limit int) ([]*TTPSess
 	var sessions []*TTPSession
 	for rows.Next() {
 		var s TTPSession
+		var sharedInfra uint8 // UInt8 -> bool
+		var eventCount uint64 // UInt64 -> int64
 		if err := rows.Scan(
 			&s.SessionID, &s.CampaignFingerprint, &s.SourceIPs,
-			&s.SharedInfrastructure, &s.KillChainStages, &s.Techniques,
-			&s.IOCIDs, &s.EventCount, &s.FirstSeen, &s.LastSeen, &s.Confidence,
+			&sharedInfra, &s.KillChainStages, &s.Techniques,
+			&s.IOCIDs, &eventCount, &s.FirstSeen, &s.LastSeen, &s.Confidence,
 		); err != nil {
 			return nil, fmt.Errorf("failed to scan ttp_session: %w", err)
 		}
+		s.SharedInfrastructure = sharedInfra != 0
+		s.EventCount = int64(eventCount)
 		sessions = append(sessions, &s)
 	}
 	return sessions, nil
@@ -1059,18 +1096,25 @@ func (ch *ClickHouse) GetUnclassifiedEvents(ctx context.Context, limit int) ([]*
 	for rows.Next() {
 		var event Event
 		var payloadStr string
+		// UInt16 ports and the UInt8 classified flag can't scan into Go
+		// int/bool directly; use sized temporaries and convert.
+		var sourcePort, destPort uint16
+		var classified uint8
 		if err := rows.Scan(
 			&event.Timestamp, &event.Honeypot, &event.SourceIP,
-			&event.SourcePort, &event.DestPort, &event.Protocol,
+			&sourcePort, &destPort, &event.Protocol,
 			&event.EventType, &event.Username, &event.Password,
 			&event.Command, &payloadStr, &event.Metadata,
 			&event.Country, &event.City, &event.ASN,
 			&event.TechniqueID, &event.TechniqueName,
 			&event.TacticID, &event.TacticName,
-			&event.KillChainStage, &event.Confidence, &event.Classified,
+			&event.KillChainStage, &event.Confidence, &classified,
 		); err != nil {
 			return nil, fmt.Errorf("failed to scan event: %w", err)
 		}
+		event.SourcePort = int(sourcePort)
+		event.DestPort = int(destPort)
+		event.Classified = classified != 0
 		event.Payload = []byte(payloadStr)
 		events = append(events, &event)
 	}
