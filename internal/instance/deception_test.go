@@ -170,8 +170,8 @@ func TestCredentialTemplates(t *testing.T) {
 			t.Errorf("duplicate persona name %q", tmpl.Name)
 		}
 		names[tmpl.Name] = true
-		if len(tmpl.Users) < 3 || len(tmpl.Users) > 6 {
-			t.Errorf("persona %q has %d users; realistic boxes have ~3-6", tmpl.Name, len(tmpl.Users))
+		if len(tmpl.Users) < 2 || len(tmpl.Users) > 6 {
+			t.Errorf("persona %q has %d users; realistic boxes have ~2-6", tmpl.Name, len(tmpl.Users))
 		}
 		for _, u := range tmpl.Users {
 			if u.Username == "" || len(u.Passwords) == 0 {

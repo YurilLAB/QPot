@@ -136,6 +136,57 @@ var credentialTemplates = []credentialTemplate{
 			{"svc_backup", []string{"Backup2019"}},
 		},
 	},
+	{
+		Name: "soho-router", Description: "Home/SOHO router with shell (OpenWrt/Mikrotik)",
+		Users: []credUser{
+			{"root", []string{"admin", "root"}},
+			{"admin", []string{"admin", "1234"}},
+			{"user", []string{"user"}},
+		},
+	},
+	{
+		Name: "voip-pbx", Description: "VoIP / PBX appliance (Asterisk/FreePBX)",
+		Users: []credUser{
+			{"asterisk", []string{"asterisk"}},
+			{"asteriskftp", []string{"asteriskftp"}}, // appears in real F5 attack data
+			{"freepbx", []string{"freepbx"}},
+			{"sip", []string{"sip123"}},
+			{"root", []string{"Voip2023!"}},
+		},
+	},
+	{
+		Name: "cctv-nvr", Description: "CCTV NVR / DVR (Hikvision/Dahua firmware)",
+		Users: []credUser{
+			{"admin", []string{"12345", "admin12345"}}, // Hikvision default
+			{"root", []string{"7ujMko0admin", "vizxv"}}, // Dahua defaults
+			{"888888", []string{"888888"}},               // Dahua default account
+			{"default", []string{"default"}},
+		},
+	},
+	{
+		Name: "cloud-default", Description: "Cloud image, default accounts only",
+		Users: []credUser{
+			{"ubuntu", []string{"ubuntu"}},
+			{"ec2-user", []string{"ec2-user"}},
+			{"admin", []string{"admin"}},
+		},
+	},
+	{
+		Name: "abandoned-vps", Description: "Bare / abandoned VPS (few weak accounts)",
+		Users: []credUser{
+			{"root", []string{"123456", "toor"}},
+			{"user", []string{"password"}},
+		},
+	},
+	{
+		Name: "game-server", Description: "Game/voice server (TeamSpeak/Steam/Minecraft)",
+		Users: []credUser{
+			{"ts3", []string{"ts3"}}, // appears in real F5 attack data
+			{"steam", []string{"steam"}},
+			{"minecraft", []string{"minecraft123"}},
+			{"server", []string{"server2023"}},
+		},
+	},
 }
 
 // credentialTemplateByName returns the template with the given name, or false.
