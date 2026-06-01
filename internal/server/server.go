@@ -64,6 +64,14 @@ func New(cfg *config.Config) (*Server, error) {
 			connectCancel()
 			slog.Warn("Database connection failed, some API endpoints will be unavailable", "error", err)
 		} else {
+			// Ensure the schema exists. This is idempotent (CREATE ... IF NOT
+			// EXISTS) and makes `qpot up` work on a fresh database without a
+			// separate `qpot db migrate` step — otherwise the events table is
+			// never created and the whole collection pipeline silently drops
+			// everything.
+			if err := rawDB.InitializeSchema(connectCtx); err != nil {
+				slog.Warn("Database schema initialization failed; collection may not work", "error", err)
+			}
 			connectCancel()
 			db = rawDB
 		}
