@@ -1,7 +1,10 @@
 package intelligence
 
 import (
+	"bytes"
+	"crypto/sha256"
 	"fmt"
+	"math/big"
 	"net"
 	"regexp"
 	"strings"
@@ -20,6 +23,7 @@ const (
 	IOCTypeCommand    = "command"
 	IOCTypeUserAgent  = "user_agent"
 	IOCTypeDomain     = "domain"
+	IOCTypeWallet     = "wallet"
 )
 
 // pre-compiled patterns for IOC extraction.
@@ -29,6 +33,16 @@ var (
 	reSHA1   = regexp.MustCompile(`\b[0-9a-fA-F]{40}\b`)
 	reSHA256 = regexp.MustCompile(`\b[0-9a-fA-F]{64}\b`)
 	reSHA512 = regexp.MustCompile(`\b[0-9a-fA-F]{128}\b`)
+	// Cryptocurrency wallet addresses. Coinminer and ransomware payloads
+	// dropped into honeypots routinely embed these (mining-pool wallets,
+	// ransom-note addresses); extracting them lets the IOC set pivot on the
+	// actor's wallet. reBTC is a CANDIDATE matcher only - every match is then
+	// base58check-validated (validateBTCAddress) so random base58-looking
+	// strings are rejected. ETH addresses are distinctive enough via the 0x
+	// prefix + exactly-40-hex length (which also keeps them disjoint from the
+	// bare-40-hex SHA-1 matcher, whose \b never fires after the "x").
+	reBTC = regexp.MustCompile(`\b[13][a-km-zA-HJ-NP-Z1-9]{25,34}\b`)
+	reETH = regexp.MustCompile(`\b0x[0-9a-fA-F]{40}\b`)
 	// reDomain must accept every scheme reURL does (incl. ftp), otherwise
 	// ftp:// downloads — a common ingress-tool-transfer pattern — yield a URL
 	// IOC but never a domain IOC.
@@ -54,6 +68,44 @@ func trimURL(u string) string {
 		u = u[:i]
 	}
 	return strings.TrimRight(u, urlTrailingCutset)
+}
+
+const base58Alphabet = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz"
+
+// validateBTCAddress reports whether s is a valid base58check Bitcoin address
+// (legacy P2PKH/P2SH): a 25-byte decode of version(1) + hash160(20) +
+// checksum(4), where the checksum is the first 4 bytes of double-SHA256 over
+// the first 21 bytes. This rejects the random base58-looking strings reBTC
+// would otherwise over-match, so a "wallet" IOC is only emitted for an address
+// whose checksum actually verifies.
+func validateBTCAddress(s string) bool {
+	if len(s) < 26 || len(s) > 35 {
+		return false
+	}
+	x := new(big.Int)
+	base := big.NewInt(58)
+	for i := 0; i < len(s); i++ {
+		d := strings.IndexByte(base58Alphabet, s[i])
+		if d < 0 {
+			return false
+		}
+		x.Mul(x, base)
+		x.Add(x, big.NewInt(int64(d)))
+	}
+	dec := x.Bytes()
+	// Leading '1' base58 digits encode leading zero bytes.
+	nlz := 0
+	for i := 0; i < len(s) && s[i] == '1'; i++ {
+		nlz++
+	}
+	full := append(make([]byte, nlz), dec...)
+	if len(full) != 25 {
+		return false
+	}
+	payload, checksum := full[:21], full[21:]
+	h1 := sha256.Sum256(payload)
+	h2 := sha256.Sum256(h1[:])
+	return bytes.Equal(h2[:4], checksum)
 }
 
 // privateNets lists RFC1918 and loopback ranges used to skip private IPs.
@@ -184,6 +236,24 @@ func (e *Extractor) Extract(event *database.Event) []*database.IOC {
 			if !seen[h] {
 				seen[h] = true
 				iocs = append(iocs, makeIOC(IOCTypeHash, h))
+			}
+		}
+
+		// Cryptocurrency wallet addresses (coinminer/ransomware indicators).
+		// BTC candidates are base58check-validated so only real addresses are
+		// emitted; ETH addresses are kept as-is (lowercased for stable de-dup).
+		wseen := make(map[string]bool)
+		for _, w := range reBTC.FindAllString(event.Command, -1) {
+			if !wseen[w] && validateBTCAddress(w) {
+				wseen[w] = true
+				iocs = append(iocs, makeIOC(IOCTypeWallet, w))
+			}
+		}
+		for _, w := range reETH.FindAllString(event.Command, -1) {
+			w = strings.ToLower(w)
+			if !wseen[w] {
+				wseen[w] = true
+				iocs = append(iocs, makeIOC(IOCTypeWallet, w))
 			}
 		}
 

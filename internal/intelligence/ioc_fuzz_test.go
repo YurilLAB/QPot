@@ -29,6 +29,9 @@ func FuzzExtract(f *testing.F) {
 		strings.Repeat("A", 5000),
 		"http://" + strings.Repeat("a.", 200) + "com/x",
 		"\x00\x01\xff http://\xff\xfe.com",
+		"send btc to 1A1zP1eP5QGefi2DMPTfTL5SLmv7DivfNa",
+		"eth 0x52908400098527886E0F7030069857D2E4169EE7 pool",
+		"3J98t1WpEZ73CNmQviecrnyiWrnqRhWNLy 1zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz",
 	}
 	for _, s := range seeds {
 		f.Add(s)
@@ -88,6 +91,17 @@ func FuzzExtract(f *testing.F) {
 				}
 				if ioc.Value != strings.ToLower(ioc.Value) {
 					t.Errorf("domain IOC %q is not lowercased", ioc.Value)
+				}
+			case IOCTypeWallet:
+				// Either an ETH address (0x + 40 lowercase hex) or a BTC
+				// address whose base58check checksum actually verifies - the
+				// extractor must never emit an unvalidated BTC candidate.
+				if strings.HasPrefix(ioc.Value, "0x") {
+					if len(ioc.Value) != 42 || !hexOnly.MatchString(ioc.Value[2:]) {
+						t.Errorf("ETH wallet IOC %q is malformed", ioc.Value)
+					}
+				} else if !validateBTCAddress(ioc.Value) {
+					t.Errorf("BTC wallet IOC %q fails base58check validation", ioc.Value)
 				}
 			}
 			// Every IOC must carry a stable, non-empty ID and value.

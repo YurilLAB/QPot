@@ -353,3 +353,76 @@ func TestExtractNoEmptyCommandIOC(t *testing.T) {
 		}
 	}
 }
+
+// TestExtractWallet verifies cryptocurrency wallet IOC extraction. BTC
+// addresses are only emitted when their base58check checksum verifies (so
+// random base58-looking strings are rejected); ETH addresses are recognized by
+// the 0x + 40-hex form and normalized to lowercase.
+func TestExtractWallet(t *testing.T) {
+	e := NewExtractor()
+	wallets := func(iocs []*database.IOC) []string {
+		var out []string
+		for _, i := range iocs {
+			if i.Type == IOCTypeWallet {
+				out = append(out, i.Value)
+			}
+		}
+		return out
+	}
+
+	// Valid addresses must be extracted.
+	valid := map[string]string{
+		// Satoshi genesis P2PKH address.
+		"download && send to 1A1zP1eP5QGefi2DMPTfTL5SLmv7DivfNa now": "1A1zP1eP5QGefi2DMPTfTL5SLmv7DivfNa",
+		// A valid P2SH address.
+		"pay 3J98t1WpEZ73CNmQviecrnyiWrnqRhWNLy": "3J98t1WpEZ73CNmQviecrnyiWrnqRhWNLy",
+		// Ethereum address (mixed case) -> lowercased.
+		"transfer 0x52908400098527886E0F7030069857D2E4169EE7": "0x52908400098527886e0f7030069857d2e4169ee7",
+	}
+	for cmd, want := range valid {
+		ev := makeIOCEvent("203.0.113.5", "command", cmd, nil)
+		got := wallets(e.Extract(ev))
+		found := false
+		for _, w := range got {
+			if w == want {
+				found = true
+			}
+		}
+		if !found {
+			t.Errorf("command %q: wallet %q not extracted (got %v)", cmd, want, got)
+		}
+	}
+
+	// Invalid base58check (last char mutated) must NOT be extracted.
+	bad := []string{
+		"1A1zP1eP5QGefi2DMPTfTL5SLmv7DivfNb", // genesis addr with bad checksum
+		"3J98t1WpEZ73CNmQviecrnyiWrnqRhWNLz", // P2SH with bad checksum
+		"1zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz",  // base58-shaped but invalid checksum
+	}
+	for _, addr := range bad {
+		ev := makeIOCEvent("203.0.113.5", "command", "curl x && echo "+addr, nil)
+		if got := wallets(e.Extract(ev)); len(got) != 0 {
+			t.Errorf("invalid BTC address %q was extracted as wallet IOC: %v", addr, got)
+		}
+	}
+
+	// An ETH-looking 0x value must not be mistaken for a hash, and a bare
+	// 40-hex SHA-1 must not be mistaken for a wallet.
+	ev := makeIOCEvent("203.0.113.5", "command", "0x52908400098527886E0F7030069857D2E4169EE7 da39a3ee5e6b4b0d3255bfef95601890afd80709", nil)
+	iocs := e.Extract(ev)
+	if w := findIOCByType(iocs, IOCTypeWallet); w == nil {
+		t.Error("expected an ETH wallet IOC")
+	}
+	gotHash := false
+	for _, i := range iocs {
+		if i.Type == IOCTypeHash && i.Value == "da39a3ee5e6b4b0d3255bfef95601890afd80709" {
+			gotHash = true
+		}
+		if i.Type == IOCTypeWallet && strings.Contains(i.Value, "da39a3ee") {
+			t.Error("SHA-1 hash misclassified as a wallet IOC")
+		}
+	}
+	if !gotHash {
+		t.Error("bare 40-hex SHA-1 was not extracted as a hash")
+	}
+}
