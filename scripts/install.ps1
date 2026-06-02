@@ -36,15 +36,22 @@ function Install-QPot {
     }
     Write-Host "  ✓ Docker found" -ForegroundColor Green
 
+    if (-not (Test-Command "docker-compose") -and -not ((docker compose version 2>&1) -match "Docker Compose")) {
+        Write-Host "  ⚠ Docker Compose plugin not detected; 'qpot up' needs it (ships with Docker Desktop)." -ForegroundColor Yellow
+    }
+
     if (-not (Test-Command "git")) {
-        Write-Host "  ✗ Git not found - some features may be limited" -ForegroundColor Yellow
+        Write-Host "  ✗ Git not found - required only to build from source" -ForegroundColor Yellow
     } else {
         Write-Host "  ✓ Git found" -ForegroundColor Green
     }
 
-    # Check if running in WSL2 mode
+    # Probe the daemon. 'docker info' fails when Docker Desktop is not running,
+    # which is the most common first-run problem; warn early (don't fail).
     $dockerInfo = docker info 2>&1
-    if ($dockerInfo -match "WSL2") {
+    if ($LASTEXITCODE -ne 0) {
+        Write-Host "  ⚠ Docker is installed but the daemon is not reachable - start Docker Desktop before 'qpot up'." -ForegroundColor Yellow
+    } elseif ($dockerInfo -match "WSL2") {
         Write-Host "  ✓ Docker using WSL2 backend" -ForegroundColor Green
     } else {
         Write-Host "  ⚠ Consider enabling WSL2 backend for better performance" -ForegroundColor Yellow
@@ -93,6 +100,9 @@ function Install-QPot {
         & git clone --depth 1 "$QPOT_REPO.git" $srcDir 2>&1 | Out-Null
         if ($LASTEXITCODE -ne 0) { Write-Error "Failed to clone $QPOT_REPO.git"; exit 1 }
         Write-Host "  Building qpot.exe with Go..." -ForegroundColor Gray
+        # Let Go fetch the exact toolchain go.mod pins instead of failing on a
+        # 'go.mod requires go >= ...' error with an older (>=1.21) Go.
+        if (-not $env:GOTOOLCHAIN) { $env:GOTOOLCHAIN = "auto" }
         Push-Location $srcDir
         & go build -o $binaryPath .\cmd\qpot
         $buildExit = $LASTEXITCODE
@@ -101,14 +111,25 @@ function Install-QPot {
         Write-Host "  ✓ Built qpot.exe from source" -ForegroundColor Green
     }
 
+    # Verify the binary actually runs before claiming success (catches a
+    # wrong-arch download or a corrupt build).
+    & $binaryPath --version 2>&1 | Out-Null
+    if ($LASTEXITCODE -ne 0) {
+        Write-Error "Installed binary failed to execute ($binaryPath --version). Try building from source: git clone $QPOT_REPO.git; cd QPot; go build -o qpot.exe .\cmd\qpot"
+        exit 1
+    }
+
     # Create data directory
     $dataDir = "$env:USERPROFILE\.qpot"
     New-Item -ItemType Directory -Force -Path $dataDir | Out-Null
 
-    # Add to PATH
+    # Add to PATH. The User Path can be unset (null) on a fresh profile, so
+    # coalesce to "" before calling .Contains to avoid a null-reference error.
     $currentPath = [Environment]::GetEnvironmentVariable("Path", "User")
+    if (-not $currentPath) { $currentPath = "" }
     if (-not $currentPath.Contains($binDir)) {
-        [Environment]::SetEnvironmentVariable("Path", "$currentPath;$binDir", "User")
+        $newPath = if ($currentPath -eq "") { $binDir } else { "$currentPath;$binDir" }
+        [Environment]::SetEnvironmentVariable("Path", $newPath, "User")
         Write-Host "  ✓ Added to PATH" -ForegroundColor Green
     }
 
@@ -143,5 +164,12 @@ function Install-QPot {
     Write-Host "Restart your terminal to use the 'qpot' command." -ForegroundColor Yellow
 }
 
-# Run installation
-Install-QPot
+# Run installation with a friendly failure message on any terminating error.
+try {
+    Install-QPot
+} catch {
+    Write-Host ""
+    Write-Host "[ERROR] Installation failed: $($_.Exception.Message)" -ForegroundColor Red
+    Write-Host "  If this looks like a bug, please report it: $QPOT_REPO/issues" -ForegroundColor Red
+    exit 1
+}

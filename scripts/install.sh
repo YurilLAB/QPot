@@ -8,6 +8,26 @@ QPOT_VERSION="0.1.0"
 QPOT_REPO="https://github.com/YurilLAB/QPot"
 INSTALL_DIR="${HOME}/.local/bin"
 DATA_DIR="${HOME}/.qpot"
+# Minimum Go (major.minor) required to build from source. go.mod pins a newer
+# `go` directive, but Go >= 1.21 with the default GOTOOLCHAIN=auto transparently
+# downloads the exact toolchain go.mod asks for, so 1.21 is the real floor (it
+# is the first release that understands the toolchain directive). Older Go just
+# errors confusingly, which is what this check turns into a clear message.
+GO_MIN_VERSION="1.21"
+
+# Temp dir used by the download/build path; cleaned up by the EXIT trap so a
+# failure midway through does not leave a stray directory behind.
+TEMP_DIR=""
+cleanup() { [ -n "${TEMP_DIR}" ] && rm -rf "${TEMP_DIR}" 2>/dev/null || true; }
+on_error() {
+    local rc=$?
+    echo ""
+    log_error "Installation failed (exit ${rc}). See the messages above."
+    echo "  If this looks like a bug, please report it: ${QPOT_REPO}/issues"
+    exit "$rc"
+}
+trap cleanup EXIT
+trap on_error ERR
 
 # Colors
 RED='\033[0;31m'
@@ -35,15 +55,39 @@ log_error() {
 detect_os() {
     local os=$(uname -s | tr '[:upper:]' '[:lower:]')
     local arch=$(uname -m)
-    
+
+    case "$os" in
+        linux|darwin) ;;
+        *) log_error "Unsupported OS: ${os} (QPot supports Linux and macOS)"; exit 1 ;;
+    esac
+
     case "$arch" in
-        x86_64)  arch="amd64" ;;
-        aarch64) arch="arm64" ;;
-        arm64)   arch="arm64" ;;
+        x86_64|amd64)   arch="amd64" ;;
+        aarch64|arm64)  arch="arm64" ;;
         *)       log_error "Unsupported architecture: $arch"; exit 1 ;;
     esac
-    
+
     echo "${os}_${arch}"
+}
+
+# docker_install_hint prints a distro/OS-appropriate command for installing
+# Docker, so the error message is actionable instead of a bare URL.
+docker_install_hint() {
+    echo "  Install Docker: https://docs.docker.com/engine/install/"
+    if [ "$(uname -s)" = "Darwin" ]; then
+        echo "  On macOS:  brew install --cask docker   (then launch Docker Desktop)"
+        return
+    fi
+    local id=""
+    [ -r /etc/os-release ] && id=$(. /etc/os-release 2>/dev/null; echo "${ID}${ID_LIKE:+ $ID_LIKE}")
+    case "$id" in
+        *arch*|*manjaro*)        echo "  sudo pacman -S docker docker-compose && sudo systemctl enable --now docker" ;;
+        *debian*|*ubuntu*)       echo "  sudo apt-get update && sudo apt-get install -y docker.io docker-compose-plugin && sudo systemctl enable --now docker" ;;
+        *fedora*)                echo "  sudo dnf install -y docker docker-compose-plugin && sudo systemctl enable --now docker" ;;
+        *rhel*|*centos*|*rocky*|*almalinux*) echo "  sudo dnf install -y docker-ce docker-compose-plugin && sudo systemctl enable --now docker" ;;
+        *suse*|*opensuse*)       echo "  sudo zypper install -y docker docker-compose && sudo systemctl enable --now docker" ;;
+        *)                       echo "  Use your distribution's package manager to install docker + the compose plugin." ;;
+    esac
 }
 
 check_prerequisites() {
@@ -51,12 +95,8 @@ check_prerequisites() {
 
     # Check Docker
     if ! command -v docker &> /dev/null; then
-        log_error "Docker is not installed. Please install Docker first:"
-        echo "  https://docs.docker.com/get-docker/"
-        # Distro-specific hint for Arch (most users will install from extra).
-        if [ -r /etc/os-release ] && grep -q '^ID=arch' /etc/os-release; then
-            echo "  On Arch: sudo pacman -S docker docker-compose && sudo systemctl enable --now docker"
-        fi
+        log_error "Docker is not installed."
+        docker_install_hint
         exit 1
     fi
 
@@ -64,17 +104,29 @@ check_prerequisites() {
     # on every supported distro now, but Arch users may still have v1
     # (`docker-compose`) from an older AUR package; accept either.
     if ! docker compose version &> /dev/null && ! docker-compose --version &> /dev/null; then
-        log_error "Docker Compose is not installed."
-        echo "  On Arch: sudo pacman -S docker-compose"
+        log_error "Docker Compose is not installed (need the 'docker compose' plugin or docker-compose v1)."
+        docker_install_hint
         exit 1
     fi
 
     log_success "Docker found"
 
-    # Check if user is in docker group
-    if ! groups | grep -q '\bdocker\b'; then
-        log_warn "User is not in the 'docker' group. You may need to run with sudo or:"
-        echo "  sudo usermod -aG docker $USER && newgrp docker"
+    # The CLI and binary install do not need a running daemon, but 'qpot up'
+    # will. Probe the daemon now and warn early (don't fail) with the most
+    # common fix, since the daemon being down / unreachable is the #1 first-run
+    # problem. macOS Docker Desktop has no 'docker' unix group, so skip the
+    # group check there.
+    if ! docker info &> /dev/null; then
+        log_warn "Docker is installed but the daemon is not reachable."
+        if [ "$(uname -s)" = "Darwin" ]; then
+            echo "  Start Docker Desktop, then re-run 'qpot up'."
+        else
+            echo "  Try: sudo systemctl start docker"
+            if ! groups 2>/dev/null | grep -qw docker; then
+                echo "  If you see a permission error, add yourself to the docker group:"
+                echo "    sudo usermod -aG docker $USER && newgrp docker"
+            fi
+        fi
     fi
 }
 
@@ -85,7 +137,7 @@ build_from_source() {
 
     if ! command -v go &> /dev/null; then
         log_error "No prebuilt binary available and Go is not installed to build from source."
-        echo "  Install Go (https://go.dev/dl/) or download a release from:"
+        echo "  Install Go ${GO_MIN_VERSION}+ (https://go.dev/dl/) or download a release from:"
         echo "  ${QPOT_REPO}/releases"
         exit 1
     fi
@@ -93,6 +145,21 @@ build_from_source() {
         log_error "git is required to build from source. Please install git."
         exit 1
     fi
+
+    # QPot's go.mod requires Go >= ${GO_MIN_VERSION}; an older toolchain fails
+    # the build with a confusing error, so check up front. Compare the
+    # "goX.Y.Z" token numerically on major.minor.
+    local go_ver have_mm need_mm
+    go_ver=$(go version | awk '{print $3}' | sed 's/^go//')
+    have_mm=$(printf '%s' "$go_ver" | awk -F. '{printf "%d%03d", $1, $2}')
+    need_mm=$(printf '%s' "$GO_MIN_VERSION" | awk -F. '{printf "%d%03d", $1, $2}')
+    if [ "$have_mm" -lt "$need_mm" ]; then
+        log_error "Go ${go_ver} is too old; QPot needs Go ${GO_MIN_VERSION}+ (newer Go auto-downloads the exact toolchain go.mod pins). Update Go or install a prebuilt release."
+        exit 1
+    fi
+    # Building may need to fetch the toolchain go.mod pins; make sure that path
+    # is enabled rather than failing on a 'go.mod requires go >= ...' error.
+    export GOTOOLCHAIN="${GOTOOLCHAIN:-auto}"
 
     log_info "Building QPot from source (Go $(go version | awk '{print $3}'))..."
     git clone --depth 1 "${QPOT_REPO}.git" "${temp_dir}/src" >/dev/null 2>&1 || {
@@ -110,7 +177,8 @@ download_qpot() {
     local platform=$1
     local binary_name="qpot_${QPOT_VERSION}_${platform}"
     local download_url="${QPOT_REPO}/releases/download/v${QPOT_VERSION}/${binary_name}.tar.gz"
-    local temp_dir=$(mktemp -d)
+    TEMP_DIR=$(mktemp -d)
+    local temp_dir="$TEMP_DIR"
 
     log_info "Downloading QPot v${QPOT_VERSION}..."
 
@@ -128,12 +196,25 @@ download_qpot() {
         build_from_source "$temp_dir"
     fi
 
+    if [ ! -f "${temp_dir}/qpot" ]; then
+        log_error "Install artifact missing (no qpot binary was produced)."
+        exit 1
+    fi
+
     # Create install directory
     mkdir -p "$INSTALL_DIR"
     cp "${temp_dir}/qpot" "$INSTALL_DIR/"
     chmod +x "${INSTALL_DIR}/qpot"
 
-    rm -rf "$temp_dir"
+    # Verify the installed binary actually runs on this machine (catches a
+    # wrong-arch download or a corrupt build before we claim success).
+    if ! "${INSTALL_DIR}/qpot" --version &> /dev/null; then
+        log_error "Installed binary failed to execute (${INSTALL_DIR}/qpot --version)."
+        echo "  This usually means an architecture mismatch. Try building from source:"
+        echo "    git clone ${QPOT_REPO}.git && cd QPot && go build -o qpot ./cmd/qpot"
+        exit 1
+    fi
+
     log_success "QPot installed to ${INSTALL_DIR}/qpot"
 }
 
