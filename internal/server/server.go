@@ -238,8 +238,9 @@ func (s *Server) Start(ctx context.Context) error {
 
 	slog.Info("Starting web server", "addr", addr, "qpot_id", s.config.QPotID)
 
-	// Start alert polling goroutine when alerts are enabled.
-	if s.config.Alerts.Enabled && s.config.Alerts.WebhookURL != "" {
+	// Start alert polling when alerts are enabled and there is somewhere for an
+	// alert to go: a webhook URL, response hooks, or both.
+	if s.alertingConfigured() {
 		go s.alertLoop(ctx)
 	}
 
@@ -256,6 +257,21 @@ func (s *Server) Start(ctx context.Context) error {
 	}()
 
 	return srv.ListenAndServe()
+}
+
+// alertingConfigured reports whether the alert loop has any work to do: a
+// webhook URL to POST to, or response hooks to run. Gating only on a webhook
+// URL (as the code originally did) silently disabled response-hooks-only
+// setups - "run my firewall script on attack, don't POST anywhere" - even
+// though config validation treats that as a valid configuration.
+func (s *Server) alertingConfigured() bool {
+	if !s.config.Alerts.Enabled {
+		return false
+	}
+	if s.config.Alerts.WebhookURL != "" {
+		return true
+	}
+	return s.config.Response.Enabled && len(s.config.Response.OnAttackDetected) > 0
 }
 
 // alertLoop polls event stats every minute and fires a webhook when the
@@ -297,7 +313,11 @@ func (s *Server) alertLoop(ctx context.Context) {
 			}
 
 			if triggered {
-				s.fireWebhook(ctx, stats)
+				// Only POST when a URL is configured - the loop may be running
+				// purely to drive response hooks.
+				if s.config.Alerts.WebhookURL != "" {
+					s.fireWebhook(ctx, stats)
+				}
 				if s.config.Response.Enabled && len(s.config.Response.OnAttackDetected) > 0 {
 					s.runResponseHooks(ctx, stats)
 				}
@@ -306,10 +326,34 @@ func (s *Server) alertLoop(ctx context.Context) {
 	}
 }
 
+// capWriter captures up to max bytes of a hook's output for logging and
+// silently discards the rest, so a misbehaving hook that floods stdout/stderr
+// can't exhaust memory. It always reports a full write so the child never
+// blocks on a backed-up pipe.
+type capWriter struct {
+	buf      bytes.Buffer
+	max      int
+	overflow bool
+}
+
+func (w *capWriter) Write(p []byte) (int, error) {
+	if rem := w.max - w.buf.Len(); rem > 0 {
+		if len(p) <= rem {
+			w.buf.Write(p)
+		} else {
+			w.buf.Write(p[:rem])
+			w.overflow = true
+		}
+	} else if len(p) > 0 {
+		w.overflow = true
+	}
+	return len(p), nil
+}
+
 // runResponseHooks executes every configured response action when an
 // alert threshold trips. Each command runs in a per-action timeout so a
 // hung script can't block the alert loop, and stdout/stderr are captured
-// to the structured log instead of inheriting the parent FDs.
+// (bounded) to the structured log instead of inheriting the parent FDs.
 func (s *Server) runResponseHooks(ctx context.Context, stats *database.Stats) {
 	envExtra := s.responseEnv(ctx, stats)
 
@@ -342,10 +386,24 @@ func (s *Server) runResponseHooks(ctx context.Context, stats *database.Stats) {
 		}
 		cmd.Env = append(os.Environ(), envExtra...)
 
-		out, err := cmd.CombinedOutput()
+		// Kill the hook's whole process group at the deadline, and - as a
+		// backstop - never let Wait block more than WaitDelay past the timeout
+		// on a descendant that inherited the output pipe. Together these make
+		// the per-action timeout actually effective for forking hooks.
+		configureHookProcessGroup(cmd)
+		cmd.WaitDelay = 2 * time.Second
+
+		const maxHookOutput = 16 << 10 // 16 KiB captured for logs
+		cw := &capWriter{max: maxHookOutput}
+		cmd.Stdout = cw
+		cmd.Stderr = cw
+		err := cmd.Run()
 		cancel()
 		// Trim trailing whitespace so multiline output doesn't double-line in logs.
-		outStr := strings.TrimRight(string(out), "\n\r\t ")
+		outStr := strings.TrimRight(cw.buf.String(), "\n\r\t ")
+		if cw.overflow {
+			outStr += " …[truncated]"
+		}
 
 		switch {
 		case err == nil:
@@ -369,6 +427,11 @@ func (s *Server) responseEnv(ctx context.Context, stats *database.Stats) []strin
 		"QPOT_ID=" + s.config.QPotID,
 		"QPOT_INSTANCE=" + s.config.InstanceName,
 		fmt.Sprintf("QPOT_TOTAL_EVENTS=%d", stats.TotalEvents),
+		fmt.Sprintf("QPOT_UNIQUE_IPS=%d", stats.UniqueIPs),
+		fmt.Sprintf("QPOT_THRESHOLD=%d", s.config.Alerts.Threshold),
+		// RFC3339/UTC, matching the webhook payload, so a hook can stamp its
+		// action with the same trigger time the SIEM sees.
+		"QPOT_TIMESTAMP=" + time.Now().UTC().Format(time.RFC3339),
 	}
 	if len(stats.TopHoneypots) > 0 {
 		env = append(env, "QPOT_TOP_HONEYPOT="+stats.TopHoneypots[0].Honeypot)

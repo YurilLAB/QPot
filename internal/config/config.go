@@ -30,8 +30,15 @@ type AlertConfig struct {
 //	QPOT_ID            - the QPot instance ID
 //	QPOT_INSTANCE      - the human-readable instance name
 //	QPOT_TOTAL_EVENTS  - events seen in the trigger window (last minute)
+//	QPOT_UNIQUE_IPS    - distinct source IPs in the trigger window
+//	QPOT_THRESHOLD     - the configured events-per-minute threshold that tripped
+//	QPOT_TIMESTAMP     - RFC3339/UTC time of the trigger (matches the webhook)
 //	QPOT_TOP_SOURCE_IP - the most active attacker IP, when known
 //	QPOT_TOP_HONEYPOT  - the most-hit honeypot, when known
+//
+// Trigger-derived values (top source IP, top honeypot) are passed as
+// environment variables, never interpolated into the command line, so an
+// attacker-influenced value cannot inject shell syntax.
 //
 // This replaces the previous fictional "lockdown integration" with a
 // real, generic mechanism — point it at any firewall, lockdown script,
