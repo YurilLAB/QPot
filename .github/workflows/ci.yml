@@ -51,6 +51,49 @@ jobs:
       - name: go test -race
         run: go test -race -timeout 10m ./...
 
+  build-run:
+    name: Build binary & CLI smoke run
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Build qpot binary
+        run: go build -o qpot ./cmd/qpot
+      - name: Smoke-run the CLI
+        run: |
+          set -euo pipefail
+          export HOME="$(mktemp -d)"
+          ./qpot --version
+          ./qpot --help >/dev/null
+          ./qpot honeypot list
+          ./qpot instance create ci-smoke
+          ./qpot instance list | grep -q ci-smoke
+          # The generated docker-compose.yml must render and be valid YAML, and
+          # must not leak self-identifying env vars into honeypot containers.
+          ./qpot honeypot enable cowrie -i ci-smoke
+          ./qpot honeypot enable conpot -i ci-smoke
+          # 'up' regenerates the compose from config (then pulls/starts images).
+          # We only need the rendered compose, so cap it with a timeout - image
+          # pulls/daemon availability are not what this job validates.
+          timeout 90 ./qpot up -i ci-smoke -d >/dev/null 2>&1 || true
+          CF="$HOME/.qpot/instances/ci-smoke/docker-compose.yml"
+          test -f "$CF"
+          python3 -c "import yaml,sys; yaml.safe_load(open('$CF')); print('compose YAML valid')"
+          if grep -qE '^[[:space:]]*- (TPOT_HONEYPOT|HONEYPOT_NAME)=' "$CF"; then
+            echo "::error::honeypot container leaks self-identifying env vars"; exit 1
+          fi
+          echo "CLI smoke run OK"
+      - name: Upload binary artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: qpot-linux-amd64
+          path: qpot
+          if-no-files-found: error
+
   govulncheck:
     name: Vulnerability scan
     runs-on: ubuntu-latest
