@@ -634,6 +634,29 @@ Add sensor nodes to the cluster:
   --node-name sensor-02
 ```
 
+### Join Approval (password + host approval)
+
+New clusters require **host approval** in addition to the password
+(`require_approval` is on by default). A node that supplies the correct password
+is **not** admitted automatically — its request is queued, and `cluster join`
+blocks while it polls for the decision. The host reviews pending requests,
+seeing the requester's **real source IP** (taken from the connection, not the
+request body) and its claimed hostname/instance, then approves or denies:
+
+```bash
+# On the host: list requests awaiting approval
+./qpot cluster requests --password "SecurePass123!"
+# REQUEST ID              HOSTNAME          SOURCE IP         INSTANCE   REQUESTED
+# req_8f3a...             sensor-02         192.168.1.21      prod       2026-06-02T...
+
+# Approve (the waiting joiner then completes) or deny:
+./qpot cluster approve req_8f3a... --password "SecurePass123!"
+./qpot cluster deny    req_8f3a... --password "SecurePass123!"
+```
+
+Set `require_approval: false` in the cluster config to restore immediate
+admission on correct password.
+
 ### Cluster Operations
 
 ```bash
