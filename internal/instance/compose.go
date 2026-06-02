@@ -19,6 +19,31 @@ func portKey(honeypot string, port int) string {
 	return honeypot + "\x00" + strconv.Itoa(port)
 }
 
+// vrlStringLiteral renders s as a safe double-quoted Vector Remap Language
+// string literal. The stealth "blocked probe" strings are operator-supplied and
+// were previously interpolated raw into a VRL contains() call inside a YAML
+// block scalar - a probe containing a double quote, backslash or newline would
+// break the whole Vector config (silently killing the log pipeline) or inject
+// VRL. Strip control characters (newlines would also break the block-scalar
+// line) and escape backslash and double-quote.
+func vrlStringLiteral(s string) string {
+	var b strings.Builder
+	b.WriteByte('"')
+	for _, r := range s {
+		// Drop C0 controls (incl. CR/LF/TAB), DEL, and C1 controls (0x80-0x9f).
+		// YAML rejects these inside the block scalar that holds the VRL filter.
+		if r < 0x20 || (r >= 0x7f && r <= 0x9f) {
+			continue
+		}
+		if r == '\\' || r == '"' {
+			b.WriteByte('\\')
+		}
+		b.WriteRune(r)
+	}
+	b.WriteByte('"')
+	return b.String()
+}
+
 // buildHostPortMap assigns a unique host port to every (honeypot, container
 // port) pair across all enabled honeypots. config.AllocatePortFor alone is a
 // pure hash, so with the ~100 port mappings a full honeypot set produces, two
@@ -735,7 +760,7 @@ transforms:
       # contains avoids regex-escaping the operator-supplied probe strings.
       {{- if .Config.Stealth.BlockCommonProbes}}
       msg = downcase(string(.message) ?? "")
-      !({{range $i, $probe := .Config.Stealth.BlockedProbes}}{{if $i}} || {{end}}contains(msg, "{{$probe}}"){{end}})
+      !({{range $i, $probe := .Config.Stealth.BlockedProbes}}{{if $i}} || {{end}}contains(msg, {{vrlStr $probe}}){{end}})
       {{- else}}
       true
       {{- end}}
@@ -817,7 +842,9 @@ sinks:
       codec: json
 `
 
-	t := template.Must(template.New("vector").Parse(config))
+	t := template.Must(template.New("vector").Funcs(template.FuncMap{
+		"vrlStr": vrlStringLiteral,
+	}).Parse(config))
 
 	var buf bytes.Buffer
 	if err := t.Execute(&buf, g); err != nil {
