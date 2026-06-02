@@ -45,8 +45,8 @@ func TestRandomizeMACEmitsValidMAC(t *testing.T) {
 }
 
 // TestComposeHoneypotHardening verifies the LIVE security path (the compose
-// template, not the unused Sandbox.GetDockerSecurityOptions) emits the isolation
-// guarantees for an attacker-facing honeypot: capabilities dropped to ALL,
+// template, which is the sole producer of container hardening) emits the
+// isolation guarantees for an attacker-facing honeypot: capabilities dropped to ALL,
 // no-new-privileges, a read-only root, a pids limit, and - for a honeypot that
 // binds a privileged container port (cowrie on 22/23) - NET_BIND_SERVICE added
 // back via the deploy profile's NeedsNetBind (NOT the host-facing HP.Port).
