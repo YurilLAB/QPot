@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -64,9 +65,14 @@ type ClusterConfig struct {
 	RetransmitMult   int           `json:"retransmit_mult" yaml:"retransmit_mult"`
 	SyncInterval     time.Duration `json:"sync_interval" yaml:"sync_interval"`
 	EnableEncryption bool          `json:"enable_encryption" yaml:"enable_encryption"`
-	TLSCertPath      string        `json:"tls_cert_path,omitempty" yaml:"tls_cert_path,omitempty"`
-	TLSKeyPath       string        `json:"tls_key_path,omitempty" yaml:"tls_key_path,omitempty"`
-	CACertPath       string        `json:"ca_cert_path,omitempty" yaml:"ca_cert_path,omitempty"`
+	// RequireApproval gates membership behind explicit host approval: a node
+	// that supplies the correct cluster password is not admitted immediately but
+	// placed in a pending queue the host reviews (with the requester's source IP
+	// and hostname) and approves or denies. On by default for new clusters.
+	RequireApproval bool   `json:"require_approval" yaml:"require_approval"`
+	TLSCertPath     string `json:"tls_cert_path,omitempty" yaml:"tls_cert_path,omitempty"`
+	TLSKeyPath      string `json:"tls_key_path,omitempty" yaml:"tls_key_path,omitempty"`
+	CACertPath      string `json:"ca_cert_path,omitempty" yaml:"ca_cert_path,omitempty"`
 }
 
 // DefaultClusterConfig returns default cluster configuration
@@ -81,6 +87,7 @@ func DefaultClusterConfig() *ClusterConfig {
 		RetransmitMult:   4,
 		SyncInterval:     30 * time.Second,
 		EnableEncryption: true,
+		RequireApproval:  true,
 	}
 }
 
@@ -186,7 +193,13 @@ type JoinRequest struct {
 
 // JoinResponse represents the response to a join request
 type JoinResponse struct {
-	Success     bool           `json:"success"`
+	Success bool `json:"success"`
+	// Status is "approved" when the node was admitted, or "pending" when the
+	// cluster requires host approval and the request is now awaiting it.
+	Status string `json:"status,omitempty"`
+	// RequestID identifies a pending join so the joiner can poll its status and
+	// the host can approve/deny it.
+	RequestID   string         `json:"request_id,omitempty"`
 	NodeID      string         `json:"node_id,omitempty"`
 	ClusterName string         `json:"cluster_name,omitempty"`
 	Nodes       []*Node        `json:"nodes,omitempty"`
@@ -248,14 +261,25 @@ type Manager struct {
 	localIntel *ThreatIntel
 	// peerIntel aggregates intel received from other nodes, keyed by node ID.
 	peerIntel map[string]*ThreatIntel
+	// pendingJoins holds password-authenticated join requests awaiting host
+	// approval, keyed by request ID. joinOutcomes records the decision so the
+	// joiner can poll its result after it has been approved or denied.
+	pendingJoins map[string]*PendingJoin
+	joinOutcomes map[string]*JoinOutcome
+	// joinPollInterval/joinPollTimeout control how a joiner polls for approval;
+	// overridable in tests. Zero means use the production defaults.
+	joinPollInterval time.Duration
+	joinPollTimeout  time.Duration
 }
 
 // NewManager creates a new cluster manager
 func NewManager(dataPath string) *Manager {
 	return &Manager{
-		dataPath:  dataPath,
-		stopCh:    make(chan struct{}),
-		peerIntel: make(map[string]*ThreatIntel),
+		dataPath:     dataPath,
+		stopCh:       make(chan struct{}),
+		peerIntel:    make(map[string]*ThreatIntel),
+		pendingJoins: make(map[string]*PendingJoin),
+		joinOutcomes: make(map[string]*JoinOutcome),
 	}
 }
 
@@ -519,7 +543,20 @@ func (m *Manager) attemptJoin(seedAddr, clusterID, password string, localNode *N
 	}
 
 	if !joinResp.Success {
-		return nil, fmt.Errorf("join rejected: %s", joinResp.Error)
+		// When the cluster requires host approval, the request was accepted and
+		// queued rather than rejected: poll its status until the host approves
+		// (we receive the membership), denies, or we time out.
+		if joinResp.Status == "pending" && joinResp.RequestID != "" {
+			slog.Info("Join request submitted; awaiting host approval",
+				"request_id", joinResp.RequestID, "cluster_id", clusterID)
+			approved, perr := m.pollJoinApproval(scheme, host, password, joinResp.RequestID)
+			if perr != nil {
+				return nil, perr
+			}
+			joinResp = *approved
+		} else {
+			return nil, fmt.Errorf("join rejected: %s", joinResp.Error)
+		}
 	}
 
 	// Create local cluster state
@@ -564,6 +601,57 @@ func (m *Manager) attemptJoin(seedAddr, clusterID, password string, localNode *N
 		"total_nodes", len(cluster.Nodes))
 
 	return cluster, nil
+}
+
+// pollJoinApproval polls a pending join's status endpoint until the host
+// approves it (returning the full JoinResponse the joiner needs), denies it, or
+// the overall timeout elapses. The poll is authenticated with the same cluster
+// password the join used.
+func (m *Manager) pollJoinApproval(scheme, host, password, requestID string) (*JoinResponse, error) {
+	client := &http.Client{Timeout: 15 * time.Second}
+	if scheme == "https" {
+		client.Transport = &http.Transport{TLSClientConfig: &tls.Config{MinVersion: tls.VersionTLS12}}
+	}
+	url := fmt.Sprintf("%s://%s/api/v1/cluster/join/status?request_id=%s", scheme, host, requestID)
+
+	pollInterval := m.joinPollInterval
+	if pollInterval <= 0 {
+		pollInterval = 3 * time.Second
+	}
+	pollTimeout := m.joinPollTimeout
+	if pollTimeout <= 0 {
+		pollTimeout = 5 * time.Minute
+	}
+	deadline := time.Now().Add(pollTimeout)
+	for time.Now().Before(deadline) {
+		time.Sleep(pollInterval)
+		req, err := http.NewRequest(http.MethodGet, url, nil)
+		if err != nil {
+			return nil, fmt.Errorf("build status request: %w", err)
+		}
+		req.Header.Set("X-Cluster-Password", password)
+		resp, err := client.Do(req)
+		if err != nil {
+			continue // transient; keep polling until the deadline
+		}
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, maxClusterBodyBytes))
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusOK {
+			continue
+		}
+		var out JoinResponse
+		if err := json.Unmarshal(body, &out); err != nil {
+			continue
+		}
+		switch {
+		case out.Success && out.NodeID != "":
+			return &out, nil // approved
+		case out.Status == "denied":
+			return nil, fmt.Errorf("join request was denied by the cluster host")
+		}
+		// still pending -> keep polling
+	}
+	return nil, fmt.Errorf("timed out waiting for host approval of join request %s", requestID)
 }
 
 // Start starts the cluster manager
@@ -715,8 +803,10 @@ func (m *Manager) VerifyPassword(password string) bool {
 	return checkPassword(password, m.cluster.PasswordHash)
 }
 
-// HandleJoinRequest handles a join request from another node
-func (m *Manager) HandleJoinRequest(req *JoinRequest) *JoinResponse {
+// HandleJoinRequest handles a join request from another node. sourceIP is the
+// authoritative peer address taken from the HTTP connection (not trusted from
+// the request body), recorded so the host sees who actually connected.
+func (m *Manager) HandleJoinRequest(req *JoinRequest, sourceIP string) *JoinResponse {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
@@ -739,23 +829,36 @@ func (m *Manager) HandleJoinRequest(req *JoinRequest) *JoinResponse {
 	if !checkPassword(req.Password, m.cluster.PasswordHash) {
 		slog.Warn("Join attempt with invalid password",
 			"cluster_id", req.ClusterID,
-			"from", req.NodeAddress)
+			"from", sourceIP)
 		return &JoinResponse{
 			Success: false,
 			Error:   "invalid password",
 		}
 	}
 
-	// Generate node ID
-	nodeID, err := generateNodeID()
-	if err != nil {
-		return &JoinResponse{
-			Success: false,
-			Error:   "failed to generate node ID",
-		}
+	// When the cluster requires host approval, the correct password is not
+	// enough: queue the request for the host to review (with the real source IP
+	// and the claimed hostname) and tell the joiner to await approval.
+	if m.cluster.Config != nil && m.cluster.Config.RequireApproval {
+		return m.queuePendingJoinLocked(req, sourceIP)
 	}
 
-	// Create node
+	// Approval not required: admit immediately.
+	resp, err := m.admitNodeLocked(req)
+	if err != nil {
+		return &JoinResponse{Success: false, Error: err.Error()}
+	}
+	return resp
+}
+
+// admitNodeLocked creates a node from a join request, adds it to the cluster,
+// and returns a success response with the full node list. Caller must hold m.mu.
+func (m *Manager) admitNodeLocked(req *JoinRequest) (*JoinResponse, error) {
+	nodeID, err := generateNodeID()
+	if err != nil {
+		return nil, fmt.Errorf("failed to generate node ID")
+	}
+
 	now := time.Now()
 	node := &Node{
 		ID:           nodeID,
@@ -771,11 +874,9 @@ func (m *Manager) HandleJoinRequest(req *JoinRequest) *JoinResponse {
 		Capabilities: req.Capabilities,
 	}
 
-	// Add to cluster
 	m.cluster.Nodes[nodeID] = node
 	m.cluster.UpdatedAt = now
 
-	// Prepare response with all nodes
 	nodes := make([]*Node, 0, len(m.cluster.Nodes))
 	for _, n := range m.cluster.Nodes {
 		nodes = append(nodes, n)
@@ -789,11 +890,12 @@ func (m *Manager) HandleJoinRequest(req *JoinRequest) *JoinResponse {
 
 	return &JoinResponse{
 		Success:     true,
+		Status:      "approved",
 		NodeID:      nodeID,
 		ClusterName: m.cluster.Name,
 		Nodes:       nodes,
 		Config:      m.cluster.Config,
-	}
+	}, nil
 }
 
 // withClusterAuth returns a handler that verifies X-Cluster-Password before
@@ -827,6 +929,14 @@ func (m *Manager) startAPIServer() error {
 	mux.HandleFunc("/api/v1/cluster/leave", m.withClusterAuth(m.handleLeaveHTTP))
 	mux.HandleFunc("/api/v1/cluster/gossip", m.withClusterAuth(m.handleGossipHTTP))
 	mux.HandleFunc("/api/v1/cluster/intel", m.withClusterAuth(m.handleIntelHTTP))
+	// Join-approval endpoints. /pending, /approve and /deny are host operations
+	// (require the password). /join/status lets a queued joiner - which already
+	// proved the password on /join - poll its request; it is also password-gated
+	// so an unauthenticated scanner cannot enumerate request IDs/outcomes.
+	mux.HandleFunc("/api/v1/cluster/pending", m.withClusterAuth(m.handlePendingHTTP))
+	mux.HandleFunc("/api/v1/cluster/approve", m.withClusterAuth(m.handleApproveHTTP))
+	mux.HandleFunc("/api/v1/cluster/deny", m.withClusterAuth(m.handleDenyHTTP))
+	mux.HandleFunc("/api/v1/cluster/join/status", m.withClusterAuth(m.handleJoinStatusHTTP))
 
 	addr := fmt.Sprintf("%s:%d", m.cluster.Config.BindAddr, m.cluster.Config.BindPort)
 	tlsEnabled := m.cluster.Config.EnableEncryption &&
@@ -892,12 +1002,89 @@ func (m *Manager) handleJoinHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	resp := m.HandleJoinRequest(&req)
+	// Use the connection's peer address as the authoritative source IP rather
+	// than trusting NodeAddress from the (attacker-influenceable) body.
+	sourceIP := r.RemoteAddr
+	if host, _, err := net.SplitHostPort(r.RemoteAddr); err == nil {
+		sourceIP = host
+	}
+
+	resp := m.HandleJoinRequest(&req, sourceIP)
 	w.Header().Set("Content-Type", "application/json")
-	if !resp.Success {
+	switch {
+	case resp.Success:
+		// 200 OK
+	case resp.Status == "pending":
+		// Authenticated but awaiting host approval - not an auth failure.
+		w.WriteHeader(http.StatusAccepted)
+	default:
 		w.WriteHeader(http.StatusUnauthorized)
 	}
 	json.NewEncoder(w).Encode(resp)
+}
+
+// handlePendingHTTP lists the join requests awaiting approval (host view).
+func (m *Manager) handlePendingHTTP(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(m.ListPendingJoins())
+}
+
+// handleApproveHTTP approves a pending join by request_id.
+func (m *Manager) handleApproveHTTP(w http.ResponseWriter, r *http.Request) {
+	m.handleJoinDecisionHTTP(w, r, true)
+}
+
+// handleDenyHTTP denies a pending join by request_id.
+func (m *Manager) handleDenyHTTP(w http.ResponseWriter, r *http.Request) {
+	m.handleJoinDecisionHTTP(w, r, false)
+}
+
+func (m *Manager) handleJoinDecisionHTTP(w http.ResponseWriter, r *http.Request, approve bool) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, maxClusterBodyBytes)
+	var body struct {
+		RequestID string `json:"request_id"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.RequestID == "" {
+		http.Error(w, "request_id required", http.StatusBadRequest)
+		return
+	}
+	if approve {
+		node, err := m.ApproveJoin(body.RequestID)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusNotFound)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(node)
+		return
+	}
+	if err := m.DenyJoin(body.RequestID); err != nil {
+		http.Error(w, err.Error(), http.StatusNotFound)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// handleJoinStatusHTTP lets a joiner poll the outcome of its pending request.
+func (m *Manager) handleJoinStatusHTTP(w http.ResponseWriter, r *http.Request) {
+	id := r.URL.Query().Get("request_id")
+	o, ok := m.joinOutcome(id)
+	if !ok {
+		http.Error(w, "unknown request_id", http.StatusNotFound)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	// On approval, return the full JoinResponse the joiner needs to build its
+	// local cluster state; otherwise just the status.
+	if o.Status == "approved" && o.response != nil {
+		json.NewEncoder(w).Encode(o.response)
+		return
+	}
+	json.NewEncoder(w).Encode(JoinResponse{Status: o.Status})
 }
 
 func (m *Manager) handleStatusHTTP(w http.ResponseWriter, r *http.Request) {

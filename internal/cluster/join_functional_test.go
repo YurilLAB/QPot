@@ -17,7 +17,11 @@ func TestTwoNodeJoinOverHTTP(t *testing.T) {
 
 	// Seed node: init a cluster and start its API server on a free port.
 	seed := NewManager(t.TempDir())
-	cl, err := seed.InitCluster("prod", password, DefaultClusterConfig())
+	// This test exercises the immediate-admit path; the host-approval flow has
+	// its own test (TestJoinApprovalFlow).
+	cfg := DefaultClusterConfig()
+	cfg.RequireApproval = false
+	cl, err := seed.InitCluster("prod", password, cfg)
 	if err != nil {
 		t.Fatalf("InitCluster: %v", err)
 	}

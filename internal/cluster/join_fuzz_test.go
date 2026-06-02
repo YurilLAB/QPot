@@ -4,6 +4,7 @@ import (
 	"net"
 	"net/http"
 	"testing"
+	"time"
 )
 
 // FuzzJoinClientResponse fuzzes the CLIENT side of joining a cluster: a node
@@ -42,6 +43,10 @@ func FuzzJoinClientResponse(f *testing.F) {
 		defer srv.Close()
 
 		m := NewManager(t.TempDir())
+		// Keep a fuzzed "pending" response from making the joiner poll for the
+		// full production 5 minutes.
+		m.joinPollInterval = time.Millisecond
+		m.joinPollTimeout = 30 * time.Millisecond
 		local := &Node{Name: "joiner", Address: "127.0.0.1", Port: 7000}
 		seedAddr := "http://127.0.0.1:" + itoa(port)
 

@@ -3,10 +3,13 @@
 package main
 
 import (
+	"bytes"
 	"context"
+	"crypto/tls"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"net"
 	"net/http"
@@ -705,6 +708,9 @@ Typical flow:
 	cmd.AddCommand(newClusterStatusCommand())
 	cmd.AddCommand(newClusterLeaveCommand())
 	cmd.AddCommand(newClusterNodesCommand())
+	cmd.AddCommand(newClusterRequestsCommand())
+	cmd.AddCommand(newClusterApproveCommand())
+	cmd.AddCommand(newClusterDenyCommand())
 
 	return cmd
 }
@@ -1088,6 +1094,161 @@ func newClusterNodesCommand() *cobra.Command {
 		},
 	}
 
+	return cmd
+}
+
+// clusterAPIBase returns the base URL of the local cluster API, derived from the
+// loaded cluster config. The CLI talks to the running cluster process over HTTP
+// because pending join requests live in that process's memory.
+func clusterAPIBase() (string, error) {
+	homeDir, err := os.UserHomeDir()
+	if err != nil {
+		return "", err
+	}
+	mgr := cluster.NewManager(filepath.Join(homeDir, ".qpot", "cluster"))
+	c, err := mgr.LoadCluster()
+	if err != nil || c == nil {
+		return "", fmt.Errorf("this node is not a cluster host (run 'qpot cluster init' first)")
+	}
+	port := cluster.DefaultClusterPort
+	scheme := "http"
+	if c.Config != nil {
+		if c.Config.BindPort != 0 {
+			port = c.Config.BindPort
+		}
+		if c.Config.EnableEncryption && c.Config.TLSCertPath != "" && c.Config.TLSKeyPath != "" {
+			scheme = "https"
+		}
+	}
+	return fmt.Sprintf("%s://127.0.0.1:%d/api/v1/cluster", scheme, port), nil
+}
+
+// clusterAPIRequest performs an authenticated request to the local cluster API
+// and returns the response body. Used by the host-side approval commands.
+func clusterAPIRequest(method, path, password string, body []byte) ([]byte, int, error) {
+	base, err := clusterAPIBase()
+	if err != nil {
+		return nil, 0, err
+	}
+	var rdr io.Reader
+	if body != nil {
+		rdr = bytes.NewReader(body)
+	}
+	req, err := http.NewRequest(method, base+path, rdr)
+	if err != nil {
+		return nil, 0, err
+	}
+	req.Header.Set("X-Cluster-Password", password)
+	req.Header.Set("Content-Type", "application/json")
+	client := &http.Client{Timeout: 10 * time.Second}
+	if strings.HasPrefix(base, "https") {
+		client.Transport = &http.Transport{TLSClientConfig: &tls.Config{MinVersion: tls.VersionTLS12}}
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, 0, fmt.Errorf("cannot reach the local cluster API (is the cluster running?): %w", err)
+	}
+	defer resp.Body.Close()
+	out, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	return out, resp.StatusCode, nil
+}
+
+func newClusterRequestsCommand() *cobra.Command {
+	var password string
+	cmd := &cobra.Command{
+		Use:   "requests",
+		Short: "List pending join requests awaiting approval",
+		Long:  "Show cluster join requests that supplied the correct password and are awaiting host approval, with the requester's source IP and hostname.",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if password == "" {
+				return fmt.Errorf("--password is required (the cluster password)")
+			}
+			out, code, err := clusterAPIRequest(http.MethodGet, "/pending", password, nil)
+			if err != nil {
+				return err
+			}
+			if code == http.StatusUnauthorized {
+				return fmt.Errorf("authentication failed: wrong cluster password")
+			}
+			var pending []cluster.PendingJoin
+			if err := json.Unmarshal(out, &pending); err != nil {
+				return fmt.Errorf("unexpected response: %s", string(out))
+			}
+			if len(pending) == 0 {
+				fmt.Println("No pending join requests.")
+				return nil
+			}
+			fmt.Printf("%-22s  %-16s  %-16s  %-15s  %s\n", "REQUEST ID", "HOSTNAME", "SOURCE IP", "INSTANCE", "REQUESTED")
+			for _, p := range pending {
+				fmt.Printf("%-22s  %-16s  %-16s  %-15s  %s\n",
+					p.RequestID, truncate(p.NodeName, 16), p.SourceIP,
+					truncate(p.InstanceName, 15), p.RequestedAt.Format(time.RFC3339))
+			}
+			fmt.Println("\nApprove with: qpot cluster approve <request-id> --password <pw>")
+			return nil
+		},
+	}
+	cmd.Flags().StringVarP(&password, "password", "p", "", "cluster password")
+	return cmd
+}
+
+func newClusterApproveCommand() *cobra.Command {
+	var password string
+	cmd := &cobra.Command{
+		Use:   "approve <request-id>",
+		Short: "Approve a pending join request",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if password == "" {
+				return fmt.Errorf("--password is required (the cluster password)")
+			}
+			reqBody, _ := json.Marshal(map[string]string{"request_id": args[0]})
+			out, code, err := clusterAPIRequest(http.MethodPost, "/approve", password, reqBody)
+			if err != nil {
+				return err
+			}
+			switch code {
+			case http.StatusOK:
+				fmt.Printf("[OK] Approved join request %s\n", args[0])
+				return nil
+			case http.StatusUnauthorized:
+				return fmt.Errorf("authentication failed: wrong cluster password")
+			default:
+				return fmt.Errorf("approve failed (%d): %s", code, string(out))
+			}
+		},
+	}
+	cmd.Flags().StringVarP(&password, "password", "p", "", "cluster password")
+	return cmd
+}
+
+func newClusterDenyCommand() *cobra.Command {
+	var password string
+	cmd := &cobra.Command{
+		Use:   "deny <request-id>",
+		Short: "Deny a pending join request",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if password == "" {
+				return fmt.Errorf("--password is required (the cluster password)")
+			}
+			reqBody, _ := json.Marshal(map[string]string{"request_id": args[0]})
+			out, code, err := clusterAPIRequest(http.MethodPost, "/deny", password, reqBody)
+			if err != nil {
+				return err
+			}
+			switch code {
+			case http.StatusNoContent, http.StatusOK:
+				fmt.Printf("[OK] Denied join request %s\n", args[0])
+				return nil
+			case http.StatusUnauthorized:
+				return fmt.Errorf("authentication failed: wrong cluster password")
+			default:
+				return fmt.Errorf("deny failed (%d): %s", code, string(out))
+			}
+		},
+	}
+	cmd.Flags().StringVarP(&password, "password", "p", "", "cluster password")
 	return cmd
 }
 
