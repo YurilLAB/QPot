@@ -777,7 +777,13 @@ auth_class = UserDB
 etc_path = etc
 
 [shell]
-filesystem = share/cowrie/fs.pickle
+# Path (relative to cowrie's working dir, /home/cowrie/cowrie) to the pickled
+# fake filesystem. This MUST match where the image ships fs.pickle
+# (src/cowrie/data/fs.pickle in telekom-security/cowrie); a wrong path makes
+# Cowrie fail to load the filesystem and the shell channel dies on every login -
+# a broken honeypot and an obvious tell. The healthcheck only probes the port,
+# so this is not caught without an actual login.
+filesystem = src/cowrie/data/fs.pickle
 kernel_version = %s
 kernel_build_string = %s
 hardware_platform = %s
@@ -786,6 +792,13 @@ ssh_version = %s
 
 [ssh]
 enabled = true
+# Advertise the per-instance OpenSSH banner. This is the single most-scanned
+# fingerprint (Shodan/zgrab key on the SSH version string), so it MUST be the
+# derived identity, not Cowrie's hardcoded default
+# ("SSH-2.0-OpenSSH_6.0p1 Debian-4+deb7u2"), which every stock Cowrie advertises.
+# The [shell] ssh_version above only changes the in-shell 'ssh -V' output; this
+# [ssh] version is what a remote scanner actually sees during version exchange.
+version = SSH-2.0-%s
 # Listen on the standard privileged ports (the deployment profile maps host
 # ports here and grants NET_BIND_SERVICE). A real server runs SSH on 22 /
 # Telnet on 23, so this is also more convincing than the 2222/2223 default.
@@ -801,7 +814,7 @@ listen_endpoints = tcp:23:interface=0.0.0.0
 [output_jsonlog]
 enabled = true
 logfile = log/cowrie.json
-`, hostname, kernel, profile.KernelBuildString, profile.HardwarePlatform, profile.OperatingSystem, sshVersion)
+`, hostname, kernel, profile.KernelBuildString, profile.HardwarePlatform, profile.OperatingSystem, sshVersion, sshVersion)
 }
 
 // generateConpotConfig generates TPOT-compatible Conpot config

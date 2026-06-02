@@ -96,6 +96,53 @@ func TestCowrieConfigIsPerInstanceAndNonDefault(t *testing.T) {
 	}
 }
 
+// TestCowrieConfigRunsWithoutBreakingShell guards three bugs that each made
+// Cowrie crash the interactive shell (or leak the default fingerprint) on every
+// login while still passing the port-only healthcheck:
+//
+//  1. the advertised SSH protocol banner ([ssh] version) must be overridden -
+//     [shell] ssh_version alone only changes the in-shell `ssh -V` output, not
+//     what a scanner sees, so a missing [ssh] version leaks Cowrie's static
+//     default banner (the single most-scanned fingerprint);
+//  2. the [ssh] version banner must MATCH the per-instance ssh_version (an
+//     internally inconsistent pair is itself a tell);
+//  3. [shell] filesystem must point at the path the image actually ships
+//     (src/cowrie/data/fs.pickle) - a wrong path makes Cowrie fail to load the
+//     fake filesystem and kill the shell channel on login.
+func TestCowrieConfigRunsWithoutBreakingShell(t *testing.T) {
+	cfg := config.Default("cowrie-shell-test")
+	cfg.QPotID = "qp_shelltest000000000001"
+	g := &ComposeGenerator{Config: cfg}
+	c := g.generateCowrieConfig(cfg.Honeypots["cowrie"])
+
+	// (1) the protocol banner must be present.
+	if !strings.Contains(c, "version = SSH-2.0-OpenSSH_") {
+		t.Error("cowrie.cfg missing [ssh] version banner override; scanners would see Cowrie's static default")
+	}
+	// (2) the banner must match the shell's ssh_version (internal consistency).
+	shellVer := lineValue(c, "ssh_version = ")
+	bannerVer := strings.TrimPrefix(lineValue(c, "version = "), "SSH-2.0-")
+	if shellVer == "" || bannerVer == "" || shellVer != bannerVer {
+		t.Errorf("[ssh] version (%q) does not match [shell] ssh_version (%q)", bannerVer, shellVer)
+	}
+	// (3) the filesystem pickle path must be the one the image ships.
+	if !strings.Contains(c, "filesystem = src/cowrie/data/fs.pickle") {
+		t.Error("cowrie.cfg points [shell] filesystem at a path the image does not ship; the shell dies on login")
+	}
+}
+
+// lineValue returns the trimmed value following the first occurrence of key
+// (which should include the trailing "= ") on its own line.
+func lineValue(s, key string) string {
+	for _, ln := range strings.Split(s, "\n") {
+		ln = strings.TrimSpace(ln)
+		if strings.HasPrefix(ln, key) {
+			return strings.TrimSpace(strings.TrimPrefix(ln, key))
+		}
+	}
+	return ""
+}
+
 // TestGetTPOTConfigWiresStealthKnobs guards the previously-dropped fields.
 func TestGetTPOTConfigWiresStealthKnobs(t *testing.T) {
 	cfg := config.Default("tpotcfg-test")

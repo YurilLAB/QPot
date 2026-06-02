@@ -639,6 +639,20 @@ func (m *Manager) generateServiceConfigs() error {
 		// Cowrie gets a per-instance honeyfs layer so post-login recon is
 		// consistent with the login persona / distro identity (see honeyfs.go).
 		if name == "cowrie" {
+			// Cowrie writes a per-session ttylog to log/tty/ (ttylog_path in
+			// cowrie.cfg) but does NOT create that directory itself, and our
+			// logs bind mount shadows whatever the image shipped. Without it
+			// cowrie crashes the shell channel on every login (the recon shell
+			// dies the instant an attacker connects) - a broken honeypot that
+			// the port-only healthcheck never catches. Pre-create it, writable
+			// by cowrie's in-container uid 2000.
+			ttyDir := filepath.Join(hpDir, "logs", "tty")
+			if err := os.MkdirAll(ttyDir, 0750); err != nil {
+				return fmt.Errorf("failed to create cowrie log/tty dir: %w", err)
+			}
+			if err := os.Chmod(ttyDir, 0777); err != nil {
+				return fmt.Errorf("failed to chmod cowrie log/tty dir: %w", err)
+			}
 			for rel, content := range generator.generateCowrieHoneyfs() {
 				dest := filepath.Join(hpDir, "honeyfs", rel)
 				if err := os.MkdirAll(filepath.Dir(dest), 0755); err != nil {
