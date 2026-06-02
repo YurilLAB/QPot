@@ -129,6 +129,16 @@ func TestCowrieConfigRunsWithoutBreakingShell(t *testing.T) {
 	if !strings.Contains(c, "filesystem = src/cowrie/data/fs.pickle") {
 		t.Error("cowrie.cfg points [shell] filesystem at a path the image does not ship; the shell dies on login")
 	}
+	// (4) SSH host keys must live under the writable etc/ mount, not cowrie's
+	// read-only working dir, or key generation crashes the whole SSH service on
+	// a read-only root. Persisting them there also keeps the fingerprint stable.
+	for _, k := range []string{
+		"rsa_private_key = etc/", "ecdsa_private_key = etc/", "ed25519_private_key = etc/",
+	} {
+		if !strings.Contains(c, k) {
+			t.Errorf("cowrie.cfg missing writable host-key path %q; SSH key gen will fail on read-only root", k)
+		}
+	}
 }
 
 // lineValue returns the trimmed value following the first occurrence of key

@@ -808,6 +808,18 @@ enabled = true
 # The [shell] ssh_version above only changes the in-shell 'ssh -V' output; this
 # [ssh] version is what a remote scanner actually sees during version exchange.
 version = SSH-2.0-%s
+# Persist the SSH host keys in the writable, per-instance etc/ mount. Cowrie's
+# default key paths are relative to its working dir, which QPot mounts read-only,
+# so on first start key generation (and therefore the entire SSH service) died
+# with "Read-only file system: 'ssh_host_rsa_key.pub'" and only telnet came up.
+# Writing them under etc/ also keeps the host-key fingerprint STABLE across
+# restarts - a host key that changes every restart is itself a honeypot tell.
+rsa_public_key = etc/ssh_host_rsa_key.pub
+rsa_private_key = etc/ssh_host_rsa_key
+ecdsa_public_key = etc/ssh_host_ecdsa_key.pub
+ecdsa_private_key = etc/ssh_host_ecdsa_key
+ed25519_public_key = etc/ssh_host_ed25519_key.pub
+ed25519_private_key = etc/ssh_host_ed25519_key
 # Listen on the standard privileged ports (the deployment profile maps host
 # ports here and grants NET_BIND_SERVICE). A real server runs SSH on 22 /
 # Telnet on 23, so this is also more convincing than the 2222/2223 default.
