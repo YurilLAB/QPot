@@ -43,6 +43,21 @@ func bridgeName(instanceName, honeypot string) string {
 	return fmt.Sprintf("br-%s%s", hp, suffix)
 }
 
+// macForSeed derives a stable, locally-administered unicast MAC address for a
+// honeypot container from the (instance, honeypot) pair. The first octet is
+// fixed to 0x02 (bit 1 = locally administered, bit 0 = unicast) so it is a
+// valid, non-OUI address that does not collide with a real vendor prefix, and
+// the remaining five octets come from a hash so each (instance, honeypot) gets
+// a distinct but deterministic MAC. Used only when NetworkIsolation.RandomizeMAC
+// is set.
+func macForSeed(instanceName, honeypot string) string {
+	h := fnv.New64a()
+	_, _ = fmt.Fprintf(h, "mac:%s:%s", instanceName, honeypot)
+	v := h.Sum64()
+	return fmt.Sprintf("02:%02x:%02x:%02x:%02x:%02x",
+		byte(v>>32), byte(v>>24), byte(v>>16), byte(v>>8), byte(v))
+}
+
 // subnetForNetwork computes a unique, stable /24 subnet for a Docker bridge
 // network given an (instanceName, networkName) pair. The result always falls
 // in the 172.20.x.y/24 range (RFC 1918) which Docker uses by default.
@@ -181,6 +196,11 @@ services:
     image: {{GetHoneypotImage .Name}}
     container_name: {{$.Config.InstanceName}}_{{.Name}}
     restart: on-failure:{{$.Config.Security.ResourceLimits.RestartAttempts}}
+    {{- if $.Config.Security.NetworkIsolation.RandomizeMAC}}
+    # Stable, locally-administered MAC per (instance, honeypot) so containers do
+    # not all share Docker's default vendor prefix / a predictable address.
+    mac_address: {{macFor $.Config.InstanceName .Name}}
+    {{- end}}
     {{if $.Sandbox.ContainerRuntime}}# Stronger isolation runtime (gVisor/Kata) for this attacker-facing container
     runtime: {{$.Sandbox.ContainerRuntime}}
     {{end}}
@@ -388,6 +408,7 @@ services:
 		"GetHoneypotImage": GetHoneypotImage,
 		"subnetFor":        subnetForNetwork,
 		"bridgeName":       bridgeName,
+		"macFor":           macForSeed,
 		"deployFor":        deployProfileFor,
 		// mergedTmpfs combines the read-only-root scratch mounts with the
 		// per-honeypot profile's tmpfs, deduplicated by target path. A profile

@@ -54,6 +54,8 @@
 | Alert Webhooks | No | Yes - Slack/Discord/generic thresholds |
 | IOC Export | No | Yes - Attacker blocklist API |
 | GeoIP Enrichment | No | Yes - Optional MaxMind via Vector (`collector.geoip_db_path`) |
+| Startup Diagnostics | No | Yes - Per-honeypot start/fail report with the failure reason |
+| CI / Supply Chain | No | Yes - GitHub Actions: build, gofmt, vet, race tests, govulncheck, fuzz smoke |
 
 ### Honeypot Coverage
 
@@ -314,6 +316,20 @@ deterministically from the instance's unique QPot ID:
   `cat /etc/os-release`, `hostname`) agrees with the login persona and the
   advertised SSH banner — closing the dominant "logged-in user is absent from
   /etc/passwd" tell.
+- **Real advertised SSH banner** — the per-instance OpenSSH version is set as the
+  actual protocol banner (`[ssh] version`), not just the in-shell `ssh -V`
+  string, so Shodan/zgrab see the derived identity rather than Cowrie's hardcoded
+  default `SSH-2.0-OpenSSH_6.0p1 Debian-4+deb7u2`.
+- **Stable SSH host keys** — Cowrie's RSA/ECDSA/ed25519 host keys are generated
+  once and persisted per instance, so the host-key fingerprint stays constant
+  across restarts (a host key that rotates every restart is itself a tell).
+- **No self-identifying configs or containers** — generated configs and honeypot
+  container environments never embed `qpot`/`tpot`/`honeypot` tokens. Conpot's
+  `sensor_id` looks like an ordinary ICS asset tag (e.g. `RTU-95f0`), and no
+  honeypot container exposes `HONEYPOT_NAME`/`TPOT_HONEYPOT`/`STEALTH_MODE` env
+  vars — an attacker with in-container code execution who runs `env` sees nothing
+  identifying. QPot's own per-honeypot metadata lives in host-side docker labels
+  (invisible from inside the container).
 - **gVisor / Kata** isolation runtime is actually applied to honeypot containers
   when available; response timing can be jittered.
 
@@ -517,9 +533,13 @@ alerts:
 | Filesystem | Read-only root, tmpfs overlays| 
 | Capabilities | Drop ALL, minimal add| 
 | Seccomp | Custom profiles per honeypot| 
-| Network | Isolated per-honeypot networks| 
+| Network | Isolated per-honeypot networks (per-instance bridge names) | 
 | MAC Address | Randomized per container| 
 | Hostname | Unique per instance| 
+| No credential leak | QPot ID is never mounted or set as env on honeypot containers | 
+| Web UI headers | CSP, `X-Frame-Options: DENY`, `nosniff`, `Referrer-Policy` | 
+| Cluster API auth | bcrypt password on join/gossip/intel/leave **and** the read-only `/nodes` & `/status` endpoints | 
+| Startup reporting | per-honeypot start/fail status with the failure reason logged | 
 
 ---
 

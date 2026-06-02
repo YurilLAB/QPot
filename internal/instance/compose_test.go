@@ -24,6 +24,26 @@ func renderCompose(t *testing.T) string {
 	return out
 }
 
+// TestRandomizeMACEmitsValidMAC verifies that when NetworkIsolation.RandomizeMAC
+// is set (the default), honeypot services get a valid locally-administered MAC -
+// the feature previously only randomized the subnet, making the documented
+// "MAC randomized per container" claim false.
+func TestRandomizeMACEmitsValidMAC(t *testing.T) {
+	out := renderCompose(t) // config.Default has RandomizeMAC = true
+	if !strings.Contains(out, "mac_address: 02:") {
+		t.Error("RandomizeMAC did not emit a locally-administered mac_address on honeypot services")
+	}
+	// Two distinct honeypots must not share a MAC.
+	a := macForSeed("inst", "cowrie")
+	b := macForSeed("inst", "heralding")
+	if a == b {
+		t.Error("macForSeed collides for distinct honeypots")
+	}
+	if a != macForSeed("inst", "cowrie") {
+		t.Error("macForSeed is not deterministic")
+	}
+}
+
 // TestHoneypotEnvDoesNotSelfIdentify guards the anti-fingerprinting change: a
 // honeypot container's environment must not carry variables that announce the
 // platform or that the box is a honeypot. An attacker who lands in-container
