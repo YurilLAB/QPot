@@ -230,7 +230,7 @@ func (s *Server) Start(ctx context.Context) error {
 
 	srv := &http.Server{
 		Addr:         addr,
-		Handler:      s.authMiddleware(s.mux),
+		Handler:      securityHeaders(s.authMiddleware(s.mux)),
 		ReadTimeout:  15 * time.Second,
 		WriteTimeout: 15 * time.Second,
 		IdleTimeout:  60 * time.Second,
@@ -421,6 +421,27 @@ func (s *Server) fireWebhook(ctx context.Context, stats *database.Stats) {
 }
 
 // authMiddleware adds basic authentication
+// securityHeaders wraps a handler with standard hardening response headers for
+// the web UI: block MIME sniffing, framing (clickjacking), referrer leakage,
+// and constrain resource loading via a Content-Security-Policy. The CSP allows
+// 'self' plus inline script/style (the dashboard ships inline JS/CSS but no
+// external/CDN resources), so it blocks injected external script sources - the
+// main XSS exfiltration vector - without breaking the UI.
+func securityHeaders(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		h := w.Header()
+		h.Set("X-Content-Type-Options", "nosniff")
+		h.Set("X-Frame-Options", "DENY")
+		h.Set("Referrer-Policy", "no-referrer")
+		h.Set("Content-Security-Policy",
+			"default-src 'self'; script-src 'self' 'unsafe-inline'; "+
+				"style-src 'self' 'unsafe-inline'; img-src 'self' data:; "+
+				"connect-src 'self'; base-uri 'self'; form-action 'self'; "+
+				"frame-ancestors 'none'")
+		next.ServeHTTP(w, r)
+	})
+}
+
 func (s *Server) authMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// Skip auth for static files (they handle their own auth)

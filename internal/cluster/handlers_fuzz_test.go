@@ -63,6 +63,44 @@ func TestGossipHandlerRejectsMalformedNodes(t *testing.T) {
 	}
 }
 
+// TestReadEndpointsRequireAuth verifies the cluster /nodes and /status HTTP
+// endpoints reject unauthenticated callers - /nodes returns every node's QPotID
+// (the management credential) and address, so it must never be public.
+func TestReadEndpointsRequireAuth(t *testing.T) {
+	m := newInitializedManager(t)
+	const pw = "correct-horse-battery"
+	for _, h := range []struct {
+		name    string
+		handler http.HandlerFunc
+	}{
+		{"nodes", m.withClusterAuth(m.handleNodesHTTP)},
+		{"status", m.withClusterAuth(m.handleStatusHTTP)},
+	} {
+		// No password -> 401.
+		rec := httptest.NewRecorder()
+		h.handler(rec, httptest.NewRequest(http.MethodGet, "/api/v1/cluster/"+h.name, nil))
+		if rec.Code != http.StatusUnauthorized {
+			t.Errorf("%s without password: status %d, want 401", h.name, rec.Code)
+		}
+		// Wrong password -> 401.
+		rec = httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodGet, "/api/v1/cluster/"+h.name, nil)
+		req.Header.Set("X-Cluster-Password", "wrong-password-xyz")
+		h.handler(rec, req)
+		if rec.Code != http.StatusUnauthorized {
+			t.Errorf("%s with wrong password: status %d, want 401", h.name, rec.Code)
+		}
+		// Correct password -> 200.
+		rec = httptest.NewRecorder()
+		req = httptest.NewRequest(http.MethodGet, "/api/v1/cluster/"+h.name, nil)
+		req.Header.Set("X-Cluster-Password", pw)
+		h.handler(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Errorf("%s with correct password: status %d, want 200", h.name, rec.Code)
+		}
+	}
+}
+
 // FuzzClusterHandlers throws arbitrary bodies at the three network-facing JSON
 // handlers (join, gossip, intel). None may panic regardless of input.
 func FuzzClusterHandlers(f *testing.F) {

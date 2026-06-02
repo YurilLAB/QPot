@@ -167,6 +167,35 @@ func TestServerEndToEnd(t *testing.T) {
 	}
 }
 
+// TestSecurityHeaders verifies the hardening response headers are applied to
+// web UI responses (defense-in-depth against MIME sniffing, clickjacking,
+// referrer leakage and injected external scripts).
+func TestSecurityHeaders(t *testing.T) {
+	s := newTestServer(true)
+	ts := httptest.NewServer(securityHeaders(s.authMiddleware(s.mux)))
+	defer ts.Close()
+
+	resp, err := ts.Client().Get(ts.URL + "/")
+	if err != nil {
+		t.Fatalf("GET /: %v", err)
+	}
+	resp.Body.Close()
+	want := map[string]string{
+		"X-Content-Type-Options": "nosniff",
+		"X-Frame-Options":        "DENY",
+		"Referrer-Policy":        "no-referrer",
+	}
+	for k, v := range want {
+		if got := resp.Header.Get(k); got != v {
+			t.Errorf("header %s = %q, want %q", k, got, v)
+		}
+	}
+	if csp := resp.Header.Get("Content-Security-Policy"); !strings.Contains(csp, "default-src 'self'") ||
+		!strings.Contains(csp, "frame-ancestors 'none'") {
+		t.Errorf("Content-Security-Policy missing expected directives: %q", csp)
+	}
+}
+
 func readBody(t *testing.T, resp *http.Response) string {
 	t.Helper()
 	defer resp.Body.Close()

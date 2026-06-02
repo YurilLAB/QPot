@@ -815,9 +815,14 @@ func (m *Manager) startAPIServer() error {
 	mux := http.NewServeMux()
 	// join verifies the password internally via HandleJoinRequest.
 	mux.HandleFunc("/api/v1/cluster/join", m.handleJoinHTTP)
-	// Read-only endpoints are unauthenticated (internal network assumed).
-	mux.HandleFunc("/api/v1/cluster/status", m.handleStatusHTTP)
-	mux.HandleFunc("/api/v1/cluster/nodes", m.handleNodesHTTP)
+	// Read-only endpoints are authenticated too: /nodes returns every node's
+	// QPotID (the management-API credential) and address, and /status leaks the
+	// cluster ID and topology that help an attacker target a join/password
+	// brute-force. Nothing internal depends on them being public - the local
+	// web UI and CLI read cluster state through in-process method calls, not
+	// over HTTP - so only password-holding peers/operators can reach them.
+	mux.HandleFunc("/api/v1/cluster/status", m.withClusterAuth(m.handleStatusHTTP))
+	mux.HandleFunc("/api/v1/cluster/nodes", m.withClusterAuth(m.handleNodesHTTP))
 	// Mutation/peer endpoints require cluster password authentication.
 	mux.HandleFunc("/api/v1/cluster/leave", m.withClusterAuth(m.handleLeaveHTTP))
 	mux.HandleFunc("/api/v1/cluster/gossip", m.withClusterAuth(m.handleGossipHTTP))
