@@ -136,10 +136,18 @@ func (e *Extractor) Extract(event *database.Event) []*database.IOC {
 			}
 			iocs = append(iocs, makeIOC(IOCTypeURL, u))
 
-			// Extract domain from URL
+			// Extract the host from the URL. reDomain's character class also
+			// matches dotted-decimal IPv4 literals (e.g. http://203.0.113.9/x),
+			// so an IP-literal host would otherwise be mistyped as a domain.
+			// Classify it as an IP IOC instead - that is what it is, and it
+			// keeps the blocklist/correlation by-type correct.
 			if matches := reDomain.FindStringSubmatch(u); len(matches) > 1 {
-				domain := strings.ToLower(matches[1])
-				iocs = append(iocs, makeIOC(IOCTypeDomain, domain))
+				host := strings.ToLower(matches[1])
+				if net.ParseIP(host) != nil {
+					iocs = append(iocs, makeIOC(IOCTypeIP, host))
+				} else {
+					iocs = append(iocs, makeIOC(IOCTypeDomain, host))
+				}
 			}
 		}
 

