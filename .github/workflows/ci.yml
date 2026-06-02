@@ -1,8 +1,24 @@
 name: CI
 
-# Build, vet, format-check, race-test, vuln-scan and a short fuzz smoke run on
-# every push/PR. This is the gate that would have caught the broken build that
-# previously reached main (server.go referencing a method the worker lacked).
+# Build, lint, static-analysis, security-scan, race-test and a short fuzz smoke
+# run on every push/PR. This is the gate that would have caught the broken build
+# that previously reached main (server.go referencing a method the worker
+# lacked), plus the security and quality scanners added since.
+#
+# What we look for:
+#   build-test   - it compiles, is gofmt-clean, passes go vet + staticcheck, and
+#                  the full race-enabled test suite is green.
+#   build-run    - the binary actually runs (CLI smoke) and renders a valid,
+#                  non-self-identifying docker-compose.
+#   govulncheck  - known CVEs reachable from our code (stdlib + deps), incl. a
+#                  scan of the built binary.
+#   gosec        - source-level security anti-patterns (SQL injection, weak
+#                  crypto, TLS misconfig, command/path injection, bad perms);
+#                  results uploaded to the GitHub Security tab as SARIF.
+#   gitleaks     - secrets accidentally committed to the tree/history.
+#   fuzz-smoke   - every Fuzz* target gets a short run so seed corpora + light
+#                  mutation are exercised on every push.
+# (CodeQL semantic analysis runs from its own workflow, codeql.yml.)
 
 on:
   push:
@@ -11,6 +27,7 @@ on:
     branches: [main]
   workflow_dispatch:
 
+# Least privilege by default; jobs opt into more only where needed.
 permissions:
   contents: read
 
@@ -18,10 +35,17 @@ concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: true
 
+env:
+  # Pin the security tools so a tool-side change can't silently alter results.
+  GOVULNCHECK_VERSION: v1.1.4
+  GOSEC_VERSION: v2.22.7
+  STATICCHECK_VERSION: "2025.1.1"
+
 jobs:
   build-test:
-    name: Build, vet, fmt & race tests
+    name: Build, vet, fmt, staticcheck & race tests
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
 
@@ -48,12 +72,18 @@ jobs:
       - name: go vet
         run: go vet ./...
 
+      - name: staticcheck
+        run: |
+          go install "honnef.co/go/tools/cmd/staticcheck@${STATICCHECK_VERSION}"
+          "$(go env GOPATH)/bin/staticcheck" ./...
+
       - name: go test -race
         run: go test -race -timeout 10m ./...
 
   build-run:
     name: Build binary & CLI smoke run
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
       - name: Set up Go
@@ -95,8 +125,9 @@ jobs:
           if-no-files-found: error
 
   govulncheck:
-    name: Vulnerability scan
+    name: Vulnerability scan (govulncheck)
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
       - name: Set up Go
@@ -104,14 +135,82 @@ jobs:
         with:
           go-version-file: go.mod
           cache: true
-      - name: Run govulncheck
+      - name: Run govulncheck (source + binary)
         run: |
-          go install golang.org/x/vuln/cmd/govulncheck@latest
-          "$(go env GOPATH)/bin/govulncheck" ./...
+          set -euo pipefail
+          go install "golang.org/x/vuln/cmd/govulncheck@${GOVULNCHECK_VERSION}"
+          GVC="$(go env GOPATH)/bin/govulncheck"
+          echo "::group::source scan"
+          "$GVC" ./...
+          echo "::endgroup::"
+          # Also scan the built binary: catches vulnerable code paths reachable
+          # in the actual shipped artifact, including the toolchain that built it.
+          echo "::group::binary scan"
+          go build -o qpot ./cmd/qpot
+          "$GVC" -mode=binary ./qpot
+          echo "::endgroup::"
+
+  gosec:
+    name: Security scan (gosec)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      security-events: write   # upload SARIF to the Security tab
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Run gosec
+        # Excluded rules are systematic false positives for a Docker-orchestrating
+        # honeypot: G204 (we exec docker by design, args are validated),
+        # G301/G302/G306 (honeypot dirs/decoy configs are intentionally readable
+        # by the non-root container uid; the real secret qpot.id is written 0600),
+        # G101 (the *fake* honeypot /etc/passwd), G117 (we deliberately store the
+        # attacker-supplied passwords the honeypot captures), G115 (intentional
+        # FNV hash truncation), G104 (noisy unhandled-error check), G304 (internal,
+        # non-web-controlled file paths). All high-signal rules - SQL injection,
+        # weak crypto, TLS misconfig, blocklisted imports, template injection -
+        # stay enabled.
+        run: |
+          set -uo pipefail
+          go install "github.com/securego/gosec/v2/cmd/gosec@${GOSEC_VERSION}"
+          GOSEC="$(go env GOPATH)/bin/gosec"
+          EXCLUDES="G104,G115,G204,G304,G301,G302,G306,G101,G117,G118"
+          # Write SARIF for the Security tab (note: -quiet would suppress the
+          # file on a clean run, so it is omitted) and fail on any finding.
+          GOSEC_RC=0
+          "$GOSEC" -exclude="$EXCLUDES" -fmt sarif -out gosec.sarif ./... || GOSEC_RC=$?
+          echo "gosec exit: ${GOSEC_RC}"
+          exit "${GOSEC_RC}"
+      - name: Upload gosec SARIF
+        if: always()
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: gosec.sarif
+          category: gosec
+
+  gitleaks:
+    name: Secret scan (gitleaks)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0   # full history so committed-then-removed secrets are caught
+      - name: Run gitleaks
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITLEAKS_ENABLE_UPLOAD_ARTIFACT: "false"
+          # GITLEAKS_LICENSE is only needed for org accounts; personal/public repos run free.
 
   fuzz-smoke:
     name: Fuzz smoke (10s per target)
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
       - name: Set up Go

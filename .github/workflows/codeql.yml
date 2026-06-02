@@ -1,0 +1,56 @@
+name: CodeQL
+
+# GitHub's semantic security analysis for Go. Complements gosec (pattern-based)
+# with dataflow/taint analysis - it traces attacker-controlled input to
+# dangerous sinks (injection, path traversal, SSRF, etc.) across function
+# boundaries. Findings land in the repo's Security > Code scanning tab.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  schedule:
+    # Re-scan weekly so newly-published CodeQL queries run against unchanged code.
+    - cron: "27 3 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: codeql-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  analyze:
+    name: Analyze (Go)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      security-events: write   # required to upload CodeQL results
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@v3
+        with:
+          languages: go
+          # security-extended adds the higher-signal security queries on top of
+          # the default suite.
+          queries: security-extended
+
+      - name: Build
+        uses: github/codeql-action/autobuild@v3
+
+      - name: Perform CodeQL analysis
+        uses: github/codeql-action/analyze@v3
+        with:
+          category: "/language:go"

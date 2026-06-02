@@ -1,0 +1,28 @@
+version: 2
+# Keep dependencies and CI actions patched automatically. Dependabot opens PRs
+# for new versions, which then run through the full CI (incl. govulncheck/gosec),
+# so a vulnerable dependency or a compromised action update is surfaced quickly.
+updates:
+  # Go module dependencies.
+  - package-ecosystem: gomod
+    directory: "/"
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 10
+    labels: ["dependencies", "go"]
+    groups:
+      # Batch low-risk patch/minor bumps into one PR to reduce noise; majors
+      # still come as individual PRs for review.
+      go-minor-and-patch:
+        update-types: ["minor", "patch"]
+    commit-message:
+      prefix: "deps"
+
+  # GitHub Actions used by the workflows (supply-chain hygiene).
+  - package-ecosystem: github-actions
+    directory: "/"
+    schedule:
+      interval: weekly
+    labels: ["dependencies", "github-actions"]
+    commit-message:
+      prefix: "ci"
