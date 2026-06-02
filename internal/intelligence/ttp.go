@@ -230,13 +230,13 @@ var knownCloudCIDRs []*net.IPNet
 
 func init() {
 	cidrs := []string{
-		"3.0.0.0/8",    // AWS us-east-1 (rough)
-		"13.0.0.0/8",   // Azure (rough)
-		"35.0.0.0/8",   // GCP (rough)
-		"34.0.0.0/8",   // GCP (rough)
-		"52.0.0.0/8",   // AWS
-		"54.0.0.0/8",   // AWS
-		"18.0.0.0/8",   // AWS
+		"3.0.0.0/8",      // AWS us-east-1 (rough)
+		"13.0.0.0/8",     // Azure (rough)
+		"35.0.0.0/8",     // GCP (rough)
+		"34.0.0.0/8",     // GCP (rough)
+		"52.0.0.0/8",     // AWS
+		"54.0.0.0/8",     // AWS
+		"18.0.0.0/8",     // AWS
 		"104.196.0.0/14", // GCP
 	}
 	for _, cidr := range cidrs {

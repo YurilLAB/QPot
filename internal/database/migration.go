@@ -257,10 +257,10 @@ func (m *MigrationManager) getLatestVersion() int {
 
 // MigrationStatus represents the status of all migrations
 type MigrationStatus struct {
-	CurrentVersion int                    `json:"current_version"`
-	LatestVersion  int                    `json:"latest_version"`
-	PendingCount   int                    `json:"pending_count"`
-	Migrations     []MigrationStatusItem  `json:"migrations"`
+	CurrentVersion int                   `json:"current_version"`
+	LatestVersion  int                   `json:"latest_version"`
+	PendingCount   int                   `json:"pending_count"`
+	Migrations     []MigrationStatusItem `json:"migrations"`
 }
 
 // MigrationStatusItem represents status of a single migration

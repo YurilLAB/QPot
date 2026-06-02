@@ -29,7 +29,7 @@ func NewClickHouse(cfg *config.DatabaseConfig) (*ClickHouse, error) {
 // Connect establishes connection to ClickHouse
 func (ch *ClickHouse) Connect(ctx context.Context) error {
 	addr := fmt.Sprintf("%s:%d", ch.config.Host, ch.config.Port)
-	
+
 	options := &clickhouse.Options{
 		Addr: []string{addr},
 		Auth: clickhouse.Auth{
@@ -43,10 +43,10 @@ func (ch *ClickHouse) Connect(ctx context.Context) error {
 		Compression: &clickhouse.Compression{
 			Method: clickhouse.CompressionLZ4,
 		},
-		DialTimeout:      10 * time.Second,
-		MaxOpenConns:     10,
-		MaxIdleConns:     5,
-		ConnMaxLifetime:  time.Hour,
+		DialTimeout:     10 * time.Second,
+		MaxOpenConns:    10,
+		MaxIdleConns:    5,
+		ConnMaxLifetime: time.Hour,
 	}
 
 	conn, err := clickhouse.Open(options)
@@ -600,7 +600,6 @@ func (ch *ClickHouse) Optimize(ctx context.Context) error {
 	return ch.conn.Exec(ctx, "OPTIMIZE TABLE events FINAL")
 }
 
-
 // ExportData exports data to a writer in CSV format
 func (ch *ClickHouse) ExportData(ctx context.Context, start, end time.Time, w io.Writer) error {
 	if ch.conn == nil {
@@ -839,7 +838,7 @@ func (ch *ClickHouse) GetSchemaVersion(ctx context.Context) (int, error) {
 		FROM system.tables 
 		WHERE database = currentDatabase() AND name = 'schema_migrations'
 	`).Scan(&exists)
-	
+
 	if err != nil || exists == 0 {
 		return 0, nil // No migrations table means version 0
 	}
@@ -852,7 +851,7 @@ func (ch *ClickHouse) GetSchemaVersion(ctx context.Context) (int, error) {
 		ORDER BY version DESC
 		LIMIT 1
 	`).Scan(&version)
-	
+
 	if err != nil {
 		return 0, nil
 	}

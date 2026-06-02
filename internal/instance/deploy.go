@@ -139,16 +139,16 @@ func deployProfileFor(name string) honeypotDeploy {
 		// passes empty args (--mibcache <empty>) and crashes. The "default"
 		// template emulates a Siemens S7-200 over the ICS ports below.
 		return honeypotDeploy{
-			Tmpfs:   []string{"/tmp/conpot:uid=2000,gid=2000"},
-			Volumes: []deployVolume{{HostSubdir: "logs", ContainerPath: "/var/log/conpot"}},
-			Ports:   []int{21, 80, 102, 1025, 2404, 10001, 44818, 50100},
+			Tmpfs:    []string{"/tmp/conpot:uid=2000,gid=2000"},
+			Volumes:  []deployVolume{{HostSubdir: "logs", ContainerPath: "/var/log/conpot"}},
+			Ports:    []int{21, 80, 102, 1025, 2404, 10001, 44818, 50100},
 			UDPPorts: []int{69, 161, 623, 47808},
 			Env: map[string]string{
 				"CONPOT_TMP":      "/tmp/conpot",
-				"CONPOT_TEMPLATE":  "default",
-				"CONPOT_CONFIG":    "/etc/conpot/conpot.cfg",
-				"CONPOT_LOG":       "/var/log/conpot/conpot.log",
-				"CONPOT_JSON_LOG":  "/var/log/conpot/conpot.json",
+				"CONPOT_TEMPLATE": "default",
+				"CONPOT_CONFIG":   "/etc/conpot/conpot.cfg",
+				"CONPOT_LOG":      "/var/log/conpot/conpot.log",
+				"CONPOT_JSON_LOG": "/var/log/conpot/conpot.json",
 			},
 		}
 	case "heralding":

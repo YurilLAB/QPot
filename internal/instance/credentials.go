@@ -157,9 +157,9 @@ var credentialTemplates = []credentialTemplate{
 	{
 		Name: "cctv-nvr", Description: "CCTV NVR / DVR (Hikvision/Dahua firmware)",
 		Users: []credUser{
-			{"admin", []string{"12345", "admin12345"}}, // Hikvision default
+			{"admin", []string{"12345", "admin12345"}},  // Hikvision default
 			{"root", []string{"7ujMko0admin", "vizxv"}}, // Dahua defaults
-			{"888888", []string{"888888"}},               // Dahua default account
+			{"888888", []string{"888888"}},              // Dahua default account
 			{"default", []string{"default"}},
 		},
 	},

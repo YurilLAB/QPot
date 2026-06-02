@@ -1,0 +1,26 @@
+# Normalize line endings so the repo never reaccumulates the CRLF files that
+# made the codebase fail a gofmt/`go fmt` check. Go tooling (gofmt, go vet)
+# expects LF; enforce it for source and common text files regardless of the
+# contributor's OS or git core.autocrlf setting.
+* text=auto eol=lf
+
+*.go     text eol=lf
+*.mod    text eol=lf
+*.sum    text eol=lf
+*.sh     text eol=lf
+*.yml    text eol=lf
+*.yaml   text eol=lf
+*.toml   text eol=lf
+*.json   text eol=lf
+*.md     text eol=lf
+
+# Windows scripts keep CRLF.
+*.ps1    text eol=crlf
+
+# Binary assets must never be line-ending converted.
+*.png    binary
+*.jpg    binary
+*.gif    binary
+*.ico    binary
+*.gz     binary
+*.pickle binary

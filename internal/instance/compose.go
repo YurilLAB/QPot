@@ -42,7 +42,7 @@ func subnetForNetwork(instanceName, networkName string) string {
 	_, _ = fmt.Fprintf(h, "%s:%s", instanceName, networkName)
 	v := h.Sum32()
 	x := 20 + int((v>>8)%12) // 20–31
-	y := int(v % 256)         // 0–255
+	y := int(v % 256)        // 0–255
 	return fmt.Sprintf("172.%d.%d.0/24", x, y)
 }
 
@@ -370,9 +370,9 @@ services:
 			return a < b
 		},
 		"GetHoneypotImage": GetHoneypotImage,
-		"subnetFor": subnetForNetwork,
-		"bridgeName": bridgeName,
-		"deployFor": deployProfileFor,
+		"subnetFor":        subnetForNetwork,
+		"bridgeName":       bridgeName,
+		"deployFor":        deployProfileFor,
 		// mergedTmpfs combines the read-only-root scratch mounts with the
 		// per-honeypot profile's tmpfs, deduplicated by target path. A profile
 		// that needs /tmp owned by a specific uid (e.g. log4pot) would otherwise
@@ -657,12 +657,12 @@ sinks:
 // GenerateTPOTConfig generates TPOT-compatible configuration files
 func (g *ComposeGenerator) GenerateTPOTConfig(honeypot string) (map[string]string, error) {
 	configs := make(map[string]string)
-	
+
 	hp, ok := g.Config.Honeypots[honeypot]
 	if !ok {
 		return configs, fmt.Errorf("honeypot not found: %s", honeypot)
 	}
-	
+
 	switch honeypot {
 	case "cowrie":
 		configs["cowrie.cfg"] = g.generateCowrieConfig(hp)
@@ -860,23 +860,23 @@ func (g *ComposeGenerator) generateConpotConfig(hp config.HoneypotConfig) string
 func GetHoneypotImage(name string) string {
 	// Map of honeypot names to their images (reuse TPOT images)
 	images := map[string]string{
-		"cowrie":     "ghcr.io/telekom-security/cowrie:24.04.1",
-		"dionaea":    "ghcr.io/telekom-security/dionaea:24.04.1",
-		"conpot":     "ghcr.io/telekom-security/conpot:24.04.1",
-		"tanner":     "ghcr.io/telekom-security/tanner:24.04.1",
-		"adbhoney":   "ghcr.io/telekom-security/adbhoney:24.04.1",
-		"endlessh":   "ghcr.io/telekom-security/endlessh:24.04.1",
-		"heralding":  "ghcr.io/telekom-security/heralding:24.04.1",
-		"honeyaml":   "ghcr.io/telekom-security/honeyaml:24.04.1",
-		"elasticpot": "ghcr.io/telekom-security/elasticpot:24.04.1",
-		"ciscoasa":   "ghcr.io/telekom-security/ciscoasa:24.04.1",
+		"cowrie":         "ghcr.io/telekom-security/cowrie:24.04.1",
+		"dionaea":        "ghcr.io/telekom-security/dionaea:24.04.1",
+		"conpot":         "ghcr.io/telekom-security/conpot:24.04.1",
+		"tanner":         "ghcr.io/telekom-security/tanner:24.04.1",
+		"adbhoney":       "ghcr.io/telekom-security/adbhoney:24.04.1",
+		"endlessh":       "ghcr.io/telekom-security/endlessh:24.04.1",
+		"heralding":      "ghcr.io/telekom-security/heralding:24.04.1",
+		"honeyaml":       "ghcr.io/telekom-security/honeyaml:24.04.1",
+		"elasticpot":     "ghcr.io/telekom-security/elasticpot:24.04.1",
+		"ciscoasa":       "ghcr.io/telekom-security/ciscoasa:24.04.1",
 		"citrixhoneypot": "ghcr.io/telekom-security/citrixhoneypot:24.04.1",
-		"ddospot":    "ghcr.io/telekom-security/ddospot:24.04.1",
-		"ipphoney":   "ghcr.io/telekom-security/ipphoney:24.04.1",
-		"mailoney":   "ghcr.io/telekom-security/mailoney:24.04.1",
-		"medpot":     "ghcr.io/telekom-security/medpot:24.04.1",
-		"dicompot":   "ghcr.io/telekom-security/dicompot:24.04.1",
-		"redishoneypot": "ghcr.io/telekom-security/redishoneypot:24.04.1",
+		"ddospot":        "ghcr.io/telekom-security/ddospot:24.04.1",
+		"ipphoney":       "ghcr.io/telekom-security/ipphoney:24.04.1",
+		"mailoney":       "ghcr.io/telekom-security/mailoney:24.04.1",
+		"medpot":         "ghcr.io/telekom-security/medpot:24.04.1",
+		"dicompot":       "ghcr.io/telekom-security/dicompot:24.04.1",
+		"redishoneypot":  "ghcr.io/telekom-security/redishoneypot:24.04.1",
 		// Newer / 2024-2026 honeypots vendored under docker/.
 		"beelzebub":  "ghcr.io/telekom-security/beelzebub:24.04.1",  // LLM SSH/HTTP/TCP
 		"galah":      "ghcr.io/telekom-security/galah:24.04.1",      // LLM web

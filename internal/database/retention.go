@@ -18,27 +18,27 @@ import (
 
 // RetentionPolicy defines how long to keep data and where to archive it
 type RetentionPolicy struct {
-	ID               string              `yaml:"id" json:"id"`
-	Name             string              `yaml:"name" json:"name"`
-	Enabled          bool                `yaml:"enabled" json:"enabled"`
-	Honeypots        []string            `yaml:"honeypots,omitempty" json:"honeypots,omitempty"`
-	HotRetention     time.Duration       `yaml:"hot_retention" json:"hot_retention"`
-	WarmRetention    time.Duration       `yaml:"warm_retention" json:"warm_retention"`
-	ColdRetention    time.Duration       `yaml:"cold_retention" json:"cold_retention"`
-	ArchiveConfig    *ArchiveConfig      `yaml:"archive,omitempty" json:"archive,omitempty"`
-	CompressionType  string              `yaml:"compression" json:"compression"`
-	Schedule         string              `yaml:"schedule" json:"schedule"`
-	LastRun          *time.Time          `yaml:"last_run,omitempty" json:"last_run,omitempty"`
-	NextRun          *time.Time          `yaml:"next_run,omitempty" json:"next_run,omitempty"`
-	TotalArchived    int64               `yaml:"total_archived" json:"total_archived"`
-	TotalDeleted     int64               `yaml:"total_deleted" json:"total_deleted"`
+	ID              string         `yaml:"id" json:"id"`
+	Name            string         `yaml:"name" json:"name"`
+	Enabled         bool           `yaml:"enabled" json:"enabled"`
+	Honeypots       []string       `yaml:"honeypots,omitempty" json:"honeypots,omitempty"`
+	HotRetention    time.Duration  `yaml:"hot_retention" json:"hot_retention"`
+	WarmRetention   time.Duration  `yaml:"warm_retention" json:"warm_retention"`
+	ColdRetention   time.Duration  `yaml:"cold_retention" json:"cold_retention"`
+	ArchiveConfig   *ArchiveConfig `yaml:"archive,omitempty" json:"archive,omitempty"`
+	CompressionType string         `yaml:"compression" json:"compression"`
+	Schedule        string         `yaml:"schedule" json:"schedule"`
+	LastRun         *time.Time     `yaml:"last_run,omitempty" json:"last_run,omitempty"`
+	NextRun         *time.Time     `yaml:"next_run,omitempty" json:"next_run,omitempty"`
+	TotalArchived   int64          `yaml:"total_archived" json:"total_archived"`
+	TotalDeleted    int64          `yaml:"total_deleted" json:"total_deleted"`
 }
 
 // ArchiveConfig defines cold storage archive settings
 type ArchiveConfig struct {
-	Type        string            `yaml:"type" json:"type"`           // s3, gcs, azure, filesystem
-	S3          *S3Config         `yaml:"s3,omitempty" json:"s3,omitempty"`
-	Filesystem  *FilesystemConfig `yaml:"filesystem,omitempty" json:"filesystem,omitempty"`
+	Type       string            `yaml:"type" json:"type"` // s3, gcs, azure, filesystem
+	S3         *S3Config         `yaml:"s3,omitempty" json:"s3,omitempty"`
+	Filesystem *FilesystemConfig `yaml:"filesystem,omitempty" json:"filesystem,omitempty"`
 }
 
 // S3Config defines S3-compatible storage settings
@@ -201,8 +201,8 @@ func (rm *RetentionManager) ExecutePolicy(ctx context.Context, policyID string) 
 	policy.NextRun = &nextRun
 
 	result.CompletedAt = time.Now()
-	slog.Info("Retention policy completed", 
-		"policy", policyID, 
+	slog.Info("Retention policy completed",
+		"policy", policyID,
 		"archived", result.Archived,
 		"deleted", result.HotDeleted,
 		"duration", result.CompletedAt.Sub(result.StartedAt))
@@ -216,9 +216,9 @@ func (rm *RetentionManager) archiveData(ctx context.Context, policy *RetentionPo
 		return 0, nil
 	}
 
-	slog.Info("Archiving data", 
-		"policy", policy.ID, 
-		"from", coldCutoff, 
+	slog.Info("Archiving data",
+		"policy", policy.ID,
+		"from", coldCutoff,
 		"to", warmCutoff,
 		"type", policy.ArchiveConfig.Type)
 
@@ -245,8 +245,8 @@ func (rm *RetentionManager) archiveToS3(ctx context.Context, policy *RetentionPo
 	}
 
 	// Create archive file
-	archiveFile := fmt.Sprintf("qpot_archive_%s_%s.parquet", 
-		policy.ID, 
+	archiveFile := fmt.Sprintf("qpot_archive_%s_%s.parquet",
+		policy.ID,
 		coldCutoff.Format("20060102_150405"))
 	localPath := filepath.Join(rm.archiveDir, archiveFile)
 
@@ -269,9 +269,9 @@ func (rm *RetentionManager) archiveToS3(ctx context.Context, policy *RetentionPo
 	defer file.Close()
 
 	putInput := &s3.PutObjectInput{
-		Bucket: aws.String(cfg.Bucket),
-		Key:    aws.String(key),
-		Body:   file,
+		Bucket:   aws.String(cfg.Bucket),
+		Key:      aws.String(key),
+		Body:     file,
 		Metadata: cfg.Metadata,
 	}
 
@@ -305,7 +305,7 @@ func (rm *RetentionManager) archiveToFilesystem(ctx context.Context, policy *Ret
 		return 0, fmt.Errorf("failed to create archive directory: %w", err)
 	}
 
-	archiveFile := fmt.Sprintf("qpot_archive_%s.parquet", 
+	archiveFile := fmt.Sprintf("qpot_archive_%s.parquet",
 		coldCutoff.Format("20060102_150405"))
 	fullPath := filepath.Join(archivePath, archiveFile)
 

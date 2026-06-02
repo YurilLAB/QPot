@@ -19,8 +19,8 @@ type mockDB struct {
 	failPing  atomic.Bool
 }
 
-func (m *mockDB) Connect(ctx context.Context) error   { return nil }
-func (m *mockDB) Close() error                        { m.closed.Store(true); return nil }
+func (m *mockDB) Connect(ctx context.Context) error { return nil }
+func (m *mockDB) Close() error                      { m.closed.Store(true); return nil }
 func (m *mockDB) Ping(ctx context.Context) error {
 	m.pingCalls.Add(1)
 	if m.failPing.Load() {
@@ -28,14 +28,14 @@ func (m *mockDB) Ping(ctx context.Context) error {
 	}
 	return nil
 }
-func (m *mockDB) InitializeSchema(ctx context.Context) error                        { return nil }
-func (m *mockDB) GetSchemaVersion(ctx context.Context) (int, error)                 { return 1, nil }
-func (m *mockDB) SetSchemaVersion(ctx context.Context, v int) error                 { return nil }
-func (m *mockDB) InsertEvent(ctx context.Context, e *Event) error                   { return nil }
-func (m *mockDB) InsertEvents(ctx context.Context, evs []*Event) error              { return nil }
-func (m *mockDB) GetEvents(ctx context.Context, f EventFilter) ([]*Event, error)    { return nil, nil }
-func (m *mockDB) GetEventByID(ctx context.Context, id string) (*Event, error)       { return nil, nil }
-func (m *mockDB) GetStats(ctx context.Context, since time.Time) (*Stats, error)     { return &Stats{}, nil }
+func (m *mockDB) InitializeSchema(ctx context.Context) error                     { return nil }
+func (m *mockDB) GetSchemaVersion(ctx context.Context) (int, error)              { return 1, nil }
+func (m *mockDB) SetSchemaVersion(ctx context.Context, v int) error              { return nil }
+func (m *mockDB) InsertEvent(ctx context.Context, e *Event) error                { return nil }
+func (m *mockDB) InsertEvents(ctx context.Context, evs []*Event) error           { return nil }
+func (m *mockDB) GetEvents(ctx context.Context, f EventFilter) ([]*Event, error) { return nil, nil }
+func (m *mockDB) GetEventByID(ctx context.Context, id string) (*Event, error)    { return nil, nil }
+func (m *mockDB) GetStats(ctx context.Context, since time.Time) (*Stats, error)  { return &Stats{}, nil }
 func (m *mockDB) GetTopAttackers(ctx context.Context, limit int, since time.Time) ([]*AttackerStats, error) {
 	return nil, nil
 }

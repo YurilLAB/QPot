@@ -92,10 +92,10 @@ type InstanceInfo struct {
 
 // Status represents instance status
 type Status struct {
-	Overall   string            `json:"overall"`
-	Honeypots []HoneypotStatus  `json:"honeypots"`
-	Database  string            `json:"database"`
-	Uptime    time.Duration     `json:"uptime"`
+	Overall   string           `json:"overall"`
+	Honeypots []HoneypotStatus `json:"honeypots"`
+	Database  string           `json:"database"`
+	Uptime    time.Duration    `json:"uptime"`
 }
 
 // HoneypotStatus represents a honeypot's status
@@ -430,7 +430,7 @@ func (m *Manager) GetLogs(ctx context.Context, honeypot string, follow bool, tai
 
 	composeFile := m.config.GetDockerComposePath()
 	args := []string{"compose", "-f", composeFile, "logs"}
-	
+
 	if follow {
 		args = append(args, "-f")
 	}
@@ -692,7 +692,7 @@ func List() ([]InstanceInfo, error) {
 
 		name := entry.Name()
 		dataPath := filepath.Join(instancesDir, name)
-		
+
 		// Try to load config
 		cfg, err := config.Load(name)
 		if err != nil {

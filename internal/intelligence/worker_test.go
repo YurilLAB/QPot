@@ -19,13 +19,13 @@ type fakeDB struct {
 	failTagEvent bool
 }
 
-func (f *fakeDB) Connect(ctx context.Context) error  { return nil }
-func (f *fakeDB) Close() error                       { return nil }
-func (f *fakeDB) Ping(ctx context.Context) error     { return nil }
-func (f *fakeDB) InitializeSchema(ctx context.Context) error { return nil }
-func (f *fakeDB) GetSchemaVersion(ctx context.Context) (int, error)  { return 1, nil }
-func (f *fakeDB) SetSchemaVersion(ctx context.Context, v int) error  { return nil }
-func (f *fakeDB) InsertEvent(ctx context.Context, e *database.Event) error  { return nil }
+func (f *fakeDB) Connect(ctx context.Context) error                             { return nil }
+func (f *fakeDB) Close() error                                                  { return nil }
+func (f *fakeDB) Ping(ctx context.Context) error                                { return nil }
+func (f *fakeDB) InitializeSchema(ctx context.Context) error                    { return nil }
+func (f *fakeDB) GetSchemaVersion(ctx context.Context) (int, error)             { return 1, nil }
+func (f *fakeDB) SetSchemaVersion(ctx context.Context, v int) error             { return nil }
+func (f *fakeDB) InsertEvent(ctx context.Context, e *database.Event) error      { return nil }
 func (f *fakeDB) InsertEvents(ctx context.Context, evs []*database.Event) error { return nil }
 func (f *fakeDB) GetEvents(ctx context.Context, filter database.EventFilter) ([]*database.Event, error) {
 	return nil, nil
@@ -42,12 +42,12 @@ func (f *fakeDB) GetTopAttackers(ctx context.Context, limit int, since time.Time
 func (f *fakeDB) GetHoneypotStats(ctx context.Context, hp string, since time.Time) (*database.HoneypotStats, error) {
 	return &database.HoneypotStats{}, nil
 }
-func (f *fakeDB) RetentionCleanup(ctx context.Context, olderThan time.Time) error { return nil }
-func (f *fakeDB) Optimize(ctx context.Context) error                              { return nil }
+func (f *fakeDB) RetentionCleanup(ctx context.Context, olderThan time.Time) error   { return nil }
+func (f *fakeDB) Optimize(ctx context.Context) error                                { return nil }
 func (f *fakeDB) ExportData(ctx context.Context, s, e time.Time, w io.Writer) error { return nil }
-func (f *fakeDB) ImportData(ctx context.Context, r io.Reader) error               { return nil }
-func (f *fakeDB) WithPool(pool *database.Pool) database.Database                  { return f }
-func (f *fakeDB) GetPoolStats() database.PoolStats                                { return database.PoolStats{} }
+func (f *fakeDB) ImportData(ctx context.Context, r io.Reader) error                 { return nil }
+func (f *fakeDB) WithPool(pool *database.Pool) database.Database                    { return f }
+func (f *fakeDB) GetPoolStats() database.PoolStats                                  { return database.PoolStats{} }
 func (f *fakeDB) TagEvent(ctx context.Context, e *database.Event) error {
 	if f.failTagEvent {
 		return nil // silently ignore in production worker

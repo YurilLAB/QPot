@@ -17,9 +17,9 @@ import (
 // AlertConfig configures webhook alerting when attack thresholds are crossed.
 type AlertConfig struct {
 	Enabled    bool     `yaml:"enabled"`
-	WebhookURL string   `yaml:"webhook_url"`  // Slack/Discord/generic webhook
-	Threshold  int      `yaml:"threshold"`     // events per minute to trigger
-	Honeypots  []string `yaml:"honeypots"`     // which honeypots to alert on (empty = all)
+	WebhookURL string   `yaml:"webhook_url"` // Slack/Discord/generic webhook
+	Threshold  int      `yaml:"threshold"`   // events per minute to trigger
+	Honeypots  []string `yaml:"honeypots"`   // which honeypots to alert on (empty = all)
 }
 
 // ResponseConfig configures local commands to execute when an alert
@@ -60,21 +60,21 @@ type IntelligenceConfig struct {
 
 // Config represents QPot configuration
 type Config struct {
-	InstanceName string            `yaml:"instance_name"`
-	QPotID       string            `yaml:"qpot_id"`
-	DataPath     string            `yaml:"data_path"`
-	ConfigPath   string            `yaml:"config_path"`
-	Database     DatabaseConfig    `yaml:"database"`
-	Security     SecurityConfig    `yaml:"security"`
+	InstanceName string                    `yaml:"instance_name"`
+	QPotID       string                    `yaml:"qpot_id"`
+	DataPath     string                    `yaml:"data_path"`
+	ConfigPath   string                    `yaml:"config_path"`
+	Database     DatabaseConfig            `yaml:"database"`
+	Security     SecurityConfig            `yaml:"security"`
 	Honeypots    map[string]HoneypotConfig `yaml:"honeypots"`
-	Ports        PortConfig        `yaml:"ports"`
-	WebUI        WebUIConfig       `yaml:"web_ui"`
-	Stealth      StealthConfig     `yaml:"stealth"`
-	Alerts       AlertConfig       `yaml:"alerts"`
-	Intelligence IntelligenceConfig `yaml:"intelligence"`
-	Yuril        YurilConfig        `yaml:"yuril"`
-	Response     ResponseConfig    `yaml:"response"`
-	Collector    CollectorConfig    `yaml:"collector"`
+	Ports        PortConfig                `yaml:"ports"`
+	WebUI        WebUIConfig               `yaml:"web_ui"`
+	Stealth      StealthConfig             `yaml:"stealth"`
+	Alerts       AlertConfig               `yaml:"alerts"`
+	Intelligence IntelligenceConfig        `yaml:"intelligence"`
+	Yuril        YurilConfig               `yaml:"yuril"`
+	Response     ResponseConfig            `yaml:"response"`
+	Collector    CollectorConfig           `yaml:"collector"`
 }
 
 // CollectorConfig configures the Vector log collector.
@@ -90,37 +90,37 @@ type CollectorConfig struct {
 // Yuril Security Suite. When Enabled is false the forwarder is never
 // constructed and QPot runs standalone.
 type YurilConfig struct {
-	Enabled    bool          `yaml:"enabled"`
-	Endpoint   string        `yaml:"endpoint"`     // e.g. https://tracking.local:8443/api/v1/ingest/intel
-	APIKey     string        `yaml:"api_key"`      // bearer token for the endpoint
-	Source     string        `yaml:"source"`       // producer label; defaults to "qpot_honeypot"
-	BatchSize  int           `yaml:"batch_size"`   // max indicators per POST; defaults to 200
-	Timeout    time.Duration `yaml:"timeout"`      // HTTP timeout; defaults to 10s
-	VerifyTLS  bool          `yaml:"verify_tls"`   // defaults to true
+	Enabled   bool          `yaml:"enabled"`
+	Endpoint  string        `yaml:"endpoint"`   // e.g. https://tracking.local:8443/api/v1/ingest/intel
+	APIKey    string        `yaml:"api_key"`    // bearer token for the endpoint
+	Source    string        `yaml:"source"`     // producer label; defaults to "qpot_honeypot"
+	BatchSize int           `yaml:"batch_size"` // max indicators per POST; defaults to 200
+	Timeout   time.Duration `yaml:"timeout"`    // HTTP timeout; defaults to 10s
+	VerifyTLS bool          `yaml:"verify_tls"` // defaults to true
 }
 
 // DatabaseConfig contains database connection settings
 type DatabaseConfig struct {
-	Type         string                `yaml:"type"`      // clickhouse, timescaledb, elasticsearch
-	Host         string                `yaml:"host"`
-	Port         int                   `yaml:"port"`
-	Username     string                `yaml:"username"`
-	Password     string                `yaml:"password"`
-	Database     string                `yaml:"database"`  // database name
-	SSLMode      string                `yaml:"ssl_mode"`
-	
+	Type     string `yaml:"type"` // clickhouse, timescaledb, elasticsearch
+	Host     string `yaml:"host"`
+	Port     int    `yaml:"port"`
+	Username string `yaml:"username"`
+	Password string `yaml:"password"`
+	Database string `yaml:"database"` // database name
+	SSLMode  string `yaml:"ssl_mode"`
+
 	// Connection pooling
-	PoolConfig   *PoolConfig           `yaml:"pool,omitempty"`
-	
+	PoolConfig *PoolConfig `yaml:"pool,omitempty"`
+
 	// Read replicas for high availability
-	ReadReplicas []*ReadReplicaConfig  `yaml:"read_replicas,omitempty"`
-	
+	ReadReplicas []*ReadReplicaConfig `yaml:"read_replicas,omitempty"`
+
 	// Retention policies
 	RetentionPolicies []*RetentionPolicyConfig `yaml:"retention_policies,omitempty"`
-	
+
 	// Schema version tracking
-	AutoMigrate  bool                  `yaml:"auto_migrate"`
-	TargetVersion int                  `yaml:"target_version,omitempty"`
+	AutoMigrate   bool `yaml:"auto_migrate"`
+	TargetVersion int  `yaml:"target_version,omitempty"`
 }
 
 // PoolConfig defines connection pool settings
@@ -146,134 +146,134 @@ type ReadReplicaConfig struct {
 
 // RetentionPolicyConfig defines data retention settings
 type RetentionPolicyConfig struct {
-	ID              string              `yaml:"id"`
-	Name            string              `yaml:"name"`
-	Enabled         bool                `yaml:"enabled"`
-	Honeypots       []string            `yaml:"honeypots,omitempty"`
-	HotRetention    time.Duration       `yaml:"hot_retention"`
-	WarmRetention   time.Duration       `yaml:"warm_retention"`
-	ColdRetention   time.Duration       `yaml:"cold_retention"`
-	ArchiveType     string              `yaml:"archive_type,omitempty"` // s3, gcs, filesystem
-	ArchiveConfig   map[string]string   `yaml:"archive_config,omitempty"`
-	CompressionType string              `yaml:"compression"`
-	Schedule        string              `yaml:"schedule"`
+	ID              string            `yaml:"id"`
+	Name            string            `yaml:"name"`
+	Enabled         bool              `yaml:"enabled"`
+	Honeypots       []string          `yaml:"honeypots,omitempty"`
+	HotRetention    time.Duration     `yaml:"hot_retention"`
+	WarmRetention   time.Duration     `yaml:"warm_retention"`
+	ColdRetention   time.Duration     `yaml:"cold_retention"`
+	ArchiveType     string            `yaml:"archive_type,omitempty"` // s3, gcs, filesystem
+	ArchiveConfig   map[string]string `yaml:"archive_config,omitempty"`
+	CompressionType string            `yaml:"compression"`
+	Schedule        string            `yaml:"schedule"`
 }
 
 // SecurityConfig contains security hardening options
 type SecurityConfig struct {
-	SandboxMode        string            `yaml:"sandbox_mode"`        // none, gvisor, kata, firejail
-	EnableAppArmor     bool              `yaml:"enable_apparmor"`
-	EnableSeccomp      bool              `yaml:"enable_seccomp"`
-	ReadOnlyFilesystem bool              `yaml:"read_only_filesystem"`
-	DropCapabilities   bool              `yaml:"drop_capabilities"`
-	NoNewPrivileges    bool              `yaml:"no_new_privileges"`
-	ResourceLimits     ResourceLimits    `yaml:"resource_limits"`
-	NetworkIsolation   NetworkIsolation  `yaml:"network_isolation"`
-	RuntimeSecurity    RuntimeSecurity   `yaml:"runtime_security"`
+	SandboxMode        string           `yaml:"sandbox_mode"` // none, gvisor, kata, firejail
+	EnableAppArmor     bool             `yaml:"enable_apparmor"`
+	EnableSeccomp      bool             `yaml:"enable_seccomp"`
+	ReadOnlyFilesystem bool             `yaml:"read_only_filesystem"`
+	DropCapabilities   bool             `yaml:"drop_capabilities"`
+	NoNewPrivileges    bool             `yaml:"no_new_privileges"`
+	ResourceLimits     ResourceLimits   `yaml:"resource_limits"`
+	NetworkIsolation   NetworkIsolation `yaml:"network_isolation"`
+	RuntimeSecurity    RuntimeSecurity  `yaml:"runtime_security"`
 }
 
 // RuntimeSecurity contains additional runtime security settings
 type RuntimeSecurity struct {
-	EnableSeccompProfile   bool     `yaml:"enable_seccomp_profile"`
-	SeccompProfile         string   `yaml:"seccomp_profile"`          // custom, default, docker-default
-	EnableLandlock         bool     `yaml:"enable_landlock"`          // Linux 5.13+
-	EnableCgroupV2         bool     `yaml:"enable_cgroupv2"`          // Use cgroup v2 limits
-	DisableSUIDBinaries    bool     `yaml:"disable_suid_binaries"`
-	HideProcessInfo        bool     `yaml:"hide_process_info"`        // Hide other processes
-	IsolateHostname        bool     `yaml:"isolate_hostname"`         // Unique hostname per container
+	EnableSeccompProfile bool   `yaml:"enable_seccomp_profile"`
+	SeccompProfile       string `yaml:"seccomp_profile"` // custom, default, docker-default
+	EnableLandlock       bool   `yaml:"enable_landlock"` // Linux 5.13+
+	EnableCgroupV2       bool   `yaml:"enable_cgroupv2"` // Use cgroup v2 limits
+	DisableSUIDBinaries  bool   `yaml:"disable_suid_binaries"`
+	HideProcessInfo      bool   `yaml:"hide_process_info"` // Hide other processes
+	IsolateHostname      bool   `yaml:"isolate_hostname"`  // Unique hostname per container
 }
 
 // ResourceLimits contains container resource constraints
 type ResourceLimits struct {
-	MaxCPUPercent    float64 `yaml:"max_cpu_percent"`
-	MaxMemoryMB      int64   `yaml:"max_memory_mb"`
-	MaxStorageGB     int64   `yaml:"max_storage_gb"`
-	MaxPids          int64   `yaml:"max_pids"`
-	RestartAttempts  int     `yaml:"restart_attempts"`
-}
-
-// NetworkIsolation contains network security settings
-type NetworkIsolation struct {
-	SeparateNetworks     bool     `yaml:"separate_networks"`
-	BlockOutbound        bool     `yaml:"block_outbound"`
-	AllowedPorts         []int    `yaml:"allowed_ports"`
-	RateLimitConnections int      `yaml:"rate_limit_connections"`
-	EnableNAT            bool     `yaml:"enable_nat"`
-	RandomizeMAC         bool     `yaml:"randomize_mac"`
-}
-
-// HoneypotConfig contains individual honeypot settings
-type HoneypotConfig struct {
-	Enabled       bool              `yaml:"enabled"`
-	Port          int               `yaml:"port"`
-	RiskLevel     string            `yaml:"risk_level"`  // low, medium, high, critical
-	Sandbox       bool              `yaml:"sandbox"`
-	Resources     HoneypotResources `yaml:"resources"`   // Per-honeypot resource limits
-	Environment   map[string]string `yaml:"environment"`
-	Stealth       HoneypotStealth   `yaml:"stealth"`
-	CustomConfig  map[string]string `yaml:"custom_config"`  // TPOT config overrides
-}
-
-// HoneypotResources contains per-honeypot resource limits
-type HoneypotResources struct {
-	UseCustomLimits bool    `yaml:"use_custom_limits"`
 	MaxCPUPercent   float64 `yaml:"max_cpu_percent"`
 	MaxMemoryMB     int64   `yaml:"max_memory_mb"`
 	MaxStorageGB    int64   `yaml:"max_storage_gb"`
 	MaxPids         int64   `yaml:"max_pids"`
-	MaxFileDescriptors int64 `yaml:"max_file_descriptors"`
+	RestartAttempts int     `yaml:"restart_attempts"`
+}
+
+// NetworkIsolation contains network security settings
+type NetworkIsolation struct {
+	SeparateNetworks     bool  `yaml:"separate_networks"`
+	BlockOutbound        bool  `yaml:"block_outbound"`
+	AllowedPorts         []int `yaml:"allowed_ports"`
+	RateLimitConnections int   `yaml:"rate_limit_connections"`
+	EnableNAT            bool  `yaml:"enable_nat"`
+	RandomizeMAC         bool  `yaml:"randomize_mac"`
+}
+
+// HoneypotConfig contains individual honeypot settings
+type HoneypotConfig struct {
+	Enabled      bool              `yaml:"enabled"`
+	Port         int               `yaml:"port"`
+	RiskLevel    string            `yaml:"risk_level"` // low, medium, high, critical
+	Sandbox      bool              `yaml:"sandbox"`
+	Resources    HoneypotResources `yaml:"resources"` // Per-honeypot resource limits
+	Environment  map[string]string `yaml:"environment"`
+	Stealth      HoneypotStealth   `yaml:"stealth"`
+	CustomConfig map[string]string `yaml:"custom_config"` // TPOT config overrides
+}
+
+// HoneypotResources contains per-honeypot resource limits
+type HoneypotResources struct {
+	UseCustomLimits    bool    `yaml:"use_custom_limits"`
+	MaxCPUPercent      float64 `yaml:"max_cpu_percent"`
+	MaxMemoryMB        int64   `yaml:"max_memory_mb"`
+	MaxStorageGB       int64   `yaml:"max_storage_gb"`
+	MaxPids            int64   `yaml:"max_pids"`
+	MaxFileDescriptors int64   `yaml:"max_file_descriptors"`
 }
 
 // HoneypotStealth contains per-honeypot stealth settings
 type HoneypotStealth struct {
-	Enabled              bool   `yaml:"enabled"`
-	FakeHostname         string `yaml:"fake_hostname"`
-	FakeOS               string `yaml:"fake_os"`
-	FakeKernel           string `yaml:"fake_kernel"`
-	RandomizeSSHVersion  bool   `yaml:"randomize_ssh_version"`
-	AddArtificialDelay   bool   `yaml:"add_artificial_delay"`
-	DelayRangeMs         int    `yaml:"delay_range_ms"`
-	FakeServices         []string `yaml:"fake_services"`
-	BannerString         string   `yaml:"banner_string"`
+	Enabled             bool     `yaml:"enabled"`
+	FakeHostname        string   `yaml:"fake_hostname"`
+	FakeOS              string   `yaml:"fake_os"`
+	FakeKernel          string   `yaml:"fake_kernel"`
+	RandomizeSSHVersion bool     `yaml:"randomize_ssh_version"`
+	AddArtificialDelay  bool     `yaml:"add_artificial_delay"`
+	DelayRangeMs        int      `yaml:"delay_range_ms"`
+	FakeServices        []string `yaml:"fake_services"`
+	BannerString        string   `yaml:"banner_string"`
 	// CredentialTemplate names a realistic login persona (see credential
 	// templates) for honeypots that authenticate users (Cowrie). Empty means
 	// QPot auto-selects one per instance from the QPot ID, so each deployment
 	// looks like a distinct real system.
-	CredentialTemplate   string   `yaml:"credential_template"`
+	CredentialTemplate string `yaml:"credential_template"`
 }
 
 // StealthConfig contains global stealth settings
 type StealthConfig struct {
-	Enabled                 bool     `yaml:"enabled"`
-	HideDockerArtifacts     bool     `yaml:"hide_docker_artifacts"`
-	FakeSystemd             bool     `yaml:"fake_systemd"`
-	RandomizeResponseTime   bool     `yaml:"randomize_response_time"`
-	MinResponseDelay        int      `yaml:"min_response_delay_ms"`
-	MaxResponseDelay        int      `yaml:"max_response_delay_ms"`
-	AddRealisticErrors      bool     `yaml:"add_realistic_errors"`
-	ErrorRatePercent        int      `yaml:"error_rate_percent"`
-	MasqueradeHostname      string   `yaml:"masquerade_hostname"`
-	MasqueradeOS            string   `yaml:"masquerade_os"`
-	BlockCommonProbes       bool     `yaml:"block_common_probes"`
-	BlockedProbes           []string `yaml:"blocked_probes"`
+	Enabled               bool     `yaml:"enabled"`
+	HideDockerArtifacts   bool     `yaml:"hide_docker_artifacts"`
+	FakeSystemd           bool     `yaml:"fake_systemd"`
+	RandomizeResponseTime bool     `yaml:"randomize_response_time"`
+	MinResponseDelay      int      `yaml:"min_response_delay_ms"`
+	MaxResponseDelay      int      `yaml:"max_response_delay_ms"`
+	AddRealisticErrors    bool     `yaml:"add_realistic_errors"`
+	ErrorRatePercent      int      `yaml:"error_rate_percent"`
+	MasqueradeHostname    string   `yaml:"masquerade_hostname"`
+	MasqueradeOS          string   `yaml:"masquerade_os"`
+	BlockCommonProbes     bool     `yaml:"block_common_probes"`
+	BlockedProbes         []string `yaml:"blocked_probes"`
 }
 
 // PortConfig contains port allocation settings
 type PortConfig struct {
-	BasePort       int  `yaml:"base_port"`
-	AutoAllocate   bool `yaml:"auto_allocate"`
-	WebUIPort      int  `yaml:"web_ui_port"`
-	DatabasePort   int  `yaml:"database_port"`
+	BasePort     int  `yaml:"base_port"`
+	AutoAllocate bool `yaml:"auto_allocate"`
+	WebUIPort    int  `yaml:"web_ui_port"`
+	DatabasePort int  `yaml:"database_port"`
 }
 
 // WebUIConfig contains web interface settings
 type WebUIConfig struct {
-	Enabled   bool   `yaml:"enabled"`
-	Port      int    `yaml:"port"`
-	Username  string `yaml:"username"`
-	Password  string `yaml:"password"`
-	BindAddr  string `yaml:"bind_addr"`
-	QPotIDAuth bool  `yaml:"qpot_id_auth"`  // Require QPot ID to access
+	Enabled    bool   `yaml:"enabled"`
+	Port       int    `yaml:"port"`
+	Username   string `yaml:"username"`
+	Password   string `yaml:"password"`
+	BindAddr   string `yaml:"bind_addr"`
+	QPotIDAuth bool   `yaml:"qpot_id_auth"` // Require QPot ID to access
 }
 
 var (
@@ -413,8 +413,8 @@ func Default(instanceName string) *Config {
 					MaxPids:         75,
 				},
 				Stealth: HoneypotStealth{
-					Enabled:     true,
-					FakeOS:      "Windows Server 2019",
+					Enabled:      true,
+					FakeOS:       "Windows Server 2019",
 					BannerString: "Microsoft FTP Service",
 				},
 			},
@@ -506,7 +506,7 @@ func Default(instanceName string) *Config {
 			ErrorRatePercent:      2,
 			MasqueradeHostname:    "prod-server",
 			MasqueradeOS:          "Linux",
-			BlockCommonProbes:    true,
+			BlockCommonProbes:     true,
 			BlockedProbes: []string{
 				"nmap",
 				"masscan",
@@ -517,7 +517,7 @@ func Default(instanceName string) *Config {
 		},
 		Alerts: AlertConfig{
 			Enabled:   false,
-			Threshold: 10, // 10 events per minute before alerting
+			Threshold: 10,         // 10 events per minute before alerting
 			Honeypots: []string{}, // empty = alert on all honeypots
 		},
 		Intelligence: IntelligenceConfig{
@@ -566,7 +566,7 @@ func Load(instanceName string) (*Config, error) {
 	}
 
 	configPath := filepath.Join(homeDir, ".qpot", "instances", instanceName, "config.yaml")
-	
+
 	data, err := os.ReadFile(configPath)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -815,13 +815,13 @@ func (c *Config) GetEffectiveResourceLimits(honeypot string) ResourceLimits {
 // GetTPOTConfig generates TPOT-compatible configuration for a honeypot
 func (c *Config) GetTPOTConfig(honeypot string) map[string]string {
 	config := make(map[string]string)
-	
+
 	if hp, ok := c.Honeypots[honeypot]; ok {
 		// Add TPOT-specific configs from custom config
 		for k, v := range hp.CustomConfig {
 			config[k] = v
 		}
-		
+
 		// Add stealth configs
 		if hp.Stealth.Enabled {
 			config["STEALTH_ENABLED"] = "true"
@@ -852,6 +852,6 @@ func (c *Config) GetTPOTConfig(honeypot string) map[string]string {
 			}
 		}
 	}
-	
+
 	return config
 }

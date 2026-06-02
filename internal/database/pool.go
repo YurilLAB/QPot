@@ -13,12 +13,12 @@ import (
 
 // PoolConfig defines connection pool settings
 type PoolConfig struct {
-	MaxOpenConns    int           `yaml:"max_open_conns" json:"max_open_conns"`
-	MaxIdleConns    int           `yaml:"max_idle_conns" json:"max_idle_conns"`
-	ConnMaxLifetime time.Duration `yaml:"conn_max_lifetime" json:"conn_max_lifetime"`
-	ConnMaxIdleTime time.Duration `yaml:"conn_max_idle_time" json:"conn_max_idle_time"`
+	MaxOpenConns        int           `yaml:"max_open_conns" json:"max_open_conns"`
+	MaxIdleConns        int           `yaml:"max_idle_conns" json:"max_idle_conns"`
+	ConnMaxLifetime     time.Duration `yaml:"conn_max_lifetime" json:"conn_max_lifetime"`
+	ConnMaxIdleTime     time.Duration `yaml:"conn_max_idle_time" json:"conn_max_idle_time"`
 	HealthCheckInterval time.Duration `yaml:"health_check_interval" json:"health_check_interval"`
-	AcquireTimeout  time.Duration `yaml:"acquire_timeout" json:"acquire_timeout"`
+	AcquireTimeout      time.Duration `yaml:"acquire_timeout" json:"acquire_timeout"`
 }
 
 // DefaultPoolConfig returns default pool configuration
@@ -96,21 +96,21 @@ func (pc *PooledConnection) Stats() ConnectionStats {
 
 // Pool manages a pool of database connections
 type Pool struct {
-	config      *PoolConfig
-	factory     ConnectionFactory
-	
+	config  *PoolConfig
+	factory ConnectionFactory
+
 	// Connection management
 	mu          sync.RWMutex
 	connections []*PooledConnection
 	available   chan *PooledConnection
-	
+
 	// Statistics
-	stats       PoolStats
-	
+	stats PoolStats
+
 	// Lifecycle
-	ctx         context.Context
-	cancel      context.CancelFunc
-	wg          sync.WaitGroup
+	ctx    context.Context
+	cancel context.CancelFunc
+	wg     sync.WaitGroup
 }
 
 // ConnectionFactory creates new database connections
@@ -155,7 +155,7 @@ func NewPool(config *PoolConfig, factory ConnectionFactory) (*Pool, error) {
 	pool.wg.Add(1)
 	go pool.maintenance()
 
-	slog.Info("Connection pool initialized", 
+	slog.Info("Connection pool initialized",
 		"max_open", config.MaxOpenConns,
 		"max_idle", config.MaxIdleConns)
 
@@ -239,7 +239,7 @@ func (p *Pool) AcquireWithRetry(ctx context.Context, maxRetries int) (*PooledCon
 			return conn, nil
 		}
 		lastErr = err
-		
+
 		if i < maxRetries {
 			backoff := time.Duration(i+1) * 100 * time.Millisecond
 			time.Sleep(backoff)
@@ -459,11 +459,11 @@ type ConnectionStats struct {
 
 // PoolStats represents pool statistics
 type PoolStats struct {
-	TotalConnections     int           `json:"total_connections"`
-	AvailableConnections int           `json:"available_connections"`
-	InUseConnections     int           `json:"in_use_connections"`
-	TotalCreated         int64         `json:"total_created"`
-	TotalClosed          int64         `json:"total_closed"`
+	TotalConnections     int   `json:"total_connections"`
+	AvailableConnections int   `json:"available_connections"`
+	InUseConnections     int   `json:"in_use_connections"`
+	TotalCreated         int64 `json:"total_created"`
+	TotalClosed          int64 `json:"total_closed"`
 }
 
 // Close closes the pool and all connections.
@@ -511,9 +511,9 @@ type ReadReplicaConfig struct {
 
 // ReadReplicaPool manages a pool of read replicas
 type ReadReplicaPool struct {
-	replicas    []*Replica
-	strategy    ReplicaSelectionStrategy
-	rrIdx       atomic.Int64 // index for round-robin selection
+	replicas []*Replica
+	strategy ReplicaSelectionStrategy
+	rrIdx    atomic.Int64 // index for round-robin selection
 }
 
 // Replica represents a read replica

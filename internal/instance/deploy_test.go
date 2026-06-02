@@ -204,7 +204,6 @@ func TestDeployProfilesRedisAdbhoney(t *testing.T) {
 	}
 }
 
-
 func TestAllHoneypotsHaveProfiles(t *testing.T) {
 	// Every honeypot QPot ships an image for must have a non-generic deploy
 	// profile (a logs volume) so it actually runs.

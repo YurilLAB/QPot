@@ -18,9 +18,9 @@ import (
 type SandboxType string
 
 const (
-	SandboxNone    SandboxType = "none"
-	SandboxGVisor  SandboxType = "gvisor"
-	SandboxKata    SandboxType = "kata"
+	SandboxNone     SandboxType = "none"
+	SandboxGVisor   SandboxType = "gvisor"
+	SandboxKata     SandboxType = "kata"
 	SandboxFirejail SandboxType = "firejail"
 )
 
@@ -147,9 +147,9 @@ func (sb *Sandbox) GetDockerSecurityOptions(honeypot string, hpConfig config.Hon
 	}
 
 	// Memory protections
-	opts = append(opts, "--memory-swappiness=0")        // Disable swap
-	opts = append(opts, "--oom-kill-disable=false")     // Allow OOM kill
-	opts = append(opts, "--shm-size=64m")               // Limit shared memory
+	opts = append(opts, "--memory-swappiness=0")    // Disable swap
+	opts = append(opts, "--oom-kill-disable=false") // Allow OOM kill
+	opts = append(opts, "--shm-size=64m")           // Limit shared memory
 
 	// Security options
 	if sb.config.NoNewPrivileges {
@@ -167,7 +167,7 @@ func (sb *Sandbox) GetDockerSecurityOptions(honeypot string, hpConfig config.Hon
 	if sb.config.ReadOnlyFilesystem {
 		opts = append(opts, "--read-only")
 	}
-	
+
 	// Seccomp profile
 	if sb.config.RuntimeSecurity.EnableSeccompProfile {
 		profile := sb.getSeccompProfile(honeypot)
@@ -175,7 +175,7 @@ func (sb *Sandbox) GetDockerSecurityOptions(honeypot string, hpConfig config.Hon
 			opts = append(opts, fmt.Sprintf("--security-opt=seccomp=%s", profile))
 		}
 	}
-	
+
 	// AppArmor
 	if sb.config.EnableAppArmor {
 		profile := sb.getAppArmorProfile(honeypot)
@@ -191,7 +191,7 @@ func (sb *Sandbox) GetDockerSecurityOptions(honeypot string, hpConfig config.Hon
 	opts = append(opts, "--user=1000:1000")
 
 	// Group additions for required permissions
-	opts = append(opts, "--group-add=999")  // docker group equivalent
+	opts = append(opts, "--group-add=999") // docker group equivalent
 
 	// Network isolation
 	if sb.config.NetworkIsolation.SeparateNetworks {
@@ -229,7 +229,7 @@ func (sb *Sandbox) GetDockerSecurityOptions(honeypot string, hpConfig config.Hon
 	case SandboxGVisor:
 		opts = append(opts, "--runtime=runsc")
 		// gVisor-specific options
-		opts = append(opts, "--security-opt=seccomp=unconfined")  // gVisor handles this
+		opts = append(opts, "--security-opt=seccomp=unconfined") // gVisor handles this
 	case SandboxKata:
 		opts = append(opts, "--runtime=kata-runtime")
 	}
@@ -548,7 +548,7 @@ func (sb *Sandbox) ValidateHost() error {
 	}
 
 	if len(errors) > 0 {
-		return fmt.Errorf("host validation failed:\n  - %s", 
+		return fmt.Errorf("host validation failed:\n  - %s",
 			strings.Join(errors, "\n  - "))
 	}
 
@@ -615,20 +615,20 @@ func (sb *Sandbox) checkCgroupV2() error {
 // GetSandboxInfo returns information about the sandbox
 func (sb *Sandbox) GetSandboxInfo() map[string]interface{} {
 	return map[string]interface{}{
-		"type":       sb.sandboxType,
-		"available":  sb.available,
-		"config":     sb.config,
+		"type":      sb.sandboxType,
+		"available": sb.available,
+		"config":    sb.config,
 	}
 }
 
 // GetStealthEnvironment returns environment variables for stealth
 func (sb *Sandbox) GetStealthEnvironment(hpConfig config.HoneypotConfig) map[string]string {
 	env := make(map[string]string)
-	
+
 	if !hpConfig.Stealth.Enabled {
 		return env
 	}
-	
+
 	// Add stealth environment variables
 	if hpConfig.Stealth.FakeHostname != "" {
 		env["FAKE_HOSTNAME"] = hpConfig.Stealth.FakeHostname
@@ -642,8 +642,8 @@ func (sb *Sandbox) GetStealthEnvironment(hpConfig config.HoneypotConfig) map[str
 	if hpConfig.Stealth.BannerString != "" {
 		env["BANNER_STRING"] = hpConfig.Stealth.BannerString
 	}
-	
+
 	env["STEALTH_MODE"] = "enabled"
-	
+
 	return env
 }

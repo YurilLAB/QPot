@@ -18,10 +18,10 @@ import (
 	"strings"
 	"time"
 
+	"github.com/qpot/qpot/internal/cluster"
 	"github.com/qpot/qpot/internal/config"
 	"github.com/qpot/qpot/internal/database"
 	"github.com/qpot/qpot/internal/instance"
-	"github.com/qpot/qpot/internal/cluster"
 	"github.com/qpot/qpot/internal/intelligence"
 	"github.com/qpot/qpot/internal/yuril"
 )
@@ -464,11 +464,11 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 
 	// Add QPot ID to status
 	response := map[string]interface{}{
-		"qpot_id":    s.config.QPotID,
-		"instance":   s.config.InstanceName,
-		"overall":    status.Overall,
-		"honeypots":  status.Honeypots,
-		"database":   s.config.Database.Type,
+		"qpot_id":   s.config.QPotID,
+		"instance":  s.config.InstanceName,
+		"overall":   status.Overall,
+		"honeypots": status.Honeypots,
+		"database":  s.config.Database.Type,
 	}
 
 	s.sendJSON(w, response)
@@ -713,10 +713,10 @@ func (s *Server) handleIOC(w http.ResponseWriter, r *http.Request) {
 	}
 
 	response := map[string]interface{}{
-		"qpot_id":    s.config.QPotID,
-		"generated":  time.Now().UTC().Format(time.RFC3339),
-		"count":      len(entries),
-		"ioc_list":   entries,
+		"qpot_id":   s.config.QPotID,
+		"generated": time.Now().UTC().Format(time.RFC3339),
+		"count":     len(entries),
+		"ioc_list":  entries,
 	}
 	s.sendJSON(w, response)
 }
@@ -924,14 +924,14 @@ func (s *Server) handleCluster(w http.ResponseWriter, r *http.Request) {
 	nodes := s.cluster.GetNodes()
 
 	type nodeView struct {
-		Name         string `json:"name"`
-		Address      string `json:"address"`
-		Online       bool   `json:"online"`
-		Status       string `json:"status"`
-		UptimeSecs   int64  `json:"uptime_seconds"`
-		TotalEvents  int64  `json:"total_events"`
-		ActiveAttacks int64 `json:"active_attacks"`
-		IsLocal      bool   `json:"is_local"`
+		Name          string `json:"name"`
+		Address       string `json:"address"`
+		Online        bool   `json:"online"`
+		Status        string `json:"status"`
+		UptimeSecs    int64  `json:"uptime_seconds"`
+		TotalEvents   int64  `json:"total_events"`
+		ActiveAttacks int64  `json:"active_attacks"`
+		IsLocal       bool   `json:"is_local"`
 	}
 	views := make([]nodeView, 0, len(nodes))
 	localID := ""
@@ -1037,8 +1037,8 @@ func (s *Server) handleYurilHealth(w http.ResponseWriter, r *http.Request) {
 		"api_version": yuril.APIVersion,
 		"database":    map[string]interface{}{"reachable": dbOK, "type": s.config.Database.Type},
 		"intel": map[string]interface{}{
-			"enabled":     s.config.Intelligence.Enabled,
-			"worker_up":   s.worker != nil,
+			"enabled":      s.config.Intelligence.Enabled,
+			"worker_up":    s.worker != nil,
 			"attck_loaded": s.attckLoader != nil && s.attckLoader.Loaded(),
 		},
 	}
@@ -1127,7 +1127,7 @@ func (s *Server) handleYurilIntel(w http.ResponseWriter, r *http.Request) {
 		// Tag every inbound item with its origin so operators can audit which
 		// indicators came from QPot's own honeypots vs. pushed by Yuril.
 		meta := map[string]string{
-			"origin":      "yuril_inbound",
+			"origin":       "yuril_inbound",
 			"yuril_source": source,
 		}
 		if item.Severity != "" {
@@ -1199,8 +1199,8 @@ func (s *Server) handleYurilQuery(w http.ResponseWriter, r *http.Request) {
 	since := time.Now().Add(-7 * 24 * time.Hour) // last 7 days
 
 	response := map[string]interface{}{
-		"qpot_id":   s.config.QPotID,
-		"queried":   map[string]string{"ip": ip, "hash": hash, "domain": domain},
+		"qpot_id":    s.config.QPotID,
+		"queried":    map[string]string{"ip": ip, "hash": hash, "domain": domain},
 		"queried_at": time.Now().UTC().Format(time.RFC3339),
 	}
 

@@ -23,29 +23,29 @@ import (
 )
 
 const (
-	ClusterIDPrefix     = "qc_"
-	ClusterIDLength     = 24
-	NodeIDPrefix        = "qn_"
-	NodeIDLength        = 16
-	DefaultClusterPort  = 7946
+	ClusterIDPrefix    = "qc_"
+	ClusterIDLength    = 24
+	NodeIDPrefix       = "qn_"
+	NodeIDLength       = 16
+	DefaultClusterPort = 7946
 )
 
 // Cluster represents a QPot cluster
 type Cluster struct {
-	ID           string                 `json:"id" yaml:"id"`
-	Name         string                 `json:"name" yaml:"name"`
-	PasswordHash string                 `json:"password_hash" yaml:"password_hash"`
-	CreatedAt    time.Time              `json:"created_at" yaml:"created_at"`
-	UpdatedAt    time.Time              `json:"updated_at" yaml:"updated_at"`
-	Metadata     map[string]string      `json:"metadata,omitempty" yaml:"metadata,omitempty"`
-	
+	ID           string            `json:"id" yaml:"id"`
+	Name         string            `json:"name" yaml:"name"`
+	PasswordHash string            `json:"password_hash" yaml:"password_hash"`
+	CreatedAt    time.Time         `json:"created_at" yaml:"created_at"`
+	UpdatedAt    time.Time         `json:"updated_at" yaml:"updated_at"`
+	Metadata     map[string]string `json:"metadata,omitempty" yaml:"metadata,omitempty"`
+
 	// Node management
-	LocalNode   *Node                  `json:"local_node" yaml:"local_node"`
-	Nodes       map[string]*Node       `json:"nodes" yaml:"nodes"`
-	
+	LocalNode *Node            `json:"local_node" yaml:"local_node"`
+	Nodes     map[string]*Node `json:"nodes" yaml:"nodes"`
+
 	// Configuration
-	Config      *ClusterConfig         `json:"config" yaml:"config"`
-	
+	Config *ClusterConfig `json:"config" yaml:"config"`
+
 	// State (not serialized)
 	mu            sync.RWMutex `json:"-" yaml:"-"`
 	isInitialized bool         `json:"-" yaml:"-"`
@@ -54,19 +54,19 @@ type Cluster struct {
 
 // ClusterConfig defines cluster-wide settings
 type ClusterConfig struct {
-	BindAddr            string            `json:"bind_addr" yaml:"bind_addr"`
-	BindPort            int               `json:"bind_port" yaml:"bind_port"`
-	AdvertiseAddr       string            `json:"advertise_addr" yaml:"advertise_addr"`
-	GossipInterval      time.Duration     `json:"gossip_interval" yaml:"gossip_interval"`
-	ProbeInterval       time.Duration     `json:"probe_interval" yaml:"probe_interval"`
-	ProbeTimeout        time.Duration     `json:"probe_timeout" yaml:"probe_timeout"`
-	SuspicionMult       int               `json:"suspicion_mult" yaml:"suspicion_mult"`
-	RetransmitMult      int               `json:"retransmit_mult" yaml:"retransmit_mult"`
-	SyncInterval        time.Duration     `json:"sync_interval" yaml:"sync_interval"`
-	EnableEncryption    bool              `json:"enable_encryption" yaml:"enable_encryption"`
-	TLSCertPath         string            `json:"tls_cert_path,omitempty" yaml:"tls_cert_path,omitempty"`
-	TLSKeyPath          string            `json:"tls_key_path,omitempty" yaml:"tls_key_path,omitempty"`
-	CACertPath          string            `json:"ca_cert_path,omitempty" yaml:"ca_cert_path,omitempty"`
+	BindAddr         string        `json:"bind_addr" yaml:"bind_addr"`
+	BindPort         int           `json:"bind_port" yaml:"bind_port"`
+	AdvertiseAddr    string        `json:"advertise_addr" yaml:"advertise_addr"`
+	GossipInterval   time.Duration `json:"gossip_interval" yaml:"gossip_interval"`
+	ProbeInterval    time.Duration `json:"probe_interval" yaml:"probe_interval"`
+	ProbeTimeout     time.Duration `json:"probe_timeout" yaml:"probe_timeout"`
+	SuspicionMult    int           `json:"suspicion_mult" yaml:"suspicion_mult"`
+	RetransmitMult   int           `json:"retransmit_mult" yaml:"retransmit_mult"`
+	SyncInterval     time.Duration `json:"sync_interval" yaml:"sync_interval"`
+	EnableEncryption bool          `json:"enable_encryption" yaml:"enable_encryption"`
+	TLSCertPath      string        `json:"tls_cert_path,omitempty" yaml:"tls_cert_path,omitempty"`
+	TLSKeyPath       string        `json:"tls_key_path,omitempty" yaml:"tls_key_path,omitempty"`
+	CACertPath       string        `json:"ca_cert_path,omitempty" yaml:"ca_cert_path,omitempty"`
 }
 
 // DefaultClusterConfig returns default cluster configuration
@@ -143,9 +143,9 @@ type Node struct {
 	JoinedAt     time.Time         `json:"joined_at" yaml:"joined_at"`
 	Metadata     map[string]string `json:"metadata,omitempty" yaml:"metadata,omitempty"`
 	Capabilities []string          `json:"capabilities,omitempty" yaml:"capabilities,omitempty"`
-	
+
 	// Stats
-	Stats        NodeStats         `json:"stats" yaml:"stats"`
+	Stats NodeStats `json:"stats" yaml:"stats"`
 }
 
 // NodeStatus represents the state of a node
@@ -162,13 +162,13 @@ const (
 
 // NodeStats contains node statistics
 type NodeStats struct {
-	TotalEvents    int64         `json:"total_events" yaml:"total_events"`
-	ActiveAttacks  int64         `json:"active_attacks" yaml:"active_attacks"`
-	Uptime         time.Duration `json:"uptime" yaml:"uptime"`
-	CPUUsage       float64       `json:"cpu_usage" yaml:"cpu_usage"`
-	MemoryUsage    float64       `json:"memory_usage" yaml:"memory_usage"`
-	DiskUsage      float64       `json:"disk_usage" yaml:"disk_usage"`
-	LastSync       time.Time     `json:"last_sync" yaml:"last_sync"`
+	TotalEvents   int64         `json:"total_events" yaml:"total_events"`
+	ActiveAttacks int64         `json:"active_attacks" yaml:"active_attacks"`
+	Uptime        time.Duration `json:"uptime" yaml:"uptime"`
+	CPUUsage      float64       `json:"cpu_usage" yaml:"cpu_usage"`
+	MemoryUsage   float64       `json:"memory_usage" yaml:"memory_usage"`
+	DiskUsage     float64       `json:"disk_usage" yaml:"disk_usage"`
+	LastSync      time.Time     `json:"last_sync" yaml:"last_sync"`
 }
 
 // JoinRequest represents a request to join a cluster
@@ -186,25 +186,25 @@ type JoinRequest struct {
 
 // JoinResponse represents the response to a join request
 type JoinResponse struct {
-	Success      bool           `json:"success"`
-	NodeID       string         `json:"node_id,omitempty"`
-	ClusterName  string         `json:"cluster_name,omitempty"`
-	Nodes        []*Node        `json:"nodes,omitempty"`
-	Config       *ClusterConfig `json:"config,omitempty"`
-	Error        string         `json:"error,omitempty"`
+	Success     bool           `json:"success"`
+	NodeID      string         `json:"node_id,omitempty"`
+	ClusterName string         `json:"cluster_name,omitempty"`
+	Nodes       []*Node        `json:"nodes,omitempty"`
+	Config      *ClusterConfig `json:"config,omitempty"`
+	Error       string         `json:"error,omitempty"`
 }
 
 // ClusterStatus represents the overall cluster status
 type ClusterStatus struct {
-	ID            string            `json:"id"`
-	Name          string            `json:"name"`
-	NodeCount     int               `json:"node_count"`
-	HealthyNodes  int               `json:"healthy_nodes"`
-	SuspectNodes  int               `json:"suspect_nodes"`
-	FailedNodes   int               `json:"failed_nodes"`
-	TotalEvents   int64             `json:"total_events"`
-	Leader        string            `json:"leader,omitempty"`
-	IsRunning     bool              `json:"is_running"`
+	ID           string `json:"id"`
+	Name         string `json:"name"`
+	NodeCount    int    `json:"node_count"`
+	HealthyNodes int    `json:"healthy_nodes"`
+	SuspectNodes int    `json:"suspect_nodes"`
+	FailedNodes  int    `json:"failed_nodes"`
+	TotalEvents  int64  `json:"total_events"`
+	Leader       string `json:"leader,omitempty"`
+	IsRunning    bool   `json:"is_running"`
 }
 
 // ThreatIntel holds aggregated threat intelligence shared across cluster nodes.
@@ -233,21 +233,21 @@ type GossipMessage struct {
 
 // Manager handles cluster lifecycle
 type Manager struct {
-	mu            sync.RWMutex
-	cluster       *Cluster
-	dataPath      string
-	apiServer     *http.Server
-	gossipTicker  *time.Ticker
-	syncTicker    *time.Ticker
-	stopCh        chan struct{}
-	stopOnce      sync.Once
+	mu           sync.RWMutex
+	cluster      *Cluster
+	dataPath     string
+	apiServer    *http.Server
+	gossipTicker *time.Ticker
+	syncTicker   *time.Ticker
+	stopCh       chan struct{}
+	stopOnce     sync.Once
 	// plainPassword is the cluster password stored in memory (never on disk).
 	// Used to authenticate outbound gossip and intel requests to peer nodes.
 	plainPassword string
 	// localIntel holds threat intelligence for the local node, updated externally.
-	localIntel    *ThreatIntel
+	localIntel *ThreatIntel
 	// peerIntel aggregates intel received from other nodes, keyed by node ID.
-	peerIntel     map[string]*ThreatIntel
+	peerIntel map[string]*ThreatIntel
 }
 
 // NewManager creates a new cluster manager
@@ -530,13 +530,13 @@ func (m *Manager) attemptJoin(seedAddr, clusterID, password string, localNode *N
 	localNode.Status = NodeStatusHealthy
 
 	cluster := &Cluster{
-		ID:            clusterID,
-		Name:          joinResp.ClusterName,
-		PasswordHash:  hashPassword(password), // bcrypt hash for local verification
-		CreatedAt:     now,
-		UpdatedAt:     now,
-		LocalNode:     localNode,
-		Nodes:         make(map[string]*Node),
+		ID:           clusterID,
+		Name:         joinResp.ClusterName,
+		PasswordHash: hashPassword(password), // bcrypt hash for local verification
+		CreatedAt:    now,
+		UpdatedAt:    now,
+		LocalNode:    localNode,
+		Nodes:        make(map[string]*Node),
 		// The seed's Config is untrusted wire input: a nil or out-of-range
 		// value would panic time.NewTicker in Start or overflow the
 		// failure-detection deadline in gossip(). Clamp it.

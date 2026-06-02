@@ -27,10 +27,10 @@ func TestGossipHandlerRejectsMalformedNodes(t *testing.T) {
 	pw := "correct-horse-battery"
 
 	bodies := []string{
-		`{"sender_id":"x","node_digest":[null]}`,                       // nil *Node -> would nil-deref
+		`{"sender_id":"x","node_digest":[null]}`,                                      // nil *Node -> would nil-deref
 		`{"sender_id":"x","node_digest":[{"id":"","address":"1.2.3.4","port":7946}]}`, // empty ID
-		`{"sender_id":"x","node_digest":[{"id":"n1","address":"","port":7946}]}`,       // empty address
-		`{"sender_id":"x","node_digest":[{"id":"n2","address":"1.2.3.4","port":0}]}`,    // bad port
+		`{"sender_id":"x","node_digest":[{"id":"n1","address":"","port":7946}]}`,      // empty address
+		`{"sender_id":"x","node_digest":[{"id":"n2","address":"1.2.3.4","port":0}]}`,  // bad port
 		`{"sender_id":"x","node_digest":[{"id":"n3","address":"1.2.3.4","port":99999}]}`,
 	}
 	for _, b := range bodies {

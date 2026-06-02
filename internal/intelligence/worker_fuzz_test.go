@@ -37,15 +37,15 @@ func FuzzWorkerRunOnce(f *testing.F) {
 
 	f.Fuzz(func(t *testing.T, command, username, password, srcIP, proto string, payload []byte, withForwarder bool) {
 		ev := &database.Event{
-			Honeypot:   "cowrie",
-			SourceIP:   srcIP,
-			Protocol:   proto,
-			EventType:  "command",
-			Username:   username,
-			Password:   password,
-			Command:    command,
-			Payload:    payload,
-			Metadata:   map[string]string{"raw": command},
+			Honeypot:  "cowrie",
+			SourceIP:  srcIP,
+			Protocol:  proto,
+			EventType: "command",
+			Username:  username,
+			Password:  password,
+			Command:   command,
+			Payload:   payload,
+			Metadata:  map[string]string{"raw": command},
 		}
 		// Two events: one classifiable-looking, one near-empty, to cover the
 		// classified/unclassified branches in the same batch.

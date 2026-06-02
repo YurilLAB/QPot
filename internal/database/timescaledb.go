@@ -415,8 +415,8 @@ func (ts *TimescaleDB) GetStats(ctx context.Context, since time.Time) (*Stats, e
 	stats := &Stats{}
 
 	// Total events
-	err := ts.pool.QueryRow(ctx, 
-		"SELECT COUNT(*) FROM events WHERE timestamp >= $1", 
+	err := ts.pool.QueryRow(ctx,
+		"SELECT COUNT(*) FROM events WHERE timestamp >= $1",
 		since).Scan(&stats.TotalEvents)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get total events: %w", err)
@@ -577,7 +577,6 @@ func (ts *TimescaleDB) Optimize(ctx context.Context) error {
 	return nil
 }
 
-
 // ExportData exports data to a writer in CSV format
 func (ts *TimescaleDB) ExportData(ctx context.Context, start, end time.Time, w io.Writer) error {
 	if ts.pool == nil {
@@ -723,7 +722,7 @@ func (ts *TimescaleDB) GetSchemaVersion(ctx context.Context) (int, error) {
 			WHERE table_name = 'schema_migrations'
 		)
 	`).Scan(&exists)
-	
+
 	if err != nil || !exists {
 		return 0, nil
 	}
@@ -732,7 +731,7 @@ func (ts *TimescaleDB) GetSchemaVersion(ctx context.Context) (int, error) {
 	err = ts.pool.QueryRow(ctx, `
 		SELECT COALESCE(MAX(version), 0) FROM schema_migrations
 	`).Scan(&version)
-	
+
 	if err != nil {
 		return 0, nil
 	}

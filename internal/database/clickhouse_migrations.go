@@ -16,12 +16,12 @@ type ClickHouseMigrationManager struct {
 // NewClickHouseMigrationManager creates a new ClickHouse migration manager
 func NewClickHouseMigrationManager(ch *ClickHouse) *ClickHouseMigrationManager {
 	base := NewMigrationManager(ch)
-	
+
 	// Register core migrations
 	for _, m := range GetClickHouseMigrations() {
 		base.Register(m)
 	}
-	
+
 	return &ClickHouseMigrationManager{
 		MigrationManager: base,
 		ch:               ch,

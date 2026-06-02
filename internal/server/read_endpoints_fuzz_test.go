@@ -17,12 +17,12 @@ import (
 // response-building code under fuzzing without needing a real backend.
 type stubDB struct{}
 
-func (stubDB) Connect(context.Context) error               { return nil }
-func (stubDB) Close() error                                { return nil }
-func (stubDB) Ping(context.Context) error                  { return nil }
-func (stubDB) InitializeSchema(context.Context) error      { return nil }
-func (stubDB) GetSchemaVersion(context.Context) (int, error) { return 1, nil }
-func (stubDB) SetSchemaVersion(context.Context, int) error { return nil }
+func (stubDB) Connect(context.Context) error                         { return nil }
+func (stubDB) Close() error                                          { return nil }
+func (stubDB) Ping(context.Context) error                            { return nil }
+func (stubDB) InitializeSchema(context.Context) error                { return nil }
+func (stubDB) GetSchemaVersion(context.Context) (int, error)         { return 1, nil }
+func (stubDB) SetSchemaVersion(context.Context, int) error           { return nil }
 func (stubDB) InsertEvent(context.Context, *database.Event) error    { return nil }
 func (stubDB) InsertEvents(context.Context, []*database.Event) error { return nil }
 func (stubDB) GetEvents(context.Context, database.EventFilter) ([]*database.Event, error) {
@@ -38,14 +38,14 @@ func (stubDB) GetTopAttackers(context.Context, int, time.Time) ([]*database.Atta
 func (stubDB) GetHoneypotStats(context.Context, string, time.Time) (*database.HoneypotStats, error) {
 	return &database.HoneypotStats{}, nil
 }
-func (stubDB) RetentionCleanup(context.Context, time.Time) error      { return nil }
-func (stubDB) Optimize(context.Context) error                         { return nil }
+func (stubDB) RetentionCleanup(context.Context, time.Time) error                 { return nil }
+func (stubDB) Optimize(context.Context) error                                    { return nil }
 func (stubDB) ExportData(context.Context, time.Time, time.Time, io.Writer) error { return nil }
-func (stubDB) ImportData(context.Context, io.Reader) error            { return nil }
-func (stubDB) WithPool(*database.Pool) database.Database              { return stubDB{} }
-func (stubDB) GetPoolStats() database.PoolStats                       { return database.PoolStats{} }
-func (stubDB) TagEvent(context.Context, *database.Event) error        { return nil }
-func (stubDB) InsertIOC(context.Context, *database.IOC) error         { return nil }
+func (stubDB) ImportData(context.Context, io.Reader) error                       { return nil }
+func (stubDB) WithPool(*database.Pool) database.Database                         { return stubDB{} }
+func (stubDB) GetPoolStats() database.PoolStats                                  { return database.PoolStats{} }
+func (stubDB) TagEvent(context.Context, *database.Event) error                   { return nil }
+func (stubDB) InsertIOC(context.Context, *database.IOC) error                    { return nil }
 func (stubDB) GetIOCs(context.Context, database.IOCFilter) ([]*database.IOC, error) {
 	return nil, nil
 }

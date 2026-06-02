@@ -718,8 +718,8 @@ func (es *Elasticsearch) GetTopAttackers(ctx context.Context, limit int, since t
 		Aggregations struct {
 			ByIP struct {
 				Buckets []struct {
-					Key      string `json:"key"`
-					DocCount int64  `json:"doc_count"`
+					Key       string `json:"key"`
+					DocCount  int64  `json:"doc_count"`
 					FirstSeen struct {
 						Value float64 `json:"value"`
 					} `json:"first_seen"`
@@ -1011,12 +1011,12 @@ ctx._source.confidence = params.confidence;
 ctx._source.classified = true;`,
 			"lang": "painless",
 			"params": map[string]interface{}{
-				"technique_id":    event.TechniqueID,
-				"technique_name":  event.TechniqueName,
-				"tactic_id":       event.TacticID,
-				"tactic_name":     event.TacticName,
+				"technique_id":     event.TechniqueID,
+				"technique_name":   event.TechniqueName,
+				"tactic_id":        event.TacticID,
+				"tactic_name":      event.TacticName,
 				"kill_chain_stage": event.KillChainStage,
-				"confidence":      event.Confidence,
+				"confidence":       event.Confidence,
 			},
 		},
 	}
@@ -1212,17 +1212,17 @@ func (es *Elasticsearch) GetTTPSessions(ctx context.Context, limit int) ([]*TTPS
 	sessions := make([]*TTPSession, 0, len(resp.Hits.Hits))
 	for _, hit := range resp.Hits.Hits {
 		var doc struct {
-			SessionID           string   `json:"session_id"`
-			CampaignFingerprint string   `json:"campaign_fingerprint"`
-			SourceIPs           []string `json:"source_ips"`
-			SharedInfrastructure bool    `json:"shared_infrastructure"`
-			KillChainStages     []string `json:"kill_chain_stages"`
-			Techniques          []string `json:"techniques"`
-			IOCIDs              []string `json:"ioc_ids"`
-			EventCount          int64    `json:"event_count"`
-			FirstSeen           string   `json:"first_seen"`
-			LastSeen            string   `json:"last_seen"`
-			Confidence          float64  `json:"confidence"`
+			SessionID            string   `json:"session_id"`
+			CampaignFingerprint  string   `json:"campaign_fingerprint"`
+			SourceIPs            []string `json:"source_ips"`
+			SharedInfrastructure bool     `json:"shared_infrastructure"`
+			KillChainStages      []string `json:"kill_chain_stages"`
+			Techniques           []string `json:"techniques"`
+			IOCIDs               []string `json:"ioc_ids"`
+			EventCount           int64    `json:"event_count"`
+			FirstSeen            string   `json:"first_seen"`
+			LastSeen             string   `json:"last_seen"`
+			Confidence           float64  `json:"confidence"`
 		}
 		if err := json.Unmarshal(hit.Source, &doc); err != nil {
 			continue
@@ -1298,4 +1298,3 @@ func (es *Elasticsearch) WithPool(pool *Pool) Database {
 func (es *Elasticsearch) GetPoolStats() PoolStats {
 	return PoolStats{}
 }
-

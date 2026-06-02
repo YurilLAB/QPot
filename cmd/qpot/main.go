@@ -112,7 +112,7 @@ func newUpCommand() *cobra.Command {
 		Long:  "Start a QPot instance with all configured honeypots",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			ctx := cmd.Context()
-			
+
 			cfg, err := config.Load(instanceName)
 			if err != nil {
 				return fmt.Errorf("failed to load config: %w", err)
@@ -199,7 +199,7 @@ func newDownCommand() *cobra.Command {
 		Long:  "Stop a running QPot instance and all its honeypots",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			ctx := cmd.Context()
-			
+
 			cfg, err := config.Load(instanceName)
 			if err != nil {
 				return fmt.Errorf("failed to load config: %w", err)
@@ -233,7 +233,7 @@ func newStatusCommand() *cobra.Command {
 		Long:  "Display status of all running honeypots and services",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			ctx := cmd.Context()
-			
+
 			cfg, err := config.Load(instanceName)
 			if err != nil {
 				return fmt.Errorf("failed to load config: %w", err)
@@ -306,7 +306,7 @@ func newInstanceCommand() *cobra.Command {
 
 			cfg := config.Default(name)
 			cfg.QPotID = qpotID.ID
-			
+
 			if err := config.Save(cfg); err != nil {
 				return fmt.Errorf("failed to save config: %w", err)
 			}
@@ -370,7 +370,7 @@ func newInstanceCommand() *cobra.Command {
 		RunE: func(cmd *cobra.Command, args []string) error {
 			ctx := cmd.Context()
 			name := args[0]
-			
+
 			if err := instance.Remove(ctx, name); err != nil {
 				return fmt.Errorf("failed to remove instance: %w", err)
 			}
@@ -406,7 +406,7 @@ func newHoneypotCommand() *cobra.Command {
 				"citrixhoneypot": "Citrix NetScaler (CVE-2019-19781)", "ddospot": "UDP amplification (NTP/DNS/SSDP)",
 				"ipphoney": "IPP / network printer", "mailoney": "SMTP",
 				"medpot": "HL7 / medical", "redishoneypot": "Redis",
-				"dicompot": "DICOM (medical imaging)",
+				"dicompot":  "DICOM (medical imaging)",
 				"beelzebub": "LLM-backed SSH/HTTP (needs Ollama/API)", "galah": "LLM-backed web (needs Ollama/API)",
 				"go-pot": "HTTP tarpit", "h0neytr4p": "Web exploit trap", "hellpot": "HTTP tarpit",
 				"log4pot": "Log4Shell (CVE-2021-44228)", "miniprint": "Network printer (JetDirect)",
@@ -450,7 +450,7 @@ func newHoneypotCommand() *cobra.Command {
 		RunE: func(cmd *cobra.Command, args []string) error {
 			ctx := cmd.Context()
 			hpName := args[0]
-			
+
 			cfg, err := config.Load(instanceName)
 			if err != nil {
 				return fmt.Errorf("failed to load config: %w", err)
@@ -463,7 +463,7 @@ func newHoneypotCommand() *cobra.Command {
 
 			fmt.Printf("[OK] Enabled honeypot '%s' for instance '%s'\n", hpName, instanceName)
 			fmt.Println("     Run 'qpot up' to apply changes")
-			
+
 			// Auto-start if instance is running
 			mgr, _ := instance.NewManager(cfg)
 			if mgr != nil && mgr.IsRunning(ctx) {
@@ -472,7 +472,7 @@ func newHoneypotCommand() *cobra.Command {
 				}
 				fmt.Printf("[OK] Started honeypot '%s'\n", hpName)
 			}
-			
+
 			return nil
 		},
 	}
@@ -485,7 +485,7 @@ func newHoneypotCommand() *cobra.Command {
 		RunE: func(cmd *cobra.Command, args []string) error {
 			ctx := cmd.Context()
 			hpName := args[0]
-			
+
 			cfg, err := config.Load(instanceName)
 			if err != nil {
 				return fmt.Errorf("failed to load config: %w", err)
@@ -497,7 +497,7 @@ func newHoneypotCommand() *cobra.Command {
 			}
 
 			fmt.Printf("[OK] Disabled honeypot '%s' for instance '%s'\n", hpName, instanceName)
-			
+
 			// Auto-stop if instance is running
 			mgr, _ := instance.NewManager(cfg)
 			if mgr != nil && mgr.IsRunning(ctx) {
@@ -506,7 +506,7 @@ func newHoneypotCommand() *cobra.Command {
 				}
 				fmt.Printf("[OK] Stopped honeypot '%s'\n", hpName)
 			}
-			
+
 			return nil
 		},
 	}
@@ -530,12 +530,12 @@ func newLogsCommand() *cobra.Command {
 		Long:  "View logs from a specific honeypot or all honeypots",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			ctx := cmd.Context()
-			
+
 			var hpName string
 			if len(args) > 0 {
 				hpName = args[0]
 			}
-			
+
 			cfg, err := config.Load(instanceName)
 			if err != nil {
 				return fmt.Errorf("failed to load config: %w", err)
@@ -678,7 +678,6 @@ $notify.ShowBalloonTip(10000)
 	fmt.Println()
 }
 
-
 // newClusterCommand creates the cluster management command
 func newClusterCommand() *cobra.Command {
 	cmd := &cobra.Command{
@@ -805,13 +804,13 @@ func newClusterInitCommand() *cobra.Command {
 
 func newClusterJoinCommand() *cobra.Command {
 	var (
-		clusterID   string
-		password    string
-		seedNodes   []string
-		nodeName    string
-		nodeAddr    string
-		nodePort    int
-		qpotID      string
+		clusterID    string
+		password     string
+		seedNodes    []string
+		nodeName     string
+		nodeAddr     string
+		nodePort     int
+		qpotID       string
 		instanceName string
 	)
 
@@ -852,7 +851,7 @@ func newClusterJoinCommand() *cobra.Command {
 			if instanceName == "" {
 				instanceName = "default"
 			}
-			
+
 			idObj, _ := instance.LoadID(instanceName)
 			if idObj != nil {
 				qpotID = idObj.ID
@@ -1071,7 +1070,7 @@ func newClusterNodesCommand() *cobra.Command {
 			fmt.Println("=============")
 			fmt.Printf("%-12s %-15s %-20s %-10s %-12s\n", "NODE ID", "NAME", "ADDRESS", "STATUS", "EVENTS")
 			fmt.Println(strings.Repeat("-", 80))
-			
+
 			for _, node := range nodes {
 				nodeID := node.ID
 				if len(nodeID) > 12 {
