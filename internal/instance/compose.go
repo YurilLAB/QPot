@@ -210,21 +210,29 @@ services:
     networks:
       - qpot_internal
       - {{.Name}}_net
+    labels:
+      # Host-side identification for QPot's tooling and the docker log driver.
+      # Docker labels are NOT visible to a process running inside the container
+      # (unlike environment variables, which 'env' dumps), so the honeypot is
+      # identifiable for management WITHOUT handing an attacker who lands
+      # in-container code execution a "this is a honeypot / this is QPot" tell.
+      qpot.instance: "{{$.Config.InstanceName}}"
+      qpot.honeypot: "{{.Name}}"
     environment:
-      - HONEYPOT_NAME={{.Name}}
+      # Deliberately minimal and non-self-identifying. Earlier revisions set
+      # platform/honeypot-naming variables inside every honeypot container, so an
+      # attacker who got a real shell and ran env immediately learned it was a
+      # honeypot. None were needed: the log pipeline derives the honeypot from
+      # the bind-mounted log path and QPot's own metadata now lives in the
+      # host-side labels above. Only innocuous, commonly-present values and the
+      # per-honeypot stealth/profile knobs (set only when configured) remain.
       - LOG_LEVEL=info
-      - QPOT_INSTANCE={{$.Config.InstanceName}}
-      {{if .HP.Sandbox}}- SANDBOX_MODE=1{{end}}
-      {{if .HP.Stealth.Enabled}}- STEALTH_MODE=1{{end}}
       {{if .HP.Stealth.FakeHostname}}- FAKE_HOSTNAME={{.HP.Stealth.FakeHostname}}{{end}}
       {{if .HP.Stealth.FakeOS}}- FAKE_OS={{.HP.Stealth.FakeOS}}{{end}}
       {{if .HP.Stealth.FakeKernel}}- FAKE_KERNEL={{.HP.Stealth.FakeKernel}}{{end}}
       {{if .HP.Stealth.BannerString}}- BANNER_STRING={{.HP.Stealth.BannerString}}{{end}}
       {{if .HP.Stealth.RandomizeSSHVersion}}- RANDOMIZE_SSH_VERSION=1{{end}}
       {{if .HP.Stealth.AddArtificialDelay}}- ARTIFICIAL_DELAY={{.HP.Stealth.DelayRangeMs}}{{end}}
-      # TPOT-compatible environment variables
-      - TPOT_HONEYPOT={{.Name}}
-      - TPOT_INSTANCE={{$.Config.InstanceName}}
       {{- range $k, $v := $d.Env}}
       - {{$k}}={{$v}}
       {{- end}}
@@ -350,7 +358,6 @@ services:
         max-size: "10m"
         max-file: "3"
         labels: "qpot.instance,qpot.honeypot"
-        env: "QPOT_INSTANCE,HONEYPOT_NAME"
 {{end}}
 `
 

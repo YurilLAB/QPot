@@ -24,6 +24,28 @@ func renderCompose(t *testing.T) string {
 	return out
 }
 
+// TestHoneypotEnvDoesNotSelfIdentify guards the anti-fingerprinting change: a
+// honeypot container's environment must not carry variables that announce the
+// platform or that the box is a honeypot. An attacker who lands in-container
+// code execution and runs `env` previously saw TPOT_HONEYPOT/HONEYPOT_NAME/
+// SANDBOX_MODE/STEALTH_MODE. We check actual env-var lines ("- NAME="), not the
+// explanatory comments. The identifying metadata must instead be docker labels.
+func TestHoneypotEnvDoesNotSelfIdentify(t *testing.T) {
+	out := renderCompose(t)
+	for _, leak := range []string{
+		"- HONEYPOT_NAME=", "- TPOT_HONEYPOT=", "- TPOT_INSTANCE=",
+		"- QPOT_INSTANCE=", "- SANDBOX_MODE=", "- STEALTH_MODE=",
+	} {
+		if strings.Contains(out, leak) {
+			t.Errorf("honeypot container env leaks self-identifying variable %q", leak)
+		}
+	}
+	// The host-side labels that carry this metadata must be present instead.
+	if !strings.Contains(out, "qpot.honeypot:") || !strings.Contains(out, "qpot.instance:") {
+		t.Error("honeypot service is missing the host-side qpot.honeypot/qpot.instance labels")
+	}
+}
+
 // TestComposeDoesNotLeakCredentialToHoneypots verifies the API credential is
 // never injected into attacker-facing honeypot containers. Honeypot env vars
 // use list syntax ("- QPOT_ID=..."), while services that legitimately consume
