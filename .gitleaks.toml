@@ -1,0 +1,27 @@
+title = "QPot gitleaks configuration"
+
+# Start from gitleaks' default rule set, then allow-list the parts of the tree
+# that are honeypot decoy content or config templates - by design they contain
+# credential-shaped strings that are NOT real secrets.
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Honeypot decoy content and env templates are not real secrets"
+paths = [
+  # Vendored T-Pot honeypot images and their decoy web content (mirrored sample
+  # pages, example service configs). This is third-party reference material the
+  # honeypots serve to attackers, not QPot's own secrets; the same content is
+  # public in upstream T-Pot.
+  '''^docker/''',
+  # Env templates ship only commented placeholders (e.g. sk-proj-123456,
+  # sk-XXXX...). Real deployments set these via the environment, not the file.
+  '''^\.env$''',
+  '''^env\.example$''',
+]
+# Belt-and-suspenders: ignore the specific placeholder tokens wherever they
+# appear, so an accidentally-relocated template line is still not a "leak".
+regexes = [
+  '''sk-proj-123456''',
+  '''sk-X{4,}''',
+]
