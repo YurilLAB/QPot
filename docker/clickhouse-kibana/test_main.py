@@ -133,6 +133,36 @@ class TestHelpers(unittest.TestCase):
         self.assertEqual(main.safe_limit(None), 10)
 
 
+class TestSchemaMapping(unittest.TestCase):
+    """Guard that the connector targets QPot's real ClickHouse schema (the
+    `events` table with `source_ip`/`country`/... columns), not the
+    non-existent T-Pot logstash schema (honeypot_logs / src_ip / geoip_*) it
+    originally assumed - which made every query return nothing."""
+
+    def test_table_is_events(self):
+        for index in ("logstash-*", "events", "anything-else"):
+            sql = main.build_ch_query(index, {})
+            self.assertIn("FROM events", sql, f"index {index!r} -> {sql!r}")
+            self.assertNotIn("honeypot_logs", sql)
+
+    def test_field_mappings_match_real_columns(self):
+        # Real columns from internal/database/clickhouse.go.
+        real = {
+            "timestamp", "honeypot", "source_ip", "source_port", "dest_port",
+            "protocol", "event_type", "username", "password", "command",
+            "payload", "country", "city", "asn", "technique_id",
+            "technique_name", "tactic_id", "tactic_name", "kill_chain_stage",
+        }
+        for es_field, ch_col in main.FIELD_MAPPINGS.items():
+            self.assertIn(ch_col, real, f"{es_field!r} maps to unknown column {ch_col!r}")
+
+    def test_es_spellings_resolve(self):
+        # The spellings Kibana/attack map actually send must resolve to columns.
+        self.assertEqual(main.es_field_to_ch("src_ip"), "source_ip")
+        self.assertEqual(main.es_field_to_ch("geoip.country_name"), "country")
+        self.assertEqual(main.es_field_to_ch("geoip.ip"), "source_ip")
+
+
 class TestQueryTranslation(unittest.TestCase):
     def test_apostrophe_value_is_valid_sql(self):
         q = {"bool": {"must": [{"query_string": {"query": "username:O'Brien"}}]}}

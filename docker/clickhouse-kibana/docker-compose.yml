@@ -1,0 +1,44 @@
+# QPot ClickHouse-Kibana connector
+#
+# Exposes an Elasticsearch-compatible HTTP API (port 9200) backed by QPot's
+# ClickHouse `events` table, so Elasticsearch-speaking tools - Kibana, the
+# attack map's DataServer, the nginx /es/ route, raw _search clients - can read
+# QPot data without a real Elasticsearch.
+#
+# To use it as a drop-in for Elasticsearch, put this service on the same network
+# as ClickHouse and point consumers at `clickhouse-kibana:9200`:
+#   - Kibana:    ELASTICSEARCH_HOSTS=http://clickhouse-kibana:9200
+#   - attack map: the DataServer's ES endpoint
+#   - nginx:     the /es/ and (optionally) /kibana/ upstreams in qpot.conf
+services:
+  clickhouse-kibana:
+    build: .
+    image: ${TPOT_DOCKER_REPO:-dtagdevsec}/clickhouse-kibana:${TPOT_VERSION:-24.04.1}
+    container_name: clickhouse-kibana
+    restart: always
+    environment:
+      - CLICKHOUSE_HOST=${CLICKHOUSE_HOST:-clickhouse}
+      - CLICKHOUSE_PORT=${CLICKHOUSE_PORT:-9000}
+      - CLICKHOUSE_DATABASE=${CLICKHOUSE_DATABASE:-qpot}
+      - CLICKHOUSE_USER=${CLICKHOUSE_USER:-default}
+      - CLICKHOUSE_PASSWORD=${CLICKHOUSE_PASSWORD:-}
+      - QPOT_ID=${QPOT_ID:-}
+      - QPOT_INSTANCE=${QPOT_INSTANCE:-}
+    ports:
+      - "127.0.0.1:64292:9200"
+    networks:
+      - nginx_local
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:9200/_cluster/health')"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+
+networks:
+  nginx_local:

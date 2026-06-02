@@ -10,6 +10,15 @@ This service provides an Elasticsearch-compatible API layer on top of ClickHouse
 - **Query Translation**: Converts ES DSL to ClickHouse queries
 - **Read-Optimized**: Designed for analytics workloads
 
+## Schema
+
+Queries resolve to QPot's single ClickHouse `events` table (see
+`internal/database/clickhouse.go`). Elasticsearch field names are mapped to that
+table's real columns - e.g. `src_ip` and `geoip.ip` -> `source_ip`,
+`geoip.country_name` -> `country`, `type` -> `event_type`. SQL safety: all
+values are escaped and all identifiers/limits are sanitized before they reach
+ClickHouse (see `test_main.py`).
+
 ## Configuration
 
 Environment variables:
@@ -71,7 +80,7 @@ Environment variables:
 
 **ClickHouse:**
 ```sql
-SELECT * FROM honeypot_logs 
+SELECT * FROM events 
 WHERE timestamp >= now() - INTERVAL 24 HOUR 
   AND timestamp <= now()
 ```
@@ -90,7 +99,7 @@ WHERE timestamp >= now() - INTERVAL 24 HOUR
 
 **ClickHouse:**
 ```sql
-SELECT * FROM honeypot_logs 
+SELECT * FROM events 
 WHERE type IN ('Cowrie', 'Dionaea')
 ```
 

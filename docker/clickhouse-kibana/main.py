@@ -33,34 +33,59 @@ app = FastAPI(title="QPot ClickHouse-Kibana Connector")
 # ClickHouse client
 ch_client: Optional[ClickHouseClient] = None
 
-# Index pattern mappings
+# The single ClickHouse table QPot writes events to (see
+# internal/database/clickhouse.go: CREATE TABLE events). Every ES index pattern
+# resolves to it.
+EVENTS_TABLE = "events"
+
+# Index pattern mappings. Kibana/the attack map query "logstash-*"; QPot stores
+# everything in the `events` table.
 INDEX_PATTERNS = {
-    "logstash-*": "honeypot_logs",
-    "*:logstash-*": "honeypot_logs",
+    "logstash-*": EVENTS_TABLE,
+    "*:logstash-*": EVENTS_TABLE,
+    "events": EVENTS_TABLE,
 }
 
-# Field mappings from ES to ClickHouse
+# Field mappings from Elasticsearch field names to QPot's ClickHouse columns.
+# These MUST match the real `events` schema in internal/database/clickhouse.go
+# (timestamp, honeypot, source_ip, source_port, dest_port, protocol,
+# event_type, username, password, command, payload, country, city, asn,
+# technique_*). The previous mapping targeted a non-existent T-Pot/logstash
+# schema (honeypot_logs / src_ip / geoip_*), so no query returned data.
 FIELD_MAPPINGS = {
     "@timestamp": "timestamp",
-    "type": "type",
-    "src_ip": "src_ip",
+    "timestamp": "timestamp",
+    "type": "event_type",
+    "event_type": "event_type",
+    "honeypot": "honeypot",
+    # Source IP: accept the common ES spellings and the geoip.* fields the
+    # attack map uses, all backed by QPot's single source_ip column.
+    "src_ip": "source_ip",
+    "source_ip": "source_ip",
+    "geoip.ip": "source_ip",
+    "src_port": "source_port",
+    "source_port": "source_port",
     "dest_port": "dest_port",
-    "geoip.ip": "geoip_ip",
-    "geoip.country_name": "geoip_country_name",
-    "geoip.country_code2": "geoip_country_code2",
-    "geoip.continent_code": "geoip_continent_code",
-    "geoip.latitude": "geoip_latitude",
-    "geoip.longitude": "geoip_longitude",
-    "geoip_ext.ip": "geoip_ext_ip",
-    "geoip_ext.latitude": "geoip_ext_latitude",
-    "geoip_ext.longitude": "geoip_ext_longitude",
-    "geoip_ext.country_code2": "geoip_ext_country_code2",
-    "geoip_ext.country_name": "geoip_ext_country_name",
-    "t-pot_hostname": "tpot_hostname",
-    "qpot_hostname": "qpot_hostname",
-    "qpot_id": "qpot_id",
-    "src_port": "src_port",
-    "ip_rep": "ip_rep",
+    "protocol": "protocol",
+    "username": "username",
+    "password": "password",
+    "command": "command",
+    "payload": "payload",
+    # Geo: QPot resolves country/city/asn directly on the event row. Map the
+    # geoip.* ES field names the attack map and Kibana dashboards expect onto
+    # those real columns.
+    "country": "country",
+    "geoip.country_name": "country",
+    "geoip.country_code2": "country",
+    "city": "city",
+    "geoip.city_name": "city",
+    "asn": "asn",
+    # ATT&CK enrichment QPot adds on the same row.
+    "technique_id": "technique_id",
+    "technique_name": "technique_name",
+    "tactic_id": "tactic_id",
+    "tactic_name": "tactic_name",
+    "kill_chain_stage": "kill_chain_stage",
 }
 
 
@@ -245,7 +270,7 @@ def es_query_to_ch_where(query: Dict) -> str:
 
 def build_ch_query(index: str, es_query: Dict, size: int = 10, aggs: Dict = None) -> str:
     """Build ClickHouse query from Elasticsearch query."""
-    table = INDEX_PATTERNS.get(index, "honeypot_logs")
+    table = INDEX_PATTERNS.get(index, EVENTS_TABLE)
     
     # Build SELECT
     select_fields = "*"
@@ -461,7 +486,7 @@ async def search(index: str, request: Request):
         if track_total_hits:
             count_query = f"""
             SELECT count()
-            FROM honeypot_logs
+            FROM {INDEX_PATTERNS.get(index, EVENTS_TABLE)}
             WHERE {es_query_to_ch_where(es_query.get('query', {}))}
             """
             count_result = client.execute(count_query)

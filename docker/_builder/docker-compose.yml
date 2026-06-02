@@ -390,6 +390,16 @@ services:
         - ${TPOT_GHCR_REPO}/map:${TPOT_VERSION}
       context: ../elk/map/
       <<: *common-build
+
+## ClickHouse-Kibana connector (Elasticsearch-compatible API over QPot's
+## ClickHouse, so Kibana / the attack map can read QPot data)
+  clickhouse-kibana:
+    image: ${TPOT_DOCKER_REPO}/clickhouse-kibana:${TPOT_VERSION}
+    build:
+      tags:
+        - ${TPOT_GHCR_REPO}/clickhouse-kibana:${TPOT_VERSION}
+      context: ../clickhouse-kibana/
+      <<: *common-build
 ####
 
 # Ewsposter
