@@ -1254,8 +1254,16 @@ func (m *Manager) handleGossipHTTP(w http.ResponseWriter, r *http.Request) {
 	now := time.Now()
 	m.mu.Lock()
 	if m.cluster != nil {
-		// Merge the sender's node digest.
+		// Merge the sender's node digest. Validate each entry first: a peer
+		// (or anyone replaying its credential) can send a digest containing a
+		// JSON null (decodes to a nil *Node, which would nil-deref) or a node
+		// with an empty ID / blank address / out-of-range port, which would
+		// either panic the handler or pollute the membership table with a junk
+		// entry (e.g. keyed by ""). Skip anything validPeerNode rejects.
 		for _, node := range incoming.NodeDigest {
+			if !validPeerNode(node) {
+				continue
+			}
 			if m.cluster.LocalNode != nil && node.ID == m.cluster.LocalNode.ID {
 				continue
 			}
