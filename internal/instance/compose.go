@@ -5,12 +5,79 @@ import (
 	"bytes"
 	"fmt"
 	"hash/fnv"
+	"sort"
+	"strconv"
 	"strings"
 	"text/template"
 
 	"github.com/qpot/qpot/internal/config"
 	"github.com/qpot/qpot/internal/security"
 )
+
+// portKey identifies a (honeypot, container port) pair in the host-port map.
+func portKey(honeypot string, port int) string {
+	return honeypot + "\x00" + strconv.Itoa(port)
+}
+
+// buildHostPortMap assigns a unique host port to every (honeypot, container
+// port) pair across all enabled honeypots. config.AllocatePortFor alone is a
+// pure hash, so with the ~100 port mappings a full honeypot set produces, two
+// pairs eventually hash to the same host port and `docker compose up` then
+// fails to bind it. Here we resolve collisions deterministically: honeypots are
+// processed in sorted order, each port starts from its AllocatePortFor hash, and
+// a taken port is linearly probed upward (wrapping in range) until free. The
+// instance's infra ports (database) are reserved first so honeypots avoid them.
+func (g *ComposeGenerator) buildHostPortMap() map[string]int {
+	const rangeSize = 50000
+	base := g.Config.Ports.BasePort
+	if base < 1024 {
+		base = 10000
+	}
+
+	used := map[int]bool{}
+	if g.Config.Ports.AutoAllocate {
+		for _, infra := range []int{9000, 8123, 5432} {
+			used[g.Config.AllocatePort(infra)] = true
+		}
+	}
+
+	names := make([]string, 0, len(g.Config.Honeypots))
+	for name, hp := range g.Config.Honeypots {
+		if hp.Enabled {
+			names = append(names, name)
+		}
+	}
+	sort.Strings(names)
+
+	assign := make(map[string]int)
+	for _, name := range names {
+		d := deployProfileFor(name)
+		ports := append(append([]int{}, d.Ports...), d.UDPPorts...)
+		if len(ports) == 0 {
+			ports = []int{g.Config.Honeypots[name].Port}
+		}
+		for _, p := range ports {
+			key := portKey(name, p)
+			if _, ok := assign[key]; ok {
+				continue // TCP+UDP on the same number share one host port (fine)
+			}
+			cand := g.Config.AllocatePortFor(name, p)
+			if !g.Config.Ports.AutoAllocate {
+				assign[key] = cand // fixed mapping; caller opted out of allocation
+				continue
+			}
+			for used[cand] {
+				cand++
+				if cand >= base+rangeSize {
+					cand = base
+				}
+			}
+			used[cand] = true
+			assign[key] = cand
+		}
+	}
+	return assign
+}
 
 // ComposeGenerator generates Docker Compose files
 type ComposeGenerator struct {
@@ -209,13 +276,13 @@ services:
     ports:
     {{- if or $d.Ports $d.UDPPorts}}
     {{- range $p := $d.Ports}}
-      - "{{$.Config.AllocatePortFor $hpName $p}}:{{$p}}"
+      - "{{hostPort $hpName $p}}:{{$p}}"
     {{- end}}
     {{- range $p := $d.UDPPorts}}
-      - "{{$.Config.AllocatePortFor $hpName $p}}:{{$p}}/udp"
+      - "{{hostPort $hpName $p}}:{{$p}}/udp"
     {{- end}}
     {{- else}}
-      - "{{$.Config.AllocatePortFor $hpName .HP.Port}}:{{.HP.Port}}"
+      - "{{hostPort $hpName .HP.Port}}:{{.HP.Port}}"
     {{- end}}
     volumes:
       # The QPot ID (the API credential) is deliberately NOT mounted or passed
@@ -381,6 +448,9 @@ services:
 {{end}}
 `
 
+	// Pre-assign collision-free host ports for the whole stack before rendering.
+	hostPortMap := g.buildHostPortMap()
+
 	funcMap := template.FuncMap{
 		"dict": func(values ...interface{}) (map[string]interface{}, error) {
 			if len(values)%2 != 0 {
@@ -410,6 +480,16 @@ services:
 		"bridgeName":       bridgeName,
 		"macFor":           macForSeed,
 		"deployFor":        deployProfileFor,
+		// hostPort resolves the collision-free host port assigned to a
+		// (honeypot, container port) pair. Built once per Generate() so the
+		// whole stack shares one consistent, unique assignment.
+		"hostPort": func(honeypot string, port int) int {
+			if p, ok := hostPortMap[portKey(honeypot, port)]; ok {
+				return p
+			}
+			// Fall back to the raw hash if a pair was somehow not pre-assigned.
+			return g.Config.AllocatePortFor(honeypot, port)
+		},
 		// mergedTmpfs combines the read-only-root scratch mounts with the
 		// per-honeypot profile's tmpfs, deduplicated by target path. A profile
 		// that needs /tmp owned by a specific uid (e.g. log4pot) would otherwise
