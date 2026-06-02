@@ -93,6 +93,10 @@ func deployProfileFor(name string) honeypotDeploy {
 				{HostSubdir: "honeyfs/etc/hostname", ContainerPath: "/home/cowrie/cowrie/honeyfs/etc/hostname", File: true},
 				{HostSubdir: "honeyfs/etc/os-release", ContainerPath: "/home/cowrie/cowrie/honeyfs/etc/os-release", File: true},
 				{HostSubdir: "honeyfs/etc/issue", ContainerPath: "/home/cowrie/cowrie/honeyfs/etc/issue", File: true},
+				// Per-distro /etc/motd: overrides cowrie's stock Debian-boilerplate
+				// motd, which is a global fingerprint and a tell on a non-Debian
+				// profile.
+				{HostSubdir: "honeyfs/etc/motd", ContainerPath: "/home/cowrie/cowrie/honeyfs/etc/motd", File: true},
 			},
 			Ports:        []int{22, 23},
 			ConfigSubdir: "etc",

@@ -70,8 +70,32 @@ func generateHoneyfs(t credentialTemplate, p distroProfile, hostname string) map
 		"etc/hostname":   hostname + "\n",
 		"etc/os-release": osRelease(p, hostname),
 		"etc/issue":      issue(p),
+		"etc/motd":       motd(p),
 	}
 	return files
+}
+
+// debianMOTD is the stock /etc/motd shipped on a Debian system.
+const debianMOTD = `
+The programs included with the Debian GNU/Linux system are free software;
+the exact distribution terms for each program are described in the
+individual files in /usr/share/doc/*/copyright.
+
+Debian GNU/Linux comes with ABSOLUTELY NO WARRANTY, to the extent
+permitted by applicable law.
+`
+
+// motd returns the static /etc/motd appropriate for the profile's distro.
+// Cowrie's default honeyfs ships the Debian boilerplate on EVERY honeypot, which
+// is both a globally-identical fingerprint and a tell on a non-Debian box (the
+// os-release says Ubuntu/CentOS but `cat /etc/motd` shows "Debian GNU/Linux").
+// Real Ubuntu and CentOS systems have an empty static /etc/motd (their login
+// banner is generated dynamically), so only Debian gets the boilerplate.
+func motd(p distroProfile) string {
+	if strings.Contains(strings.ToLower(p.OSPretty), "debian") {
+		return debianMOTD
+	}
+	return ""
 }
 
 // etcPasswd builds /etc/passwd = system base + the persona's accounts, so every

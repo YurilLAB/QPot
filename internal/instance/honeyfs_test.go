@@ -84,3 +84,24 @@ func TestHoneyfsASCII(t *testing.T) {
 		}
 	}
 }
+
+// TestHoneyfsMOTDPerDistro guards that the Debian boilerplate motd is only used
+// on Debian profiles (it is a tell on Ubuntu/CentOS, which have an empty static
+// /etc/motd), and that generateHoneyfs always emits the file so its bind mount
+// never resolves to a missing source.
+func TestHoneyfsMOTDPerDistro(t *testing.T) {
+	for _, p := range distroProfiles {
+		m := motd(p)
+		isDebian := strings.Contains(strings.ToLower(p.OSPretty), "debian")
+		if isDebian && !strings.Contains(m, "Debian GNU/Linux comes with ABSOLUTELY NO WARRANTY") {
+			t.Errorf("Debian profile %q should have the Debian motd", p.OSPretty)
+		}
+		if !isDebian && strings.Contains(m, "Debian GNU/Linux") {
+			t.Errorf("non-Debian profile %q leaks Debian motd boilerplate", p.OSPretty)
+		}
+	}
+	files := generateHoneyfs(credentialTemplates[0], distroProfiles[0], "h")
+	if _, ok := files["etc/motd"]; !ok {
+		t.Error("generateHoneyfs must always emit etc/motd (its mount source)")
+	}
+}
