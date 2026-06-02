@@ -18,6 +18,8 @@ name: CI
 #   gitleaks     - secrets accidentally committed to the tree/history.
 #   fuzz-smoke   - every Fuzz* target gets a short run so seed corpora + light
 #                  mutation are exercised on every push.
+#   connector-test - the ClickHouse-Kibana connector's ES->SQL translation is
+#                  injection-safe (stdlib unittest + a 20k-iteration fuzz loop).
 # (CodeQL semantic analysis runs from its own workflow, codeql.yml.)
 
 on:
@@ -266,3 +268,21 @@ jobs:
             if [ "$rc" -ne 0 ]; then echo "::error::fuzz target $fn FAILED"; fail=1; fi
           done
           exit "$fail"
+
+  connector-test:
+    name: ClickHouse-Kibana connector (SQL-safety tests + fuzz)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Run connector translation tests + fuzz
+        # The connector translates attacker-influenced Elasticsearch DSL into
+        # ClickHouse SQL; these stdlib-only tests assert no value/identifier can
+        # escape its string literal (SQL injection) and include a 20k-iteration
+        # fuzz loop. No third-party deps needed - the FastAPI/ClickHouse imports
+        # are stubbed inside the test.
+        run: python3 docker/clickhouse-kibana/test_main.py

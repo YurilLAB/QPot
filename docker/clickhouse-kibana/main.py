@@ -64,6 +64,61 @@ FIELD_MAPPINGS = {
 }
 
 
+# --- SQL-safety helpers -----------------------------------------------------
+# Kibana / the attack map send Elasticsearch DSL whose values (search terms,
+# filter values, sizes) and field names are ultimately attacker-influenced
+# (an attacker controls usernames, source IPs, commands that end up indexed and
+# later queried). Interpolating those straight into a ClickHouse SQL string is a
+# SQL-injection sink and also breaks on any legitimate value containing a quote
+# (e.g. a username like O'Brien). Every value that reaches the SQL string must
+# go through ch_quote, every identifier through safe_ident, and LIMIT through
+# safe_limit.
+
+_IDENT_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+
+
+def ch_quote(value) -> str:
+    """Return a ClickHouse string literal for an arbitrary value, safely
+    escaped. Booleans/ints are rendered without quotes; everything else is
+    stringified, backslash/quote-escaped and single-quoted."""
+    if isinstance(value, bool):
+        return "1" if value else "0"
+    if isinstance(value, (int, float)):
+        return str(value)
+    s = str(value)
+    # ClickHouse string-literal escaping: backslash first, then single quote.
+    s = s.replace("\\", "\\\\").replace("'", "\\'")
+    return f"'{s}'"
+
+
+def safe_ident(name: str) -> str:
+    """Sanitize an identifier (column/field name) to a bare SQL identifier.
+    Non-identifier characters are stripped so a crafted field name like
+    "evil) OR 1=1 --" cannot break out of its position. Falls back to
+    "timestamp" if nothing usable remains."""
+    if not name:
+        return "timestamp"
+    cleaned = name.replace(".", "_")
+    m = _IDENT_RE.match(cleaned)
+    if not m:
+        # Drop any leading junk and retry (e.g. "1abc" -> "abc").
+        stripped = re.sub(r"^[^A-Za-z_]+", "", cleaned)
+        m = _IDENT_RE.match(stripped) if stripped else None
+    return m.group(0) if m else "timestamp"
+
+
+def safe_limit(size, default: int = 10, maximum: int = 10000) -> int:
+    """Coerce an ES "size" (which arrives untyped from a JSON body) to a
+    bounded non-negative integer suitable for LIMIT."""
+    try:
+        n = int(size)
+    except (TypeError, ValueError):
+        return default
+    if n < 0:
+        return default
+    return min(n, maximum)
+
+
 def get_ch_client():
     """Get or create ClickHouse client."""
     global ch_client
@@ -79,8 +134,11 @@ def get_ch_client():
 
 
 def es_field_to_ch(field: str) -> str:
-    """Convert Elasticsearch field name to ClickHouse column name."""
-    return FIELD_MAPPINGS.get(field, field.replace(".", "_"))
+    """Convert Elasticsearch field name to ClickHouse column name. Unknown
+    fields are sanitized to a bare identifier so they can never inject SQL."""
+    if field in FIELD_MAPPINGS:
+        return FIELD_MAPPINGS[field]
+    return safe_ident(field)
 
 
 def parse_time_range(range_dict: Dict) -> tuple:
@@ -147,14 +205,14 @@ def es_query_to_ch_where(query: Dict) -> str:
                                 field, value = term.split(":", 1)
                                 field = es_field_to_ch(field.strip())
                                 value = value.strip().strip('"')
-                                or_conditions.append(f"{field} = '{value}'")
+                                or_conditions.append(f"{field} = {ch_quote(value)}")
                         if or_conditions:
                             conditions.append(f"({' OR '.join(or_conditions)})")
                     elif ":" in qs:
                         field, value = qs.split(":", 1)
                         field = es_field_to_ch(field.strip())
                         value = value.strip().strip('"')
-                        conditions.append(f"{field} = '{value}'")
+                        conditions.append(f"{field} = {ch_quote(value)}")
         
         # FILTER
         if "filter" in bool_query:
@@ -166,15 +224,15 @@ def es_query_to_ch_where(query: Dict) -> str:
                             gte_val = range_cond["gte"]
                             if isinstance(gte_val, str) and gte_val.startswith("now-"):
                                 gte_val = relative_time_to_datetime(gte_val[4:]).strftime("%Y-%m-%d %H:%M:%S")
-                            conditions.append(f"{ch_field} >= '{gte_val}'")
+                            conditions.append(f"{ch_field} >= {ch_quote(gte_val)}")
                         if "lte" in range_cond:
-                            conditions.append(f"{ch_field} <= '{range_cond['lte']}'")
-                
+                            conditions.append(f"{ch_field} <= {ch_quote(range_cond['lte'])}")
+
                 if "terms" in filter_item:
                     for field, values in filter_item["terms"].items():
                         ch_field = es_field_to_ch(field.replace(".keyword", ""))
                         if isinstance(values, list):
-                            value_list = ", ".join([f"'{v}'" for v in values])
+                            value_list = ", ".join([ch_quote(v) for v in values])
                             conditions.append(f"{ch_field} IN ({value_list})")
                 
                 if "exists" in filter_item:
@@ -214,15 +272,16 @@ def build_ch_query(index: str, es_query: Dict, size: int = 10, aggs: Dict = None
         if sorts:
             order_by = ", ".join(sorts)
     
-    # Build the query
+    # Build the query. size arrives untyped from the JSON body, so it must be
+    # coerced to a bounded integer before it reaches the SQL string.
     ch_query = f"""
     SELECT {select_fields}
     FROM {table}
     WHERE {where_clause}
     ORDER BY {order_by}
-    LIMIT {size}
+    LIMIT {safe_limit(size)}
     """
-    
+
     return ch_query.strip()
 
 

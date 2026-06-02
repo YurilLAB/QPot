@@ -4,3 +4,7 @@ _data/
 **/.DS_Store
 .idea
 install_tpot.log
+
+# Python bytecode caches (e.g. clickhouse-kibana connector tests)
+__pycache__/
+*.pyc
