@@ -4,6 +4,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"regexp"
 	"strings"
 	"testing"
 
@@ -44,6 +45,94 @@ func TestStaticIndexDoesNotLeakQPotID(t *testing.T) {
 		if strings.Contains(body, "window.QPOT_ID") {
 			t.Errorf("GET %s still injects window.QPOT_ID", path)
 		}
+	}
+}
+
+// TestStaticServesRealDashboard guards against the embedded UI silently
+// regressing to a placeholder. The binary serves internal/server/static via
+// go:embed; for a long time that directory held a 49-byte stub
+// (<body>QPot</body>) while the real, API-wired dashboard sat unused under
+// web/static and was never served. A generic "is it HTML?" check (as in
+// TestServerEndToEnd) passes for the stub too, so we assert the served page
+// carries the dashboard's actual wiring: the QPot-ID auth flow and live calls
+// to the real API surface. If someone reintroduces a stub, this fails.
+func TestStaticServesRealDashboard(t *testing.T) {
+	s := newTestServer(true)
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	rec := httptest.NewRecorder()
+	s.handleStatic(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET /: status %d, want 200", rec.Code)
+	}
+	body := rec.Body.String()
+
+	// The dashboard must wire up the credential-based auth the API enforces.
+	for _, marker := range []string{
+		"X-QPot-ID",                      // the header withQPotAuth checks
+		"localStorage.getItem('qpot_id'", // credential persisted client-side
+		"const API_BASE = '/api'",        // base path for every API call
+	} {
+		if !strings.Contains(body, marker) {
+			t.Errorf("served dashboard missing auth/wiring marker %q (serving a stub?)", marker)
+		}
+	}
+
+	// It must actually call the live endpoints registered on the mux. Each of
+	// these has a corresponding s.mux.HandleFunc("/api/...") route.
+	for _, ep := range []string{"/status", "/honeypots", "/events", "/stats"} {
+		if !strings.Contains(body, "${API_BASE}"+ep) {
+			t.Errorf("served dashboard never calls the %q API endpoint", ep)
+		}
+	}
+
+	// A stub would be tiny; the real dashboard is a full single-page app.
+	if len(body) < 2000 {
+		t.Errorf("served dashboard is only %d bytes; looks like a placeholder, not the real UI", len(body))
+	}
+}
+
+// TestEmbeddedDashboardEndpointsAreRouted is the other half of "connected":
+// every ${API_BASE}/<ep> the dashboard fetches must have a matching route
+// registered in setupRoutes. This catches the dashboard calling an endpoint
+// the server doesn't serve (a 404 in the live UI) without needing a browser.
+func TestEmbeddedDashboardEndpointsAreRouted(t *testing.T) {
+	data, err := staticFS.ReadFile("static/index.html")
+	if err != nil {
+		t.Fatalf("read embedded dashboard: %v", err)
+	}
+	page := string(data)
+
+	// Bring up a real server so its mux carries the production routes.
+	cfg := config.Default("route-test")
+	cfg.QPotID = validTestID
+	cfg.Database.Host = "127.0.0.1"
+	cfg.Database.Port = 1
+	srv, err := New(cfg)
+	if err != nil {
+		t.Fatalf("server.New: %v", err)
+	}
+
+	re := regexp.MustCompile(`\$\{API_BASE\}(/[a-zA-Z][a-zA-Z0-9/_-]*)`)
+	seen := map[string]bool{}
+	for _, m := range re.FindAllStringSubmatch(page, -1) {
+		ep := m[1]
+		if seen[ep] {
+			continue
+		}
+		seen[ep] = true
+		// The dashboard must authenticate; reaching the handler (not 404)
+		// proves the route exists. We assert "not 404" rather than 200 since
+		// the DB is intentionally unreachable here.
+		req := httptest.NewRequest(http.MethodGet, "/api"+ep, nil)
+		req.Header.Set("X-QPot-ID", validTestID)
+		rec := httptest.NewRecorder()
+		srv.mux.ServeHTTP(rec, req)
+		if rec.Code == http.StatusNotFound {
+			t.Errorf("dashboard fetches /api%s but no route is registered (404)", ep)
+		}
+	}
+	if len(seen) == 0 {
+		t.Error("found no ${API_BASE} fetch calls in the embedded dashboard")
 	}
 }
 
