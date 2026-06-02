@@ -47,10 +47,10 @@ type Cluster struct {
 	// Configuration
 	Config *ClusterConfig `json:"config" yaml:"config"`
 
-	// State (not serialized)
-	mu            sync.RWMutex `json:"-" yaml:"-"`
-	isInitialized bool         `json:"-" yaml:"-"`
-	isRunning     bool         `json:"-" yaml:"-"`
+	// State (not serialized). Synchronization is handled by the owning Manager's
+	// mutex, so the Cluster value itself carries no lock.
+	isInitialized bool `json:"-" yaml:"-"`
+	isRunning     bool `json:"-" yaml:"-"`
 }
 
 // ClusterConfig defines cluster-wide settings
@@ -297,13 +297,6 @@ func (m *Manager) schemeLocked() string {
 	return "http"
 }
 
-// scheme is the lock-acquiring variant.
-func (m *Manager) scheme() string {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-	return m.schemeLocked()
-}
-
 // peerHTTPClient builds an HTTP client suitable for talking to other
 // cluster members. When TLS is enabled it verifies peer certs against
 // the configured CA bundle (CACertPath). With EnableEncryption=true and
@@ -334,12 +327,6 @@ func (m *Manager) peerHTTPClient(timeout time.Duration) *http.Client {
 		transport.TLSClientConfig = tlsCfg
 	}
 	return &http.Client{Timeout: timeout, Transport: transport}
-}
-
-// peerURL builds a fully-qualified URL for a peer endpoint, picking
-// http or https based on the local cluster config. Caller must hold m.mu.
-func (m *Manager) peerURLLocked(host string, port int, path string) string {
-	return fmt.Sprintf("%s://%s:%d%s", m.schemeLocked(), host, port, path)
 }
 
 // UpdateThreatIntel updates the local node's threat intelligence data.

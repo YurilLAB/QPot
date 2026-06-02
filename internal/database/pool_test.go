@@ -13,7 +13,6 @@ import (
 // mockDB is a minimal Database implementation for pool tests.
 // It records how many times Ping was called and can be made to fail.
 type mockDB struct {
-	mu        sync.Mutex
 	pingCalls atomic.Int64
 	closed    atomic.Bool
 	failPing  atomic.Bool

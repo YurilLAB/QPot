@@ -77,7 +77,7 @@ func FuzzExtract(f *testing.F) {
 				}
 				// A URL IOC must not retain over-captured trailing shell
 				// punctuation, which would defeat de-duplication.
-				if strings.IndexAny(ioc.Value[len(ioc.Value)-1:], urlTrailingCutset) >= 0 {
+				if strings.ContainsAny(ioc.Value[len(ioc.Value)-1:], urlTrailingCutset) {
 					t.Errorf("URL IOC %q ends with trailing shell punctuation", ioc.Value)
 				}
 			case IOCTypeDomain:

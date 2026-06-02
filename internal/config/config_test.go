@@ -281,9 +281,9 @@ func TestAllocatePortForUniqueAcrossHoneypots(t *testing.T) {
 	if cfg.AllocatePortFor("cowrie", 22) == cfg.AllocatePortFor("heralding", 22) {
 		t.Error("AllocatePortFor collides for two honeypots on the same container port")
 	}
-	// Deterministic.
-	if cfg.AllocatePortFor("cowrie", 22) != cfg.AllocatePortFor("cowrie", 22) {
-		t.Error("AllocatePortFor is not deterministic")
+	// Deterministic: two calls with the same inputs must agree.
+	if first, second := cfg.AllocatePortFor("cowrie", 22), cfg.AllocatePortFor("cowrie", 22); first != second {
+		t.Errorf("AllocatePortFor is not deterministic: %d != %d", first, second)
 	}
 	// In a valid, non-privileged host range.
 	seen := map[int]string{}

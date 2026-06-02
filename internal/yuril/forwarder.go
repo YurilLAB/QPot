@@ -119,9 +119,11 @@ func New(cfg config.YurilConfig) (*Forwarder, error) {
 	}
 
 	transport := &http.Transport{
-		// VerifyTLS defaults to true at the config layer; only disable
-		// when the operator has explicitly said so.
-		TLSClientConfig: &tls.Config{InsecureSkipVerify: !cfg.VerifyTLS},
+		// VerifyTLS defaults to true at the config layer; the only way to reach
+		// InsecureSkipVerify=true is for the operator to explicitly opt out for
+		// their own Yuril endpoint, so this is a documented, deliberate knob -
+		// not an unconditional bypass.
+		TLSClientConfig: &tls.Config{InsecureSkipVerify: !cfg.VerifyTLS}, //#nosec G402 -- opt-in only, defaults to verifying
 	}
 
 	f := &Forwarder{

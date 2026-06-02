@@ -2,7 +2,6 @@ package instance
 
 import (
 	"fmt"
-	"sort"
 	"strings"
 )
 
@@ -166,15 +165,4 @@ func extractVersion(pretty string) string {
 		}
 	}
 	return ""
-}
-
-// honeyfsFilePaths returns the honeyfs file keys in stable order (for
-// deterministic generation/testing).
-func honeyfsFilePaths(files map[string]string) []string {
-	keys := make([]string, 0, len(files))
-	for k := range files {
-		keys = append(keys, k)
-	}
-	sort.Strings(keys)
-	return keys
 }
