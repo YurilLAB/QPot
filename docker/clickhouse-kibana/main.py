@@ -14,6 +14,7 @@ from urllib.parse import urlparse, parse_qs
 import geo
 import aggs as agg_translate
 import savedobjects
+import default_objects
 
 from fastapi import FastAPI, Request, Response, HTTPException
 from fastapi.responses import JSONResponse, PlainTextResponse
@@ -1068,6 +1069,16 @@ async def startup():
     print(f"[*] QPot ID: {QPOT_ID if QPOT_ID else 'Not configured'}")
     print(f"[*] ClickHouse: {CH_HOST}:{CH_PORT}")
     
+    # Seed Kibana's data view + the QPot Overview dashboard on first boot, so
+    # Kibana opens straight into working attack dashboards with no setup (the
+    # T-Pot experience). Idempotent: once Kibana has written any saved object,
+    # this is a no-op and never clobbers user edits.
+    try:
+        seeded = SO.seed_if_empty(default_objects.build_saved_objects(EVENTS_FIELD_TYPES, ES_VERSION))
+        print(f"[*] Kibana saved objects: {'seeded defaults' if seeded else 'already present'}")
+    except Exception as e:
+        print(f"[!] Warning: could not seed Kibana objects: {e}")
+
     # Test connection
     try:
         client = get_ch_client()

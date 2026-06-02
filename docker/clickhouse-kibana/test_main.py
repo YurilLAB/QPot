@@ -13,6 +13,7 @@ functions can be imported and exercised without the real dependencies.
 """
 
 import importlib.util
+import json
 import os
 import random
 import sys
@@ -564,6 +565,82 @@ class TestEndpointRouting(unittest.TestCase):
         res = main._process_bulk(b'{"index":{"_index":"logstash-x","_id":"1"}}\n{"a":1}\n', None)
         self.assertFalse(res["errors"])
         self.assertFalse(main.savedobjects.is_system_index("logstash-x"))
+
+
+class TestDefaultObjects(unittest.TestCase):
+    """The auto-provisioned Kibana data view + dashboard."""
+
+    def setUp(self):
+        self.objs = main.default_objects.build_saved_objects(main.EVENTS_FIELD_TYPES, main.ES_VERSION)
+        self.by_id = {o["_id"]: o["_source"] for o in self.objs}
+
+    def test_has_data_view_config_and_dashboard(self):
+        types = [s["type"] for s in self.by_id.values()]
+        self.assertIn("index-pattern", types)
+        self.assertIn("config", types)
+        self.assertIn("dashboard", types)
+        self.assertGreaterEqual(types.count("visualization"), 6)
+
+    def test_config_default_index_points_at_data_view(self):
+        cfg = next(s for s in self.by_id.values() if s["type"] == "config")
+        self.assertEqual(cfg["config"]["defaultIndex"], main.default_objects.INDEX_PATTERN_ID)
+
+    def test_data_view_fields_cover_schema(self):
+        ip = self.by_id[f"index-pattern:{main.default_objects.INDEX_PATTERN_ID}"]
+        self.assertEqual(ip["index-pattern"]["title"], "logstash-*")
+        self.assertEqual(ip["index-pattern"]["timeFieldName"], "@timestamp")
+        fields = json.loads(ip["index-pattern"]["fields"])
+        names = {f["name"] for f in fields}
+        for required in ("@timestamp", "type", "src_ip", "geoip.country_name",
+                         "dest_port", "username"):
+            self.assertIn(required, names)
+
+    def test_visualizations_reference_the_data_view_and_valid_visstate(self):
+        for sid, src in self.by_id.items():
+            if src["type"] != "visualization":
+                continue
+            json.loads(src["visualization"]["visState"])  # valid JSON
+            refs = src["references"]
+            self.assertTrue(any(r["type"] == "index-pattern" and
+                                r["id"] == main.default_objects.INDEX_PATTERN_ID for r in refs),
+                            f"{sid} does not reference the data view")
+
+    def test_dashboard_panel_references_resolve(self):
+        dash = self.by_id[f"dashboard:{main.default_objects.DASHBOARD_ID}"]
+        panels = json.loads(dash["dashboard"]["panelsJSON"])
+        refs = {r["name"]: r["id"] for r in dash["references"]}
+        viz_ids = {sid.split(":", 1)[1] for sid in self.by_id if sid.startswith("visualization:")}
+        self.assertEqual(len(panels), len(refs))
+        for p in panels:
+            ref_id = refs[p["panelRefName"]]
+            self.assertIn(ref_id, viz_ids, f"panel {p['panelRefName']} -> unknown viz {ref_id}")
+
+    def test_seed_if_empty_idempotent(self):
+        import tempfile
+        tmp = tempfile.NamedTemporaryFile(suffix=".json", delete=False)
+        tmp.close()
+        try:
+            store = main.savedobjects.SavedObjectStore(tmp.name)
+            self.assertTrue(store.seed_if_empty(self.objs))
+            # the data view is now searchable
+            res = store.search(".kibana", {"query": {"term": {"type": "index-pattern"}}})
+            self.assertEqual(res["hits"]["total"]["value"], 1)
+            n_dash = store.search(".kibana", {"query": {"term": {"type": "dashboard"}}})["hits"]["total"]["value"]
+            self.assertEqual(n_dash, 1)
+            # second call is a no-op (user edits never clobbered)
+            self.assertFalse(store.seed_if_empty(self.objs))
+        finally:
+            os.remove(tmp.name)
+
+    def test_every_panel_aggregation_is_serviceable(self):
+        # Each dashboard panel's aggregation must be one the connector can plan
+        # and turn into injection-safe SQL - otherwise the panel would be blank.
+        for name, aggdsl in main.default_objects.panel_aggregations().items():
+            plan = main.agg_translate.plan_aggregations(aggdsl, main.es_field_to_ch, main.ch_quote)
+            self.assertIsNotNone(plan, f"panel {name}: connector cannot plan {aggdsl}")
+            sql = main.agg_translate.build_agg_sql("events", "1=1", plan)
+            self.assertIn("FROM events", sql)
+            assert_no_structural_injection(sql)
 
 
 if __name__ == "__main__":

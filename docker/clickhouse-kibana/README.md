@@ -19,6 +19,20 @@ This service provides an Elasticsearch-compatible API layer on top of ClickHouse
   ClickHouse `GROUP BY`, and persists Kibana's own saved objects (index
   patterns, visualizations, dashboards) in a writable `.kibana*` document store
 
+## Zero-setup dashboards
+
+On first boot the connector seeds Kibana's `.kibana` store (when empty) with a
+ready-to-use **data view** over QPot's data plus a **"QPot Overview" dashboard**
+- attacks over time, top honeypots, top source countries / IPs, top usernames /
+passwords, top targeted ports, and a total-attacks metric. So Kibana opens
+straight into working attack dashboards with no manual index-pattern creation or
+dashboard building - matching T-Pot's out-of-the-box experience, on QPot data.
+
+Seeding is idempotent: once Kibana (or you) edits any saved object it never
+re-seeds, so customizations are preserved. The store persists to
+`QPOT_SO_PATH` (a volume in the compose files). Additional T-Pot-style
+dashboards can be added at any time via Kibana's normal Saved Objects import.
+
 ## Kibana over ClickHouse
 
 `docker-compose.kibana.yml` runs Kibana against QPot data with no Elasticsearch

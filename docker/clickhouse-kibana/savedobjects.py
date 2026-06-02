@@ -227,6 +227,21 @@ class SavedObjectStore:
     def exists(self, index: str) -> bool:
         return self._canon(index) in self._data
 
+    def seed_if_empty(self, objects: List[Dict]) -> bool:
+        """Seed default saved objects into `.kibana` when it has none yet.
+        Idempotent: returns False (and changes nothing) once Kibana has written
+        any object, so user edits are never clobbered."""
+        with self._lock:
+            if self._data.get(".kibana"):
+                return False
+            bucket = self._data.setdefault(".kibana", {})
+            for obj in objects:
+                doc_id = obj["_id"]
+                bucket[doc_id] = {"_seq_no": self._next_seq(), "_primary_term": 1,
+                                  "_version": 1, "_source": obj["_source"]}
+            self._persist()
+            return True
+
 
 def _field(source: Dict, path: str):
     cur: Any = source
