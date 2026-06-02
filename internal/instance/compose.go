@@ -19,19 +19,28 @@ type ComposeGenerator struct {
 }
 
 // bridgeName builds the Linux bridge interface name for a honeypot network.
-// Linux interface names are capped at 15 chars (IFNAMSIZ), so "br-<honeypot>"
-// overflows for names >12 chars (e.g. redishoneypot, citrixhoneypot) and Docker
-// rejects the network with "numerical result out of range". When too long, use
-// a stable short hash suffix so the name stays <=15 chars and unique.
-func bridgeName(honeypot string) string {
+// Linux interface names are capped at 15 chars (IFNAMSIZ), so the name is a
+// "br-" prefix, a readable (possibly truncated) honeypot prefix, and a 4-hex
+// suffix hashed from the (instance, honeypot) pair.
+//
+// The instance name MUST be part of the hash: the bridge interface name is a
+// host-global Linux resource, so two QPot instances that both enable the same
+// honeypot (e.g. instance "a" and instance "b" both running cowrie) would
+// otherwise both ask Docker for "br-cowrie" and the second `qpot up` fails with
+// "networks have same bridge name". Hashing the pair keeps the name unique per
+// instance while staying within IFNAMSIZ. (subnetForNetwork already scopes the
+// /24 by instance the same way.)
+func bridgeName(instanceName, honeypot string) string {
 	const max = 15
-	name := "br-" + honeypot
-	if len(name) <= max {
-		return name
-	}
 	h := fnv.New32a()
-	_, _ = h.Write([]byte(honeypot))
-	return fmt.Sprintf("br-%s%04x", honeypot[:8], h.Sum32()&0xffff)
+	_, _ = fmt.Fprintf(h, "%s:%s", instanceName, honeypot)
+	suffix := fmt.Sprintf("%04x", h.Sum32()&0xffff)
+	prefixLen := max - len("br-") - len(suffix) // 8 chars for the honeypot
+	hp := honeypot
+	if len(hp) > prefixLen {
+		hp = hp[:prefixLen]
+	}
+	return fmt.Sprintf("br-%s%s", hp, suffix)
 }
 
 // subnetForNetwork computes a unique, stable /24 subnet for a Docker bridge
@@ -61,7 +70,7 @@ networks:
   {{$name}}_net:
     driver: bridge
     driver_opts:
-      com.docker.network.bridge.name: {{bridgeName $name}}
+      com.docker.network.bridge.name: {{bridgeName $.Config.InstanceName $name}}
 {{if $.Config.Security.NetworkIsolation.RandomizeMAC}}
     ipam:
       config:

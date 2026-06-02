@@ -170,21 +170,26 @@ func TestComposeHasNoPhantomWebUIService(t *testing.T) {
 }
 
 func TestBridgeNameWithinLinuxLimit(t *testing.T) {
-	// Linux interface names are capped at 15 chars; br-<honeypot> overflows for
-	// names >12 chars and docker rejects the network.
-	for _, hp := range []string{"cowrie", "endlessh", "redishoneypot", "citrixhoneypot", "redishoneypot"} {
-		bn := bridgeName(hp)
+	// Linux interface names are capped at 15 chars (IFNAMSIZ); the name must
+	// never exceed that or docker rejects the network.
+	for _, hp := range []string{"cowrie", "endlessh", "redishoneypot", "citrixhoneypot", "h0neytr4p"} {
+		bn := bridgeName("inst1", hp)
 		if len(bn) > 15 {
 			t.Errorf("bridgeName(%q)=%q is %d chars (>15)", hp, bn, len(bn))
 		}
 	}
-	// Long names must still be unique to each other.
-	if bridgeName("redishoneypot") == bridgeName("citrixhoneypot") {
+	// Distinct honeypots in the same instance must be unique.
+	if bridgeName("inst1", "redishoneypot") == bridgeName("inst1", "citrixhoneypot") {
 		t.Error("bridge names collide for distinct honeypots")
 	}
-	// Short names keep the readable form.
-	if bridgeName("cowrie") != "br-cowrie" {
-		t.Errorf("short bridge name changed: %q", bridgeName("cowrie"))
+	// The same honeypot in DIFFERENT instances must NOT collide - this is the
+	// host-global bridge name conflict that previously broke a second instance.
+	if bridgeName("inst1", "cowrie") == bridgeName("inst2", "cowrie") {
+		t.Error("bridge name collides across instances for the same honeypot")
+	}
+	// Readable prefix is preserved for short honeypot names.
+	if got := bridgeName("inst1", "cowrie"); got[:len("br-cowrie")] != "br-cowrie" {
+		t.Errorf("bridge name lost its readable prefix: %q", got)
 	}
 }
 
