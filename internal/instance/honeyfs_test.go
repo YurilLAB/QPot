@@ -45,6 +45,30 @@ func TestHoneyfsOsReleaseMatchesDistro(t *testing.T) {
 				t.Errorf("os-release ID should be %s for %q:\n%s", fam, p.OSPretty, osr)
 			}
 		}
+		// Enriched fields must be internally consistent: a real modern Debian/
+		// Ubuntu box carries VERSION_CODENAME and SUPPORT/BUG report URLs, and
+		// Ubuntu carries ID_LIKE=debian + a matching UBUNTU_CODENAME. A thin
+		// os-release missing these is itself a tell.
+		if p.Codename != "" && !strings.Contains(osr, "VERSION_CODENAME="+p.Codename) {
+			t.Errorf("os-release missing VERSION_CODENAME=%s for %q", p.Codename, p.OSPretty)
+		}
+		if p.IDLike != "" && !strings.Contains(osr, "ID_LIKE="+p.IDLike) {
+			t.Errorf("os-release missing ID_LIKE=%s for %q", p.IDLike, p.OSPretty)
+		}
+		if strings.Contains(low, "ubuntu") {
+			if !strings.Contains(osr, "ID_LIKE=debian") {
+				t.Errorf("Ubuntu os-release must declare ID_LIKE=debian: %q", p.OSPretty)
+			}
+			if !strings.Contains(osr, "UBUNTU_CODENAME="+p.Codename) {
+				t.Errorf("Ubuntu os-release missing UBUNTU_CODENAME=%s", p.Codename)
+			}
+			if !strings.Contains(osr, "HOME_URL=\"https://www.ubuntu.com/\"") {
+				t.Errorf("Ubuntu HOME_URL should be ubuntu.com, not .org: %q", p.OSPretty)
+			}
+		}
+		if !strings.Contains(osr, "BUG_REPORT_URL=") {
+			t.Errorf("os-release missing BUG_REPORT_URL for %q", p.OSPretty)
+		}
 	}
 }
 

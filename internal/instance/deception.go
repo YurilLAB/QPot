@@ -46,6 +46,12 @@ type distroProfile struct {
 	OperatingSystem string
 	// OSPretty is the human distro string (e.g. /etc/os-release PRETTY_NAME).
 	OSPretty string
+	// Codename is the release codename (/etc/os-release VERSION_CODENAME), e.g.
+	// "bookworm" or "jammy". Empty for distros that do not use one (CentOS 7).
+	Codename string
+	// IDLike is the /etc/os-release ID_LIKE value, e.g. "debian" for Ubuntu or
+	// "rhel fedora" for CentOS. Empty for Debian (which has no ID_LIKE).
+	IDLike string
 }
 
 // distroProfiles are realistic, internally-consistent identities drawn from
@@ -60,6 +66,8 @@ var distroProfiles = []distroProfile{
 		HardwarePlatform:  "x86_64",
 		OperatingSystem:   "GNU/Linux",
 		OSPretty:          "Ubuntu 20.04.6 LTS",
+		Codename:          "focal",
+		IDLike:            "debian",
 	},
 	{
 		SSHVersion:        "OpenSSH_8.4p1 Debian-5+deb11u3",
@@ -68,6 +76,7 @@ var distroProfiles = []distroProfile{
 		HardwarePlatform:  "x86_64",
 		OperatingSystem:   "GNU/Linux",
 		OSPretty:          "Debian GNU/Linux 11 (bullseye)",
+		Codename:          "bullseye",
 	},
 	{
 		SSHVersion:        "OpenSSH_8.9p1 Ubuntu-3ubuntu0.6",
@@ -76,6 +85,8 @@ var distroProfiles = []distroProfile{
 		HardwarePlatform:  "x86_64",
 		OperatingSystem:   "GNU/Linux",
 		OSPretty:          "Ubuntu 22.04.3 LTS",
+		Codename:          "jammy",
+		IDLike:            "debian",
 	},
 	{
 		SSHVersion:        "OpenSSH_9.2p1 Debian-2+deb12u3",
@@ -84,6 +95,7 @@ var distroProfiles = []distroProfile{
 		HardwarePlatform:  "x86_64",
 		OperatingSystem:   "GNU/Linux",
 		OSPretty:          "Debian GNU/Linux 12 (bookworm)",
+		Codename:          "bookworm",
 	},
 	{
 		SSHVersion:        "OpenSSH_7.4",
@@ -92,6 +104,7 @@ var distroProfiles = []distroProfile{
 		HardwarePlatform:  "x86_64",
 		OperatingSystem:   "GNU/Linux",
 		OSPretty:          "CentOS Linux 7 (Core)",
+		IDLike:            "rhel fedora",
 	},
 	{
 		SSHVersion:        "OpenSSH_9.6p1 Ubuntu-3ubuntu13.4",
@@ -100,6 +113,8 @@ var distroProfiles = []distroProfile{
 		HardwarePlatform:  "x86_64",
 		OperatingSystem:   "GNU/Linux",
 		OSPretty:          "Ubuntu 24.04 LTS",
+		Codename:          "noble",
+		IDLike:            "debian",
 	},
 }
 

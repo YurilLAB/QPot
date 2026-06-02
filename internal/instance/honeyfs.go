@@ -142,8 +142,38 @@ func osRelease(p distroProfile, hostname string) string {
 		fmt.Fprintf(&b, "VERSION_ID=\"%s\"\n", versionID)
 		fmt.Fprintf(&b, "VERSION=\"%s\"\n", strings.TrimPrefix(pretty, name+" "))
 	}
+	// VERSION_CODENAME / UBUNTU_CODENAME: real os-release files carry the release
+	// codename, and Ubuntu repeats it in UBUNTU_CODENAME. A missing codename on a
+	// modern Debian/Ubuntu box is itself a tell.
+	if p.Codename != "" {
+		fmt.Fprintf(&b, "VERSION_CODENAME=%s\n", p.Codename)
+	}
 	fmt.Fprintf(&b, "ID=%s\n", id)
-	b.WriteString("HOME_URL=\"https://www." + id + ".org/\"\n")
+	// ID_LIKE places the distro in its family (Ubuntu -> debian, CentOS -> rhel
+	// fedora); Debian itself has none.
+	if p.IDLike != "" {
+		fmt.Fprintf(&b, "ID_LIKE=%s\n", p.IDLike)
+	}
+	// HOME_URL / SUPPORT_URL / BUG_REPORT_URL round out the file the way a real
+	// install has them, with the correct per-distro URLs (Ubuntu uses .com).
+	switch id {
+	case "ubuntu":
+		b.WriteString("HOME_URL=\"https://www.ubuntu.com/\"\n")
+		b.WriteString("SUPPORT_URL=\"https://help.ubuntu.com/\"\n")
+		b.WriteString("BUG_REPORT_URL=\"https://bugs.launchpad.net/ubuntu/\"\n")
+		if p.Codename != "" {
+			fmt.Fprintf(&b, "UBUNTU_CODENAME=%s\n", p.Codename)
+		}
+	case "debian":
+		b.WriteString("HOME_URL=\"https://www.debian.org/\"\n")
+		b.WriteString("SUPPORT_URL=\"https://www.debian.org/support\"\n")
+		b.WriteString("BUG_REPORT_URL=\"https://bugs.debian.org/\"\n")
+	case "centos":
+		b.WriteString("HOME_URL=\"https://www.centos.org/\"\n")
+		b.WriteString("BUG_REPORT_URL=\"https://bugs.centos.org/\"\n")
+	default:
+		b.WriteString("HOME_URL=\"https://www." + id + ".org/\"\n")
+	}
 	return b.String()
 }
 
