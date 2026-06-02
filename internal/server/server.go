@@ -390,11 +390,19 @@ func (s *Server) responseEnv(ctx context.Context, stats *database.Stats) []strin
 // fireWebhook sends a JSON POST to the configured webhook URL.
 func (s *Server) fireWebhook(ctx context.Context, stats *database.Stats) {
 	payload := map[string]interface{}{
-		"qpot_id":      s.config.QPotID,
-		"instance":     s.config.InstanceName,
+		"qpot_id":  s.config.QPotID,
+		"instance": s.config.InstanceName,
+		// RFC3339/UTC timestamp so SIEM and chat integrations can order and
+		// correlate alerts (most webhook consumers require a timestamp field).
+		"timestamp":    time.Now().UTC().Format(time.RFC3339),
 		"total_events": stats.TotalEvents,
 		"unique_ips":   stats.UniqueIPs,
 		"message":      fmt.Sprintf("QPot alert: %d events in the last minute on instance %s", stats.TotalEvents, s.config.InstanceName),
+	}
+	// Surface the most-hit honeypot so a responder knows what is under attack
+	// without a second lookup.
+	if len(stats.TopHoneypots) > 0 {
+		payload["top_honeypot"] = stats.TopHoneypots[0].Honeypot
 	}
 
 	body, err := json.Marshal(payload)
