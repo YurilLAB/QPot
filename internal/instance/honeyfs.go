@@ -68,11 +68,27 @@ func generateHoneyfs(t credentialTemplate, p distroProfile, hostname string) map
 		"etc/passwd":     etcPasswd(t),
 		"etc/group":      etcGroup(t),
 		"etc/hostname":   hostname + "\n",
+		"etc/hosts":      etcHosts(hostname),
 		"etc/os-release": osRelease(p, hostname),
 		"etc/issue":      issue(p),
 		"etc/motd":       motd(p),
 	}
 	return files
+}
+
+// etcHosts builds a standard Debian/Ubuntu /etc/hosts. The 127.0.1.1 line must
+// carry the SAME per-instance hostname as /etc/hostname and the shell prompt;
+// cowrie's stock /etc/hosts hard-codes a fixed hostname, so `cat /etc/hosts`
+// otherwise both reveals the default and contradicts `hostname`.
+func etcHosts(hostname string) string {
+	return "127.0.0.1\tlocalhost\n" +
+		"127.0.1.1\t" + hostname + "\n\n" +
+		"# The following lines are desirable for IPv6 capable hosts\n" +
+		"::1     ip6-localhost ip6-loopback\n" +
+		"fe00::0 ip6-localnet\n" +
+		"ff00::0 ip6-mcastprefix\n" +
+		"ff02::1 ip6-allnodes\n" +
+		"ff02::2 ip6-allrouters\n"
 }
 
 // debianMOTD is the stock /etc/motd shipped on a Debian system.

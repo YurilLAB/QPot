@@ -85,6 +85,27 @@ func TestHoneyfsASCII(t *testing.T) {
 	}
 }
 
+// TestHoneyfsEtcHostsConsistent verifies /etc/hosts carries the same per-instance
+// hostname as /etc/hostname on the 127.0.1.1 line (Debian/Ubuntu convention), so
+// `cat /etc/hosts` agrees with `hostname` instead of leaking cowrie's default.
+func TestHoneyfsEtcHostsConsistent(t *testing.T) {
+	files := generateHoneyfs(credentialTemplates[0], distroProfiles[0], "edge-01")
+	hosts, ok := files["etc/hosts"]
+	if !ok {
+		t.Fatal("generateHoneyfs must emit etc/hosts (its mount source)")
+	}
+	if !strings.Contains(hosts, "127.0.1.1\tedge-01\n") {
+		t.Errorf("/etc/hosts missing the 127.0.1.1 <hostname> line:\n%s", hosts)
+	}
+	if !strings.Contains(hosts, "127.0.0.1\tlocalhost") {
+		t.Error("/etc/hosts missing the localhost line")
+	}
+	// Must agree with /etc/hostname.
+	if strings.TrimSpace(files["etc/hostname"]) != "edge-01" {
+		t.Error("/etc/hostname does not match the requested hostname")
+	}
+}
+
 // TestHoneyfsMOTDPerDistro guards that the Debian boilerplate motd is only used
 // on Debian profiles (it is a tell on Ubuntu/CentOS, which have an empty static
 // /etc/motd), and that generateHoneyfs always emits the file so its bind mount
