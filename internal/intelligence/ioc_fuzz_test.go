@@ -63,7 +63,8 @@ func FuzzExtract(f *testing.F) {
 				}
 			case IOCTypeHash:
 				n := len(ioc.Value)
-				if n != 32 && n != 40 && n != 64 {
+				// MD5 / SHA-1 / SHA-256 / SHA-512.
+				if n != 32 && n != 40 && n != 64 && n != 128 {
 					t.Errorf("hash IOC %q has invalid length %d", ioc.Value, n)
 				}
 				if !hexOnly.MatchString(ioc.Value) {

@@ -28,6 +28,7 @@ var (
 	reMD5    = regexp.MustCompile(`\b[0-9a-fA-F]{32}\b`)
 	reSHA1   = regexp.MustCompile(`\b[0-9a-fA-F]{40}\b`)
 	reSHA256 = regexp.MustCompile(`\b[0-9a-fA-F]{64}\b`)
+	reSHA512 = regexp.MustCompile(`\b[0-9a-fA-F]{128}\b`)
 	// reDomain must accept every scheme reURL does (incl. ftp), otherwise
 	// ftp:// downloads — a common ingress-tool-transfer pattern — yield a URL
 	// IOC but never a domain IOC.
@@ -151,9 +152,19 @@ func (e *Extractor) Extract(event *database.Event) []*database.IOC {
 			}
 		}
 
-		// File hashes — SHA256 first (superset of shorter), then SHA1, then MD5
-		// to avoid sub-matching. We de-duplicate by length.
+		// File hashes — longest first (SHA512, then SHA256, SHA1, MD5) to avoid
+		// sub-matching. The \b anchors already make the lengths disjoint, but the
+		// order + de-dup set keeps it robust. SHA-512 is increasingly the hash
+		// threat-intel feeds and `sha512sum`-based droppers use to identify
+		// payloads, so capturing it makes the IOC set usable against those feeds.
 		seen := make(map[string]bool)
+		for _, h := range reSHA512.FindAllString(event.Command, -1) {
+			h = strings.ToLower(h)
+			if !seen[h] {
+				seen[h] = true
+				iocs = append(iocs, makeIOC(IOCTypeHash, h))
+			}
+		}
 		for _, h := range reSHA256.FindAllString(event.Command, -1) {
 			h = strings.ToLower(h)
 			if !seen[h] {

