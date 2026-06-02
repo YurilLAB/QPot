@@ -49,9 +49,9 @@ func TestStaticIndexDoesNotLeakQPotID(t *testing.T) {
 }
 
 // TestStaticServesRealDashboard guards against the embedded UI silently
-// regressing to a placeholder. The binary serves internal/server/static via
-// go:embed; for a long time that directory held a 49-byte stub
-// (<body>QPot</body>) while the real, API-wired dashboard sat unused under
+// regressing to a placeholder. The binary embeds and serves the
+// internal/server/static directory; for a long time that directory held a
+// 49-byte stub (<body>QPot</body>) while the real, API-wired dashboard sat unused under
 // web/static and was never served. A generic "is it HTML?" check (as in
 // TestServerEndToEnd) passes for the stub too, so we assert the served page
 // carries the dashboard's actual wiring: the QPot-ID auth flow and live calls
