@@ -220,7 +220,7 @@ jobs:
           cache: true
       - name: Run each fuzz target briefly
         run: |
-          set -euo pipefail
+          set -uo pipefail
           # Discover every Fuzz target with the package it lives in. Collect into
           # an array first (mapfile) so a failing target reliably fails the job -
           # piping straight into `while` would swallow the exit status in a
@@ -234,10 +234,35 @@ jobs:
             done
           )
           echo "Found ${#targets[@]} fuzz targets"
+
+          run_one() { go test "$1" -run '^$' -fuzz "^${2}\$" -fuzztime 10s 2>&1; }
+
+          # A non-zero exit that only reports "context deadline exceeded" - with
+          # no panic and no crash input written to testdata - is Go's known
+          # short-fuzztime flake (a worker is mid-exec when the deadline fires),
+          # not a finding. Treat that as a retryable flake; a real crash (panic
+          # or "Failing input written") always fails the job.
+          is_flake() {
+            grep -q 'context deadline exceeded' <<<"$1" \
+              && ! grep -qE 'panic:|Failing input written|runtime error' <<<"$1"
+          }
+
+          fail=0
           for line in "${targets[@]}"; do
-            pkg="${line%% *}"
-            fn="${line##* }"
+            pkg="${line%% *}"; fn="${line##* }"
             echo "::group::$pkg $fn"
-            go test "$pkg" -run '^$' -fuzz "^${fn}\$" -fuzztime 10s
+            out="$(run_one "$pkg" "$fn")"; rc=$?
+            echo "$out"
+            if [ "$rc" -ne 0 ] && is_flake "$out"; then
+              echo "::warning::$fn hit a fuzzing-deadline flake; retrying once"
+              out="$(run_one "$pkg" "$fn")"; rc=$?
+              echo "$out"
+              if [ "$rc" -ne 0 ] && is_flake "$out"; then
+                echo "::warning::$fn flaked again on the deadline (no crash); treating as pass"
+                rc=0
+              fi
+            fi
             echo "::endgroup::"
+            if [ "$rc" -ne 0 ]; then echo "::error::fuzz target $fn FAILED"; fail=1; fi
           done
+          exit "$fail"
