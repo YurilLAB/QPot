@@ -44,6 +44,39 @@ func TestRandomizeMACEmitsValidMAC(t *testing.T) {
 	}
 }
 
+// TestComposeHoneypotHardening verifies the LIVE security path (the compose
+// template, not the unused Sandbox.GetDockerSecurityOptions) emits the isolation
+// guarantees for an attacker-facing honeypot: capabilities dropped to ALL,
+// no-new-privileges, a read-only root, a pids limit, and - for a honeypot that
+// binds a privileged container port (cowrie on 22/23) - NET_BIND_SERVICE added
+// back via the deploy profile's NeedsNetBind (NOT the host-facing HP.Port).
+func TestComposeHoneypotHardening(t *testing.T) {
+	cfg := config.Default("hardening-test")
+	cfg.QPotID = "qp_hardeningtest0000000001"
+	hp := cfg.Honeypots["cowrie"]
+	hp.Enabled = true
+	cfg.Honeypots["cowrie"] = hp
+	sb, err := security.NewSandbox(&cfg.Security)
+	if err != nil {
+		t.Fatalf("NewSandbox: %v", err)
+	}
+	out, err := (&ComposeGenerator{Config: cfg, Sandbox: sb}).Generate()
+	if err != nil {
+		t.Fatalf("Generate: %v", err)
+	}
+	// Isolate the cowrie service block.
+	start := strings.Index(out, "\n  cowrie:")
+	if start < 0 {
+		t.Fatal("cowrie service not found in compose")
+	}
+	block := out[start:]
+	for _, want := range []string{"cap_drop:", "- ALL", "- NET_BIND_SERVICE", "no-new-privileges:true", "read_only: true", "pids:"} {
+		if !strings.Contains(block, want) {
+			t.Errorf("cowrie compose block missing hardening %q", want)
+		}
+	}
+}
+
 // TestHoneypotEnvDoesNotSelfIdentify guards the anti-fingerprinting change: a
 // honeypot container's environment must not carry variables that announce the
 // platform or that the box is a honeypot. An attacker who lands in-container
