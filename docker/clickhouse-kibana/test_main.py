@@ -32,14 +32,15 @@ def _load_main():
 
     fa.FastAPI = lambda *a, **k: types.SimpleNamespace(
         get=_decorator_factory, post=_decorator_factory, put=_decorator_factory,
-        head=_decorator_factory, on_event=_decorator_factory,
+        head=_decorator_factory, delete=_decorator_factory,
+        patch=_decorator_factory, on_event=_decorator_factory,
     )
     fa.Request = object
-    fa.Response = object
+    fa.Response = lambda *a, **k: None
     fa.HTTPException = Exception
     far = sys.modules["fastapi.responses"]
-    far.JSONResponse = object
-    far.PlainTextResponse = object
+    far.JSONResponse = lambda *a, **k: (a[0] if a else None)
+    far.PlainTextResponse = lambda *a, **k: (a[0] if a else None)
     sys.modules["clickhouse_driver"].Client = object
 
     # main.py does `import geo`; make the connector directory importable.
@@ -335,6 +336,234 @@ class TestFuzz(unittest.TestCase):
             limit_line = [l for l in sql.splitlines() if "LIMIT" in l]
             self.assertTrue(limit_line, sql)
             int(limit_line[0].strip().split()[-1])  # raises if not an int
+
+
+class TestAggregations(unittest.TestCase):
+    """ES aggregation -> ClickHouse GROUP BY translation (Kibana viz)."""
+
+    def plan(self, aggs):
+        return main.agg_translate.plan_aggregations(aggs, main.es_field_to_ch, main.ch_quote)
+
+    def test_terms_agg_sql(self):
+        p = self.plan({"by_hp": {"terms": {"field": "type", "size": 5}}})
+        self.assertIsNotNone(p)
+        sql = main.agg_translate.build_agg_sql("events", "1=1", p)
+        # type -> honeypot; grouped + ordered by count desc + size limit.
+        self.assertIn("honeypot AS b0", sql)
+        self.assertIn("count() AS doc_count", sql)
+        self.assertIn("GROUP BY b0", sql)
+        self.assertIn("LIMIT 5", sql)
+        assert_no_structural_injection(sql)
+
+    def test_date_histogram_sql(self):
+        p = self.plan({"ot": {"date_histogram": {"field": "@timestamp", "fixed_interval": "1h"}}})
+        sql = main.agg_translate.build_agg_sql("events", "1=1", p)
+        self.assertIn("toStartOfInterval(timestamp, INTERVAL 1 HOUR)", sql)
+        self.assertIn("ORDER BY b0 ASC", sql)
+
+    def test_terms_with_metric(self):
+        p = self.plan({"by_hp": {"terms": {"field": "type"},
+                                 "aggs": {"avg_port": {"avg": {"field": "dest_port"}}}}})
+        self.assertEqual(len(p.buckets), 1)
+        self.assertEqual(len(p.metrics), 1)
+        sql = main.agg_translate.build_agg_sql("events", "1=1", p)
+        self.assertIn("avg(dest_port) AS m0", sql)
+
+    def test_nested_terms_plan(self):
+        p = self.plan({"by_country": {"terms": {"field": "geoip.country_name"},
+                                      "aggs": {"by_hp": {"terms": {"field": "type", "size": 3}}}}})
+        self.assertEqual(len(p.buckets), 2)
+        self.assertEqual(p.buckets[0].expr, "country")   # geoip.country_name -> country
+        self.assertEqual(p.buckets[1].expr, "honeypot")
+
+    def test_three_levels_unsupported(self):
+        p = self.plan({"a": {"terms": {"field": "type"},
+                             "aggs": {"b": {"terms": {"field": "country"},
+                                            "aggs": {"c": {"terms": {"field": "city"}}}}}}})
+        self.assertIsNone(p)  # >2 bucket levels -> caller falls back gracefully
+
+    def test_shape_terms_response(self):
+        p = self.plan({"by_hp": {"terms": {"field": "type", "size": 5}}})
+        cols = ["b0", "doc_count"]
+        rows = [("cowrie", 10), ("dionaea", 4)]
+        out = main.agg_translate.shape_agg_response(p, rows, cols)
+        buckets = out["by_hp"]["buckets"]
+        self.assertEqual(buckets[0], {"doc_count": 10, "key": "cowrie"})
+        self.assertEqual(buckets[1]["key"], "dionaea")
+
+    def test_shape_metric_only(self):
+        p = self.plan({"uniq_ips": {"cardinality": {"field": "src_ip"}}})
+        out = main.agg_translate.shape_agg_response(p, [(7,)], ["m0"])
+        self.assertEqual(out["uniq_ips"], {"value": 7})
+
+
+class TestSavedObjects(unittest.TestCase):
+    """Kibana system-index document store."""
+
+    def setUp(self):
+        import tempfile
+        self.tmp = tempfile.NamedTemporaryFile(suffix=".json", delete=False)
+        self.tmp.close()
+        self.store = main.savedobjects.SavedObjectStore(self.tmp.name)
+
+    def tearDown(self):
+        os.remove(self.tmp.name)
+
+    def test_is_system_index(self):
+        self.assertTrue(main.savedobjects.is_system_index(".kibana"))
+        self.assertTrue(main.savedobjects.is_system_index(".kibana_8.11.0_001"))
+        self.assertFalse(main.savedobjects.is_system_index("logstash-*"))
+        self.assertFalse(main.savedobjects.is_system_index("events"))
+
+    def test_crud_roundtrip(self):
+        r = self.store.index_doc(".kibana", "config:8.11.0", {"type": "config", "buildNum": 1})
+        self.assertEqual(r["result"], "created")
+        got = self.store.get_doc(".kibana", "config:8.11.0")
+        self.assertTrue(got["found"])
+        self.assertEqual(got["_source"]["buildNum"], 1)
+        self.store.update_doc(".kibana", "config:8.11.0", {"doc": {"buildNum": 2}})
+        self.assertEqual(self.store.get_doc(".kibana", "config:8.11.0")["_source"]["buildNum"], 2)
+        d = self.store.delete_doc(".kibana", "config:8.11.0")
+        self.assertEqual(d["result"], "deleted")
+        self.assertFalse(self.store.get_doc(".kibana", "config:8.11.0")["found"])
+
+    def test_create_conflict(self):
+        self.store.index_doc(".kibana", "x", {"a": 1}, create=True)
+        with self.assertRaises(KeyError):
+            self.store.index_doc(".kibana", "x", {"a": 2}, create=True)
+
+    def test_search_term_and_ids(self):
+        self.store.index_doc(".kibana", "index-pattern:1", {"type": "index-pattern", "title": "logstash-*"})
+        self.store.index_doc(".kibana", "visualization:1", {"type": "visualization", "title": "v"})
+        res = self.store.search(".kibana", {"query": {"term": {"type": "index-pattern"}}})
+        self.assertEqual(res["hits"]["total"]["value"], 1)
+        self.assertEqual(res["hits"]["hits"][0]["_source"]["title"], "logstash-*")
+        # ids query
+        res = self.store.search(".kibana", {"query": {"ids": {"values": ["visualization:1"]}}})
+        self.assertEqual(res["hits"]["total"]["value"], 1)
+        # match_all
+        self.assertEqual(self.store.search(".kibana", {"query": {"match_all": {}}})["hits"]["total"]["value"], 2)
+        self.assertEqual(self.store.count(".kibana", {})["count"], 2)
+
+    def test_persistence(self):
+        self.store.index_doc(".kibana", "k", {"v": 1})
+        reopened = main.savedobjects.SavedObjectStore(self.tmp.name)
+        self.assertTrue(reopened.get_doc(".kibana", "k")["found"])
+
+    def test_versioned_index_canonicalized(self):
+        self.store.index_doc(".kibana_8.11.0_001", "a", {"x": 1})
+        # readable via the family name too
+        self.assertTrue(self.store.get_doc(".kibana", "a")["found"])
+
+
+class TestAggFuzz(unittest.TestCase):
+    """Throw randomized aggregation trees at the planner/SQL builder; it must
+    never crash and never emit an injectable SQL fragment."""
+
+    FIELDS = ["type", "honeypot", "geoip.country_name", "dest_port", "src_ip",
+              "evil) OR 1=1 --", "@timestamp", "city"]
+    METRICS = ["avg", "min", "max", "sum", "cardinality", "value_count"]
+
+    def _rand_agg(self, rnd, depth=0):
+        kind = rnd.choice(["terms", "date_histogram", "metric"])
+        if kind == "metric" or depth > 2:
+            m = rnd.choice(self.METRICS)
+            return {rnd.choice(["m1", "m2"]): {m: {"field": rnd.choice(self.FIELDS)}}}
+        body = {}
+        if kind == "terms":
+            body["terms"] = {"field": rnd.choice(self.FIELDS),
+                             "size": rnd.choice([5, 10, "bad", -1, 99999])}
+        else:
+            body["date_histogram"] = {"field": "@timestamp",
+                                      "fixed_interval": rnd.choice(["1h", "30m", "1d", "bad", "5"])}
+        if rnd.random() < 0.6:
+            body["aggs"] = self._rand_agg(rnd, depth + 1)
+        return {rnd.choice(["a", "b", "c"]): body}
+
+    def test_fuzz_agg_planner(self):
+        rnd = random.Random(7)
+        for _ in range(5000):
+            tree = self._rand_agg(rnd)
+            try:
+                p = main.agg_translate.plan_aggregations(tree, main.es_field_to_ch, main.ch_quote)
+            except Exception as e:
+                self.fail(f"planner crashed on {tree!r}: {e!r}")
+            if p is None:
+                continue
+            try:
+                sql = main.agg_translate.build_agg_sql("events", "1=1", p)
+            except Exception as e:
+                self.fail(f"build_agg_sql crashed on {tree!r}: {e!r}")
+            assert_no_structural_injection(sql)
+
+
+class TestEndpointRouting(unittest.TestCase):
+    """Exercise the real handlers: Kibana system-index ops route to the saved-
+    object store (never ClickHouse), and _bulk applies there."""
+
+    def setUp(self):
+        import tempfile
+        self.tmp = tempfile.NamedTemporaryFile(suffix=".json", delete=False)
+        self.tmp.close()
+        self._orig = main.SO
+        main.SO = main.savedobjects.SavedObjectStore(self.tmp.name)
+
+    def tearDown(self):
+        main.SO = self._orig
+        os.remove(self.tmp.name)
+
+    def _req(self, js=None, body=b"", path="/", method="POST"):
+        class Req:
+            def __init__(s):
+                s.url = types.SimpleNamespace(path=path)
+                s.method = method
+
+            async def json(s):
+                if js is None:
+                    raise ValueError("no json")
+                return js
+
+            async def body(s):
+                return body
+        return Req()
+
+    def test_system_index_doc_and_search_route_to_store(self):
+        import asyncio
+        asyncio.run(main.put_doc(".kibana", "index-pattern:1",
+                                 self._req(js={"type": "index-pattern", "title": "logstash-*"},
+                                           path="/.kibana/_doc/index-pattern:1")))
+        # root version is reported for Kibana's compat check
+        root = asyncio.run(main.root())
+        self.assertEqual(root["version"]["number"], main.ES_VERSION)
+        # search the system index -> served from the store, not ClickHouse
+        res = asyncio.run(main.search(".kibana",
+                                      self._req(js={"query": {"term": {"type": "index-pattern"}}})))
+        self.assertEqual(res["hits"]["total"]["value"], 1)
+        self.assertEqual(res["hits"]["hits"][0]["_source"]["title"], "logstash-*")
+        # get the doc back
+        got = asyncio.run(main.get_doc(".kibana", "index-pattern:1", self._req(path="/.kibana/_doc/index-pattern:1", method="GET")))
+        self.assertTrue(got["found"])
+
+    def test_bulk_applies_to_store(self):
+        nd = (
+            b'{"index":{"_index":".kibana","_id":"a"}}\n'
+            b'{"type":"config","buildNum":1}\n'
+            b'{"create":{"_index":".kibana","_id":"b"}}\n'
+            b'{"type":"dashboard"}\n'
+            b'{"delete":{"_index":".kibana","_id":"a"}}\n'
+        )
+        res = main._process_bulk(nd, None)
+        self.assertFalse(res["errors"])
+        self.assertEqual(len(res["items"]), 3)
+        # 'a' created then deleted; 'b' remains.
+        self.assertFalse(main.SO.get_doc(".kibana", "a")["found"])
+        self.assertTrue(main.SO.get_doc(".kibana", "b")["found"])
+
+    def test_data_index_write_is_noop(self):
+        # Writing to a data index must not raise and must not create a saved obj.
+        res = main._process_bulk(b'{"index":{"_index":"logstash-x","_id":"1"}}\n{"a":1}\n', None)
+        self.assertFalse(res["errors"])
+        self.assertFalse(main.savedobjects.is_system_index("logstash-x"))
 
 
 if __name__ == "__main__":

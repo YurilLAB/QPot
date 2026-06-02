@@ -12,6 +12,28 @@ This service provides an Elasticsearch-compatible API layer on top of ClickHouse
 - **Attack map support**: Translates the T-Pot attack map's `type:(...)`
   honeypot selector and time ranges, and synthesizes `geoip.latitude/longitude`
   from each event's country code so the map can plot QPot's ClickHouse data
+- **Kibana support**: reports an ES version for Kibana's compatibility check,
+  serves `_field_caps`/`_mapping` for index patterns, translates Kibana's
+  **aggregations** (`date_histogram`, `terms`, and `avg/min/max/sum/
+  value_count/cardinality` metrics, up to two nested bucket levels) into
+  ClickHouse `GROUP BY`, and persists Kibana's own saved objects (index
+  patterns, visualizations, dashboards) in a writable `.kibana*` document store
+
+## Kibana over ClickHouse
+
+`docker-compose.kibana.yml` runs Kibana against QPot data with no Elasticsearch
+(connector aliased as `elasticsearch`; `ES_VERSION` must match the bundled
+Kibana's major version):
+
+```
+CLICKHOUSE_HOST=<qpot-db-host> ES_VERSION=8.11.0 docker compose \
+  -f docker/clickhouse-kibana/docker-compose.kibana.yml up
+```
+
+This covers Discover, index patterns and the common Visualize aggregations over
+QPot data. It is not a full Elasticsearch, so ES|QL, ML and other advanced
+features are out of scope; honeypot data is read-only (QPot ingests via Vector),
+while Kibana's saved objects are read/write in the `.kibana*` store.
 
 ## Attack map over ClickHouse
 

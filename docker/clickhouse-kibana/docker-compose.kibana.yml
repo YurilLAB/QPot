@@ -1,0 +1,71 @@
+# Kibana over QPot's ClickHouse
+#
+# Runs Kibana against QPot data with no Elasticsearch. The clickhouse-kibana
+# connector exposes the Elasticsearch API Kibana needs - root/version, cluster
+# health, _field_caps, _mapping, _search with aggregations, and a writable
+# .kibana* saved-object store - and joins the network under the alias
+# `elasticsearch` so Kibana's default ELASTICSEARCH_HOSTS resolves to it.
+#
+# Point CLICKHOUSE_HOST at the QPot `database` service/host. ES_VERSION MUST
+# match the bundled Kibana's major version or Kibana refuses to start; set both
+# from the same TPOT_VERSION/Kibana image you run.
+#
+#   CLICKHOUSE_HOST=<qpot-db-host> ES_VERSION=8.11.0 docker compose \
+#     -f docker/clickhouse-kibana/docker-compose.kibana.yml up
+#
+# Open Kibana via the nginx portal (/kibana/) or http://127.0.0.1:64296.
+# Note: this connector implements the ES surface for Discover, index patterns
+# and the common Visualize aggregations over QPot data; it is not a full
+# Elasticsearch, so advanced/ES|QL/ML features are out of scope.
+services:
+  clickhouse-kibana:
+    build: .
+    image: ${TPOT_DOCKER_REPO:-dtagdevsec}/clickhouse-kibana:${TPOT_VERSION:-24.04.1}
+    container_name: clickhouse-kibana
+    restart: always
+    environment:
+      - CLICKHOUSE_HOST=${CLICKHOUSE_HOST:-clickhouse}
+      - CLICKHOUSE_PORT=${CLICKHOUSE_PORT:-9000}
+      - CLICKHOUSE_DATABASE=${CLICKHOUSE_DATABASE:-qpot}
+      - CLICKHOUSE_USER=${CLICKHOUSE_USER:-default}
+      - CLICKHOUSE_PASSWORD=${CLICKHOUSE_PASSWORD:-}
+      - QPOT_ID=${QPOT_ID:-}
+      - ES_VERSION=${ES_VERSION:-8.11.0}
+      - QPOT_SO_PATH=/data/kibana-objects.json
+    networks:
+      map_net:
+        aliases:
+          - elasticsearch
+    read_only: true
+    volumes:
+      - clickhouse_kibana_so:/data
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:9200/_cluster/health')"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+
+  kibana:
+    image: ghcr.io/telekom-security/kibana:24.04.1
+    container_name: kibana
+    restart: always
+    environment:
+      - ELASTICSEARCH_HOSTS=http://elasticsearch:9200
+    ports:
+      - "127.0.0.1:64296:5601"
+    depends_on:
+      clickhouse-kibana:
+        condition: service_healthy
+    networks:
+      - map_net
+
+networks:
+  map_net:
+
+volumes:
+  clickhouse_kibana_so:

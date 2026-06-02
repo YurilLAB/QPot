@@ -12,6 +12,8 @@ from typing import Dict, List, Any, Optional
 from urllib.parse import urlparse, parse_qs
 
 import geo
+import aggs as agg_translate
+import savedobjects
 
 from fastapi import FastAPI, Request, Response, HTTPException
 from fastapi.responses import JSONResponse, PlainTextResponse
@@ -30,7 +32,18 @@ CH_PASSWORD = os.getenv("CLICKHOUSE_PASSWORD", "")
 QPOT_ID = os.getenv("QPOT_ID", "")
 QPOT_INSTANCE = os.getenv("QPOT_INSTANCE", "")
 
+# The Elasticsearch version reported to Kibana. Kibana refuses to start against
+# an ES whose major version differs from its own, so this must match the bundled
+# Kibana (override with ES_VERSION to track the image).
+ES_VERSION = os.getenv("ES_VERSION", "8.11.0")
+CLUSTER_UUID = os.getenv("QPOT_CLUSTER_UUID", "qpot-clickhouse-0000000000")
+
 app = FastAPI(title="QPot ClickHouse-Kibana Connector")
+
+# File-backed store for Kibana's own system indices (.kibana*). Kibana reads and
+# writes its saved objects there; those documents are Kibana's, not honeypot
+# data, so they are kept out of ClickHouse.
+SO = savedobjects.SavedObjectStore(os.getenv("QPOT_SO_PATH", "/data/kibana-objects.json"))
 
 # ClickHouse client
 ch_client: Optional[ClickHouseClient] = None
@@ -468,12 +481,24 @@ def ch_row_to_es_hit(row: tuple, columns: List[str]) -> Dict:
 
 @app.get("/")
 async def root():
-    """Root endpoint."""
+    """ES root. Kibana reads version.number here and refuses to start if its
+    major version differs, so report a real, configurable ES version."""
     return {
-        "name": "QPot ClickHouse-Kibana Connector",
-        "version": "3.0.0",
-        "qpot_id": QPOT_ID,
-        "status": "running"
+        "name": "qpot-clickhouse",
+        "cluster_name": "qpot-clickhouse",
+        "cluster_uuid": CLUSTER_UUID,
+        "version": {
+            "number": ES_VERSION,
+            "build_flavor": "default",
+            "build_type": "docker",
+            "build_hash": "qpot",
+            "build_date": "2024-01-01T00:00:00.000Z",
+            "build_snapshot": False,
+            "lucene_version": "9.7.0",
+            "minimum_wire_compatibility_version": "7.17.0",
+            "minimum_index_compatibility_version": "7.0.0",
+        },
+        "tagline": "You Know, for Search",
     }
 
 
@@ -540,103 +565,147 @@ async def cat_indices():
     return PlainTextResponse("""green open logstash-clickhouse 1 0 1000 0 1mb 1mb""")
 
 
+# ES field types for QPot's event fields, as the attack map / Kibana index
+# pattern see them. Flat dotted names; nested for _mapping is derived from this.
+EVENTS_FIELD_TYPES = {
+    "@timestamp": "date",
+    "type": "keyword",
+    "honeypot": "keyword",
+    "src_ip": "ip",
+    "source_ip": "ip",
+    "src_port": "integer",
+    "source_port": "integer",
+    "dest_port": "integer",
+    "protocol": "keyword",
+    "event_type": "keyword",
+    "username": "keyword",
+    "password": "keyword",
+    "command": "text",
+    "city": "keyword",
+    "asn": "keyword",
+    "technique_id": "keyword",
+    "technique_name": "keyword",
+    "tactic_id": "keyword",
+    "tactic_name": "keyword",
+    "geoip.country_code2": "keyword",
+    "geoip.country_name": "keyword",
+    "geoip.city_name": "keyword",
+    "geoip.latitude": "float",
+    "geoip.longitude": "float",
+    "geoip.location": "geo_point",
+}
+
+
+def events_mapping_properties() -> dict:
+    """Build the nested ES mapping `properties` from the flat field-type table."""
+    props: dict = {}
+    for field, typ in EVENTS_FIELD_TYPES.items():
+        parts = field.split(".")
+        cur = props
+        for p in parts[:-1]:
+            cur = cur.setdefault(p, {}).setdefault("properties", {})
+        cur[parts[-1]] = {"type": typ}
+    return props
+
+
 @app.get("/{index}/_mapping")
 async def get_mapping(index: str):
     """ES-compatible mapping endpoint."""
-    return {
-        index: {
-            "mappings": {
-                "properties": {
-                    "@timestamp": {"type": "date"},
-                    "type": {"type": "keyword"},
-                    "src_ip": {"type": "ip"},
-                    "dest_port": {"type": "integer"},
-                    "geoip": {
-                        "properties": {
-                            "ip": {"type": "ip"},
-                            "country_name": {"type": "keyword"},
-                            "country_code2": {"type": "keyword"},
-                            "continent_code": {"type": "keyword"},
-                            "latitude": {"type": "float"},
-                            "longitude": {"type": "float"}
-                        }
-                    },
-                    "geoip_ext": {
-                        "properties": {
-                            "ip": {"type": "ip"},
-                            "latitude": {"type": "float"},
-                            "longitude": {"type": "float"},
-                            "country_code2": {"type": "keyword"},
-                            "country_name": {"type": "keyword"}
-                        }
-                    },
-                    "t-pot_hostname": {"type": "keyword"},
-                    "qpot_id": {"type": "keyword"},
-                    "qpot_instance": {"type": "keyword"}
-                }
+    if savedobjects.is_system_index(index):
+        # Kibana manages its own system-index mappings; return an empty dynamic
+        # mapping so it proceeds.
+        return {index: {"mappings": {"dynamic": "true", "properties": {}}}}
+    return {index: {"mappings": {"properties": events_mapping_properties()}}}
+
+
+def _field_caps_payload(indices_label: str) -> dict:
+    es_to_ch_caps = {}
+    for field, typ in EVENTS_FIELD_TYPES.items():
+        es_to_ch_caps[field] = {
+            typ: {
+                "type": typ,
+                "metadata_field": False,
+                "searchable": True,
+                "aggregatable": typ in ("keyword", "ip", "integer", "float", "date", "geo_point"),
             }
         }
-    }
+    # Always-present meta fields Kibana expects.
+    for meta, mtype in (("_id", "_id"), ("_index", "_index"), ("_source", "_source")):
+        es_to_ch_caps[meta] = {mtype: {"type": mtype, "metadata_field": True,
+                                       "searchable": meta != "_source",
+                                       "aggregatable": False}}
+    return {"indices": [indices_label], "fields": es_to_ch_caps}
+
+
+@app.get("/{index}/_field_caps")
+@app.post("/{index}/_field_caps")
+async def field_caps(index: str, request: Request = None):
+    """Field capabilities - how Kibana discovers an index pattern's fields."""
+    if savedobjects.is_system_index(index):
+        return {"indices": [index], "fields": {}}
+    return _field_caps_payload(index)
+
+
+@app.get("/_field_caps")
+@app.post("/_field_caps")
+async def field_caps_all(request: Request = None):
+    return _field_caps_payload("logstash-*")
 
 
 @app.post("/{index}/_search")
 async def search(index: str, request: Request):
-    """ES-compatible search endpoint."""
+    """ES-compatible search endpoint over ClickHouse, with aggregation
+    support. Kibana's system indices are served from the saved-object store."""
     try:
         es_query = await request.json()
-    except:
+    except Exception:
         es_query = {}
-    
+
+    # Kibana's own saved objects live in .kibana*; never touch ClickHouse.
+    if savedobjects.is_system_index(index):
+        return SO.search(index, es_query)
+
     size = es_query.get("size", 10)
     track_total_hits = es_query.get("track_total_hits", False)
-    aggs = es_query.get("aggs", {})
-    
+    aggs = es_query.get("aggs") or es_query.get("aggregations") or {}
+
     try:
         client = get_ch_client()
-        
-        # Build and execute query
-        ch_query = build_ch_query(index, es_query, size, aggs)
-        
-        # Execute query
-        result = client.execute(ch_query, with_column_types=True)
-        rows = result[0]
-        columns = [col[0] for col in result[1]]
-        
-        # Convert to ES format
-        hits = [ch_row_to_es_hit(row, columns) for row in rows]
-        
-        # Get total count if requested
+        table = INDEX_PATTERNS.get(index, EVENTS_TABLE)
+        where = es_query_to_ch_where(es_query.get("query", {}))
+
+        # Hits (Kibana viz send size:0 to fetch only aggregations).
+        hits = []
+        if safe_limit(size, default=10) > 0:
+            ch_query = build_ch_query(index, es_query, size, aggs)
+            result = client.execute(ch_query, with_column_types=True)
+            rows, columns = result[0], [c[0] for c in result[1]]
+            hits = [ch_row_to_es_hit(row, columns) for row in rows]
+
+        # Total. With track_total_hits or any aggregation, compute the real
+        # matching count; otherwise the hit count is enough.
         total_value = len(hits)
-        if track_total_hits:
-            count_query = f"""
-            SELECT count()
-            FROM {INDEX_PATTERNS.get(index, EVENTS_TABLE)}
-            WHERE {es_query_to_ch_where(es_query.get('query', {}))}
-            """
-            count_result = client.execute(count_query)
-            total_value = count_result[0][0] if count_result else len(hits)
-        
+        if track_total_hits or aggs:
+            cres = client.execute(f"SELECT count() FROM {table} WHERE {where}")
+            total_value = cres[0][0] if cres else len(hits)
+
         response = {
-            "took": 1,
-            "timed_out": False,
-            "_shards": {
-                "total": 1,
-                "successful": 1,
-                "skipped": 0,
-                "failed": 0
-            },
-            "hits": {
-                "total": {
-                    "value": total_value,
-                    "relation": "eq"
-                },
-                "max_score": 1.0,
-                "hits": hits
-            }
+            "took": 1, "timed_out": False,
+            "_shards": {"total": 1, "successful": 1, "skipped": 0, "failed": 0},
+            "hits": {"total": {"value": total_value, "relation": "eq"},
+                     "max_score": 1.0 if hits else None, "hits": hits},
         }
-        
+
+        # Aggregations -> ClickHouse GROUP BY.
+        if aggs:
+            plan = agg_translate.plan_aggregations(aggs, es_field_to_ch, ch_quote)
+            if plan is not None:
+                asql = agg_translate.build_agg_sql(table, where, plan)
+                ares = client.execute(asql, with_column_types=True)
+                arows, acols = ares[0], [c[0] for c in ares[1]]
+                response["aggregations"] = agg_translate.shape_agg_response(plan, arows, acols)
+
         return response
-        
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -714,14 +783,69 @@ async def get_template():
     }
 
 
+def _process_bulk(body_bytes: bytes, default_index: Optional[str]) -> dict:
+    """Apply an ND-JSON _bulk body. Operations on Kibana system indices are
+    applied to the saved-object store; operations on data indices are accepted
+    as no-ops (QPot ingests via Vector, not the ES write path)."""
+    items = []
+    errors = False
+    lines = body_bytes.decode("utf-8", "replace").split("\n")
+    i = 0
+    while i < len(lines):
+        line = lines[i].strip()
+        i += 1
+        if not line:
+            continue
+        try:
+            action = json.loads(line)
+        except Exception:
+            continue
+        if not isinstance(action, dict) or not action:
+            continue
+        op, meta = next(iter(action.items()))
+        index = (meta or {}).get("_index", default_index)
+        doc_id = (meta or {}).get("_id")
+        src = None
+        if op in ("index", "create", "update"):
+            if i < len(lines):
+                try:
+                    src = json.loads(lines[i])
+                except Exception:
+                    src = {}
+                i += 1
+        system = savedobjects.is_system_index(index or "")
+        try:
+            if op == "delete":
+                res = SO.delete_doc(index, doc_id) if system else {
+                    "_index": index, "_id": doc_id, "result": "deleted"}
+                status = 200
+            elif op == "update":
+                res = SO.update_doc(index, doc_id, src or {}) if system else {
+                    "_index": index, "_id": doc_id, "result": "updated"}
+                status = 200
+            else:  # index | create
+                if system:
+                    res = SO.index_doc(index, doc_id, src or {}, create=(op == "create"))
+                else:
+                    res = {"_index": index, "_id": doc_id or "auto", "result": "created"}
+                status = 201 if res.get("result") == "created" else 200
+            res["status"] = status
+            items.append({op: res})
+        except KeyError:
+            errors = True
+            items.append({op: {"_index": index, "_id": doc_id, "status": 409,
+                               "error": {"type": "version_conflict_engine_exception"}}})
+    return {"took": 1, "errors": errors, "items": items}
+
+
 @app.post("/_bulk")
 async def bulk(request: Request):
-    """ES-compatible bulk endpoint - not implemented for read-only mode."""
-    return {
-        "took": 1,
-        "errors": False,
-        "items": []
-    }
+    return _process_bulk(await request.body(), None)
+
+
+@app.post("/{index}/_bulk")
+async def bulk_index(index: str, request: Request):
+    return _process_bulk(await request.body(), index)
 
 
 @app.get("/_nodes")
@@ -740,7 +864,7 @@ async def nodes_info():
                 "transport_address": "127.0.0.1:9300",
                 "host": "127.0.0.1",
                 "ip": "127.0.0.1",
-                "version": "7.0.0",
+                "version": ES_VERSION,
                 "build_flavor": "default",
                 "build_type": "docker",
                 "build_hash": "qpot",
@@ -789,6 +913,152 @@ async def license_info():
             "signature": "QPot License"
         }
     }
+
+
+# ---------------------------------------------------------------------------
+# Document API for Kibana's system indices (.kibana*). These are how Kibana
+# bootstraps and persists its saved objects. Non-system indices are read-only
+# (QPot ingests via Vector), so writes there are accepted as no-ops.
+# ---------------------------------------------------------------------------
+
+@app.put("/{index}/_doc/{doc_id}")
+@app.post("/{index}/_doc/{doc_id}")
+@app.put("/{index}/_create/{doc_id}")
+@app.post("/{index}/_create/{doc_id}")
+async def put_doc(index: str, doc_id: str, request: Request):
+    create = "/_create/" in str(request.url.path)
+    try:
+        source = await request.json()
+    except Exception:
+        source = {}
+    if savedobjects.is_system_index(index):
+        try:
+            res = SO.index_doc(index, doc_id, source, create=create)
+        except KeyError:
+            raise HTTPException(status_code=409, detail="version_conflict_engine_exception")
+        return JSONResponse(res, status_code=201 if res["result"] == "created" else 200)
+    return {"_index": index, "_id": doc_id, "result": "created", "_version": 1,
+            "_shards": {"total": 1, "successful": 1, "failed": 0}}
+
+
+@app.post("/{index}/_doc")
+async def post_doc_autoid(index: str, request: Request):
+    try:
+        source = await request.json()
+    except Exception:
+        source = {}
+    if savedobjects.is_system_index(index):
+        res = SO.index_doc(index, None, source)
+        return JSONResponse(res, status_code=201)
+    return {"_index": index, "_id": "auto", "result": "created"}
+
+
+@app.post("/{index}/_update/{doc_id}")
+async def update_doc(index: str, doc_id: str, request: Request):
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    if savedobjects.is_system_index(index):
+        return SO.update_doc(index, doc_id, body)
+    return {"_index": index, "_id": doc_id, "result": "updated"}
+
+
+@app.get("/{index}/_doc/{doc_id}")
+@app.get("/{index}/_source/{doc_id}")
+async def get_doc(index: str, doc_id: str, request: Request):
+    if savedobjects.is_system_index(index):
+        res = SO.get_doc(index, doc_id)
+        if not res.get("found"):
+            return JSONResponse(res, status_code=404)
+        if str(request.url.path).endswith(f"/_source/{doc_id}"):
+            return res["_source"]
+        return res
+    return JSONResponse({"_index": index, "_id": doc_id, "found": False},
+                        status_code=404)
+
+
+@app.delete("/{index}/_doc/{doc_id}")
+async def delete_doc(index: str, doc_id: str):
+    if savedobjects.is_system_index(index):
+        res = SO.delete_doc(index, doc_id)
+        return JSONResponse(res, status_code=200 if res["result"] == "deleted" else 404)
+    return {"_index": index, "_id": doc_id, "result": "not_found"}
+
+
+@app.post("/_mget")
+@app.post("/{index}/_mget")
+async def mget(request: Request, index: str = None):
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    return SO.mget(body.get("docs", []), index)
+
+
+@app.post("/{index}/_count")
+@app.get("/{index}/_count")
+async def count(index: str, request: Request):
+    body = {}
+    try:
+        if request.method == "POST":
+            body = await request.json()
+    except Exception:
+        body = {}
+    if savedobjects.is_system_index(index):
+        return SO.count(index, body)
+    try:
+        client = get_ch_client()
+        table = INDEX_PATTERNS.get(index, EVENTS_TABLE)
+        where = es_query_to_ch_where(body.get("query", {}))
+        res = client.execute(f"SELECT count() FROM {table} WHERE {where}")
+        return {"count": res[0][0] if res else 0,
+                "_shards": {"total": 1, "successful": 1, "skipped": 0, "failed": 0}}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/{index}/_refresh")
+@app.get("/{index}/_refresh")
+@app.post("/_refresh")
+async def refresh(index: str = None):
+    return {"_shards": {"total": 1, "successful": 1, "failed": 0}}
+
+
+@app.put("/{index}")
+async def create_index(index: str, request: Request):
+    # Kibana creates its system indices; acknowledge so it proceeds.
+    return {"acknowledged": True, "shards_acknowledged": True, "index": index}
+
+
+@app.get("/{index}")
+async def get_index(index: str):
+    return {index: {"aliases": {}, "mappings": {"properties": (
+        {} if savedobjects.is_system_index(index) else events_mapping_properties())},
+        "settings": {"index": {"number_of_shards": "1", "number_of_replicas": "0",
+                               "uuid": "qpot-" + index.strip(".").replace("*", "x")[:16] or "idx",
+                               "version": {"created": "8110000"}}}}}
+
+
+@app.head("/{index}")
+async def head_index(index: str):
+    if savedobjects.is_system_index(index) and not SO.exists(index):
+        return Response(status_code=404)
+    return Response(status_code=200)
+
+
+@app.get("/_resolve/index/{expr:path}")
+async def resolve_index(expr: str):
+    name = expr.split(",")[0]
+    return {"indices": [{"name": name, "attributes": ["open"]}],
+            "aliases": [], "data_streams": []}
+
+
+@app.get("/{index}/_settings")
+async def get_settings(index: str):
+    return {index: {"settings": {"index": {"number_of_shards": "1",
+                                           "number_of_replicas": "0",
+                                           "version": {"created": "8110000"}}}}}
 
 
 @app.on_event("startup")
