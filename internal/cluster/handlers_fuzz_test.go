@@ -76,19 +76,28 @@ func FuzzClusterHandlers(f *testing.F) {
 	for _, s := range seeds {
 		f.Add(s)
 	}
+	// Initialize the cluster ONCE. InitCluster runs bcrypt, so doing it per
+	// iteration capped the fuzzer at a few dozen execs; the handlers lock the
+	// manager mutex internally, so a single shared manager is safe and lets the
+	// fuzzer reach tens of thousands of executions.
+	const pw = "correct-horse-battery"
+	m := NewManager(f.TempDir())
+	if _, err := m.InitCluster("fz", pw, DefaultClusterConfig()); err != nil {
+		f.Fatalf("InitCluster: %v", err)
+	}
 	f.Fuzz(func(t *testing.T, body string) {
-		m := NewManager(t.TempDir())
-		if _, err := m.InitCluster("fz", "correct-horse-battery", DefaultClusterConfig()); err != nil {
-			t.Skip()
-		}
-		pw := "correct-horse-battery"
+		// Call the handlers directly (not through withClusterAuth) so the fuzzer
+		// exercises the JSON parsing and node/intel merge logic at full speed -
+		// the bcrypt in the auth gate is slow and is covered separately by
+		// TestGossipHandlerRejectsMalformedNodes. handleJoinHTTP self-rejects on
+		// the cluster-ID check before any bcrypt, so it stays fast too.
 		for _, h := range []struct {
 			path    string
 			handler http.HandlerFunc
 		}{
 			{"/api/v1/cluster/join", m.handleJoinHTTP},
-			{"/api/v1/cluster/gossip", m.withClusterAuth(m.handleGossipHTTP)},
-			{"/api/v1/cluster/intel", m.withClusterAuth(m.handleIntelHTTP)},
+			{"/api/v1/cluster/gossip", m.handleGossipHTTP},
+			{"/api/v1/cluster/intel", m.handleIntelHTTP},
 		} {
 			req := httptest.NewRequest(http.MethodPost, h.path, bytes.NewBufferString(body))
 			req.Header.Set("X-Cluster-Password", pw)

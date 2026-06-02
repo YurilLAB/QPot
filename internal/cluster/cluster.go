@@ -544,8 +544,15 @@ func (m *Manager) attemptJoin(seedAddr, clusterID, password string, localNode *N
 		isInitialized: true,
 	}
 
-	// Add all nodes from response
+	// Add all nodes from the seed's response. The seed is untrusted wire input
+	// (a compromised seed, or a MITM on a plain-HTTP join): a JSON null decodes
+	// to a nil *Node and would nil-deref on node.ID, and an empty-ID/blank-addr
+	// node would pollute the membership map. Screen every entry through
+	// validPeerNode (which also nil-checks), exactly as the gossip path does.
 	for _, node := range joinResp.Nodes {
+		if !validPeerNode(node) {
+			continue
+		}
 		cluster.Nodes[node.ID] = node
 	}
 	cluster.Nodes[localNode.ID] = localNode
