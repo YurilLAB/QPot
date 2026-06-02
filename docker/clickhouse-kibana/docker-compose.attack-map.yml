@@ -1,0 +1,88 @@
+# QPot attack map over ClickHouse
+#
+# Runs the T-Pot attack map against QPot data without an Elasticsearch: the
+# clickhouse-kibana connector exposes an ES-compatible API backed by QPot's
+# ClickHouse `events` table, and joins the network under the alias
+# `elasticsearch` so the attack map's DataServer - which hardcodes
+# http://elasticsearch:9200 - reaches it unmodified.
+#
+# Point it at your QPot ClickHouse by setting CLICKHOUSE_HOST (the QPot
+# `database` service / host). To share QPot's own network instead, attach these
+# services to it and set CLICKHOUSE_HOST to the database service name.
+#
+#   CLICKHOUSE_HOST=<qpot-db-host> docker compose \
+#     -f docker/clickhouse-kibana/docker-compose.attack-map.yml up
+#
+# Then open the map via the nginx portal (/map/) or http://127.0.0.1:64299.
+services:
+  clickhouse-kibana:
+    build: .
+    image: ${TPOT_DOCKER_REPO:-dtagdevsec}/clickhouse-kibana:${TPOT_VERSION:-24.04.1}
+    container_name: clickhouse-kibana
+    restart: always
+    environment:
+      - CLICKHOUSE_HOST=${CLICKHOUSE_HOST:-clickhouse}
+      - CLICKHOUSE_PORT=${CLICKHOUSE_PORT:-9000}
+      - CLICKHOUSE_DATABASE=${CLICKHOUSE_DATABASE:-qpot}
+      - CLICKHOUSE_USER=${CLICKHOUSE_USER:-default}
+      - CLICKHOUSE_PASSWORD=${CLICKHOUSE_PASSWORD:-}
+      - QPOT_ID=${QPOT_ID:-}
+    networks:
+      map_net:
+        # The attack map's DataServer hardcodes http://elasticsearch:9200, so
+        # the connector answers to that name on this network.
+        aliases:
+          - elasticsearch
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:9200/_cluster/health')"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+
+  map_redis:
+    image: ghcr.io/telekom-security/redis:24.04.1
+    container_name: map_redis
+    restart: always
+    stop_signal: SIGKILL
+    tty: true
+    read_only: true
+    networks:
+      - map_net
+
+  map_web:
+    image: ghcr.io/telekom-security/map:24.04.1
+    container_name: map_web
+    restart: always
+    environment:
+      - MAP_COMMAND=AttackMapServer.py
+    stop_signal: SIGKILL
+    tty: true
+    ports:
+      - "127.0.0.1:64299:64299"
+    depends_on:
+      - map_redis
+    networks:
+      - map_net
+
+  map_data:
+    image: ghcr.io/telekom-security/map:24.04.1
+    container_name: map_data
+    restart: always
+    environment:
+      - MAP_COMMAND=DataServer_v2.py
+    stop_signal: SIGKILL
+    tty: true
+    depends_on:
+      - map_redis
+      - clickhouse-kibana
+    networks:
+      - map_net
+
+networks:
+  map_net:

@@ -13,6 +13,7 @@ functions can be imported and exercised without the real dependencies.
 """
 
 import importlib.util
+import os
 import random
 import sys
 import types
@@ -41,9 +42,14 @@ def _load_main():
     far.PlainTextResponse = object
     sys.modules["clickhouse_driver"].Client = object
 
+    # main.py does `import geo`; make the connector directory importable.
+    here = os.path.dirname(os.path.abspath(__file__))
+    if here not in sys.path:
+        sys.path.insert(0, here)
+
     spec = importlib.util.spec_from_file_location(
         "qpot_ch_main",
-        __file__.replace("test_main.py", "main.py"),
+        os.path.join(here, "main.py"),
     )
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
@@ -161,6 +167,90 @@ class TestSchemaMapping(unittest.TestCase):
         self.assertEqual(main.es_field_to_ch("src_ip"), "source_ip")
         self.assertEqual(main.es_field_to_ch("geoip.country_name"), "country")
         self.assertEqual(main.es_field_to_ch("geoip.ip"), "source_ip")
+
+
+class TestAttackMap(unittest.TestCase):
+    """The T-Pot attack map's actual queries and the hit shape it reads."""
+
+    def test_grouped_query_string_to_in(self):
+        # The map's main selector: type:(Cowrie OR Dionaea OR Heralding)
+        cond = main.query_string_to_condition("type:(Cowrie OR Dionaea OR Heralding)")
+        # type -> honeypot, case-insensitive IN, lowercased values.
+        self.assertEqual(
+            cond, "lower(honeypot) IN ('cowrie', 'dionaea', 'heralding')")
+        assert_no_structural_injection(f"WHERE {cond}")
+
+    def test_query_string_case_insensitive_equality(self):
+        cond = main.query_string_to_condition("type:Cowrie")
+        self.assertEqual(cond, "lower(honeypot) = lower('Cowrie')")
+
+    def test_grouped_query_string_injection_trapped(self):
+        cond = main.query_string_to_condition("type:(Cowrie OR x') OR 1=1 --)")
+        assert_no_structural_injection(f"SELECT * FROM events WHERE {cond}")
+
+    def test_full_attack_map_query_builds_safe_sql(self):
+        es_query = {
+            "query": {
+                "bool": {
+                    "must": [{"query_string": {"query": "type:(Cowrie OR Dionaea)"}}],
+                    "filter": [{"range": {"@timestamp": {"gte": "now-1m", "lte": "now"}}}],
+                }
+            }
+        }
+        sql = main.build_ch_query("logstash-*", es_query, size=100)
+        self.assertIn("FROM events", sql)
+        self.assertIn("lower(honeypot) IN", sql)
+        self.assertIn("timestamp >=", sql)
+        assert_no_structural_injection(sql)
+
+    def test_hit_shape_has_geo_for_attack_map(self):
+        # A row mirroring SELECT * FROM events.
+        columns = ["timestamp", "honeypot", "source_ip", "source_port",
+                   "dest_port", "event_type", "country", "city"]
+        from datetime import datetime
+        row = (datetime(2026, 6, 2, 12, 0, 0), "cowrie", "203.0.113.7",
+               54321, 22, "login", "US", "Ashburn")
+        hit = main.ch_row_to_es_hit(row, columns)
+        src = hit["_source"]
+        self.assertEqual(src["type"], "Cowrie")           # capitalized honeypot
+        self.assertEqual(src["src_ip"], "203.0.113.7")
+        self.assertEqual(src["dest_port"], 22)
+        geoip = src["geoip"]
+        self.assertEqual(geoip["country_code2"], "US")
+        self.assertEqual(geoip["country_name"], "United States")
+        # Latitude/longitude derived from the country centroid so the map plots.
+        self.assertAlmostEqual(geoip["latitude"], 37.09, places=1)
+        self.assertAlmostEqual(geoip["longitude"], -95.71, places=1)
+        self.assertEqual(geoip["location"], {"lat": geoip["latitude"], "lon": geoip["longitude"]})
+
+    def test_time_range_now_resolves(self):
+        # Regression: the attack map sends lte:"now"; it must become a real
+        # timestamp, not the literal SQL `<= 'now'` (which ClickHouse rejects).
+        where = main.es_query_to_ch_where(
+            {"bool": {"filter": [{"range": {"@timestamp": {"gte": "now-1m", "lte": "now"}}}]}})
+        self.assertNotIn("'now'", where)
+        self.assertNotIn("now-", where)
+        # Both bounds present as quoted timestamps.
+        self.assertIn("timestamp >=", where)
+        self.assertIn("timestamp <=", where)
+        self.assertRegex(where, r"timestamp <= '\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}'")
+
+    def test_resolve_time_value_forms(self):
+        import re as _re
+        ts = r"^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$"
+        self.assertRegex(main.resolve_time_value("now"), ts)
+        self.assertRegex(main.resolve_time_value("now-2h"), ts)
+        # ISO with T/Z is normalized to a ClickHouse-friendly form.
+        self.assertEqual(main.resolve_time_value("2026-06-02T19:30:00Z"), "2026-06-02 19:30:00")
+        self.assertEqual(main.resolve_time_value("2026-06-02T19:30:00.123+00:00"), "2026-06-02 19:30:00")
+
+    def test_hit_shape_unknown_country_has_no_coords(self):
+        columns = ["timestamp", "honeypot", "source_ip", "country"]
+        from datetime import datetime
+        row = (datetime(2026, 6, 2, 12, 0, 0), "dionaea", "10.0.0.1", "unknown")
+        hit = main.ch_row_to_es_hit(row, columns)
+        # No bogus (0,0) coordinate when geo is unknown.
+        self.assertNotIn("geoip", hit["_source"])
 
 
 class TestQueryTranslation(unittest.TestCase):

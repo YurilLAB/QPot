@@ -9,6 +9,25 @@ This service provides an Elasticsearch-compatible API layer on top of ClickHouse
 - **Index Pattern Support**: Handles `logstash-*` patterns
 - **Query Translation**: Converts ES DSL to ClickHouse queries
 - **Read-Optimized**: Designed for analytics workloads
+- **Attack map support**: Translates the T-Pot attack map's `type:(...)`
+  honeypot selector and time ranges, and synthesizes `geoip.latitude/longitude`
+  from each event's country code so the map can plot QPot's ClickHouse data
+
+## Attack map over ClickHouse
+
+`docker-compose.attack-map.yml` runs the T-Pot attack map against QPot data with
+no Elasticsearch. The connector joins the network under the alias
+`elasticsearch`, so the attack map's DataServer (which hardcodes
+`http://elasticsearch:9200`) reaches it unmodified:
+
+```
+CLICKHOUSE_HOST=<qpot-db-host> docker compose \
+  -f docker/clickhouse-kibana/docker-compose.attack-map.yml up
+```
+
+QPot stores only a country ISO code per event, so the connector derives
+country-centroid coordinates (see `geo.py`) for plotting; events with an unknown
+country carry no coordinates and are skipped rather than placed at (0,0).
 
 ## Schema
 

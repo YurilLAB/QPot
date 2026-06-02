@@ -11,6 +11,8 @@ from datetime import datetime, timedelta
 from typing import Dict, List, Any, Optional
 from urllib.parse import urlparse, parse_qs
 
+import geo
+
 from fastapi import FastAPI, Request, Response, HTTPException
 from fastapi.responses import JSONResponse, PlainTextResponse
 import uvicorn
@@ -55,7 +57,10 @@ INDEX_PATTERNS = {
 FIELD_MAPPINGS = {
     "@timestamp": "timestamp",
     "timestamp": "timestamp",
-    "type": "event_type",
+    # In T-Pot's Elasticsearch the logstash `type` field holds the honeypot
+    # name (Cowrie, Dionaea, ...), which the attack map filters on. QPot stores
+    # that in the `honeypot` column; `event_type` is the kind of event.
+    "type": "honeypot",
     "event_type": "event_type",
     "honeypot": "honeypot",
     # Source IP: accept the common ES spellings and the geoip.* fields the
@@ -166,6 +171,67 @@ def es_field_to_ch(field: str) -> str:
     return safe_ident(field)
 
 
+# Columns matched case-insensitively. T-Pot/Kibana send capitalized honeypot
+# names (the attack map queries `type:(Cowrie OR Dionaea ...)`) while QPot
+# stores them lower-case (`cowrie`), so equality must fold case.
+_CI_COLUMNS = {"honeypot"}
+
+
+def _eq_condition(ch_field: str, value: str) -> str:
+    if ch_field in _CI_COLUMNS:
+        return f"lower({ch_field}) = lower({ch_quote(value)})"
+    return f"{ch_field} = {ch_quote(value)}"
+
+
+def _in_condition(ch_field: str, values: list) -> str:
+    if ch_field in _CI_COLUMNS:
+        vlist = ", ".join(ch_quote(str(v).lower()) for v in values)
+        return f"lower({ch_field}) IN ({vlist})"
+    vlist = ", ".join(ch_quote(v) for v in values)
+    return f"{ch_field} IN ({vlist})"
+
+
+def query_string_to_condition(qs: str) -> str:
+    """Translate the subset of Elasticsearch query_string syntax QPot's
+    consumers actually emit into a ClickHouse boolean condition:
+
+        field:value                -> field = 'value'
+        field:(v1 OR v2 OR v3)     -> field IN ('v1','v2','v3')   (attack map)
+        f1:v1 OR f2:v2             -> (f1 = 'v1' OR f2 = 'v2')
+
+    All values are escaped via ch_quote and the honeypot column is matched
+    case-insensitively. Returns "" when nothing usable is present.
+    """
+    qs = (qs or "").strip()
+    if not qs:
+        return ""
+
+    # field:(v1 OR v2 OR ...)  - the attack map's main honeypot selector.
+    m = re.match(r'^([\w.@+-]+)\s*:\s*\((.+)\)\s*$', qs, re.DOTALL)
+    if m:
+        field = es_field_to_ch(m.group(1).strip())
+        values = [v.strip().strip('"').strip("'")
+                  for v in re.split(r'\s+OR\s+', m.group(2), flags=re.IGNORECASE)]
+        values = [v for v in values if v]
+        return _in_condition(field, values) if values else ""
+
+    # f1:v1 OR f2:v2  (top-level OR of field:value terms)
+    if re.search(r'\s+OR\s+', qs, flags=re.IGNORECASE):
+        parts = []
+        for term in re.split(r'\s+OR\s+', qs, flags=re.IGNORECASE):
+            term = term.strip()
+            if ":" in term:
+                f, v = term.split(":", 1)
+                parts.append(_eq_condition(es_field_to_ch(f.strip()), v.strip().strip('"')))
+        return "(" + " OR ".join(parts) + ")" if parts else ""
+
+    # field:value
+    if ":" in qs:
+        f, v = qs.split(":", 1)
+        return _eq_condition(es_field_to_ch(f.strip()), v.strip().strip('"'))
+    return ""
+
+
 def parse_time_range(range_dict: Dict) -> tuple:
     """Parse ES time range to ClickHouse time range."""
     time_field = "timestamp"
@@ -206,52 +272,75 @@ def relative_time_to_datetime(delta_str: str) -> datetime:
     return now - timedelta(hours=24)
 
 
+def resolve_time_value(val) -> str:
+    """Resolve an Elasticsearch range bound to a 'YYYY-MM-DD HH:MM:SS' string
+    ClickHouse can compare against a DateTime column. Handles the forms QPot's
+    consumers send:
+        "now"            -> current UTC time   (the attack map sends lte:"now")
+        "now-1h"/"now-5m"-> relative past
+        ISO "2026-..T..Z"-> normalized (drop the T separator / timezone)
+        epoch millis/secs-> converted
+    A previous version only special-cased gte:"now-..", so the attack map's
+    lte:"now" became the literal SQL `<= 'now'` and ClickHouse rejected it.
+    """
+    if isinstance(val, bool):
+        val = int(val)
+    if isinstance(val, (int, float)):
+        secs = val / 1000.0 if val > 1e11 else float(val)
+        return datetime.utcfromtimestamp(secs).strftime("%Y-%m-%d %H:%M:%S")
+    s = str(val).strip()
+    if s == "now":
+        return datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
+    if s.startswith("now-"):
+        return relative_time_to_datetime(s[4:]).strftime("%Y-%m-%d %H:%M:%S")
+    if s.startswith("now+"):
+        m = re.match(r'(\d+)([smhdw])', s[4:])
+        if m:
+            unit = {"s": "seconds", "m": "minutes", "h": "hours",
+                    "d": "days", "w": "weeks"}[m.group(2)]
+            return (datetime.utcnow() + timedelta(**{unit: int(m.group(1))})).strftime("%Y-%m-%d %H:%M:%S")
+        return datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
+    # ISO timestamp: normalize the 'T' separator and strip fractional/timezone.
+    s = s.replace("T", " ")
+    s = re.sub(r'(\.\d+)?(Z|[+-]\d{2}:?\d{2})?$', '', s).strip()
+    return s
+
+
 def es_query_to_ch_where(query: Dict) -> str:
     """Convert Elasticsearch query to ClickHouse WHERE clause."""
     conditions = []
     
     if not query:
         return "1=1"
-    
+
+    # Top-level query_string (some clients send it directly, not under bool).
+    if "query_string" in query:
+        cond = query_string_to_condition(query["query_string"].get("query", ""))
+        if cond:
+            conditions.append(cond)
+
     if "bool" in query:
         bool_query = query["bool"]
-        
+
         # MUST (AND)
         if "must" in bool_query:
             for must_item in bool_query["must"]:
                 if "query_string" in must_item:
-                    qs = must_item["query_string"].get("query", "")
-                    # Convert simple query string to LIKE conditions
-                    if " OR " in qs:
-                        or_conditions = []
-                        for term in qs.split(" OR "):
-                            term = term.strip()
-                            if ":" in term:
-                                field, value = term.split(":", 1)
-                                field = es_field_to_ch(field.strip())
-                                value = value.strip().strip('"')
-                                or_conditions.append(f"{field} = {ch_quote(value)}")
-                        if or_conditions:
-                            conditions.append(f"({' OR '.join(or_conditions)})")
-                    elif ":" in qs:
-                        field, value = qs.split(":", 1)
-                        field = es_field_to_ch(field.strip())
-                        value = value.strip().strip('"')
-                        conditions.append(f"{field} = {ch_quote(value)}")
-        
+                    cond = query_string_to_condition(must_item["query_string"].get("query", ""))
+                    if cond:
+                        conditions.append(cond)
+
         # FILTER
         if "filter" in bool_query:
             for filter_item in bool_query["filter"]:
                 if "range" in filter_item:
                     for field, range_cond in filter_item["range"].items():
                         ch_field = es_field_to_ch(field)
-                        if "gte" in range_cond:
-                            gte_val = range_cond["gte"]
-                            if isinstance(gte_val, str) and gte_val.startswith("now-"):
-                                gte_val = relative_time_to_datetime(gte_val[4:]).strftime("%Y-%m-%d %H:%M:%S")
-                            conditions.append(f"{ch_field} >= {ch_quote(gte_val)}")
-                        if "lte" in range_cond:
-                            conditions.append(f"{ch_field} <= {ch_quote(range_cond['lte'])}")
+                        for op, sql_op in (("gte", ">="), ("gt", ">"),
+                                           ("lte", "<="), ("lt", "<")):
+                            if op in range_cond:
+                                conditions.append(
+                                    f"{ch_field} {sql_op} {ch_quote(resolve_time_value(range_cond[op]))}")
 
                 if "terms" in filter_item:
                     for field, values in filter_item["terms"].items():
@@ -311,34 +400,69 @@ def build_ch_query(index: str, es_query: Dict, size: int = 10, aggs: Dict = None
 
 
 def ch_row_to_es_hit(row: tuple, columns: List[str]) -> Dict:
-    """Convert ClickHouse row to Elasticsearch hit format."""
-    source = {}
-    for i, col in enumerate(columns):
-        value = row[i]
-        # Reverse field mapping
-        for es_field, ch_field in FIELD_MAPPINGS.items():
-            if ch_field == col:
-                # Handle nested objects
-                if "." in es_field:
-                    parts = es_field.split(".")
-                    current = source
-                    for part in parts[:-1]:
-                        if part not in current:
-                            current[part] = {}
-                        current = current[part]
-                    current[parts[-1]] = value
-                else:
-                    source[es_field] = value
-                break
+    """Convert a ClickHouse `events` row into an Elasticsearch hit shaped the
+    way QPot's consumers (the T-Pot attack map, Kibana dashboards) expect.
+
+    The attack map reads `type` (honeypot name), `@timestamp`, `src_ip`,
+    `src_port`, `dest_port`, and a nested `geoip` object with
+    `country_name`/`country_code2`/`latitude`/`longitude`. QPot stores only a
+    country ISO code, so latitude/longitude are derived from a country centroid
+    (see geo.py) - approximate, country-level coordinates good enough to plot.
+    """
+    col = {columns[i]: row[i] for i in range(min(len(columns), len(row)))}
+    source: Dict[str, Any] = {}
+
+    ts = col.get("timestamp")
+    if ts is not None:
+        source["@timestamp"] = ts.isoformat() if hasattr(ts, "isoformat") else str(ts)
+
+    honeypot = col.get("honeypot")
+    if honeypot:
+        # T-Pot's `type` is the (capitalized) honeypot name.
+        source["type"] = str(honeypot).capitalize()
+        source["honeypot"] = honeypot
+
+    # Flat fields the dashboards/attack map consume, under both QPot and the
+    # common ES spellings.
+    if "source_ip" in col:
+        source["src_ip"] = col["source_ip"]
+        source["source_ip"] = col["source_ip"]
+    if "source_port" in col:
+        source["src_port"] = col["source_port"]
+    if "dest_port" in col:
+        source["dest_port"] = col["dest_port"]
+    for c in ("protocol", "event_type", "username", "password", "command",
+              "city", "asn", "technique_id", "technique_name", "tactic_id",
+              "tactic_name"):
+        if c in col and col[c] not in (None, ""):
+            source[c] = col[c]
+
+    # Geo: QPot stores country as an ISO-3166-1 alpha-2 code; build the nested
+    # geoip object the attack map plots from it.
+    cc = (col.get("country") or "")
+    geoip: Dict[str, Any] = {}
+    if cc and cc.upper() not in ("UNKNOWN", "--"):
+        geoip["country_code2"] = cc.upper()
+        rec = geo.lookup(cc)
+        if rec:
+            name, lat, lon = rec
+            geoip["country_name"] = name
+            geoip["latitude"] = lat
+            geoip["longitude"] = lon
+            geoip["location"] = {"lat": lat, "lon": lon}
         else:
-            source[col] = value
-    
+            geoip["country_name"] = cc.upper()
+    if col.get("city") and col["city"] != "unknown":
+        geoip["city_name"] = col["city"]
+    if geoip:
+        source["geoip"] = geoip
+
     return {
         "_index": "logstash-clickhouse",
         "_type": "_doc",
         "_id": f"ch_{hash(str(row))}",
         "_score": 1.0,
-        "_source": source
+        "_source": source,
     }
 
 
