@@ -940,6 +940,40 @@ func (ch *ClickHouse) InsertIOC(ctx context.Context, ioc *IOC) error {
 	)
 }
 
+// InsertIOCs persists a batch of IOCs in a single prepared batch. ClickHouse
+// creates a new data part per INSERT, so inserting a worker cycle's IOCs one at
+// a time causes "too many parts" pressure; batching is the documented best
+// practice. An empty slice is a no-op.
+func (ch *ClickHouse) InsertIOCs(ctx context.Context, iocs []*IOC) error {
+	if ch.conn == nil {
+		return fmt.Errorf("not connected")
+	}
+	if len(iocs) == 0 {
+		return nil
+	}
+	batch, err := ch.conn.PrepareBatch(ctx, "INSERT INTO iocs")
+	if err != nil {
+		return fmt.Errorf("failed to prepare IOC batch: %w", err)
+	}
+	for _, ioc := range iocs {
+		if err := batch.Append(
+			ioc.ID,
+			ioc.Type,
+			ioc.Value,
+			ioc.Honeypot,
+			ioc.SourceIP,
+			ioc.TechniqueID,
+			ioc.FirstSeen,
+			ioc.LastSeen,
+			ioc.Count,
+			ioc.Metadata,
+		); err != nil {
+			return fmt.Errorf("failed to append IOC: %w", err)
+		}
+	}
+	return batch.Send()
+}
+
 // GetIOCs retrieves IOCs with optional filtering.
 func (ch *ClickHouse) GetIOCs(ctx context.Context, filter IOCFilter) ([]*IOC, error) {
 	if ch.conn == nil {

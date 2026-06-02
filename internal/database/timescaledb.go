@@ -830,6 +830,41 @@ func (ts *TimescaleDB) InsertIOC(ctx context.Context, ioc *IOC) error {
 	return err
 }
 
+// InsertIOCs persists a batch of IOCs inside one transaction. Postgres handles
+// single-row inserts fine, but a single commit for the whole worker cycle is
+// cheaper than N implicit transactions and keeps the batch atomic. Each row
+// keeps the same ON CONFLICT upsert semantics as InsertIOC.
+func (ts *TimescaleDB) InsertIOCs(ctx context.Context, iocs []*IOC) error {
+	if ts.pool == nil {
+		return fmt.Errorf("not connected")
+	}
+	if len(iocs) == 0 {
+		return nil
+	}
+	tx, err := ts.pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("begin IOC batch: %w", err)
+	}
+	defer tx.Rollback(ctx) //nolint:errcheck // no-op after a successful commit
+	const q = `
+		INSERT INTO iocs (id, type, value, honeypot, source_ip, technique_id,
+		                  first_seen, last_seen, count, metadata)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+		ON CONFLICT (type, value, honeypot) DO UPDATE SET
+			last_seen    = EXCLUDED.last_seen,
+			count        = iocs.count + 1,
+			technique_id = COALESCE(EXCLUDED.technique_id, iocs.technique_id)`
+	for _, ioc := range iocs {
+		if _, err := tx.Exec(ctx, q,
+			ioc.ID, ioc.Type, ioc.Value, ioc.Honeypot, ioc.SourceIP,
+			ioc.TechniqueID, ioc.FirstSeen, ioc.LastSeen, ioc.Count, ioc.Metadata,
+		); err != nil {
+			return fmt.Errorf("append IOC: %w", err)
+		}
+	}
+	return tx.Commit(ctx)
+}
+
 // GetIOCs retrieves IOCs with optional filtering.
 func (ts *TimescaleDB) GetIOCs(ctx context.Context, filter IOCFilter) ([]*IOC, error) {
 	if ts.pool == nil {

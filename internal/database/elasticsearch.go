@@ -1059,6 +1059,49 @@ func (es *Elasticsearch) InsertIOC(ctx context.Context, ioc *IOC) error {
 	return nil
 }
 
+// InsertIOCs indexes a batch of IOCs via the Bulk API. The action carries each
+// IOC's ID as the document _id, preserving the same by-ID upsert behavior as
+// InsertIOC while collapsing the worker cycle into a single request.
+func (es *Elasticsearch) InsertIOCs(ctx context.Context, iocs []*IOC) error {
+	if len(iocs) == 0 {
+		return nil
+	}
+	var buf bytes.Buffer
+	for _, ioc := range iocs {
+		action := map[string]interface{}{
+			"index": map[string]string{"_index": "qpot-iocs", "_id": ioc.ID},
+		}
+		actionLine, _ := json.Marshal(action)
+		buf.Write(actionLine)
+		buf.WriteByte('\n')
+
+		doc := map[string]interface{}{
+			"id":           ioc.ID,
+			"type":         ioc.Type,
+			"value":        ioc.Value,
+			"honeypot":     ioc.Honeypot,
+			"source_ip":    ioc.SourceIP,
+			"technique_id": ioc.TechniqueID,
+			"first_seen":   ioc.FirstSeen.UTC().Format(time.RFC3339Nano),
+			"last_seen":    ioc.LastSeen.UTC().Format(time.RFC3339Nano),
+			"count":        ioc.Count,
+			"metadata":     ioc.Metadata,
+		}
+		docLine, _ := json.Marshal(doc)
+		buf.Write(docLine)
+		buf.WriteByte('\n')
+	}
+
+	_, status, err := es.esRequest(ctx, http.MethodPost, "/_bulk", buf.Bytes())
+	if err != nil {
+		return fmt.Errorf("bulk insert iocs: %w", err)
+	}
+	if status >= 300 {
+		return fmt.Errorf("bulk insert iocs returned status %d", status)
+	}
+	return nil
+}
+
 // GetIOCs retrieves IOCs with optional filtering.
 func (es *Elasticsearch) GetIOCs(ctx context.Context, filter IOCFilter) ([]*IOC, error) {
 	must := make([]interface{}, 0)

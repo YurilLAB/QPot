@@ -52,6 +52,7 @@ func (m *mockDB) WithPool(pool *Pool) Database                      { return m }
 func (m *mockDB) GetPoolStats() PoolStats                           { return PoolStats{} }
 func (m *mockDB) TagEvent(ctx context.Context, e *Event) error      { return nil }
 func (m *mockDB) InsertIOC(ctx context.Context, ioc *IOC) error     { return nil }
+func (m *mockDB) InsertIOCs(ctx context.Context, iocs []*IOC) error { return nil }
 func (m *mockDB) GetIOCs(ctx context.Context, f IOCFilter) ([]*IOC, error) {
 	return nil, nil
 }

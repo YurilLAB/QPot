@@ -22,6 +22,12 @@ func (f *fakeDB) InsertIOC(ctx context.Context, ioc *database.IOC) error {
 	f.iocs = append(f.iocs, ioc)
 	return nil
 }
+func (f *fakeDB) InsertIOCs(ctx context.Context, iocs []*database.IOC) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.iocs = append(f.iocs, iocs...)
+	return nil
+}
 func (f *fakeDB) insertedIOCs() []*database.IOC {
 	f.mu.Lock()
 	defer f.mu.Unlock()

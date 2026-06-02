@@ -46,6 +46,7 @@ func (stubDB) WithPool(*database.Pool) database.Database                        
 func (stubDB) GetPoolStats() database.PoolStats                                  { return database.PoolStats{} }
 func (stubDB) TagEvent(context.Context, *database.Event) error                   { return nil }
 func (stubDB) InsertIOC(context.Context, *database.IOC) error                    { return nil }
+func (stubDB) InsertIOCs(context.Context, []*database.IOC) error                 { return nil }
 func (stubDB) GetIOCs(context.Context, database.IOCFilter) ([]*database.IOC, error) {
 	return nil, nil
 }

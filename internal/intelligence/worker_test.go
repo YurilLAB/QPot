@@ -59,6 +59,10 @@ func (f *fakeDB) InsertIOC(ctx context.Context, ioc *database.IOC) error {
 	f.iocCount.Add(1)
 	return nil
 }
+func (f *fakeDB) InsertIOCs(ctx context.Context, iocs []*database.IOC) error {
+	f.iocCount.Add(int64(len(iocs)))
+	return nil
+}
 func (f *fakeDB) GetIOCs(ctx context.Context, filter database.IOCFilter) ([]*database.IOC, error) {
 	return nil, nil
 }

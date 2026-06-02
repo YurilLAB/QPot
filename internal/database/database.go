@@ -142,6 +142,11 @@ type Database interface {
 	// Intelligence methods
 	TagEvent(ctx context.Context, event *Event) error
 	InsertIOC(ctx context.Context, ioc *IOC) error
+	// InsertIOCs persists a batch of IOCs in one operation. Backends that
+	// dislike single-row inserts (ClickHouse creates a part per INSERT) use a
+	// real batch; others may loop. Worker runs produce many IOCs per cycle, so
+	// this avoids N round-trips and ClickHouse merge pressure.
+	InsertIOCs(ctx context.Context, iocs []*IOC) error
 	GetIOCs(ctx context.Context, filter IOCFilter) ([]*IOC, error)
 	UpsertTTPSession(ctx context.Context, session *TTPSession) error
 	GetTTPSessions(ctx context.Context, limit int) ([]*TTPSession, error)

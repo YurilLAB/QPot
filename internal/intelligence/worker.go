@@ -101,10 +101,13 @@ func (w *Worker) runOnce(ctx context.Context) int {
 		}
 	}
 
-	for _, ioc := range iocs {
-		if err := w.db.InsertIOC(ctx, ioc); err != nil {
-			slog.Warn("Intelligence worker: failed to insert IOC", "error", err,
-				"type", ioc.Type, "value", ioc.Value)
+	// Persist all IOCs from this cycle in one batch. ClickHouse (the default
+	// backend) creates a data part per INSERT, so a per-IOC loop here caused
+	// avoidable merge pressure; InsertIOCs collapses it into a single batch.
+	if len(iocs) > 0 {
+		if err := w.db.InsertIOCs(ctx, iocs); err != nil {
+			slog.Warn("Intelligence worker: failed to insert IOC batch", "error", err,
+				"count", len(iocs))
 		}
 	}
 
