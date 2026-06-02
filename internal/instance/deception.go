@@ -24,6 +24,7 @@
 package instance
 
 import (
+	"fmt"
 	"hash/fnv"
 )
 
@@ -130,4 +131,23 @@ func profileForSeed(seed string) distroProfile {
 // index keeps the hostname uncorrelated with the distro choice.
 func hostnameForSeed(seed string) string {
 	return realisticHostnames[seededIndex("host:"+seed, len(realisticHostnames))]
+}
+
+// icsStationPrefixes are believable industrial device/station tag prefixes used
+// to build a Conpot sensor_id that looks like a real PLC/RTU/SCADA asset rather
+// than a honeypot. Real ICS assets carry tags like "PLC-01", "RTU-A", "S7-300".
+var icsStationPrefixes = []string{
+	"PLC", "RTU", "HMI", "S7-300", "S7-1200", "MTU", "IED", "DCS", "SCADA",
+}
+
+// conpotSensorIDForSeed builds a per-instance Conpot sensor_id that (a) does NOT
+// contain "qpot"/"conpot"/"honeypot" - the stock value "qpot-conpot" literally
+// announced both the platform and that it is a honeypot - and (b) is unique per
+// deployment so two QPot instances do not share a SCADA-sensor signature. The
+// result looks like a plausible industrial asset tag, e.g. "RTU-7a3f".
+func conpotSensorIDForSeed(seed string) string {
+	prefix := icsStationPrefixes[seededIndex("conpot-prefix:"+seed, len(icsStationPrefixes))]
+	h := fnv.New32a()
+	_, _ = h.Write([]byte("conpot-id:" + seed))
+	return fmt.Sprintf("%s-%04x", prefix, h.Sum32()&0xffff)
 }

@@ -840,8 +840,16 @@ logfile = log/cowrie.json
 
 // generateConpotConfig generates TPOT-compatible Conpot config
 func (g *ComposeGenerator) generateConpotConfig(hp config.HoneypotConfig) string {
+	seed := g.Config.QPotID
+	if seed == "" {
+		seed = g.Config.InstanceName
+	}
+	// A per-instance, non-self-identifying sensor_id. The stock "qpot-conpot"
+	// both announced the platform and flagged the box as a honeypot; this looks
+	// like an ordinary industrial asset tag and is unique per deployment.
+	sensorID := sanitizeConfigValue(conpotSensorIDForSeed(seed))
 	return `[common]
- sensor_id = qpot-conpot
+ sensor_id = ` + sensorID + `
  device = default
 
 [session]
