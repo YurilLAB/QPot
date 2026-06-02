@@ -202,7 +202,7 @@ jobs:
         with:
           fetch-depth: 0   # full history so committed-then-removed secrets are caught
       - name: Run gitleaks
-        uses: gitleaks/gitleaks-action@v2
+        uses: gitleaks/gitleaks-action@v3
         env:
           GITLEAKS_ENABLE_UPLOAD_ARTIFACT: "false"
           # GITLEAKS_LICENSE is only needed for org accounts; personal/public repos run free.
