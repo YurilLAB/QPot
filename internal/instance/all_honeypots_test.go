@@ -50,6 +50,9 @@ func TestAllHoneypotsComposeTogether(t *testing.T) {
 			// Linux bridge names and container names must be unique.
 			assertUnique(t, "bridge name", regexp.MustCompile(`com\.docker\.network\.bridge\.name:\s+(\S+)`), out)
 			assertUnique(t, "container name", regexp.MustCompile(`container_name:\s+(\S+)`), out)
+			// Network /24 subnets must be unique, or docker rejects the second
+			// with "Pool overlaps with other one on this address space".
+			assertUnique(t, "subnet", regexp.MustCompile(`-\s+subnet:\s+(\S+)`), out)
 
 			// Every enabled honeypot must resolve to a real image.
 			imgRe := regexp.MustCompile(`image:\s+(\S+)`)

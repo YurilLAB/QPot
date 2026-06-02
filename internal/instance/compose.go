@@ -125,9 +125,10 @@ func macForSeed(instanceName, honeypot string) string {
 		byte(v>>32), byte(v>>24), byte(v>>16), byte(v>>8), byte(v))
 }
 
-// subnetForNetwork computes a unique, stable /24 subnet for a Docker bridge
-// network given an (instanceName, networkName) pair. The result always falls
-// in the 172.20.x.y/24 range (RFC 1918) which Docker uses by default.
+// subnetForNetwork computes a stable /24 subnet for a Docker bridge network
+// given an (instanceName, networkName) pair. The result always falls in the
+// 172.20.x.0/24 .. 172.31.x.0/24 range (RFC 1918). This is only the starting
+// point; buildSubnetMap resolves any collisions deterministically.
 func subnetForNetwork(instanceName, networkName string) string {
 	h := fnv.New32a()
 	_, _ = fmt.Fprintf(h, "%s:%s", instanceName, networkName)
@@ -135,6 +136,51 @@ func subnetForNetwork(instanceName, networkName string) string {
 	x := 20 + int((v>>8)%12) // 20–31
 	y := int(v % 256)        // 0–255
 	return fmt.Sprintf("172.%d.%d.0/24", x, y)
+}
+
+// nextSubnet returns the next /24 after the given 172.x.y.0/24, advancing y then
+// x and wrapping within the 172.20-31 range. Used to probe past a collision.
+func nextSubnet(s string) string {
+	var x, y int
+	if _, err := fmt.Sscanf(s, "172.%d.%d.0/24", &x, &y); err != nil {
+		return "172.20.0.0/24"
+	}
+	y++
+	if y > 255 {
+		y = 0
+		x++
+		if x > 31 {
+			x = 20
+		}
+	}
+	return fmt.Sprintf("172.%d.%d.0/24", x, y)
+}
+
+// buildSubnetMap assigns a unique /24 to every enabled honeypot network.
+// subnetForNetwork alone is a pure hash over ~3072 possible /24s, so a handful
+// of honeypots eventually collide and `docker compose up` fails with "Pool
+// overlaps with other one". Resolve deterministically: process honeypots in
+// sorted order, start at the hashed subnet, and probe to the next free /24.
+func (g *ComposeGenerator) buildSubnetMap() map[string]string {
+	names := make([]string, 0, len(g.Config.Honeypots))
+	for name, hp := range g.Config.Honeypots {
+		if hp.Enabled {
+			names = append(names, name)
+		}
+	}
+	sort.Strings(names)
+
+	used := map[string]bool{}
+	assign := make(map[string]string)
+	for _, name := range names {
+		sub := subnetForNetwork(g.Config.InstanceName, name)
+		for used[sub] {
+			sub = nextSubnet(sub)
+		}
+		used[sub] = true
+		assign[name] = sub
+	}
+	return assign
 }
 
 // Generate generates a Docker Compose file
@@ -156,7 +202,7 @@ networks:
 {{if $.Config.Security.NetworkIsolation.RandomizeMAC}}
     ipam:
       config:
-        - subnet: {{subnetFor $.Config.InstanceName $name}}
+        - subnet: {{netSubnet $name}}
 {{end}}{{end}}{{end}}
 
 volumes:
@@ -448,8 +494,10 @@ services:
 {{end}}
 `
 
-	// Pre-assign collision-free host ports for the whole stack before rendering.
+	// Pre-assign collision-free host ports and subnets for the whole stack
+	// before rendering, so no two honeypots clash on a host port or a /24.
 	hostPortMap := g.buildHostPortMap()
+	subnetMap := g.buildSubnetMap()
 
 	funcMap := template.FuncMap{
 		"dict": func(values ...interface{}) (map[string]interface{}, error) {
@@ -489,6 +537,14 @@ services:
 			}
 			// Fall back to the raw hash if a pair was somehow not pre-assigned.
 			return g.Config.AllocatePortFor(honeypot, port)
+		},
+		// netSubnet resolves the collision-free /24 assigned to a honeypot's
+		// network.
+		"netSubnet": func(honeypot string) string {
+			if s, ok := subnetMap[honeypot]; ok {
+				return s
+			}
+			return subnetForNetwork(g.Config.InstanceName, honeypot)
 		},
 		// mergedTmpfs combines the read-only-root scratch mounts with the
 		// per-honeypot profile's tmpfs, deduplicated by target path. A profile
