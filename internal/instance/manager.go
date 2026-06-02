@@ -25,10 +25,11 @@ import (
 // Field tags are matched case-insensitively, so they cover docker compose v2's
 // capitalised keys ("Service", "State", "Health").
 type composePSEntry struct {
-	Service string `json:"service"`
-	Name    string `json:"name"`
-	State   string `json:"state"`
-	Health  string `json:"health"`
+	Service  string `json:"service"`
+	Name     string `json:"name"`
+	State    string `json:"state"`
+	Health   string `json:"health"`
+	ExitCode int    `json:"exitcode"`
 }
 
 // parseComposePS parses `docker compose ps --format json` output into a map
@@ -250,6 +251,9 @@ func (m *Manager) Start(ctx context.Context, detach bool) error {
 	if detach {
 		// Reap the process in the background to avoid zombies.
 		go func() { _ = cmd.Wait() }()
+		// Watch the honeypots settle and log which started / which failed (and
+		// why). Non-fatal: a single honeypot failing must not abort the instance.
+		m.verifyStartup(ctx, 90*time.Second)
 		return nil
 	}
 
@@ -258,10 +262,10 @@ func (m *Manager) Start(ctx context.Context, detach bool) error {
 	waitDone := make(chan error, 1)
 	go func() { waitDone <- cmd.Wait() }()
 
-	// Wait for startup
-	if err := m.waitForHealthy(ctx); err != nil {
-		return fmt.Errorf("services failed to become healthy: %w", err)
-	}
+	// Wait for the honeypots to settle and report per-honeypot startup status.
+	// Failures are logged (with the reason) rather than aborting: the collector,
+	// database, web UI and the honeypots that did come up keep running.
+	m.verifyStartup(ctx, 2*time.Minute)
 
 	// Block until the compose process exits or context is cancelled.
 	select {
@@ -468,65 +472,6 @@ func (m *Manager) GetLogs(ctx context.Context, honeypot string, follow bool, tai
 	}()
 
 	return logs, nil
-}
-
-// waitForHealthy waits for services to become healthy
-func (m *Manager) waitForHealthy(ctx context.Context) error {
-	timeout := time.After(2 * time.Minute)
-	ticker := time.NewTicker(2 * time.Second)
-	defer ticker.Stop()
-
-	for {
-		select {
-		case <-timeout:
-			return fmt.Errorf("timeout waiting for services")
-		case <-ctx.Done():
-			return ctx.Err()
-		case <-ticker.C:
-			if m.isHealthy(ctx) {
-				return nil
-			}
-		}
-	}
-}
-
-// isHealthy checks if all services are healthy.
-// Returns false when no containers are running, when any container is
-// unhealthy/exited, or when containers are still starting up.
-func (m *Manager) isHealthy(ctx context.Context) bool {
-	composeFile := m.config.GetDockerComposePath()
-	cmd := exec.CommandContext(ctx, "docker", "compose", "-f", composeFile, "ps", "-a", "--format", "table {{.Name}}\t{{.Status}}")
-	cmd.Dir = m.config.DataPath
-
-	output, err := cmd.Output()
-	if err != nil {
-		return false
-	}
-
-	lines := strings.Split(strings.TrimSpace(string(output)), "\n")
-	// The first line is the header; if there are no service rows the stack is
-	// not running and we must not report healthy.
-	serviceRows := 0
-	for _, line := range lines {
-		trimmed := strings.TrimSpace(line)
-		if trimmed == "" {
-			continue
-		}
-		// Skip the header row produced by the "table" format.
-		if strings.HasPrefix(trimmed, "NAME") {
-			continue
-		}
-		serviceRows++
-		// Any of these states means we are not yet fully healthy.
-		if strings.Contains(line, "unhealthy") ||
-			strings.Contains(line, "Exit") ||
-			strings.Contains(line, "starting") ||
-			strings.Contains(line, "health: starting") {
-			return false
-		}
-	}
-
-	return serviceRows > 0
 }
 
 // pullImages pulls Docker images for the instance
