@@ -46,6 +46,11 @@ type Server struct {
 	// the /api/yuril/health endpoint and `qpot yuril status` can expose
 	// its activity counters. nil when Yuril forwarding is disabled.
 	forwarder *yuril.Forwarder
+
+	// lastAlert is when the alert loop last fired (webhook/response hooks),
+	// used to debounce alerting within Alerts.Cooldown. Touched only by the
+	// single alertLoop goroutine.
+	lastAlert time.Time
 }
 
 // New creates a new web server.
@@ -295,24 +300,8 @@ func (s *Server) alertLoop(ctx context.Context) {
 				continue
 			}
 
-			triggered := false
-			if len(s.config.Alerts.Honeypots) == 0 {
-				// Alert on total events across all honeypots.
-				if int(stats.TotalEvents) >= s.config.Alerts.Threshold {
-					triggered = true
-				}
-			} else {
-				// Alert only when a configured honeypot exceeds the threshold.
-				for _, hc := range stats.TopHoneypots {
-					for _, alertHP := range s.config.Alerts.Honeypots {
-						if hc.Honeypot == alertHP && int(hc.Count) >= s.config.Alerts.Threshold {
-							triggered = true
-						}
-					}
-				}
-			}
-
-			if triggered {
+			if s.alertThresholdExceeded(stats) && !s.alertCoolingDown(time.Now()) {
+				s.lastAlert = time.Now()
 				// Only POST when a URL is configured - the loop may be running
 				// purely to drive response hooks.
 				if s.config.Alerts.WebhookURL != "" {
@@ -324,6 +313,33 @@ func (s *Server) alertLoop(ctx context.Context) {
 			}
 		}
 	}
+}
+
+// alertThresholdExceeded reports whether the last-minute stats cross the
+// configured events-per-minute threshold, honoring the optional honeypot
+// allow-list (empty = alert on total across all honeypots).
+func (s *Server) alertThresholdExceeded(stats *database.Stats) bool {
+	if len(s.config.Alerts.Honeypots) == 0 {
+		return int(stats.TotalEvents) >= s.config.Alerts.Threshold
+	}
+	for _, hc := range stats.TopHoneypots {
+		for _, alertHP := range s.config.Alerts.Honeypots {
+			if hc.Honeypot == alertHP && int(hc.Count) >= s.config.Alerts.Threshold {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// alertCoolingDown reports whether a prior alert fired within Alerts.Cooldown,
+// debouncing sustained attacks so the webhook/response hooks don't re-fire every
+// minute. A zero cooldown disables debouncing.
+func (s *Server) alertCoolingDown(now time.Time) bool {
+	if s.config.Alerts.Cooldown <= 0 || s.lastAlert.IsZero() {
+		return false
+	}
+	return now.Sub(s.lastAlert) < s.config.Alerts.Cooldown
 }
 
 // capWriter captures up to max bytes of a hook's output for logging and

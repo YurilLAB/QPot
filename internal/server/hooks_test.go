@@ -75,6 +75,62 @@ func TestAlertingConfigured(t *testing.T) {
 	}
 }
 
+// TestAlertThresholdExceeded covers the trigger decision: total-events mode and
+// the per-honeypot allow-list.
+func TestAlertThresholdExceeded(t *testing.T) {
+	s := hookTestServer(nil)
+	s.config.Alerts.Threshold = 10
+
+	// Total mode (no allow-list).
+	if s.alertThresholdExceeded(&database.Stats{TotalEvents: 9}) {
+		t.Error("9 < threshold 10 should not trigger")
+	}
+	if !s.alertThresholdExceeded(&database.Stats{TotalEvents: 10}) {
+		t.Error("10 >= threshold 10 should trigger")
+	}
+
+	// Allow-list mode: only the named honeypot's count matters.
+	s.config.Alerts.Honeypots = []string{"cowrie"}
+	stats := &database.Stats{
+		TotalEvents:  100,
+		TopHoneypots: []database.HoneypotCount{{Honeypot: "dionaea", Count: 100}},
+	}
+	if s.alertThresholdExceeded(stats) {
+		t.Error("dionaea over threshold must not trigger when only cowrie is watched")
+	}
+	stats.TopHoneypots = append(stats.TopHoneypots, database.HoneypotCount{Honeypot: "cowrie", Count: 11})
+	if !s.alertThresholdExceeded(stats) {
+		t.Error("watched honeypot cowrie over threshold should trigger")
+	}
+}
+
+// TestAlertCoolingDown verifies alert debouncing: after firing, further
+// triggers are suppressed until the cooldown elapses; a zero cooldown disables
+// it.
+func TestAlertCoolingDown(t *testing.T) {
+	s := hookTestServer(nil)
+	s.config.Alerts.Cooldown = 5 * time.Minute
+	now := time.Now()
+
+	// No prior alert -> not cooling down.
+	if s.alertCoolingDown(now) {
+		t.Error("should not be cooling down before any alert fired")
+	}
+	s.lastAlert = now
+	if !s.alertCoolingDown(now.Add(1 * time.Minute)) {
+		t.Error("within the cooldown window, should be cooling down")
+	}
+	if s.alertCoolingDown(now.Add(6 * time.Minute)) {
+		t.Error("after the cooldown elapses, should fire again")
+	}
+
+	// Zero cooldown disables debouncing entirely.
+	s.config.Alerts.Cooldown = 0
+	if s.alertCoolingDown(now.Add(1 * time.Second)) {
+		t.Error("zero cooldown must never suppress alerts")
+	}
+}
+
 // TestResponseEnv verifies the stable env-var contract hooks depend on,
 // including the trigger-derived values.
 func TestResponseEnv(t *testing.T) {
