@@ -52,6 +52,10 @@
 | IOC Tracking | No | Yes - Automated IOC extraction & dedup |
 | TTP Session Analysis | No | Yes - Behavioral campaign fingerprinting |
 | Alert Webhooks | No | Yes - Slack/Discord/generic thresholds |
+| Attack-Response Hooks | No | Yes - shell hooks on threshold (firewall/SOAR), debounced |
+| Kibana Dashboards | Yes (ELK) | Yes - over ClickHouse, **auto-provisioned** (zero setup) |
+| Attack Map | Yes | Yes - over ClickHouse (country-centroid geo) |
+| Suricata IDS Ingest | Yes (Logstash→ES) | Yes - Vector→ClickHouse (`collector.ingest_suricata`) |
 | IOC Export | No | Yes - Attacker blocklist API |
 | GeoIP Enrichment | No | Yes - Optional MaxMind via Vector (`collector.geoip_db_path`) |
 | Startup Diagnostics | No | Yes - Per-honeypot start/fail report with the failure reason |
@@ -80,13 +84,29 @@ QPot omits them; the broad protocol coverage they provide is largely covered by
 
 **Analysis / sensor stack.** T-Pot bundles host-level sensors and a visualization
 stack (Suricata, p0f, Fatt, Spiderfoot, Ewsposter, the ELK stack, the attack
-map, nginx). QPot replaces these with its own integrated pipeline rather than
-running them as separate honeypot containers: **Vector** for collection,
+map, nginx). QPot ships its own integrated pipeline — **Vector** for collection,
 **ClickHouse** for storage, an **in-process Web UI** (served by the `qpot`
-binary — there is no separate web container), built-in **MITRE ATT&CK**
-classification and **IOC/TTP** extraction, and **Yuril Security Suite**
-integration. The vendored upstream sources for the omitted components remain
-under `docker/` for reference.
+binary), built-in **MITRE ATT&CK** classification, **IOC/TTP** extraction, and
+**Yuril Security Suite** integration — *and* keeps the native T-Pot experience
+working on top of it so users lose nothing:
+
+- **Kibana** runs against QPot's ClickHouse via the bundled **ClickHouse-Kibana
+  connector** (`docker/clickhouse-kibana/`), which speaks the Elasticsearch API
+  Kibana needs (version, `_field_caps`, `_mapping`, `_search` with
+  aggregations, and a writable `.kibana` saved-object store). It **auto-seeds a
+  data view and a "QPot Overview" dashboard on first boot**, so Kibana opens
+  straight into attack dashboards with no setup.
+- **Attack map** works against the same connector (`docker-compose.attack-map.yml`),
+  with country-centroid geo so events plot from QPot's country data.
+- **Suricata** network-IDS alerts are ingested by Vector into the same events
+  store (`collector.ingest_suricata`, default on), so they appear in the
+  dashboards / attack map alongside honeypot hits.
+- **nginx** portal, **Spiderfoot**, **CyberChef** and **Elasticvue** are wired
+  through the QPot nginx config (`docker/nginx/dist/conf/qpot.conf`).
+
+The connector covers Discover, index patterns and aggregation visualizations;
+it is not a full Elasticsearch (ES|QL/ML are out of scope). The vendored
+upstream sources remain under `docker/` for reference.
 
 ### Key Advantages
 
@@ -468,10 +488,17 @@ QPot automatically extracts and deduplicates indicators of compromise from every
 - **IP addresses** — public source IPs (RFC1918/loopback filtered)
 - **Credential pairs** — username:password combinations attempted
 - **URLs** — download URLs from `wget`/`curl` commands
-- **File hashes** — MD5, SHA1, SHA256 from captured payloads
+- **File hashes** — MD5, SHA1, SHA256, **SHA512** from captured payloads
+- **Crypto wallets** — Bitcoin (base58check-validated) and Ethereum addresses
+  dropped by coinminers/ransomware
 - **Commands** — shell commands executed in honeypot sessions
 - **User agents** — HTTP client fingerprints
 - **Domains** — extracted from URLs in commands
+
+Indicators are **refanged before extraction** — defanged notations common in
+threat-intel and attacker notes (`hxxp://`, `1.2.3[.]4`, `evil[dot]com`,
+`user[at]host`) are normalized first, so IOCs embedded in dropped scripts or
+pasted C2 are still captured. The stored command IOC keeps the original text.
 
 ### TTP Session Tracking
 
@@ -508,19 +535,49 @@ intelligence:
 
 ---
 
-## Alert Webhooks
+## Alerting & Attack-Response Hooks
 
-QPot can fire webhook alerts to Slack, Discord, or any HTTP endpoint when attack volume crosses a threshold.
+QPot can fire webhook alerts to Slack, Discord, or any HTTP endpoint when attack
+volume crosses a threshold, and/or run local **attack-response hooks** (any
+shell command — firewall rule, lockdown script, SOAR runbook).
 
 ```yaml
 alerts:
   enabled: true
-  webhook_url: https://hooks.slack.com/services/...
-  threshold: 100       # Events per minute to trigger alert
+  webhook_url: https://hooks.slack.com/services/...   # optional
+  threshold: 100       # Events per minute to trigger
+  cooldown: 5m         # Debounce: at most one alert per window (0 = every minute)
   honeypots:           # Leave empty to alert on all
     - cowrie
     - dionaea
+
+# Run user-defined commands when the threshold trips. Fires from the same loop
+# as webhooks and works with no webhook configured.
+response:
+  enabled: true
+  on_attack_detected:
+    - name: block-top-attacker
+      command: 'iptables -A INPUT -s "$QPOT_TOP_SOURCE_IP" -j DROP'
+      timeout: 10s     # per-action (default 10s, hard cap 5m)
 ```
+
+**Debounce (`cooldown`)** prevents alert fatigue: during a sustained attack the
+webhook/hooks fire at most once per window instead of every minute.
+
+Hooks receive a stable set of environment variables describing the trigger
+(passed as env, never interpolated into the command, so attacker-influenced
+values can't inject shell):
+
+| Variable | Meaning |
+|----------|---------|
+| `QPOT_ID`, `QPOT_INSTANCE` | instance identity |
+| `QPOT_TOTAL_EVENTS`, `QPOT_UNIQUE_IPS` | counts in the trigger window |
+| `QPOT_THRESHOLD` | the configured threshold that tripped |
+| `QPOT_TIMESTAMP` | RFC3339 trigger time (matches the webhook) |
+| `QPOT_TOP_SOURCE_IP`, `QPOT_TOP_HONEYPOT` | most active attacker / most-hit honeypot |
+
+Each hook runs under its own timeout and process group (so a forking hook is
+killed cleanly at the deadline), with output captured and bounded in the log.
 
 ---
 
