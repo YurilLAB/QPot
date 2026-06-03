@@ -129,7 +129,16 @@ Optional ClickHouse backend provides columnar storage for fast analytics, while 
 Every QPot deployment receives a unique QPot ID (`qp_*`) for multi-instance management, threat correlation, and integration with YurilTracking.
 
 **Stealth Operations**  
-Built-in anti-fingerprinting features including fake hostnames, randomized response delays, and MAC address randomization make honeypots harder to detect.
+Built-in anti-fingerprinting makes honeypots slower and harder to detect, so an
+attacker stays engaged longer and yields more intelligence. Each instance derives
+a unique, internally-consistent system identity from its QPot ID — per-instance
+distro/SSH banner/kernel, one of 22 credential personas (UserDB-enforced), and a
+matching fake filesystem (`/etc/passwd`, `os-release`, `/proc/version`,
+`/proc/cpuinfo`, `/etc/timezone`, …) so post-login recon tells one coherent
+story. A realistic session idle timeout, randomized response delays, stable SSH
+host keys, and MAC address randomization round it out. See
+[Deception & Anti-Fingerprinting](#deception--anti-fingerprinting)
+for the full mechanism and honest limitations.
 
 ---
 
