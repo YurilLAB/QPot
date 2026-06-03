@@ -405,8 +405,17 @@ func (rm *RetentionManager) RestoreFromArchive(ctx context.Context, policyID str
 		return fmt.Errorf("S3 archive not configured")
 	}
 
-	s3Client := rm.s3Clients[policyID]
+	// Guard the S3 client and config exactly like archiveToS3 does: a policy can
+	// declare an S3 archive whose client was never registered (init failed) or
+	// whose S3 sub-config is nil, and dereferencing either here would panic.
+	s3Client, ok := rm.s3Clients[policyID]
+	if !ok || s3Client == nil {
+		return fmt.Errorf("S3 client not initialized for policy %s", policyID)
+	}
 	cfg := policy.ArchiveConfig.S3
+	if cfg == nil {
+		return fmt.Errorf("S3 config is nil for policy %s", policyID)
+	}
 
 	// Download from S3
 	getInput := &s3.GetObjectInput{

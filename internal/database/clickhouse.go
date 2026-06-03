@@ -364,6 +364,9 @@ func (ch *ClickHouse) GetEvents(ctx context.Context, filter EventFilter) ([]*Eve
 		event.Classified = classified != 0
 		events = append(events, &event)
 	}
+	if err := rows.Err(); err != nil { // surface mid-stream row errors (partial result)
+		return nil, err
+	}
 
 	return events, nil
 }
@@ -501,6 +504,9 @@ func (ch *ClickHouse) GetTopAttackers(ctx context.Context, limit int, since time
 		a.Usernames = usernames
 		a.Passwords = passwords
 		attackers = append(attackers, &a)
+	}
+	if err := rows.Err(); err != nil { // surface mid-stream row errors (partial result)
+		return nil, err
 	}
 
 	return attackers, nil
@@ -663,6 +669,9 @@ func (ch *ClickHouse) ExportData(ctx context.Context, start, end time.Time, w io
 		if _, err := w.Write([]byte(line)); err != nil {
 			return fmt.Errorf("failed to write row: %w", err)
 		}
+	}
+	if err := rows.Err(); err != nil { // surface mid-stream row errors (partial result)
+		return err
 	}
 
 	return nil
@@ -1027,6 +1036,9 @@ func (ch *ClickHouse) GetIOCs(ctx context.Context, filter IOCFilter) ([]*IOC, er
 		ioc.Count = int64(count)
 		iocs = append(iocs, &ioc)
 	}
+	if err := rows.Err(); err != nil { // surface mid-stream row errors (partial result)
+		return nil, err
+	}
 	return iocs, nil
 }
 
@@ -1096,6 +1108,9 @@ func (ch *ClickHouse) GetTTPSessions(ctx context.Context, limit int) ([]*TTPSess
 		s.EventCount = int64(eventCount)
 		sessions = append(sessions, &s)
 	}
+	if err := rows.Err(); err != nil { // surface mid-stream row errors (partial result)
+		return nil, err
+	}
 	return sessions, nil
 }
 
@@ -1150,6 +1165,9 @@ func (ch *ClickHouse) GetUnclassifiedEvents(ctx context.Context, limit int) ([]*
 		event.Classified = classified != 0
 		event.Payload = []byte(payloadStr)
 		events = append(events, &event)
+	}
+	if err := rows.Err(); err != nil { // surface mid-stream row errors (partial result)
+		return nil, err
 	}
 	return events, nil
 }

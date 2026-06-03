@@ -295,3 +295,47 @@ func TestAcquireWithRetryFailsWhenFull(t *testing.T) {
 	}
 	held.Release()
 }
+
+// TestPoolNoUseAfterCloseAfterCleanup is the regression guard for the
+// use-after-close bug: cleanup() closed an idle-expired connection that was
+// still sitting in the `available` channel, and the next Acquire() popped that
+// closed connection and handed it to a caller. cleanup must CLAIM the connection
+// (inUse CAS) before closing it, and Acquire must DROP a popped connection whose
+// CAS fails - so a freshly acquired connection is never one cleanup just closed.
+func TestPoolNoUseAfterCloseAfterCleanup(t *testing.T) {
+	cfg := &PoolConfig{
+		MaxOpenConns:        4,
+		MaxIdleConns:        0, // no auto-replenish in cleanup
+		ConnMaxLifetime:     time.Hour,
+		ConnMaxIdleTime:     time.Millisecond, // expire idle conns fast
+		HealthCheckInterval: time.Hour,        // no background cleanup; we call it
+		AcquireTimeout:      2 * time.Second,
+	}
+	p, err := NewPool(cfg, mockFactory)
+	if err != nil {
+		t.Fatalf("NewPool: %v", err)
+	}
+	t.Cleanup(func() { p.Close() })
+	ctx := context.Background()
+
+	// Acquire then release so exactly one idle connection sits in `available`.
+	c1, err := p.Acquire(ctx)
+	if err != nil {
+		t.Fatalf("acquire1: %v", err)
+	}
+	c1.Release()
+
+	time.Sleep(10 * time.Millisecond) // exceed ConnMaxIdleTime
+	p.cleanup()                       // claims + closes the idle conn (still in available)
+	time.Sleep(10 * time.Millisecond) // let the async Close() complete
+
+	// The next Acquire must NOT return the connection cleanup just closed.
+	c2, err := p.Acquire(ctx)
+	if err != nil {
+		t.Fatalf("acquire2: %v", err)
+	}
+	defer c2.Release()
+	if m, ok := c2.Database.(*mockDB); ok && m.closed.Load() {
+		t.Fatal("Acquire returned a CLOSED connection after cleanup (use-after-close)")
+	}
+}

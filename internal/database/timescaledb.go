@@ -363,6 +363,9 @@ func (ts *TimescaleDB) GetEvents(ctx context.Context, filter EventFilter) ([]*Ev
 		}
 		events = append(events, &event)
 	}
+	if err := rows.Err(); err != nil { // surface mid-stream row errors (partial result)
+		return nil, err
+	}
 	return events, nil
 }
 
@@ -492,6 +495,9 @@ func (ts *TimescaleDB) GetTopAttackers(ctx context.Context, limit int, since tim
 			return nil, err
 		}
 		attackers = append(attackers, &a)
+	}
+	if err := rows.Err(); err != nil { // surface mid-stream row errors (partial result)
+		return nil, err
 	}
 
 	return attackers, nil
@@ -676,7 +682,11 @@ func (ts *TimescaleDB) ImportData(ctx context.Context, r io.Reader) error {
 		if line == "" {
 			continue
 		}
-		fields := strings.Split(line, ",")
+		// Parse with the quote-aware CSV splitter (the same one ClickHouse's
+		// ImportData uses), NOT strings.Split: ExportData quotes any field that
+		// contains a comma (commands routinely do) via csvEscape, and a naive
+		// comma split would shift every subsequent column and corrupt the row.
+		fields := splitCSVLine(line)
 		if len(fields) < 16 {
 			continue
 		}
@@ -926,6 +936,9 @@ func (ts *TimescaleDB) GetIOCs(ctx context.Context, filter IOCFilter) ([]*IOC, e
 		}
 		iocs = append(iocs, &ioc)
 	}
+	if err := rows.Err(); err != nil { // surface mid-stream row errors (partial result)
+		return nil, err
+	}
 	return iocs, nil
 }
 
@@ -1000,6 +1013,9 @@ func (ts *TimescaleDB) GetTTPSessions(ctx context.Context, limit int) ([]*TTPSes
 		}
 		sessions = append(sessions, &s)
 	}
+	if err := rows.Err(); err != nil { // surface mid-stream row errors (partial result)
+		return nil, err
+	}
 	return sessions, nil
 }
 
@@ -1045,6 +1061,9 @@ func (ts *TimescaleDB) GetUnclassifiedEvents(ctx context.Context, limit int) ([]
 			return nil, fmt.Errorf("failed to scan event: %w", err)
 		}
 		events = append(events, &event)
+	}
+	if err := rows.Err(); err != nil { // surface mid-stream row errors (partial result)
+		return nil, err
 	}
 	return events, nil
 }

@@ -180,11 +180,11 @@ func (p *Pool) Acquire(ctx context.Context) (*PooledConnection, error) {
 				conn.setLastUsed()
 				return conn, nil
 			}
-			// Already marked in-use by another goroutine — put it back and retry.
-			select {
-			case p.available <- conn:
-			default:
-			}
+			// CAS failed. A channel receive is exclusive, so the only way a
+			// connection sitting in `available` can already be inUse is that the
+			// maintenance goroutine (cleanup) CLAIMED it for removal and is
+			// closing it. Drop it - re-enqueueing would let a later Acquire hand
+			// out a closed connection (use-after-close).
 			continue
 		default:
 			// No available connections right now.
@@ -217,11 +217,8 @@ func (p *Pool) Acquire(ctx context.Context) (*PooledConnection, error) {
 				conn.setLastUsed()
 				return conn, nil
 			}
-			// Already taken; return it and loop.
-			select {
-			case p.available <- conn:
-			default:
-			}
+			// CAS failed: cleanup claimed this connection for removal (see the
+			// fast path above). Drop it rather than re-enqueue a closing conn.
 			continue
 		case <-acquireCtx.Done():
 			cancel()
@@ -381,21 +378,24 @@ func (p *Pool) cleanup() {
 	var toRemove []*PooledConnection
 
 	for _, conn := range p.connections {
-		// Skip connections in use
+		// Skip connections in use.
 		if conn.inUse.Load() {
 			continue
 		}
 
-		// Check max lifetime
-		if p.config.ConnMaxLifetime > 0 && now.Sub(conn.createdAt) > p.config.ConnMaxLifetime {
-			toRemove = append(toRemove, conn)
+		expired := (p.config.ConnMaxLifetime > 0 && now.Sub(conn.createdAt) > p.config.ConnMaxLifetime) ||
+			(p.config.ConnMaxIdleTime > 0 && now.Sub(conn.lastUsed()) > p.config.ConnMaxIdleTime)
+		if !expired {
 			continue
 		}
 
-		// Check max idle time
-		if p.config.ConnMaxIdleTime > 0 && now.Sub(conn.lastUsed()) > p.config.ConnMaxIdleTime {
+		// CLAIM the connection before scheduling it for close, so a concurrent
+		// Acquire that pops it from `available` finds inUse already set and drops
+		// it instead of receiving a connection we are about to Close()
+		// (use-after-close). If the claim fails, an Acquire grabbed it first -
+		// leave it alone.
+		if conn.inUse.CompareAndSwap(false, true) {
 			toRemove = append(toRemove, conn)
-			continue
 		}
 	}
 
@@ -409,6 +409,31 @@ func (p *Pool) cleanup() {
 		}
 		p.stats.TotalClosed++
 		go conn.Close()
+	}
+
+	// Purge the just-removed (claimed, inUse=true) connections out of the
+	// `available` channel. They still sit there - cleanup only touches
+	// p.connections - and leaving them would (a) force every future Acquire to
+	// drain them and (b) keep the channel full so the replenish below can't
+	// enqueue replacements, stranding fresh connections and stalling Acquire.
+	// Drain up to the current length and re-enqueue only the still-live (idle,
+	// inUse=false) ones. Channel ops are concurrency-safe, and Acquire drops any
+	// claimed conn it races us for, so this stays correct under concurrent use.
+	if len(toRemove) > 0 {
+		for n := len(p.available); n > 0; n-- {
+			select {
+			case conn := <-p.available:
+				if conn.inUse.Load() {
+					continue // claimed for removal - drop it
+				}
+				select {
+				case p.available <- conn:
+				default:
+				}
+			default:
+				n = 1 // channel drained
+			}
+		}
 	}
 
 	// Ensure minimum idle connections

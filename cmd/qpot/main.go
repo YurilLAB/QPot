@@ -1741,9 +1741,11 @@ func openMigrationManager(ctx context.Context, instanceName string) (*database.M
 	}
 
 	cleanup := func() {
-		// Best-effort close; the Database interface does not expose Close
-		// uniformly so we rely on the driver's own connection lifetime.
-		_ = db
+		// Close the backend connection/pool. The Database interface DOES declare
+		// Close() (database.go), and every backend (pgxpool, clickhouse, ES)
+		// implements it; without this each `qpot db migrate` invocation leaked the
+		// opened connection pool until process exit.
+		_ = db.Close()
 	}
 	return mgr, db, cleanup, nil
 }
