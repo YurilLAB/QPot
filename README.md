@@ -55,7 +55,7 @@
 | Attack-Response Hooks | No | Yes - shell hooks on threshold (firewall/SOAR), debounced |
 | Kibana Dashboards | Yes (ELK) | Yes - over ClickHouse, **auto-provisioned** (zero setup) |
 | Attack Map | Yes | Yes - over ClickHouse (country-centroid geo) |
-| Suricata IDS Ingest | Yes (Logstash→ES) | Yes - Vector→ClickHouse (`collector.ingest_suricata`) |
+| NSM Sensor Ingest | Yes (Logstash→ES) | Yes - Suricata/p0f/fatt via Vector→ClickHouse |
 | IOC Export | No | Yes - Attacker blocklist API |
 | GeoIP Enrichment | No | Yes - Optional MaxMind via Vector (`collector.geoip_db_path`) |
 | Startup Diagnostics | No | Yes - Per-honeypot start/fail report with the failure reason |
@@ -98,9 +98,14 @@ working on top of it so users lose nothing:
   straight into attack dashboards with no setup.
 - **Attack map** works against the same connector (`docker-compose.attack-map.yml`),
   with country-centroid geo so events plot from QPot's country data.
-- **Suricata** network-IDS alerts are ingested by Vector into the same events
-  store (`collector.ingest_suricata`, default on), so they appear in the
-  dashboards / attack map alongside honeypot hits.
+- **NSM sensors** are ingested by Vector into the same events store, so they
+  appear in the dashboards / attack map alongside honeypot hits (each default
+  on, a no-op when the sensor isn't deployed):
+  - **Suricata** network-IDS alerts (`collector.ingest_suricata`) — with a
+    "Top Network Alerts" panel.
+  - **p0f** passive OS fingerprints (`collector.ingest_p0f`) — "Attacker OS" panel.
+  - **fatt** JA3/HASSH network fingerprints (`collector.ingest_fatt`) — "Top
+    Client Fingerprints" panel.
 - **nginx** portal, **Spiderfoot**, **CyberChef** and **Elasticvue** are wired
   through the QPot nginx config (`docker/nginx/dist/conf/qpot.conf`).
 
