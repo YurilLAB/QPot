@@ -210,9 +210,7 @@ func (g *ComposeGenerator) buildSubnetMap() map[string]string {
 
 // Generate generates a Docker Compose file
 func (g *ComposeGenerator) Generate() (string, error) {
-	tmpl := `version: "3.8"
-
-# QPot Instance: {{.Config.InstanceName}}
+	tmpl := `# QPot Instance: {{.Config.InstanceName}}
 # QPot ID: {{.Config.QPotID}}
 # Auto-generated - Do not edit manually
 

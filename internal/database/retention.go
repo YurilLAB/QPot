@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"sync"
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -62,6 +63,11 @@ type FilesystemConfig struct {
 
 // RetentionManager handles data retention and archival
 type RetentionManager struct {
+	// mu guards the policies and s3Clients maps. RunScheduledChecks ranges
+	// policies in a background goroutine while RegisterPolicy/DeletePolicy mutate
+	// it from another path; without this, concurrent map read+write aborts the
+	// process ("fatal error: concurrent map read and map write").
+	mu         sync.RWMutex
 	policies   map[string]*RetentionPolicy
 	db         Database
 	s3Clients  map[string]*s3.Client
@@ -95,7 +101,9 @@ func (rm *RetentionManager) RegisterPolicy(policy *RetentionPolicy) error {
 		policy.Schedule = "0 2 * * *" // Daily at 2 AM
 	}
 
+	rm.mu.Lock()
 	rm.policies[policy.ID] = policy
+	rm.mu.Unlock()
 
 	// Initialize S3 client if needed
 	if policy.ArchiveConfig != nil && policy.ArchiveConfig.Type == "s3" {
@@ -142,13 +150,17 @@ func (rm *RetentionManager) initS3Client(policyID string, cfg *S3Config) error {
 		}
 	})
 
+	rm.mu.Lock()
 	rm.s3Clients[policyID] = s3Client
+	rm.mu.Unlock()
 	return nil
 }
 
 // ExecutePolicy runs a retention policy
 func (rm *RetentionManager) ExecutePolicy(ctx context.Context, policyID string) (*RetentionResult, error) {
+	rm.mu.RLock()
 	policy, ok := rm.policies[policyID]
+	rm.mu.RUnlock()
 	if !ok {
 		return nil, fmt.Errorf("policy not found: %s", policyID)
 	}
@@ -234,7 +246,9 @@ func (rm *RetentionManager) archiveData(ctx context.Context, policy *RetentionPo
 
 // archiveToS3 archives data to S3-compatible storage
 func (rm *RetentionManager) archiveToS3(ctx context.Context, policy *RetentionPolicy, coldCutoff, warmCutoff time.Time) (int64, error) {
+	rm.mu.RLock()
 	s3Client, ok := rm.s3Clients[policy.ID]
+	rm.mu.RUnlock()
 	if !ok {
 		return 0, fmt.Errorf("S3 client not initialized")
 	}
@@ -346,6 +360,8 @@ func (rm *RetentionManager) deleteExpiredData(ctx context.Context, policy *Reten
 
 // ListPolicies returns all registered policies
 func (rm *RetentionManager) ListPolicies() []*RetentionPolicy {
+	rm.mu.RLock()
+	defer rm.mu.RUnlock()
 	policies := make([]*RetentionPolicy, 0, len(rm.policies))
 	for _, p := range rm.policies {
 		policies = append(policies, p)
@@ -355,12 +371,16 @@ func (rm *RetentionManager) ListPolicies() []*RetentionPolicy {
 
 // GetPolicy returns a specific policy
 func (rm *RetentionManager) GetPolicy(id string) (*RetentionPolicy, bool) {
+	rm.mu.RLock()
+	defer rm.mu.RUnlock()
 	p, ok := rm.policies[id]
 	return p, ok
 }
 
 // DeletePolicy removes a policy
 func (rm *RetentionManager) DeletePolicy(id string) {
+	rm.mu.Lock()
+	defer rm.mu.Unlock()
 	delete(rm.policies, id)
 	delete(rm.s3Clients, id)
 }
@@ -369,7 +389,14 @@ func (rm *RetentionManager) DeletePolicy(id string) {
 func (rm *RetentionManager) RunScheduledChecks(ctx context.Context) ([]*RetentionResult, error) {
 	var results []*RetentionResult
 
+	rm.mu.RLock()
+	snapshot := make([]*RetentionPolicy, 0, len(rm.policies))
 	for _, policy := range rm.policies {
+		snapshot = append(snapshot, policy)
+	}
+	rm.mu.RUnlock()
+
+	for _, policy := range snapshot {
 		if !policy.Enabled {
 			continue
 		}
@@ -396,7 +423,9 @@ func (rm *RetentionManager) calculateNextRun(schedule string, from time.Time) ti
 
 // RestoreFromArchive restores data from archive
 func (rm *RetentionManager) RestoreFromArchive(ctx context.Context, policyID string, archiveKey string, destTable string) error {
+	rm.mu.RLock()
 	policy, ok := rm.policies[policyID]
+	rm.mu.RUnlock()
 	if !ok {
 		return fmt.Errorf("policy not found: %s", policyID)
 	}
@@ -408,7 +437,9 @@ func (rm *RetentionManager) RestoreFromArchive(ctx context.Context, policyID str
 	// Guard the S3 client and config exactly like archiveToS3 does: a policy can
 	// declare an S3 archive whose client was never registered (init failed) or
 	// whose S3 sub-config is nil, and dereferencing either here would panic.
+	rm.mu.RLock()
 	s3Client, ok := rm.s3Clients[policyID]
+	rm.mu.RUnlock()
 	if !ok || s3Client == nil {
 		return fmt.Errorf("S3 client not initialized for policy %s", policyID)
 	}

@@ -428,14 +428,53 @@ func (es *Elasticsearch) InsertEvents(ctx context.Context, events []*Event) erro
 		buf.WriteByte('\n')
 	}
 
-	_, status, err := es.esRequest(ctx, http.MethodPost, "/_bulk", buf.Bytes())
+	data, status, err := es.esRequest(ctx, http.MethodPost, "/_bulk", buf.Bytes())
 	if err != nil {
 		return fmt.Errorf("bulk insert: %w", err)
 	}
 	if status >= 300 {
 		return fmt.Errorf("bulk insert returned status %d", status)
 	}
-	return nil
+	return checkBulkErrors(data, len(events))
+}
+
+// checkBulkErrors inspects an Elasticsearch _bulk response. The Bulk API returns
+// HTTP 200 even when individual items fail (e.g. mapping conflicts), signalling
+// per-item failures only via the top-level "errors" flag and per-item "error"
+// objects. Checking the status code alone reported partial data loss as success,
+// so parse the body and surface a representative failure.
+func checkBulkErrors(data []byte, total int) error {
+	var resp struct {
+		Errors bool `json:"errors"`
+		Items  []map[string]struct {
+			Status int `json:"status"`
+			Error  *struct {
+				Type   string `json:"type"`
+				Reason string `json:"reason"`
+			} `json:"error"`
+		} `json:"items"`
+	}
+	if err := json.Unmarshal(data, &resp); err != nil {
+		return nil // unparseable body; the 2xx status already passed
+	}
+	if !resp.Errors {
+		return nil
+	}
+	failed, firstReason := 0, ""
+	for _, item := range resp.Items {
+		for _, res := range item {
+			if res.Error != nil {
+				failed++
+				if firstReason == "" {
+					firstReason = res.Error.Reason
+				}
+			}
+		}
+	}
+	if failed == 0 {
+		return nil
+	}
+	return fmt.Errorf("bulk insert: %d/%d items failed (e.g. %s)", failed, total, firstReason)
 }
 
 // esSearchResponse is the common structure for _search responses.
@@ -913,11 +952,25 @@ func (es *Elasticsearch) ExportData(ctx context.Context, start, end time.Time, w
 
 	encoder := json.NewEncoder(w)
 
+	// Always release the scroll context on the server when we're done (or on any
+	// early return), otherwise each export pins a scroll context on the ES
+	// cluster until its 2m keep-alive expires. Best-effort with a background
+	// context so it still runs if the export's ctx was cancelled.
+	var scrollID string
+	defer func() {
+		if scrollID == "" {
+			return
+		}
+		body, _ := json.Marshal(map[string]string{"scroll_id": scrollID})
+		_, _, _ = es.esRequest(context.Background(), http.MethodDelete, "/_search/scroll", body)
+	}()
+
 	for {
 		var resp esSearchResponse
 		if err := json.Unmarshal(data, &resp); err != nil {
 			return fmt.Errorf("parse scroll response: %w", err)
 		}
+		scrollID = resp.ScrollID
 
 		if len(resp.Hits.Hits) == 0 {
 			break
@@ -943,7 +996,9 @@ func (es *Elasticsearch) ExportData(ctx context.Context, start, end time.Time, w
 			return fmt.Errorf("export scroll continue: %w", err)
 		}
 		if status >= 300 {
-			break
+			// Surface the failure rather than break: a silent break here would
+			// return a TRUNCATED export as success.
+			return fmt.Errorf("export scroll continue returned status %d", status)
 		}
 	}
 
@@ -1092,14 +1147,14 @@ func (es *Elasticsearch) InsertIOCs(ctx context.Context, iocs []*IOC) error {
 		buf.WriteByte('\n')
 	}
 
-	_, status, err := es.esRequest(ctx, http.MethodPost, "/_bulk", buf.Bytes())
+	data, status, err := es.esRequest(ctx, http.MethodPost, "/_bulk", buf.Bytes())
 	if err != nil {
 		return fmt.Errorf("bulk insert iocs: %w", err)
 	}
 	if status >= 300 {
 		return fmt.Errorf("bulk insert iocs returned status %d", status)
 	}
-	return nil
+	return checkBulkErrors(data, len(iocs))
 }
 
 // GetIOCs retrieves IOCs with optional filtering.
