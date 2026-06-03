@@ -101,13 +101,34 @@ func sshProxyBackends(cfg *config.Config) []sshBackend {
 // pinned via the ssh-proxy stealth FakeHostname.
 func sshBackendHostname(cfg *config.Config) string {
 	if hp, ok := cfg.Honeypots[sshProxyHoneypot]; ok && hp.Stealth.FakeHostname != "" {
-		return sanitizeConfigValue(hp.Stealth.FakeHostname)
+		if h := sanitizeHostname(hp.Stealth.FakeHostname); h != "" {
+			return h
+		}
 	}
 	seed := cfg.QPotID
 	if seed == "" {
 		seed = cfg.InstanceName
 	}
 	return hostnameForSeed(seed)
+}
+
+// sanitizeHostname reduces s to a valid DNS/Linux hostname: only letters,
+// digits, '-' and '.', no leading/trailing separators, max 63 chars. This both
+// keeps the value realistic and guarantees it cannot carry characters (quotes,
+// spaces, colons, newlines) that would break the quoted `hostname:` field it is
+// rendered into. Returns "" if nothing valid remains (caller falls back).
+func sanitizeHostname(s string) string {
+	var b strings.Builder
+	for _, r := range s {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9', r == '-', r == '.':
+			b.WriteRune(r)
+		}
+		if b.Len() >= 63 {
+			break
+		}
+	}
+	return strings.Trim(b.String(), "-.")
 }
 
 // sshBackendCSV returns the broker's QPOT_SSHPROXY_BACKENDS value, e.g.

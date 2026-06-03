@@ -120,9 +120,28 @@ parties, is a liability — so the backend is wrapped in defense-in-depth:
    join a botnet, or DDoS. This is the single most important control. As
    belt-and-braces, the backend `sshd_config` also disables every forwarding/
    tunnelling primitive (`AllowTcpForwarding no`, `PermitTunnel no`, …).
-2. **Stronger isolation runtime.** Run backends under gVisor (`runsc`) or Kata
-   when available (QPot already detects these). Real RCE behind a syscall
-   sandbox, not just namespaces.
+2. **Stronger isolation runtime — with a deception trade-off to understand.**
+   Run backends under gVisor (`runsc`) or Kata when available (QPot detects
+   these) so real RCE sits behind more than namespaces. **But the choice affects
+   deception, not just isolation:**
+   - **Kata Containers** runs a *real* Linux kernel in a lightweight VM. `uname`
+     reports a genuine, configurable kernel and there is no sandbox fingerprint,
+     so it is the **best choice for deception** as well as strong (VM-grade)
+     isolation. Cost: heavier, needs hardware/nested virtualization.
+   - **gVisor (`runsc`)** is excellent *isolation* (a userspace kernel intercepts
+     syscalls), but it implements its own kernel and is **detectable from inside**
+     — `uname`, parts of `/proc`, and the behaviour/availability of certain
+     syscalls differ from a real kernel, and public gVisor-detection techniques
+     exist. So gVisor **trades the SSH-transport tell for a sandbox tell**: a
+     sophisticated attacker who probes the post-login environment may conclude
+     "this is a gVisor sandbox." Prefer it where escape-resistance outweighs
+     perfect post-login realism.
+   - **Plain containers** share the **host kernel**, so the backend's `uname -r`
+     is the host's kernel string. That is fine if the host kernel is plausible for
+     the persona (e.g. a Debian/Ubuntu host), but inconsistent if, say, the host
+     runs an Amazon-Linux kernel while `/etc/os-release` says Debian 12.
+   Guidance: for the most convincing HiFi box use **Kata**; with plain containers,
+   run QPot on a host whose kernel matches the advertised persona.
 3. **No docker access on the attacker path.** The broker and backend containers
    never receive the docker socket or host mounts. Backend reset is performed by
    an **external** supervisor, never by the attacker-facing containers.
@@ -297,6 +316,15 @@ commands run) is visible only at the backend, post-decryption.
 * **Backend OS realism.** A real Debian box is not a perfect replica of the
   specific server you are impersonating; align `BACKEND_USERS`, hostname, and
   packages with the QPot persona/identity advertised for the sensor.
+* **Kernel / `uname` consistency.** Containers share the host kernel, so a
+  plain-container backend's `uname -r` is the *host* kernel — which can disagree
+  with the Debian `/etc/os-release` and is itself a (weak) tell. The packaged
+  honeyfs deception (`/proc/version` etc.) is **not** applied to the HiFi backend:
+  unlike Cowrie's emulated shell, the backend runs *real* bash on a *real* kernel,
+  so `uname`/`/proc` reflect reality. Use **Kata** for a consistent guest kernel,
+  or run on a host kernel plausible for the persona. (See §4 item 2 for the
+  gVisor-detectability trade-off — gVisor closes the SSH tell but adds a
+  sandbox tell.)
 * **`script(1)` recording** captures the PTY; for non-interactive `ssh host cmd`
   invocations the command line is logged verbatim and output is captured via
   sshd, but not as a ttyrec stream.
@@ -317,12 +345,29 @@ commands run) is visible only at the backend, post-decryption.
   malformed/duplicate rejection, and a concurrent race exercise.
 * **Teardown** — idle-timeout, normal-close attribution (regression guard),
   pool-exhaustion rejection, backend-dial-error, and graceful drain.
+* **Resource-leak audit** — `TestBrokerReleasesResources` runs many sequential
+  sessions (incl. a dial failure) and asserts the pool returns every backend and
+  the limiter's global counter returns to zero (no lease/admission leak).
 * **Config/encoding** — `FuzzParseBackends`, `FuzzSplitHostPort`,
   `FuzzEventJSON` (exactly one valid JSON line for arbitrary field values).
+
+The compose **wiring** (package `internal/instance`) is fuzzed too:
+
+* `FuzzSSHProxyRenderInvariants` — renders the full stack under fuzzed
+  seed / fake-hostname / backend-count, parses the YAML, and asserts the
+  security-critical invariants ALWAYS hold: valid YAML, the backend network is
+  `internal: true`, and **no backend ever publishes a host port** (real RCE is
+  never exposed) — even for a hostile fake hostname that tries to inject a
+  `ports:` line (neutralized by `hostnameSafe`).
+* `FuzzSSHUsersCSV` — `BACKEND_USERS` always parses to safe `user:pass` pairs
+  for arbitrary persona input (no env/`chpasswd` injection).
+* `FuzzSSHBackendCSVRoundTrip` — the renderer's `BACKENDS` string always parses
+  with the broker's own `proxy.ParseBackends` (the two formats can't drift).
 
 Run them:
 
 ```sh
-go test -race ./internal/proxy/
-go test ./internal/proxy/ -run '^$' -fuzz '^FuzzSpliceTransparency$' -fuzztime 30s
+go test -race ./internal/proxy/ ./internal/instance/
+go test ./internal/proxy/   -run '^$' -fuzz '^FuzzSpliceTransparency$'        -fuzztime 30s
+go test ./internal/instance/ -run '^$' -fuzz '^FuzzSSHProxyRenderInvariants$' -fuzztime 30s
 ```

@@ -423,7 +423,9 @@ nothing of ours on the protocol path.
 
 Because the backend is genuine code execution, it is wrapped in defense-in-depth:
 an **egress-locked `internal:true` network** (no outbound — it can never pivot,
-scan, mine, or DDoS), gVisor/Kata isolation, a minimal capability set, resource
+scan, mine, or DDoS), a stronger isolation runtime (Kata gives a real guest
+kernel and is best for realism; gVisor isolates strongly but is itself
+fingerprintable from inside — see the doc), a minimal capability set, resource
 caps, per-session **reset**, and full PTY session recording. The broker itself
 runs distroless/non-root with **no docker access** and cannot be turned into an
 SSRF primitive (backends come only from config). Admission control (per-IP rate +

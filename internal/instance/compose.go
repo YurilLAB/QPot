@@ -470,7 +470,7 @@ services:
       # host-side labels above. Only innocuous, commonly-present values and the
       # per-honeypot stealth/profile knobs (set only when configured) remain.
       - LOG_LEVEL=info
-      {{if .HP.Stealth.FakeHostname}}- FAKE_HOSTNAME={{.HP.Stealth.FakeHostname}}{{end}}
+      {{if hostnameSafe .HP.Stealth.FakeHostname}}- FAKE_HOSTNAME={{hostnameSafe .HP.Stealth.FakeHostname}}{{end}}
       {{if .HP.Stealth.FakeOS}}- FAKE_OS={{.HP.Stealth.FakeOS}}{{end}}
       {{if .HP.Stealth.FakeKernel}}- FAKE_KERNEL={{.HP.Stealth.FakeKernel}}{{end}}
       {{if .HP.Stealth.BannerString}}- BANNER_STRING={{.HP.Stealth.BannerString}}{{end}}
@@ -584,7 +584,7 @@ services:
     # ownership and tmpfs uid assumptions (cowrie's /tmp/cowrie is uid 2000).
 
     # Hostname isolation
-    hostname: {{if .FakeHostname}}"{{.FakeHostname}}"{{else if .Name}}"{{.Name}}-host"{{else}}"qpot-host"{{end}}
+    hostname: {{if hostnameSafe .FakeHostname}}"{{hostnameSafe .FakeHostname}}"{{else if .Name}}"{{.Name}}-host"{{else}}"qpot-host"{{end}}
 
     # Temporary filesystems. A single tmpfs: block combines the read-only-root
     # scratch mounts with any image-specific tmpfs the deployment profile
@@ -653,6 +653,10 @@ services:
 		"sshProxyBackends":   sshProxyBackends,
 		"sshBackendCSV":      sshBackendCSV,
 		"sshBackendHostname": sshBackendHostname,
+		// hostnameSafe reduces an operator-set fake hostname to valid hostname
+		// characters before it is interpolated into the YAML `hostname:` field /
+		// FAKE_HOSTNAME env, so a stray quote/newline can never break the compose.
+		"hostnameSafe": sanitizeHostname,
 		// hostPort resolves the collision-free host port assigned to a
 		// (honeypot, container port) pair. Built once per Generate() so the
 		// whole stack shares one consistent, unique assignment.

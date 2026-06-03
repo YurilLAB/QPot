@@ -301,3 +301,57 @@ func TestGracefulShutdownDrains(t *testing.T) {
 	stop() // cancels ctx; must drain and return (asserted inside stop)
 	_ = c.Close()
 }
+
+// TestBrokerReleasesResources is a leak audit: after many sequential sessions
+// (including a backend-dial failure), the pool must have every backend back and
+// the limiter's global concurrency counter must be zero. A leaked lease or a
+// missing limiter release would leave these non-zero — a slow death where the
+// broker eventually rejects everything ("pool exhausted" / "max concurrent").
+func TestBrokerReleasesResources(t *testing.T) {
+	beAddr, beStop := echoBackend(t)
+	defer beStop()
+	sink := &capSink{}
+	cfg := Config{Honeypot: "ssh-proxy", Sink: sink, IdleTimeout: 2 * time.Second, MaxConcurrentIP: 1000, MaxConcurrent: 1000}
+	pool := NewPool([]Backend{{ID: "be", Addr: beAddr}}, nil)
+	b := NewBroker(cfg, pool)
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { _ = b.Serve(ctx, ln); close(done) }()
+
+	for i := 0; i < 40; i++ {
+		c, err := net.Dial("tcp", ln.Addr().String())
+		if err != nil {
+			t.Fatalf("dial %d: %v", i, err)
+		}
+		_, _ = c.Write([]byte("ping"))
+		got := make([]byte, 4)
+		_, _ = io.ReadFull(c, got)
+		_ = c.Close()
+		// Wait for the session to be fully released before the next, so a single
+		// backend suffices and any leak shows up deterministically.
+		deadline := time.Now().Add(2 * time.Second)
+		for time.Now().Before(deadline) {
+			if avail, leased, _ := pool.Stats(); avail == 1 && leased == 0 {
+				break
+			}
+			time.Sleep(time.Millisecond)
+		}
+		if avail, leased, _ := pool.Stats(); avail != 1 || leased != 0 {
+			t.Fatalf("after session %d: pool avail=%d leased=%d (lease leak)", i, avail, leased)
+		}
+	}
+	if g := b.lim.activeGlobal(); g != 0 {
+		t.Fatalf("limiter global=%d after all sessions (admission-release leak)", g)
+	}
+
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(3 * time.Second):
+		t.Fatal("Serve did not drain")
+	}
+}
