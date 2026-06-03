@@ -135,21 +135,24 @@ function fuBACKUP () {
 	echo
 	echo "### Create a backup, just in case ... "
 	echo -n "###### $myBLUE Building archive in $myARCHIVE $myWHITE"
-	cd $HOME/qpotce
-	sudo tar cvf $myARCHIVE * .env >/dev/null 2>&1
-	sudo chown $LOGNAME:$LOGNAME $myARCHIVE
-	if [ $? -ne 0 ];
-	  then
+	# Guard the cd: without it a failed cd (wrong/missing install dir) would run
+	# the `tar ... *` below against the CURRENT directory and archive the wrong
+	# files. Restore PWD and abort the backup if the install dir is not there.
+	if ! cd "$HOME/qpotce"; then
 	    echo " [ $myRED""NOT OK""$myWHITE ]"
-	    echo "###### $myBLUE""Something went wrong.""$myWHITE"" [ $myRED""NOT OK""$myWHITE ]"
-	    echo "Exiting.""$myWHITE"
-	    echo
-	    cd $myPATH
+	    echo "###### $myBLUE""Cannot cd to $HOME/qpotce - is QPot installed there?""$myWHITE"
+	    cd "$myPATH" || true
 	    exit 1
-	  else
-	    echo "[ $myGREEN"OK"$myWHITE ]"
-	    cd $myPATH
 	fi
+	if ! sudo tar cvf "$myARCHIVE" * .env >/dev/null 2>&1; then
+	    echo " [ $myRED""NOT OK""$myWHITE ]"
+	    echo "###### $myBLUE""Something went wrong building the backup archive.""$myWHITE"
+	    cd "$myPATH" || true
+	    exit 1
+	fi
+	sudo chown "$LOGNAME:$LOGNAME" "$myARCHIVE"
+	echo "[ $myGREEN""OK""$myWHITE ]"
+	cd "$myPATH" || true
 	echo
 }
 

@@ -80,12 +80,17 @@ docker_install_hint() {
     fi
     local id=""
     [ -r /etc/os-release ] && id=$(. /etc/os-release 2>/dev/null; echo "${ID}${ID_LIKE:+ $ID_LIKE}")
+    # Order matters: RHEL-family distros (Rocky/Alma/CentOS) carry
+    # ID_LIKE="...fedora", so they must be matched BEFORE the *fedora* arm or
+    # they'd be told to `dnf install docker` (their distro package, often
+    # podman-docker) instead of Docker CE's `docker-ce`. (*suse* already covers
+    # *opensuse*, so it is not listed separately.)
     case "$id" in
         *arch*|*manjaro*)        echo "  sudo pacman -S docker docker-compose && sudo systemctl enable --now docker" ;;
         *debian*|*ubuntu*)       echo "  sudo apt-get update && sudo apt-get install -y docker.io docker-compose-plugin && sudo systemctl enable --now docker" ;;
-        *fedora*)                echo "  sudo dnf install -y docker docker-compose-plugin && sudo systemctl enable --now docker" ;;
         *rhel*|*centos*|*rocky*|*almalinux*) echo "  sudo dnf install -y docker-ce docker-compose-plugin && sudo systemctl enable --now docker" ;;
-        *suse*|*opensuse*)       echo "  sudo zypper install -y docker docker-compose && sudo systemctl enable --now docker" ;;
+        *fedora*)                echo "  sudo dnf install -y docker docker-compose-plugin && sudo systemctl enable --now docker" ;;
+        *suse*)                  echo "  sudo zypper install -y docker docker-compose && sudo systemctl enable --now docker" ;;
         *)                       echo "  Use your distribution's package manager to install docker + the compose plugin." ;;
     esac
 }
@@ -219,20 +224,34 @@ download_qpot() {
 }
 
 add_to_path() {
-    local shell_rc=""
-    
+    local shell_rc="" path_line=""
+
+    # Use shell-appropriate PATH syntax. fish does NOT understand
+    # `export PATH=...` - writing bash syntax into config.fish breaks the user's
+    # shell on next start - so emit `fish_add_path` for it instead.
     case "$SHELL" in
-        */bash) shell_rc="${HOME}/.bashrc" ;;
-        */zsh)  shell_rc="${HOME}/.zshrc" ;;
-        */fish) shell_rc="${HOME}/.config/fish/config.fish" ;;
+        */bash) shell_rc="${HOME}/.bashrc"; path_line="export PATH=\"\$PATH:${INSTALL_DIR}\"" ;;
+        */zsh)  shell_rc="${HOME}/.zshrc";  path_line="export PATH=\"\$PATH:${INSTALL_DIR}\"" ;;
+        */fish) shell_rc="${HOME}/.config/fish/config.fish"; path_line="fish_add_path ${INSTALL_DIR}" ;;
     esac
-    
-    if [[ -n "$shell_rc" ]]; then
-        if ! grep -q "$INSTALL_DIR" "$shell_rc" 2>/dev/null; then
-            echo "export PATH=\"\$PATH:${INSTALL_DIR}\"" >> "$shell_rc"
-            log_success "Added ${INSTALL_DIR} to PATH in ${shell_rc}"
-            log_info "Run 'source ${shell_rc}' to update your current shell"
+
+    if [[ -z "$shell_rc" ]]; then
+        # Unknown/!$SHELL login shell (or none): the binary is installed, just
+        # not auto-added to PATH. Tell the user how to reach it.
+        if ! echo ":$PATH:" | grep -q ":${INSTALL_DIR}:"; then
+            log_warn "${INSTALL_DIR} is not on your PATH. Add it, or run qpot as ${INSTALL_DIR}/qpot."
         fi
+        return
+    fi
+
+    # The rc file's directory may not exist yet (notably ~/.config/fish); create
+    # it so the append below can't fail the whole install under set -e.
+    mkdir -p "$(dirname "$shell_rc")" 2>/dev/null || true
+
+    if ! grep -q "$INSTALL_DIR" "$shell_rc" 2>/dev/null; then
+        echo "$path_line" >> "$shell_rc"
+        log_success "Added ${INSTALL_DIR} to PATH in ${shell_rc}"
+        log_info "Restart your shell or run 'source ${shell_rc}' to update the current one"
     fi
 }
 
