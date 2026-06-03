@@ -696,6 +696,15 @@ killed cleanly at the deadline), with output captured and bounded in the log.
 
 ## CLI Reference
 
+The most common commands are summarized below. For the complete reference —
+every command, subcommand, and flag, with examples and notes on how each one
+works — see **[doc/cli-reference.md](doc/cli-reference.md)**. The CLI is also
+self-documenting: run `qpot <command> --help` at any time.
+
+Every command accepts the global flags `--config <path>`, `-h/--help`, and
+`-v/--version`. Most commands target a single instance via `-i/--instance`
+(default `default`).
+
 ```bash
 # Instance management
 qpot instance create <name>      # Create new instance with QPot ID
@@ -703,9 +712,9 @@ qpot instance list               # List all instances
 qpot instance remove <name>      # Remove instance
 
 # Lifecycle
-qpot up [--instance <name>]      # Start instance
-qpot down [--instance <name>]    # Stop instance
-qpot status [--instance <name>]  # Show status
+qpot up [-i <name>] [-d]         # Start instance (--detach to background it)
+qpot down [-i <name>]            # Stop instance
+qpot status [-i <name>]          # Show status
 
 # Honeypot management
 qpot honeypot list               # List available honeypots
@@ -722,15 +731,23 @@ qpot db migrate status           # Show schema version and pending migrations
 qpot db migrate up [--to N]      # Apply pending migrations (or migrate to version N)
 qpot db migrate down [--yes]     # Roll back the most recent migration
 
+# Cluster / pairing (aliases: group, pair, networking)
+qpot cluster init --name <name>  # Create a group (prints group ID + password)
+qpot cluster join --id <id>      # Pair another node into the group
+qpot cluster status              # Show the group summary
+qpot cluster nodes               # List paired nodes
+qpot cluster leave               # Unpair this node
+
 # Yuril Security Suite integration
 qpot yuril setup                 # Interactive setup (endpoint, API key, TLS)
 qpot yuril test                  # Validate connectivity end-to-end
 qpot yuril status                # Show config and live forwarder stats
 
 # Utilities
-qpot logs [honeypot]             # View logs
-qpot id [--instance <name>]      # Show QPot ID
-qpot config [--instance <name>]  # Open instance config in $EDITOR (--print to show path)
+qpot logs [honeypot] [-f] [-n N] # View logs (--follow, --tail)
+qpot id [-i <name>]              # Show QPot ID
+qpot config [-i <name>]          # Open instance config in $EDITOR (--print to show path)
+qpot completion <shell>          # Generate a shell autocompletion script
 ```
 
 ---
