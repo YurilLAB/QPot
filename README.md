@@ -331,6 +331,13 @@ database:
 
 ### Deception & Anti-Fingerprinting
 
+![QPot anti-fingerprint demo](doc/qpot-fingerprint-demo.gif)
+
+> Real `nmap --script ssh2-enum-algos` output: stock T-Pot Cowrie leaks
+> `blowfish-cbc` and a malformed `hmac-sha2-56` MAC (same HASSH on every install),
+> while QPot strips those and HiFi mode answers as genuine OpenSSH 9.2. Full
+> reproducible breakdown in [doc/fingerprint-comparison.md](doc/fingerprint-comparison.md).
+
 A stock T-Pot deployment ships **globally identical** honeypot identity strings —
 every instance advertises the same Cowrie hostname, the same SSH version, the
 same `userdb` (including the well-known `phil`/`richard` accounts), and the same
