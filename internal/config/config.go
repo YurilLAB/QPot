@@ -105,6 +105,18 @@ type CollectorConfig struct {
 	// Kibana. Harmless when Suricata is not deployed: the file source simply
 	// matches nothing. Set false to ignore Suricata even if present.
 	IngestSuricata bool `yaml:"ingest_suricata"`
+
+	// IngestP0f ingests p0f's passive OS-fingerprint log
+	// (/data/p0f/log/p0f.json) as events tagged honeypot="p0f", with the
+	// detected OS in the command/metadata so dashboards can show attacker OS
+	// distribution. Default true; harmless when p0f is not deployed.
+	IngestP0f bool `yaml:"ingest_p0f"`
+
+	// IngestFatt ingests fatt's network-fingerprint log
+	// (/data/fatt/log/fatt.log) as events tagged honeypot="fatt", with the
+	// JA3/HASSH fingerprints in metadata. Default true; harmless when fatt is
+	// not deployed.
+	IngestFatt bool `yaml:"ingest_fatt"`
 }
 
 // YurilConfig controls the forwarder that pushes classified IOCs into the
@@ -551,9 +563,12 @@ func Default(instanceName string) *Config {
 			FetchATTCK:       true,
 		},
 		Collector: CollectorConfig{
-			// Ingest Suricata's EVE alerts by default so T-Pot's network IDS
-			// data shows up in QPot when Suricata is deployed (no-op otherwise).
+			// Ingest T-Pot's NSM sensors (Suricata IDS, p0f OS fingerprints,
+			// fatt network fingerprints) by default so their data shows up in
+			// QPot when those sensors are deployed (no-op otherwise).
 			IngestSuricata: true,
+			IngestP0f:      true,
+			IngestFatt:     true,
 		},
 	}
 }

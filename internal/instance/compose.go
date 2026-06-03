@@ -645,6 +645,25 @@ services:
 	return buf.String(), nil
 }
 
+// EnabledSensors returns the Vector transform names for the T-Pot NSM sensors
+// that are enabled (Suricata IDS, p0f, fatt). These transforms map sensor logs
+// onto the shared events schema and feed the same downstream (geoip + sink) as
+// honeypot logs, bypassing the stealth probe-filter. Used by the Vector
+// template to wire inputs without duplicating per-sensor branches.
+func (g *ComposeGenerator) EnabledSensors() []string {
+	var s []string
+	if g.Config.Collector.IngestSuricata {
+		s = append(s, "suricata_events")
+	}
+	if g.Config.Collector.IngestP0f {
+		s = append(s, "p0f_events")
+	}
+	if g.Config.Collector.IngestFatt {
+		s = append(s, "fatt_events")
+	}
+	return s
+}
+
 // GenerateVectorConfig generates Vector configuration for log collection
 func (g *ComposeGenerator) GenerateVectorConfig() (string, error) {
 	config := `# Vector configuration for QPot
@@ -685,6 +704,23 @@ sources:
     include:
       - "/data/suricata/log/eve.json"
       - "/data/suricata/log/*.json"
+    read_from: end
+{{- end}}
+{{- if .Config.Collector.IngestP0f}}
+  # p0f passive OS fingerprinting (one JSON object per line).
+  p0f_log:
+    type: file
+    include:
+      - "/data/p0f/log/p0f.json"
+    read_from: end
+{{- end}}
+{{- if .Config.Collector.IngestFatt}}
+  # fatt network fingerprinting (JA3/HASSH; one JSON object per line).
+  fatt_log:
+    type: file
+    include:
+      - "/data/fatt/log/fatt.log"
+      - "/data/fatt/log/*.json"
     read_from: end
 {{- end}}
 
@@ -776,13 +812,78 @@ transforms:
       .qpot_instance = "{{.Config.InstanceName}}"
       .timestamp = format_timestamp!(now(), "%Y-%m-%d %H:%M:%S%.3f")
 {{end}}
+{{if .Config.Collector.IngestP0f}}
+  # Map p0f passive OS fingerprints onto the events schema. honeypot="p0f";
+  # the detected OS goes in command (visible) + metadata.
+  p0f_events:
+    type: remap
+    inputs:
+      - p0f_log
+    source: |
+      if is_string(.message) && starts_with(strip_whitespace(string!(.message)), "{") {
+        parsed, perr = parse_json(string!(.message))
+        if perr == null {
+          . = merge(., object(parsed) ?? {})
+        }
+      }
+      .honeypot = "p0f"
+      .source_ip = to_string(.client_ip) ?? "0.0.0.0"
+      .source_port = to_int(.client_port) ?? 0
+      .dest_port = to_int(.server_port) ?? 0
+      .event_type = "os_fingerprint"
+      .command = to_string(.os) ?? ""
+      .metadata = {
+        "os": to_string(.os) ?? "",
+        "dist": to_string(.dist) ?? "",
+        "link": to_string(.link) ?? "",
+        "raw_sig": to_string(.raw_sig) ?? "",
+        "sensor": "p0f"
+      }
+      .qpot_id = "{{.Config.QPotID}}"
+      .qpot_instance = "{{.Config.InstanceName}}"
+      .timestamp = format_timestamp!(now(), "%Y-%m-%d %H:%M:%S%.3f")
+{{end}}
+{{if .Config.Collector.IngestFatt}}
+  # Map fatt network fingerprints onto the events schema. honeypot="fatt";
+  # JA3/HASSH fingerprints go in metadata, a representative one in command.
+  fatt_events:
+    type: remap
+    inputs:
+      - fatt_log
+    source: |
+      if is_string(.message) && starts_with(strip_whitespace(string!(.message)), "{") {
+        parsed, perr = parse_json(string!(.message))
+        if perr == null {
+          . = merge(., object(parsed) ?? {})
+        }
+      }
+      .honeypot = "fatt"
+      .source_ip = to_string(.sourceIp) ?? "0.0.0.0"
+      .source_port = to_int(.sourcePort) ?? 0
+      .dest_port = to_int(.destinationPort) ?? 0
+      .protocol = downcase(to_string(.protocol) ?? "")
+      .event_type = "fingerprint"
+      ja3 = to_string(.ja3) ?? ""
+      hassh = to_string(.hassh) ?? ""
+      .command = if ja3 != "" { ja3 } else { hassh }
+      .metadata = {
+        "ja3": ja3,
+        "ja3s": to_string(.ja3s) ?? "",
+        "hassh": hassh,
+        "hasshServer": to_string(.hasshServer) ?? "",
+        "sensor": "fatt"
+      }
+      .qpot_id = "{{.Config.QPotID}}"
+      .qpot_instance = "{{.Config.InstanceName}}"
+      .timestamp = format_timestamp!(now(), "%Y-%m-%d %H:%M:%S%.3f")
+{{end}}
 {{if .Config.Collector.GeoIPDBPath}}
   enrich_geoip:
     type: remap
     inputs:
       - add_qpot_metadata
-{{- if .Config.Collector.IngestSuricata}}
-      - suricata_events
+{{- range $.EnabledSensors}}
+      - {{.}}
 {{- end}}
     source: |
       # GeoIP enrichment using the MaxMind GeoLite2 enrichment table
@@ -804,20 +905,22 @@ transforms:
     inputs:
       # Feeds from enrich_geoip when GeoIP is configured, else directly from
       # add_qpot_metadata (GeoIP is optional so Vector can start without an mmdb).
-      # When GeoIP is off, Suricata events join here directly; when it is on,
-      # they arrive already enriched via enrich_geoip.
+      # When GeoIP is off, the NSM sensor transforms join here directly; when it
+      # is on, they arrive already enriched via enrich_geoip.
       - {{if .Config.Collector.GeoIPDBPath}}enrich_geoip{{else}}add_qpot_metadata{{end}}
-{{- if and .Config.Collector.IngestSuricata (not .Config.Collector.GeoIPDBPath)}}
-      - suricata_events
-{{- end}}
+{{- if not .Config.Collector.GeoIPDBPath}}{{range $.EnabledSensors}}
+      - {{.}}
+{{- end}}{{end}}
     condition: |
       # Drop events whose message contains a known scanner signature (stealth).
       # Substring match via contains() — match_any expects regexes, and
       # contains avoids regex-escaping the operator-supplied probe strings.
-      # Suricata IDS alerts are never stealth-filtered: dropping an alert because
-      # its EVE JSON mentions a scanner signature would discard real IDS data.
+      # NSM sensor events (Suricata/p0f/fatt) are never stealth-filtered:
+      # dropping an IDS alert or a fingerprint because its JSON mentions a
+      # scanner signature would discard real sensor data.
       {{- if .Config.Stealth.BlockCommonProbes}}
-      if (to_string(.honeypot) ?? "") == "suricata" {
+      sensor = to_string(.honeypot) ?? ""
+      if sensor == "suricata" || sensor == "p0f" || sensor == "fatt" {
         true
       } else {
         msg = downcase(string(.message) ?? "")

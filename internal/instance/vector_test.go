@@ -126,7 +126,7 @@ func TestVectorSuricataIngestion(t *testing.T) {
 		t.Error("filter_stealth should take suricata_events as input when GeoIP is off")
 	}
 	// Suricata alerts must bypass the stealth probe-drop.
-	if !strings.Contains(out, `== "suricata" {`) {
+	if !strings.Contains(out, `sensor == "suricata"`) {
 		t.Error("stealth filter must never drop Suricata IDS alerts")
 	}
 }
@@ -147,6 +147,78 @@ func TestVectorSuricataWithGeoIP(t *testing.T) {
 	fs = fs[:strings.Index(fs, "condition:")]
 	if strings.Contains(fs, "- suricata_events") {
 		t.Error("suricata_events must not feed filter_stealth directly when GeoIP is on (double ingest)")
+	}
+}
+
+// TestVectorP0fFattIngestion verifies p0f and fatt NSM sensors are ingested and
+// mapped onto the events schema, joining the same downstream as honeypot logs.
+func TestVectorP0fFattIngestion(t *testing.T) {
+	out := genVectorCfg(t, nil) // p0f + fatt default on, GeoIP off
+	for _, want := range []string{
+		"p0f_log:", "/data/p0f/log/p0f.json", "p0f_events:",
+		`.honeypot = "p0f"`, `.source_ip = to_string(.client_ip)`,
+		"fatt_log:", "/data/fatt/log/fatt.log", "fatt_events:",
+		`.honeypot = "fatt"`, `.source_ip = to_string(.sourceIp)`,
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("vector config missing p0f/fatt marker %q", want)
+		}
+	}
+	// All three sensors join the stealth filter directly (GeoIP off).
+	fs := out[strings.Index(out, "filter_stealth:"):]
+	fs = fs[:strings.Index(fs, "condition:")]
+	for _, s := range []string{"- suricata_events", "- p0f_events", "- fatt_events"} {
+		if !strings.Contains(fs, s) {
+			t.Errorf("filter_stealth missing sensor input %q (GeoIP off)", s)
+		}
+	}
+	// All NSM sensors bypass the stealth probe-drop.
+	for _, s := range []string{`sensor == "suricata"`, `sensor == "p0f"`, `sensor == "fatt"`} {
+		if !strings.Contains(out, s) {
+			t.Errorf("stealth filter must never drop sensor %q", s)
+		}
+	}
+}
+
+// TestVectorSensorsGeoIP verifies all NSM sensors are geo-enriched at
+// enrich_geoip (and not double-added at the filter) when GeoIP is on.
+func TestVectorSensorsGeoIP(t *testing.T) {
+	out := genVectorCfg(t, func(c *config.Config) {
+		c.Collector.GeoIPDBPath = "/usr/share/GeoIP/GeoLite2-City.mmdb"
+	})
+	eg := out[strings.Index(out, "enrich_geoip:"):]
+	eg = eg[:strings.Index(eg, "source:")]
+	for _, s := range []string{"- suricata_events", "- p0f_events", "- fatt_events"} {
+		if !strings.Contains(eg, s) {
+			t.Errorf("enrich_geoip missing sensor input %q", s)
+		}
+	}
+	fs := out[strings.Index(out, "filter_stealth:"):]
+	fs = fs[:strings.Index(fs, "condition:")]
+	if strings.Contains(fs, "- p0f_events") || strings.Contains(fs, "- fatt_events") {
+		t.Error("sensors must not feed filter_stealth directly when GeoIP is on (double ingest)")
+	}
+}
+
+// TestVectorAllSensorsDisabled verifies turning every NSM sensor off removes all
+// their sources/transforms and leaves the filter fed only by the honeypot path.
+func TestVectorAllSensorsDisabled(t *testing.T) {
+	out := genVectorCfg(t, func(c *config.Config) {
+		c.Collector.IngestSuricata = false
+		c.Collector.IngestP0f = false
+		c.Collector.IngestFatt = false
+	})
+	// The sensor sources/transforms and their inputs must be gone. (The stealth
+	// bypass lists the sensor names unconditionally, which is harmless when no
+	// such events exist, so it is not asserted here.)
+	for _, marker := range []string{
+		"suricata_eve", "suricata_events:", "p0f_log", "p0f_events:",
+		"fatt_log", "fatt_events:", "/data/suricata", "/data/p0f", "/data/fatt",
+		"- suricata_events", "- p0f_events", "- fatt_events",
+	} {
+		if strings.Contains(out, marker) {
+			t.Errorf("sensor config present despite all sensors disabled: %q", marker)
+		}
 	}
 }
 

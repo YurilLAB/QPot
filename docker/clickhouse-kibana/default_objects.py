@@ -162,6 +162,14 @@ def build_saved_objects(field_types: Dict[str, str], es_version: str) -> List[Di
         _viz("qpot-suricata-signatures", "QPot - Top Network Alerts (Suricata)", "table",
              [_count_metric(), _terms_bucket("command", size=20, schema="bucket")],
              {"perPage": 10}, query="type:suricata"),
+        # p0f passive OS fingerprinting: top attacker operating systems.
+        _viz("qpot-p0f-os", "QPot - Attacker OS (p0f)", "pie",
+             [_count_metric(), _terms_bucket("command", size=15)],
+             {"type": "pie", "isDonut": True, "addLegend": True}, query="type:p0f"),
+        # fatt network fingerprints: top JA3/HASSH client fingerprints.
+        _viz("qpot-fatt-fingerprints", "QPot - Top Client Fingerprints (fatt)", "table",
+             [_count_metric(), _terms_bucket("command", size=20, schema="bucket")],
+             {"perPage": 10}, query="type:fatt"),
     ]
     objs.extend(vizzes)
 
@@ -178,6 +186,8 @@ def build_saved_objects(field_types: Dict[str, str], es_version: str) -> List[Di
         ("qpot-top-passwords", 32, 20, 16, 14),
         ("qpot-top-dest-ports", 0, 34, 24, 14),
         ("qpot-suricata-signatures", 24, 34, 24, 14),
+        ("qpot-p0f-os", 0, 48, 24, 14),
+        ("qpot-fatt-fingerprints", 24, 48, 24, 14),
     ]
     for i, (vid, x, y, w, h) in enumerate(layout):
         ref = f"panel_{i}"
@@ -231,4 +241,6 @@ def panel_aggregations() -> Dict[str, Dict]:
         "top_passwords": {"2": {"terms": {"field": "password", "size": 20}}},
         "top_dest_ports": {"2": {"terms": {"field": "dest_port", "size": 20}}},
         "suricata_signatures": {"2": {"terms": {"field": "command", "size": 20}}},
+        "p0f_os": {"2": {"terms": {"field": "command", "size": 15}}},
+        "fatt_fingerprints": {"2": {"terms": {"field": "command", "size": 20}}},
     }
