@@ -32,6 +32,9 @@ func FuzzExtract(f *testing.F) {
 		"send btc to 1A1zP1eP5QGefi2DMPTfTL5SLmv7DivfNa",
 		"eth 0x52908400098527886E0F7030069857D2E4169EE7 pool",
 		"3J98t1WpEZ73CNmQviecrnyiWrnqRhWNLy 1zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz",
+		"hxxp://evil[.]com/x.sh hxxps://c2[dot]bad[dot]org",
+		"connect 1[.]2[.]3[.]4 [at] [dot] [://] [:]",
+		"hxxxxxxp://[.][.][.] dot dot dot",
 	}
 	for _, s := range seeds {
 		f.Add(s)

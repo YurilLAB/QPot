@@ -70,6 +70,32 @@ func trimURL(u string) string {
 	return strings.TrimRight(u, urlTrailingCutset)
 }
 
+// reHxxp restores the defanged scheme (hxxp/hxxps, any case) to http/https.
+// "hxxp" defangs "http" by replacing the "tt" with "xx", so map hxx -> htt and
+// keep the trailing p / ps.
+var reHxxp = regexp.MustCompile(`(?i)\bhxx(ps?://)`)
+
+// defangReplacer restores the common bracketed/worded dot and separator
+// defangs used by threat-intel and attacker notes. Order matters: longer,
+// scheme-specific forms first.
+var defangReplacer = strings.NewReplacer(
+	"[://]", "://", "[:]", ":", "[//]", "//",
+	"[.]", ".", "(.)", ".", "{.}", ".",
+	"[dot]", ".", "(dot)", ".", "{dot}", ".",
+	"[d0t]", ".", " dot ", ".", "[DOT]", ".",
+	"[at]", "@", "(at)", "@",
+)
+
+// refang reverses common indicator defanging so IOCs embedded in dropped
+// scripts, ransom notes or copied C2 are still extracted. It is applied only to
+// a working copy fed to the indicator regexes - the original command text is
+// preserved for the command IOC. Defanging conventions: CISA/MISP/STIX, e.g.
+// hxxp://1.2.3[.]4/x, evil[dot]com, user[at]host.
+func refang(s string) string {
+	s = reHxxp.ReplaceAllString(s, "htt${1}")
+	return defangReplacer.Replace(s)
+}
+
 const base58Alphabet = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz"
 
 // validateBTCAddress reports whether s is a valid base58check Bitcoin address
@@ -182,7 +208,12 @@ func (e *Extractor) Extract(event *database.Event) []*database.IOC {
 
 	// URLs from command
 	if event.Command != "" {
-		for _, u := range reURL.FindAllString(event.Command, -1) {
+		// Refang defanged indicators (hxxp://, 1.2.3[.]4, evil[dot]com) before
+		// running the extractors, so IOCs embedded in dropped scripts, ransom
+		// notes or copy-pasted C2 are captured. The de-fanged copy feeds only
+		// the indicator regexes; the command IOC below keeps the original text.
+		cmd := refang(event.Command)
+		for _, u := range reURL.FindAllString(cmd, -1) {
 			u = trimURL(u)
 			if u == "" {
 				continue
@@ -210,28 +241,28 @@ func (e *Extractor) Extract(event *database.Event) []*database.IOC {
 		// threat-intel feeds and `sha512sum`-based droppers use to identify
 		// payloads, so capturing it makes the IOC set usable against those feeds.
 		seen := make(map[string]bool)
-		for _, h := range reSHA512.FindAllString(event.Command, -1) {
+		for _, h := range reSHA512.FindAllString(cmd, -1) {
 			h = strings.ToLower(h)
 			if !seen[h] {
 				seen[h] = true
 				iocs = append(iocs, makeIOC(IOCTypeHash, h))
 			}
 		}
-		for _, h := range reSHA256.FindAllString(event.Command, -1) {
+		for _, h := range reSHA256.FindAllString(cmd, -1) {
 			h = strings.ToLower(h)
 			if !seen[h] {
 				seen[h] = true
 				iocs = append(iocs, makeIOC(IOCTypeHash, h))
 			}
 		}
-		for _, h := range reSHA1.FindAllString(event.Command, -1) {
+		for _, h := range reSHA1.FindAllString(cmd, -1) {
 			h = strings.ToLower(h)
 			if !seen[h] {
 				seen[h] = true
 				iocs = append(iocs, makeIOC(IOCTypeHash, h))
 			}
 		}
-		for _, h := range reMD5.FindAllString(event.Command, -1) {
+		for _, h := range reMD5.FindAllString(cmd, -1) {
 			h = strings.ToLower(h)
 			if !seen[h] {
 				seen[h] = true
@@ -243,13 +274,13 @@ func (e *Extractor) Extract(event *database.Event) []*database.IOC {
 		// BTC candidates are base58check-validated so only real addresses are
 		// emitted; ETH addresses are kept as-is (lowercased for stable de-dup).
 		wseen := make(map[string]bool)
-		for _, w := range reBTC.FindAllString(event.Command, -1) {
+		for _, w := range reBTC.FindAllString(cmd, -1) {
 			if !wseen[w] && validateBTCAddress(w) {
 				wseen[w] = true
 				iocs = append(iocs, makeIOC(IOCTypeWallet, w))
 			}
 		}
-		for _, w := range reETH.FindAllString(event.Command, -1) {
+		for _, w := range reETH.FindAllString(cmd, -1) {
 			w = strings.ToLower(w)
 			if !wseen[w] {
 				wseen[w] = true

