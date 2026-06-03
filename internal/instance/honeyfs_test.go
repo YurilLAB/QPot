@@ -209,8 +209,11 @@ func TestHoneyfsProcCPUInfoConsistent(t *testing.T) {
 	}
 	// And it must be deterministic for a given seed (stable identity across
 	// compose regeneration).
-	if cpuModelForSeed("stable").ModelName != cpuModelForSeed("stable").ModelName {
-		t.Error("cpuModelForSeed must be deterministic")
+	first := cpuModelForSeed("stable").ModelName
+	for i := 0; i < 5; i++ {
+		if cpuModelForSeed("stable").ModelName != first {
+			t.Error("cpuModelForSeed must be deterministic for a fixed seed")
+		}
 	}
 }
 
