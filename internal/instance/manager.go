@@ -633,16 +633,26 @@ func (m *Manager) generateServiceConfigs() error {
 		// backend sshd writes host keys to /etc/ssh and recordings to
 		// /var/log/ssh-backend; both must be writable by the in-container user.
 		if name == sshProxyHoneypot {
+			mkBackendDir := func(rel string) error {
+				dir := filepath.Join(m.config.DataPath, "honeypots", sshBackendDataDir, rel)
+				if err := os.MkdirAll(dir, 0750); err != nil {
+					return fmt.Errorf("failed to create ssh-backend dir %q: %w", rel, err)
+				}
+				// 0777 so the in-container sshd uid (not the host user that creates
+				// these) can write host keys / recordings.
+				if err := os.Chmod(dir, 0777); err != nil {
+					return fmt.Errorf("failed to chmod ssh-backend dir %q: %w", rel, err)
+				}
+				return nil
+			}
+			// One SHARED host-key dir for the whole pool (so all backends present
+			// the same fingerprint), plus a per-backend log dir.
+			if err := mkBackendDir("shared-hostkeys"); err != nil {
+				return err
+			}
 			for _, svc := range sshBackendServiceNames(m.config) {
-				base := filepath.Join(m.config.DataPath, "honeypots", sshBackendDataDir, svc)
-				for _, sub := range []string{"etc-ssh", "logs"} {
-					dir := filepath.Join(base, sub)
-					if err := os.MkdirAll(dir, 0750); err != nil {
-						return fmt.Errorf("failed to create ssh-backend %s dir for %q: %w", sub, svc, err)
-					}
-					if err := os.Chmod(dir, 0777); err != nil {
-						return fmt.Errorf("failed to chmod ssh-backend %s dir for %q: %w", sub, svc, err)
-					}
+				if err := mkBackendDir(filepath.Join(svc, "logs")); err != nil {
+					return err
 				}
 			}
 		}

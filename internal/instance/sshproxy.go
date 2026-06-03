@@ -93,6 +93,23 @@ func sshProxyBackends(cfg *config.Config) []sshBackend {
 	return out
 }
 
+// sshBackendHostname returns the single hostname EVERY backend in the pool
+// presents. All backends must agree (same as they share host keys), or a
+// returning attacker round-robined to a different backend would see `hostname`
+// change under the same IP — a pool/honeypot tell. Derived from the per-instance
+// seed via the same hostname pool as the rest of QPot's identity deception, or
+// pinned via the ssh-proxy stealth FakeHostname.
+func sshBackendHostname(cfg *config.Config) string {
+	if hp, ok := cfg.Honeypots[sshProxyHoneypot]; ok && hp.Stealth.FakeHostname != "" {
+		return sanitizeConfigValue(hp.Stealth.FakeHostname)
+	}
+	seed := cfg.QPotID
+	if seed == "" {
+		seed = cfg.InstanceName
+	}
+	return hostnameForSeed(seed)
+}
+
 // sshBackendCSV returns the broker's QPOT_SSHPROXY_BACKENDS value, e.g.
 // "ssh-backend-1=ssh-backend-1:22,ssh-backend-2=ssh-backend-2:22". The id and
 // dial host are both the service name, which docker DNS resolves on the shared

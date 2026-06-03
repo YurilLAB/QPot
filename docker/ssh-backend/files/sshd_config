@@ -9,9 +9,15 @@ Port 22
 AddressFamily any
 ListenAddress 0.0.0.0
 
-HostKey /etc/ssh/ssh_host_ed25519_key
-HostKey /etc/ssh/ssh_host_rsa_key
-HostKey /etc/ssh/ssh_host_ecdsa_key
+# Host keys live in /etc/ssh/keys, a SHARED volume mounted identically into every
+# backend in the pool, so all backends present the SAME host-key fingerprint. A
+# pool of backends behind one broker that each had their own keys would make a
+# returning attacker's SSH client warn "REMOTE HOST IDENTIFICATION HAS CHANGED" —
+# an instant honeypot/pool tell. Keeping the keys out of /etc/ssh also means the
+# shared mount never shadows this hardened sshd_config.
+HostKey /etc/ssh/keys/ssh_host_ed25519_key
+HostKey /etc/ssh/keys/ssh_host_rsa_key
+HostKey /etc/ssh/keys/ssh_host_ecdsa_key
 
 # VERBOSE logs every authentication attempt and the offered key fingerprints —
 # the structured capture the collector ingests, in addition to the recorded PTY.

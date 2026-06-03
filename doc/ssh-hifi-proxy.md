@@ -152,7 +152,8 @@ parties, is a liability — so the backend is wrapped in defense-in-depth:
 | 12 | **Backend escape** | gVisor/Kata runtime, dropped/limited caps, resource limits, no host mounts. |
 | 13 | **Cross-attacker contamination / persistence** | Per-session reset; failed resets quarantine the backend. |
 | 14 | **Privileged broker** (docker socket) | Broker is distroless nonroot with no docker access; resets are external. |
-| 15 | **Host-key rotation tell** | Backend host keys generated once and persisted (mount `/etc/ssh`). |
+| 15 | **Host-key rotation tell** | Backend host keys generated once and persisted in a SHARED volume mounted at `/etc/ssh/keys` (generation serialized with `flock`). |
+| 16 | **Pool-inconsistency tell** (different host key / hostname per backend → SSH "host identification changed" warning on reconnect) | All backends share the SAME host keys (#15) AND the SAME hostname, so the pool presents as one server regardless of which backend a session lands on. |
 
 ---
 
@@ -179,7 +180,7 @@ The equivalent compose it renders (shown for reference / manual tuning):
 networks:
   # EGRESS-LOCKED: internal:true removes the default gateway, so backends have
   # NO outbound connectivity. This is the critical control for a real-RCE box.
-  ssh_backend_net:
+  ssh-proxy_backend:
     internal: true
 
 services:
@@ -188,7 +189,7 @@ services:
     restart: unless-stopped
     ports:
       - "22:2222"                    # public SSH -> broker
-    networks: [ssh_backend_net]
+    networks: [ssh-proxy_backend]
     environment:
       QPOT_SSHPROXY_BACKENDS: "be1=ssh-backend-1:22,be2=ssh-backend-2:22"
       QPOT_SSHPROXY_NAME: "ssh-proxy"
@@ -205,36 +206,39 @@ services:
   ssh-backend-1: &backend
     image: ghcr.io/yurillab/qpot-ssh-backend:latest
     restart: unless-stopped          # cheap reset cadence; pair with an external roller
+    # All backends share ONE hostname + ONE host-key set, so the pool looks like
+    # a single server (a returning attacker never sees the identity change).
+    hostname: "web-prod-02"
     # runtime: runsc                 # gVisor STRONGLY recommended (real RCE)
-    networks: [ssh_backend_net]      # internal only -> never published to the host
+    networks: [ssh-proxy_backend]      # internal only -> never published to the host
     environment:
       BACKEND_USERS: "admin:admin,ubuntu:ubuntu,root:root123"
     volumes:
-      - ./data/honeypots/ssh-backend-1/etc-ssh:/etc/ssh        # persist host keys
-      - ./data/honeypots/ssh-backend-1/logs:/var/log/ssh-backend
+      # SHARED host keys at /etc/ssh/keys (NOT /etc/ssh, so the mount can't shadow
+      # the hardened sshd_config). The same dir is mounted into every backend.
+      - ./data/honeypots/ssh-backend/shared-hostkeys:/etc/ssh/keys
+      - ./data/honeypots/ssh-backend/ssh-backend-1/logs:/var/log/ssh-backend
     security_opt: ["no-new-privileges:true"]
     # sshd privilege separation needs a small, specific capability set; drop the
     # rest. (Do NOT cap_drop ALL — sshd auth would break.)
     cap_drop: ["ALL"]
-    cap_add: ["SETUID", "SETGID", "CHOWN", "DAC_OVERRIDE", "SYS_CHROOT", "AUDIT_WRITE", "FOWNER", "KILL", "SETPCAP"]
+    cap_add: ["SETUID", "SETGID", "CHOWN", "DAC_OVERRIDE", "SYS_CHROOT", "AUDIT_WRITE", "FOWNER", "KILL", "SETPCAP", "NET_BIND_SERVICE"]
     deploy:
       resources:
         limits: { cpus: "1.00", memory: 512M, pids: 256 }
 
   ssh-backend-2:
     <<: *backend
-    environment:
-      BACKEND_USERS: "admin:admin,ubuntu:ubuntu,root:root123"
     volumes:
-      - ./data/honeypots/ssh-backend-2/etc-ssh:/etc/ssh
-      - ./data/honeypots/ssh-backend-2/logs:/var/log/ssh-backend
+      - ./data/honeypots/ssh-backend/shared-hostkeys:/etc/ssh/keys   # SAME shared keys
+      - ./data/honeypots/ssh-backend/ssh-backend-2/logs:/var/log/ssh-backend
 ```
 
 Key invariants the recipe enforces:
 
 * **Only `ssh-proxy` publishes a host port.** Backends are reachable solely from
   the broker over the internal network — never from the internet directly.
-* **`ssh_backend_net` is `internal: true`** — the egress lock.
+* **`ssh-proxy_backend` is `internal: true`** — the egress lock.
 * The broker runs `cap_drop: ALL`, `read_only`, `no-new-privileges`; the backend
   gets exactly the caps sshd privilege-separation needs and nothing more.
 
@@ -267,8 +271,8 @@ commands run) is visible only at the backend, post-decryption.
 * **Backend** → `honeypots/ssh-backend/<svc>/logs/`: `sshd` `VERBOSE` auth log
   (every credential attempt + offered key fingerprints — this is where the
   **actual usernames/passwords** are captured, since the broker can't see them),
-  **full PTY recordings** (`*.ttyrec`), and one-shot command logs (`*.cmd`), plus
-  persisted host keys under `…/<svc>/etc-ssh/`.
+  **full PTY recordings** (`*.ttyrec`), and one-shot command logs (`*.cmd`). The
+  pool's shared host keys are persisted under `honeypots/ssh-backend/shared-hostkeys/`.
 
   These backend artefacts are bind-mounted to disk for operator review and
   forensics. Structured ingestion of the backend `sshd` auth log into ClickHouse

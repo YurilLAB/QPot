@@ -340,6 +340,11 @@ services:
     image: {{GetHoneypotImage "ssh-backend"}}
     container_name: {{$.Config.InstanceName}}_{{$b.Service}}
     restart: unless-stopped
+    # Every backend presents the SAME hostname and SAME SSH host keys (shared
+    # volume below) so the pool looks like ONE server: a returning attacker routed
+    # to a different backend never sees the hostname or host-key fingerprint
+    # change (which would warn their SSH client / reveal the honeypot pool).
+    hostname: "{{sshBackendHostname $.Config}}"
     {{- if $.Sandbox.ContainerRuntime}}
     # Stronger isolation runtime (gVisor/Kata) - strongly recommended for real RCE.
     runtime: {{$.Sandbox.ContainerRuntime}}
@@ -349,9 +354,10 @@ services:
     environment:
       - BACKEND_USERS={{$b.UsersCSV}}
     volumes:
-      # Persist host keys (stable fingerprint) and expose the session recordings
-      # / sshd logs to the collector via the bind-mounted logs dir.
-      - {{$.Config.DataPath}}/honeypots/ssh-backend/{{$b.Service}}/etc-ssh:/etc/ssh
+      # SHARED host keys (one fingerprint for the whole pool) mounted at
+      # /etc/ssh/keys so the mount never shadows the image's hardened sshd_config;
+      # plus this backend's own session recordings / sshd logs.
+      - {{$.Config.DataPath}}/honeypots/ssh-backend/shared-hostkeys:/etc/ssh/keys
       - {{$.Config.DataPath}}/honeypots/ssh-backend/{{$b.Service}}/logs:/var/log/ssh-backend
     labels:
       qpot.instance: "{{$.Config.InstanceName}}"
@@ -643,9 +649,10 @@ services:
 		// HiFi SSH proxy helpers (see sshproxy.go): whether the ssh-proxy honeypot
 		// is enabled, the real-OpenSSH backend companion services to render, and
 		// the broker's QPOT_SSHPROXY_BACKENDS value.
-		"sshProxyEnabled":  sshProxyEnabled,
-		"sshProxyBackends": sshProxyBackends,
-		"sshBackendCSV":    sshBackendCSV,
+		"sshProxyEnabled":    sshProxyEnabled,
+		"sshProxyBackends":   sshProxyBackends,
+		"sshBackendCSV":      sshBackendCSV,
+		"sshBackendHostname": sshBackendHostname,
 		// hostPort resolves the collision-free host port assigned to a
 		// (honeypot, container port) pair. Built once per Generate() so the
 		// whole stack shares one consistent, unique assignment.

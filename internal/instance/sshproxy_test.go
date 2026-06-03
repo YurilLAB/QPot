@@ -140,6 +140,7 @@ func TestSSHProxyComposeRender(t *testing.T) {
 
 	// CRITICAL: backends must NOT publish any host port (only the broker faces
 	// the internet). A `ports:` key on a backend would expose real RCE directly.
+	var hostnames []string
 	for _, svc := range []string{"ssh-backend-1", "ssh-backend-2"} {
 		blk := serviceBlock(out, svc)
 		if strings.Contains(blk, "ports:") {
@@ -155,6 +156,26 @@ func TestSSHProxyComposeRender(t *testing.T) {
 		if !strings.Contains(blk, "cap_drop:") || !strings.Contains(blk, "- SETUID") {
 			t.Errorf("%s missing expected capability hardening", svc)
 		}
+		// Anti-tell: every backend mounts the SHARED host-key dir (one fingerprint
+		// for the pool) and never the image's /etc/ssh wholesale.
+		if !strings.Contains(blk, "shared-hostkeys:/etc/ssh/keys") {
+			t.Errorf("%s must mount the shared host-key dir at /etc/ssh/keys", svc)
+		}
+		// Capture this backend's hostname for the consistency check below.
+		for _, ln := range strings.Split(blk, "\n") {
+			if s := strings.TrimSpace(ln); strings.HasPrefix(s, "hostname:") {
+				hostnames = append(hostnames, s)
+			}
+		}
+	}
+	// Anti-tell: all backends present the SAME hostname (and host keys), so a
+	// returning attacker round-robined to a different backend never sees the
+	// server identity change.
+	if len(hostnames) != 2 {
+		t.Fatalf("expected a hostname on each backend, got %v", hostnames)
+	}
+	if hostnames[0] != hostnames[1] {
+		t.Errorf("backends present different hostnames (pool tell): %q vs %q", hostnames[0], hostnames[1])
 	}
 }
 
