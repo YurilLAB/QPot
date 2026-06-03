@@ -320,3 +320,49 @@ func TestEverySupportedHoneypotIsFullyWired(t *testing.T) {
 		}
 	}
 }
+
+// TestEveryHoneypotCollectsLogs is the data-loss guard: every honeypot must map
+// its in-container log directory to the "logs" host subdir, because that is the
+// exact path the Vector collector reads (/data/honeypots/<name>/logs/**). A
+// honeypot whose deploy profile lacks a "logs" volume would run but its events
+// would never reach ClickHouse / the dashboards - silent data loss.
+func TestEveryHoneypotCollectsLogs(t *testing.T) {
+	cfg := config.Default("logs-audit")
+	for name := range cfg.Honeypots {
+		d := deployProfileFor(name)
+		hasLogs := false
+		for _, v := range d.Volumes {
+			if v.HostSubdir == "logs" {
+				hasLogs = true
+				if v.ContainerPath == "" {
+					t.Errorf("honeypot %q: logs volume has empty ContainerPath", name)
+				}
+			}
+		}
+		if !hasLogs {
+			t.Errorf("honeypot %q has no \"logs\" volume; its logs will not be collected by Vector", name)
+		}
+	}
+}
+
+// TestConfigSubdirIsMounted guards that any ConfigSubdir (where generated
+// configs like cowrie.cfg are written) is itself under a mounted volume,
+// otherwise the honeypot can't read its generated config.
+func TestConfigSubdirIsMounted(t *testing.T) {
+	cfg := config.Default("cfg-audit")
+	for name := range cfg.Honeypots {
+		d := deployProfileFor(name)
+		if d.ConfigSubdir == "" {
+			continue
+		}
+		mounted := false
+		for _, v := range d.Volumes {
+			if v.HostSubdir == d.ConfigSubdir || strings.HasPrefix(d.ConfigSubdir, v.HostSubdir+"/") {
+				mounted = true
+			}
+		}
+		if !mounted {
+			t.Errorf("honeypot %q: ConfigSubdir %q is not under any mounted volume", name, d.ConfigSubdir)
+		}
+	}
+}
