@@ -134,7 +134,7 @@ if [ ! -r /etc/os-release ]; then
 fi
 myCURRENT_DISTRIBUTION=$(awk -F= '/^NAME=/{print $2}' /etc/os-release | tr -d '"')
 
-if [[ ! " ${mySUPPORTED_DISTRIBUTIONS[@]} " =~ " ${myCURRENT_DISTRIBUTION} " ]];
+if ! printf '%s\n' "${mySUPPORTED_DISTRIBUTIONS[@]}" | grep -Fxq "$myCURRENT_DISTRIBUTION";
   then
     echo "### Only the following distributions are supported: AlmaLinux, Arch Linux, EndeavourOS, Manjaro, Fedora, Debian, openSUSE Tumbleweed, RHEL, Rocky Linux and Ubuntu."
     echo "### Please follow the QPot documentation on how to run QPot on macOS, Windows and other currently unsupported platforms."
@@ -243,7 +243,7 @@ echo
 
 # Define tag for Ansible
 myANSIBLE_DISTRIBUTIONS=("Fedora Linux" "Debian GNU/Linux" "Raspbian GNU/Linux" "Rocky Linux" "Red Hat Enterprise Linux" "Arch Linux" "Manjaro Linux" "EndeavourOS")
-if [[ "${myANSIBLE_DISTRIBUTIONS[@]}" =~ "${myCURRENT_DISTRIBUTION}" ]];
+if printf '%s\n' "${myANSIBLE_DISTRIBUTIONS[@]}" | grep -Fxq "$myCURRENT_DISTRIBUTION";
   then
     # special case AGAIN, /etc/os-release doesn't match Ansible's tagging conventions
     case "${myCURRENT_DISTRIBUTION}" in

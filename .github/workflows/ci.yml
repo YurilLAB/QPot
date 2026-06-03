@@ -294,3 +294,27 @@ jobs:
         # fuzz loop. No third-party deps needed - the FastAPI/ClickHouse imports
         # are stubbed inside the test.
         run: python3 docker/clickhouse-kibana/test_main.py
+
+  shellcheck:
+    name: Shell lint (install / ops scripts)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - name: ShellCheck QPot's install & operational scripts
+        # The installer (curl | bash) and the ops scripts are the first thing
+        # every user runs - a shell bug here breaks adoption on a whole distro
+        # before any Go code executes. Gate them at error level so real defects
+        # (bad redirects, unguarded cd, broken quoting, undefined vars) can't
+        # land. Vendored upstream T-Pot container scripts under docker/*/dist are
+        # intentionally NOT linted here: they are maintained upstream and run
+        # inside the honeypot images, not on QPot's install path.
+        run: |
+          set -euo pipefail
+          shellcheck --version
+          shellcheck -S error \
+            install.sh deploy.sh update.sh uninstall.sh genuser.sh \
+            scripts/install.sh \
+            docker/ssh-backend/files/entrypoint.sh \
+            docker/ssh-backend/files/rec-shell.sh
+          echo "shellcheck (error level) clean"
