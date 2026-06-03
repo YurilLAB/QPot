@@ -41,7 +41,7 @@
 | QPot ID Tracking | No | Yes - Instance identification |
 | Per-Instance Identity | No (identical everywhere) | Yes - Unique SSH version/hostname/kernel per instance |
 | Credential Personas | No (default phil/richard tell) | Yes - 22 realistic personas, UserDB-enforced |
-| Consistent Fake Filesystem | No (stock, identical) | Yes - /etc/passwd, os-release, /proc/version, /etc/timezone match the persona/kernel |
+| Consistent Fake Filesystem | No (stock, identical) | Yes - /etc/passwd, os-release, /proc/version, /proc/cpuinfo, /etc/timezone match the persona/kernel |
 | Stealth Mode | No | Yes - Anti-fingerprinting |
 | Yuril Integration | No | Yes - Native ecosystem support |
 | Database Migrations | No | Yes - Versioned schema management |
@@ -332,19 +332,36 @@ deterministically from the instance's unique QPot ID:
 - **Per-instance identity** — a realistic, self-consistent distro profile (SSH
   version + kernel + `uname` fields) and hostname are chosen per instance, so no
   two QPot deployments (and no QPot-vs-T-Pot) share a signature.
-- **Credential personas** — 16 research-backed login personas (corporate Ubuntu,
+- **Credential personas** — 22 research-backed login personas (corporate Ubuntu,
   IoT camera, DB server, edge router, VoIP/PBX, CCTV/NVR, cloud-default,
-  abandoned VPS, …), each with believable accounts and weak-but-real passwords
-  drawn from SANS ISC / F5 Labs brute-force corpora. One persona is
-  auto-selected per instance (or pinned via `credential_template`). The default
-  `phil`/`richard` tell is removed and `auth_class = UserDB` is enforced, so only
-  a persona's exact credentials succeed (no "any password works").
+  abandoned VPS, jump bastion, Proxmox host, GitLab CI, monitoring stack,
+  Raspberry Pi, FTP fileserver, …), each with believable accounts and
+  weak-but-real passwords drawn from SANS ISC / F5 Labs brute-force corpora. One
+  persona is auto-selected per instance (or pinned via `credential_template`).
+  The default `phil`/`richard` tell is removed and `auth_class = UserDB` is
+  enforced, so only a persona's exact credentials succeed (no "any password
+  works").
 - **Consistent fake filesystem** — Cowrie's `/etc/passwd`, `/etc/group`,
-  `/etc/os-release`, `/etc/hostname`, and `/etc/issue` are generated from the
+  `/etc/os-release`, `/etc/hostname`, `/etc/hosts`, `/etc/issue`, `/etc/motd`,
+  `/etc/timezone`, `/proc/version`, and `/proc/cpuinfo` are generated from the
   *same* persona + distro seed, so post-login recon (`cat /etc/passwd`,
-  `cat /etc/os-release`, `hostname`) agrees with the login persona and the
-  advertised SSH banner — closing the dominant "logged-in user is absent from
-  /etc/passwd" tell.
+  `cat /etc/os-release`, `cat /proc/cpuinfo`, `uname -a`, `hostname`) tells one
+  coherent, deployment-unique story — agreeing with the login persona and the
+  advertised SSH banner. This closes the dominant "logged-in user is absent from
+  /etc/passwd" tell, the stock-Debian-`motd`-on-every-box tell, and the
+  globally-identical-`/proc` fingerprint. `/proc/cpuinfo` reports a realistic,
+  per-instance server CPU (varied Xeon/EPYC model) but is deliberately pinned to
+  **2 logical CPUs** so it never contradicts Cowrie's hard-coded `nproc`/`free`
+  builtins (a core-count mismatch would itself be a tell). Only paths Cowrie
+  actually serves from its fake filesystem are overridden — writing a path absent
+  from the image (e.g. `/etc/machine-id`) would create a *new* "No such file"
+  tell, so those are intentionally left alone.
+- **Realistic session timeout** — Cowrie's stock 180s (3-minute) idle timeout
+  kicks any attacker who pauses to think or paste; a real `sshd` does not
+  disconnect idle sessions by default. QPot raises `interactive_timeout` to 1800s
+  (30 min) so the session looks like a normal server and captures more attacker
+  activity, while `authentication_timeout` stays at 120s to match OpenSSH's
+  default `LoginGraceTime`.
 - **Real advertised SSH banner** — the per-instance OpenSSH version is set as the
   actual protocol banner (`[ssh] version`), not just the in-shell `ssh -V`
   string, so Shodan/zgrab see the derived identity rather than Cowrie's hardcoded

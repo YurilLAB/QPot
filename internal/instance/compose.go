@@ -1076,7 +1076,7 @@ func (g *ComposeGenerator) generateCowrieHoneyfs() map[string]string {
 	if hostname == "" {
 		hostname = hostnameForSeed(seed)
 	}
-	return generateHoneyfs(persona, profileForSeed(seed), hostname)
+	return generateHoneyfs(persona, profileForSeed(seed), hostname, seed)
 }
 
 // generateCowrieConfig generates TPOT-compatible Cowrie config.
@@ -1129,7 +1129,13 @@ state_path = /tmp/cowrie/data
 contents_path = honeyfs
 ttylog = true
 ttylog_path = log/tty
-interactive_timeout = 180
+# Cowrie's default 180s (3 min) idle timeout disconnects an attacker who pauses
+# to think or paste - a tell (real sshd does not kick idle sessions by default,
+# ClientAliveInterval=0) AND it cuts data collection short. 1800s (30 min) is
+# long enough to be invisible and to capture more of the session, while still
+# bounding resources. authentication_timeout stays at 120s = OpenSSH's default
+# LoginGraceTime, so the pre-auth window matches a real server.
+interactive_timeout = 1800
 authentication_timeout = 120
 backend = shell
 timezone = UTC

@@ -64,8 +64,10 @@ func presentInBase(u string) bool {
 }
 
 // generateHoneyfs returns the per-instance honeyfs files for Cowrie, consistent
-// with the given persona, distro profile, and hostname.
-func generateHoneyfs(t credentialTemplate, p distroProfile, hostname string) map[string]string {
+// with the given persona, distro profile, and hostname. seed selects the
+// per-instance CPU model so two deployments don't report an identical
+// /proc/cpuinfo.
+func generateHoneyfs(t credentialTemplate, p distroProfile, hostname, seed string) map[string]string {
 	hostname = sanitizeConfigValue(hostname)
 	files := map[string]string{
 		"etc/passwd":     etcPasswd(t),
@@ -84,8 +86,57 @@ func generateHoneyfs(t credentialTemplate, p distroProfile, hostname string) map
 		// /etc/timezone must agree with the shell's clock (cowrie timezone=UTC);
 		// the file exists in the fake fs and `cat /etc/timezone` is common recon.
 		"etc/timezone": "Etc/UTC\n",
+		// /proc/cpuinfo exists in Cowrie's fake fs and `cat /proc/cpuinfo` is one
+		// of the first recon commands. Cowrie's stock file is globally identical
+		// (same model/MHz on every honeypot) - a fingerprint. We emit a realistic,
+		// per-instance server CPU. The processor COUNT is pinned to 2 to match
+		// Cowrie's hard-coded `nproc`/`free` builtins (which we verified ignore
+		// honeyfs and always report 2 CPUs / ~16 GB); a cpuinfo with a different
+		// core count than `nproc` would be a tell.
+		"proc/cpuinfo": procCPUInfo(cpuModelForSeed(seed)),
 	}
 	return files
+}
+
+// procCPUInfo renders a realistic /proc/cpuinfo for exactly two logical CPUs.
+//
+// The two-CPU count is deliberate and load-bearing: Cowrie implements `nproc`
+// and `free` as Python builtins that ignore honeyfs and always report 2 CPUs
+// (and ~16 GB RAM). If /proc/cpuinfo listed a different number of "processor"
+// entries than `nproc` prints, the disagreement would itself be a honeypot tell.
+// So only the CPU *model* varies per instance (via cpuModelForSeed); the count
+// stays fixed at two, presented as a 2-vCPU KVM guest (the common VPS shape).
+func procCPUInfo(m cpuModel) string {
+	var b strings.Builder
+	for cpu := 0; cpu < 2; cpu++ {
+		fmt.Fprintf(&b, "processor\t: %d\n", cpu)
+		fmt.Fprintf(&b, "vendor_id\t: %s\n", m.VendorID)
+		fmt.Fprintf(&b, "cpu family\t: %d\n", m.Family)
+		fmt.Fprintf(&b, "model\t\t: %d\n", m.Model)
+		fmt.Fprintf(&b, "model name\t: %s\n", m.ModelName)
+		fmt.Fprintf(&b, "stepping\t: %d\n", m.Stepping)
+		fmt.Fprintf(&b, "microcode\t: %s\n", m.Microcode)
+		fmt.Fprintf(&b, "cpu MHz\t\t: %s\n", m.MHz)
+		fmt.Fprintf(&b, "cache size\t: %d KB\n", m.CacheKB)
+		fmt.Fprintf(&b, "physical id\t: 0\n")
+		fmt.Fprintf(&b, "siblings\t: 2\n")
+		fmt.Fprintf(&b, "core id\t\t: %d\n", cpu)
+		fmt.Fprintf(&b, "cpu cores\t: 2\n")
+		fmt.Fprintf(&b, "apicid\t\t: %d\n", cpu)
+		fmt.Fprintf(&b, "initial apicid\t: %d\n", cpu)
+		fmt.Fprintf(&b, "fpu\t\t: yes\n")
+		fmt.Fprintf(&b, "fpu_exception\t: yes\n")
+		fmt.Fprintf(&b, "cpuid level\t: 13\n")
+		fmt.Fprintf(&b, "wp\t\t: yes\n")
+		fmt.Fprintf(&b, "flags\t\t: %s\n", m.Flags)
+		fmt.Fprintf(&b, "bogomips\t: %s\n", m.MHz)
+		fmt.Fprintf(&b, "clflush size\t: 64\n")
+		fmt.Fprintf(&b, "cache_alignment\t: 64\n")
+		fmt.Fprintf(&b, "address sizes\t: 46 bits physical, 48 bits virtual\n")
+		fmt.Fprintf(&b, "power management:\n")
+		b.WriteString("\n")
+	}
+	return b.String()
 }
 
 // procVersion builds a realistic /proc/version consistent with the distro

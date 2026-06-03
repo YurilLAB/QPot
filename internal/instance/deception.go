@@ -148,6 +148,51 @@ func hostnameForSeed(seed string) string {
 	return realisticHostnames[seededIndex("host:"+seed, len(realisticHostnames))]
 }
 
+// cpuModel bundles the fields a realistic /proc/cpuinfo reports for one CPU
+// type, kept internally consistent (vendor_id ↔ model name ↔ family/model/
+// stepping ↔ flags). These are real, common cloud/server CPUs so the emulated
+// box looks like an ordinary VPS/dedicated server rather than a honeypot.
+type cpuModel struct {
+	VendorID  string // vendor_id, e.g. "GenuineIntel" / "AuthenticAMD"
+	ModelName string // "model name", e.g. "Intel(R) Xeon(R) ... @ 2.80GHz"
+	Family    int    // cpu family
+	Model     int    // model
+	Stepping  int    // stepping
+	Microcode string // microcode revision
+	MHz       string // cpu MHz (string so we can keep the ".000" form)
+	CacheKB   int    // cache size in KB ("cache size")
+	Flags     string // the CPU flags line (per-vendor, KVM-guest typical)
+}
+
+// intelKVMFlags / amdKVMFlags are the CPU flag sets a typical KVM guest exposes
+// for that vendor — long, real, and a strong realism signal (a too-short or
+// vendor-mismatched flags line is a tell). Kept as constants so every Intel
+// model shares Intel-consistent flags and likewise for AMD.
+const intelKVMFlags = "fpu vme de pse tsc msr pae mce cx8 apic sep mtrr pge mca cmov pat pse36 clflush mmx fxsr sse sse2 ss ht syscall nx pdpe1gb rdtscp lm constant_tsc arch_perfmon rep_good nopl xtopology cpuid tsc_known_freq pni pclmulqdq ssse3 fma cx16 pcid sse4_1 sse4_2 x2apic movbe popcnt tsc_deadline_timer aes xsave avx f16c rdrand hypervisor lahf_lm abm 3dnowprefetch invpcid_single ssbd ibrs ibpb stibp fsgsbase tsc_adjust bmi1 hle avx2 smep bmi2 erms invpcid rtm avx512f avx512dq rdseed adx smap clflushopt clwb avx512cd avx512bw avx512vl xsaveopt xsavec xgetbv1 xsaves arat avx512_vnni md_clear arch_capabilities"
+
+const amdKVMFlags = "fpu vme de pse tsc msr pae mce cx8 apic sep mtrr pge mca cmov pat pse36 clflush mmx fxsr sse sse2 ht syscall nx mmxext fxsr_opt pdpe1gb rdtscp lm constant_tsc rep_good nopl tsc_reliable nonstop_tsc cpuid extd_apicid pni pclmulqdq ssse3 fma cx16 sse4_1 sse4_2 movbe popcnt aes xsave avx f16c rdrand hypervisor lahf_lm cmp_legacy svm cr8_legacy abm sse4a misalignsse 3dnowprefetch osvw topoext perfctr_core ssbd ibrs ibpb stibp vmmcall fsgsbase tsc_adjust bmi1 avx2 smep bmi2 rdseed adx smap clflushopt clwb sha_ni xsaveopt xsavec xgetbv1 xsaves clzero xsaveerptr arat npt nrip_save umip rdpid"
+
+// cpuModels is a pool of realistic 64-bit server/cloud CPUs. The seed selects
+// one per instance so two QPot deployments do not report an identical
+// /proc/cpuinfo, while each block stays internally consistent. (The CPU *count*
+// is fixed at 2 elsewhere to match Cowrie's hard-coded `nproc`/`free` builtins —
+// see procCPUInfo — so only the model varies, not the core count.)
+var cpuModels = []cpuModel{
+	{VendorID: "GenuineIntel", ModelName: "Intel(R) Xeon(R) Platinum 8370C CPU @ 2.80GHz", Family: 6, Model: 106, Stepping: 6, Microcode: "0xd0003d1", MHz: "2793.436", CacheKB: 49152, Flags: intelKVMFlags},
+	{VendorID: "GenuineIntel", ModelName: "Intel(R) Xeon(R) CPU E5-2680 v4 @ 2.40GHz", Family: 6, Model: 79, Stepping: 1, Microcode: "0xb000040", MHz: "2399.996", CacheKB: 35840, Flags: intelKVMFlags},
+	{VendorID: "GenuineIntel", ModelName: "Intel(R) Xeon(R) Gold 6248R CPU @ 3.00GHz", Family: 6, Model: 85, Stepping: 7, Microcode: "0x5003604", MHz: "2999.998", CacheKB: 36608, Flags: intelKVMFlags},
+	{VendorID: "GenuineIntel", ModelName: "Intel(R) Xeon(R) CPU E5-2650 v3 @ 2.30GHz", Family: 6, Model: 63, Stepping: 2, Microcode: "0x43", MHz: "2299.998", CacheKB: 25600, Flags: intelKVMFlags},
+	{VendorID: "AuthenticAMD", ModelName: "AMD EPYC 7401P 24-Core Processor", Family: 23, Model: 1, Stepping: 2, Microcode: "0x8001250", MHz: "1996.250", CacheKB: 512, Flags: amdKVMFlags},
+	{VendorID: "AuthenticAMD", ModelName: "AMD EPYC 7763 64-Core Processor", Family: 25, Model: 1, Stepping: 1, Microcode: "0xa001144", MHz: "2445.406", CacheKB: 512, Flags: amdKVMFlags},
+	{VendorID: "AuthenticAMD", ModelName: "AMD EPYC 7302P 16-Core Processor", Family: 23, Model: 49, Stepping: 0, Microcode: "0x830104d", MHz: "2994.374", CacheKB: 512, Flags: amdKVMFlags},
+}
+
+// cpuModelForSeed returns a per-instance CPU model. A distinct salt keeps the
+// CPU choice uncorrelated with the distro/hostname selection.
+func cpuModelForSeed(seed string) cpuModel {
+	return cpuModels[seededIndex("cpu:"+seed, len(cpuModels))]
+}
+
 // icsStationPrefixes are believable industrial device/station tag prefixes used
 // to build a Conpot sensor_id that looks like a real PLC/RTU/SCADA asset rather
 // than a honeypot. Real ICS assets carry tags like "PLC-01", "RTU-A", "S7-300".

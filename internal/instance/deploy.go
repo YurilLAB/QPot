@@ -103,6 +103,10 @@ func deployProfileFor(name string) honeypotDeploy {
 				// Cowrie's fake fs, so overriding them is actually served.)
 				{HostSubdir: "honeyfs/proc/version", ContainerPath: "/home/cowrie/cowrie/honeyfs/proc/version", File: true},
 				{HostSubdir: "honeyfs/etc/timezone", ContainerPath: "/home/cowrie/cowrie/honeyfs/etc/timezone", File: true},
+				// A per-instance, realistic /proc/cpuinfo (2 CPUs, to match Cowrie's
+				// hard-coded nproc/free builtins). Overrides the stock globally-
+				// identical cpuinfo, which is a cross-deployment fingerprint.
+				{HostSubdir: "honeyfs/proc/cpuinfo", ContainerPath: "/home/cowrie/cowrie/honeyfs/proc/cpuinfo", File: true},
 			},
 			Ports:        []int{22, 23},
 			ConfigSubdir: "etc",
