@@ -222,7 +222,15 @@ jobs:
           cache: true
       - name: Run each fuzz target briefly
         run: |
+          # NOTE: errexit (-e, on by default for `shell: bash`) is deliberately
+          # OFF here. This script tracks failures explicitly (the `fail` var and
+          # `exit "$fail"` at the end) and must inspect each fuzz run's non-zero
+          # exit to tell a real crash from Go's short-fuzztime deadline flake.
+          # Under -e, `out="$(run_one ...)"; rc=$?` would exit the whole script
+          # at the assignment on the first non-zero run, so the retry-on-flake
+          # logic below never ran - one flake would fail the job.
           set -uo pipefail
+          set +e
           # Discover every Fuzz target with the package it lives in. Collect into
           # an array first (mapfile) so a failing target reliably fails the job -
           # piping straight into `while` would swallow the exit status in a
