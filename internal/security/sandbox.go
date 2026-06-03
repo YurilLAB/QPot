@@ -68,7 +68,14 @@ func NewSandbox(cfg *config.SecurityConfig) (*Sandbox, error) {
 	case SandboxNone:
 		sb.available = true
 	default:
-		return nil, fmt.Errorf("unknown sandbox type: %s", sb.sandboxType)
+		// An unknown/empty sandbox mode (a typo, or an old/partial config) must
+		// NOT take the whole platform down: degrade to plain containers and warn,
+		// consistent with QPot's "keep the honeypots running even when
+		// misconfigured" principle. (config.Load already maps an empty mode to the
+		// secure default; this is belt-and-braces for any other unrecognized value.)
+		fmt.Printf("Warning: unknown sandbox mode %q; falling back to standard containers\n", sb.sandboxType)
+		sb.sandboxType = SandboxNone
+		sb.available = true
 	}
 
 	// Fall back to none if requested sandbox unavailable

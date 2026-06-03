@@ -699,6 +699,41 @@ func Load(instanceName string) (*Config, error) {
 		cfg.Intelligence.InactivityWindow = 30 * time.Minute
 	}
 
+	// Clamp the global resource limits the same way. yaml.Unmarshal leaves any
+	// omitted field at its zero value, so a hand-written or older config that
+	// drops (or partially fills) the `security:` section would otherwise render
+	// `memory: 0M` / `cpus: '0'` into the compose - which Docker REJECTS
+	// ("Minimum memory limit allowed is 6MB"), so every honeypot fails to start.
+	// Restore the secure-by-default limits for any unset field so the sandbox
+	// guarantees hold and the stack still comes up. (MaxPids is rendered only
+	// when non-zero, so 0 = unlimited is acceptable, but we still apply the
+	// default to keep the PID cap a sandbox has by default.)
+	rl := &cfg.Security.ResourceLimits
+	if rl.MaxCPUPercent <= 0 {
+		rl.MaxCPUPercent = 50.0
+	}
+	if rl.MaxMemoryMB <= 0 {
+		rl.MaxMemoryMB = 512
+	}
+	if rl.MaxStorageGB <= 0 {
+		rl.MaxStorageGB = 10
+	}
+	if rl.MaxPids <= 0 {
+		rl.MaxPids = 100
+	}
+	if rl.RestartAttempts <= 0 {
+		rl.RestartAttempts = 3
+	}
+
+	// A config that omits the security section also leaves SandboxMode empty.
+	// NewSandbox treats an empty/unknown mode as an error, which would fail the
+	// whole `qpot up` for a partial config; restore the secure default so the
+	// stack starts (NewSandbox then gracefully falls back to plain containers if
+	// gVisor is not installed on the host).
+	if cfg.Security.SandboxMode == "" {
+		cfg.Security.SandboxMode = "gvisor"
+	}
+
 	// Surface obvious misconfigurations at load time. We log instead of
 	// returning an error so a broken sub-section (e.g. unreachable Yuril
 	// endpoint) doesn't prevent QPot from starting and serving honeypots —

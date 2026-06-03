@@ -34,3 +34,22 @@ func TestContainerRuntime(t *testing.T) {
 		}
 	}
 }
+
+// TestNewSandboxUnknownModeDegrades verifies an empty or typo'd sandbox mode
+// does NOT error (which would fail `qpot up` entirely) but degrades to plain
+// containers - QPot must keep the honeypots running even when misconfigured.
+func TestNewSandboxUnknownModeDegrades(t *testing.T) {
+	for _, mode := range []string{"", "gvsior", "bogus", "GVISOR"} {
+		sb, err := NewSandbox(&config.SecurityConfig{SandboxMode: mode})
+		if err != nil {
+			t.Errorf("NewSandbox(%q) returned error %v; want graceful fallback", mode, err)
+			continue
+		}
+		if sb == nil || !sb.available {
+			t.Errorf("NewSandbox(%q): expected an available (fallback) sandbox", mode)
+		}
+		if rt := sb.ContainerRuntime(); rt != "" {
+			t.Errorf("NewSandbox(%q): fallback must use the default runtime (\"\"), got %q", mode, rt)
+		}
+	}
+}
