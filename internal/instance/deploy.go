@@ -120,6 +120,18 @@ func deployProfileFor(name string) honeypotDeploy {
 			},
 			Ports: []int{2222},
 		}
+	case "ssh-proxy":
+		// HiFi broker (cmd/qpot-sshproxy): a transparent L4 splice listening on
+		// 2222 (>1024, so no NET_BIND_SERVICE needed) and writing its NDJSON
+		// session log under logs/, which the collector ingests. The broker needs
+		// no generated config (it is env-configured) and no other mounts; the
+		// real-OpenSSH backends are rendered as companion services (sshproxy.go).
+		return honeypotDeploy{
+			Volumes: []deployVolume{
+				{HostSubdir: "logs", ContainerPath: "/var/log/ssh-proxy"},
+			},
+			Ports: []int{2222},
+		}
 	case "redishoneypot":
 		// Redis honeypot: single TCP port 6379, logs to /var/log/redishoneypot.
 		// Derived from docker/redishoneypot/docker-compose.yml.

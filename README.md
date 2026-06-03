@@ -429,10 +429,19 @@ runs distroless/non-root with **no docker access** and cannot be turned into an
 SSRF primitive (backends come only from config). Admission control (per-IP rate +
 per-IP/global concurrency caps) bounds load on the finite backend pool.
 
+Enable it with a single command — QPot renders the whole two-service stack
+(broker + N egress-locked real-OpenSSH backends, default 2 via
+`custom_config["backends"]`), wires the broker to the pool, and starts/stops the
+backends together with the broker:
+
+```sh
+qpot honeypot enable ssh-proxy   # then: qpot up  (build the docker/ssh-* images first)
+```
+
 See **[doc/ssh-hifi-proxy.md](doc/ssh-hifi-proxy.md)** for the architecture, the
-full security audit (findings + mitigations), the ready-to-use compose recipe,
-and honest limitations. The broker is tested under `-race` and fuzzed
-(transparency, admission control, config/encoding).
+full security audit (findings + mitigations), and honest limitations. The broker
+and the compose wiring are tested under `-race` and fuzzed (splice transparency,
+admission control, `BACKEND_USERS` sanitization, and broker-config round-trip).
 
 ### Database Migrations
 

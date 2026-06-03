@@ -156,13 +156,24 @@ parties, is a liability — so the backend is wrapped in defense-in-depth:
 
 ---
 
-## 5. Deployment recipe (docker compose)
+## 5. Deployment
 
-> This is the orchestration the broker is designed for. It is provided as a
-> ready-to-use fragment. Auto-emission of this fragment from
-> `qpot honeypot enable ssh-proxy` is the remaining integration step (it
-> restructures the one-service-per-honeypot compose model and wants live
-> multi-container verification); until then, operators can drop this in.
+**Enabling HiFi mode is one command:**
+
+```sh
+qpot honeypot enable ssh-proxy        # then: qpot up
+```
+
+QPot's compose generator emits the whole two-service stack automatically: the
+broker (publishing the SSH port), the configured number of real-OpenSSH backends
+(`custom_config["backends"]`, default 2), the egress-locked `ssh-proxy_backend`
+network, the broker's `QPOT_SSHPROXY_BACKENDS` wiring, the per-backend data dirs
+(persisted host keys + logs), and the hardening below. The manager starts/stops
+the backends together with the broker. `BACKEND_USERS` is derived from the same
+credential-persona system as the rest of QPot, so the HiFi box accepts the same
+realistic weak credentials the sensor advertises.
+
+The equivalent compose it renders (shown for reference / manual tuning):
 
 ```yaml
 networks:
@@ -242,27 +253,43 @@ itself. Use one of:
 
 ## 6. Capture & analytics
 
-* **Broker** → `sessions.json` (NDJSON): one record per session/rejection with
-  `src_ip`, `src_port`, `backend`, `bytes_in`, `bytes_out`, `duration_ms`,
-  `reason`, plus `ssh_proxy_rejected` records (rate-limit/cap/pool-exhaustion) as
-  an abuse signal.
-* **Backend** → `sshd` `VERBOSE` auth log (every attempt + offered key
-  fingerprints) and **full PTY recordings** (`*.ttyrec`) plus one-shot command
-  logs (`*.cmd`) under `/var/log/ssh-backend`.
+Capture is split deliberately, because **the broker never sees plaintext** — it
+forwards encrypted bytes. Anything inside the SSH session (credentials tried,
+commands run) is visible only at the backend, post-decryption.
 
-Both are bind-mounted under `data/honeypots/…/logs` and ingested by the existing
-Vector → ClickHouse pipeline.
+* **Broker** → `honeypots/ssh-proxy/logs/sessions.json` (NDJSON): one record per
+  session/rejection with `src_ip`, `src_port`, `backend`, `bytes_in`,
+  `bytes_out`, `duration_ms`, `reason`, plus `ssh_proxy_rejected` records
+  (rate-limit/cap/pool-exhaustion) as an abuse signal. **This is ingested by the
+  existing Vector → ClickHouse pipeline** (the honeypot file source matches
+  `…/ssh-proxy/logs/**/*.json`), so connection-level telemetry and the attacker
+  source set land in analytics automatically.
+* **Backend** → `honeypots/ssh-backend/<svc>/logs/`: `sshd` `VERBOSE` auth log
+  (every credential attempt + offered key fingerprints — this is where the
+  **actual usernames/passwords** are captured, since the broker can't see them),
+  **full PTY recordings** (`*.ttyrec`), and one-shot command logs (`*.cmd`), plus
+  persisted host keys under `…/<svc>/etc-ssh/`.
+
+  These backend artefacts are bind-mounted to disk for operator review and
+  forensics. Structured ingestion of the backend `sshd` auth log into ClickHouse
+  (parsing the credential attempts into the events schema) is a **follow-up**:
+  the text/`ttyrec` formats are not JSON, so they are captured but not yet parsed
+  into the pipeline. The broker's structured session telemetry already flows
+  end-to-end.
 
 ---
 
 ## 7. Honest limitations
 
 * **Real RCE.** The backend is genuinely interactive. It is only as safe as the
-  isolation around it — run it under gVisor/Kata with the egress lock. Do not
-  deploy HiFi mode without those controls.
-* **Auto-wiring is staged.** The broker, images, and this recipe are complete and
-  tested; emitting the two-service stack automatically from
-  `qpot honeypot enable ssh-proxy` is the remaining integration step.
+  isolation around it — run it under gVisor/Kata with the egress lock (the egress
+  lock is applied automatically; the gVisor/Kata runtime is applied when QPot
+  detects it on the host). Do not deploy HiFi mode on a host without a stronger
+  isolation runtime for the backends if you cannot accept container-escape risk.
+* **Images must be published/built.** `qpot honeypot enable ssh-proxy` renders the
+  stack referencing `ghcr.io/yurillab/qpot-ssh-proxy` and `…/qpot-ssh-backend`;
+  build/push them from `docker/ssh-proxy` and `docker/ssh-backend` (or retag
+  locally) before `qpot up`.
 * **Backend OS realism.** A real Debian box is not a perfect replica of the
   specific server you are impersonating; align `BACKEND_USERS`, hostname, and
   packages with the QPot persona/identity advertised for the sensor.

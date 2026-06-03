@@ -219,7 +219,14 @@ func (g *ComposeGenerator) Generate() (string, error) {
 networks:
   qpot_internal:
     internal: true
-{{range $name, $hp := .Config.Honeypots}}{{if $hp.Enabled}}
+{{if sshProxyEnabled .Config}}
+  # HiFi backends sit here ONLY. internal:true removes the default gateway, so
+  # the real-OpenSSH backends (genuine attacker code execution) have NO outbound
+  # connectivity and can never be used to pivot, scan, mine, or DDoS. This egress
+  # lock is the single most important control for high-interaction mode.
+  ssh-proxy_backend:
+    internal: true
+{{end}}{{range $name, $hp := .Config.Honeypots}}{{if $hp.Enabled}}
   {{$name}}_net:
     driver: bridge
     driver_opts:
@@ -322,6 +329,73 @@ services:
 {{range $name, $hp := .Config.Honeypots}}{{if $hp.Enabled}}
 {{template "honeypot" dict "Name" $name "HP" $hp "Config" $.Config "Sandbox" $.Sandbox}}
 {{end}}{{end}}
+{{if sshProxyEnabled .Config}}{{range $b := sshProxyBackends .Config}}
+  # HiFi backend: a REAL Debian + OpenSSH server. The attacker's SSH handshake
+  # terminates HERE (the broker only splices opaque TCP), which is what closes
+  # the protocol-fingerprinting gap. This is genuine code execution, made safe by
+  # the egress lock (ssh-proxy_backend is internal:true), the isolation runtime,
+  # a minimal capability set, resource caps, and being reset between sessions. It
+  # publishes NO host port - it is reachable only by the broker.
+  {{$b.Service}}:
+    image: {{GetHoneypotImage "ssh-backend"}}
+    container_name: {{$.Config.InstanceName}}_{{$b.Service}}
+    restart: unless-stopped
+    {{- if $.Sandbox.ContainerRuntime}}
+    # Stronger isolation runtime (gVisor/Kata) - strongly recommended for real RCE.
+    runtime: {{$.Sandbox.ContainerRuntime}}
+    {{- end}}
+    networks:
+      - ssh-proxy_backend
+    environment:
+      - BACKEND_USERS={{$b.UsersCSV}}
+    volumes:
+      # Persist host keys (stable fingerprint) and expose the session recordings
+      # / sshd logs to the collector via the bind-mounted logs dir.
+      - {{$.Config.DataPath}}/honeypots/ssh-backend/{{$b.Service}}/etc-ssh:/etc/ssh
+      - {{$.Config.DataPath}}/honeypots/ssh-backend/{{$b.Service}}/logs:/var/log/ssh-backend
+    labels:
+      qpot.instance: "{{$.Config.InstanceName}}"
+      qpot.honeypot: "ssh-backend"
+    security_opt:
+      - no-new-privileges:true
+    # sshd privilege separation needs a small, specific capability set; everything
+    # else is dropped. (Do NOT cap_drop ALL - sshd auth would break.)
+    cap_drop:
+      - ALL
+    cap_add:
+      - SETUID
+      - SETGID
+      - CHOWN
+      - DAC_OVERRIDE
+      - FOWNER
+      - SETPCAP
+      - KILL
+      - SYS_CHROOT
+      - AUDIT_WRITE
+      - NET_BIND_SERVICE
+    deploy:
+      resources:
+        limits:
+          cpus: '{{divf $.Config.Security.ResourceLimits.MaxCPUPercent 100}}'
+          memory: {{$.Config.Security.ResourceLimits.MaxMemoryMB}}M
+          {{if $.Config.Security.ResourceLimits.MaxPids}}pids: {{$.Config.Security.ResourceLimits.MaxPids}}{{end}}
+        reservations:
+          cpus: '0.05'
+          memory: 32M
+      restart_policy:
+        condition: on-failure
+        delay: 5s
+        max_attempts: {{$.Config.Security.ResourceLimits.RestartAttempts}}
+        window: 120s
+    mem_swappiness: 0
+    oom_kill_disable: false
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+        labels: "qpot.instance,qpot.honeypot"
+{{end}}{{end}}
 
   # Note: the Web UI is served in-process by the qpot binary itself ("qpot up"
   # starts an HTTP server on Config.WebUI.Port). There is no separate web UI
@@ -368,6 +442,11 @@ services:
     networks:
       - qpot_internal
       - {{.Name}}_net
+    {{- if eq .Name "ssh-proxy"}}
+      # The broker also joins the egress-locked backend network so it can reach
+      # the real-OpenSSH backends (and nothing else can).
+      - ssh-proxy_backend
+    {{- end}}
     labels:
       # Host-side identification for QPot's tooling and the docker log driver.
       # Docker labels are NOT visible to a process running inside the container
@@ -391,16 +470,24 @@ services:
       {{if .HP.Stealth.BannerString}}- BANNER_STRING={{.HP.Stealth.BannerString}}{{end}}
       {{if .HP.Stealth.RandomizeSSHVersion}}- RANDOMIZE_SSH_VERSION=1{{end}}
       {{if .HP.Stealth.AddArtificialDelay}}- ARTIFICIAL_DELAY={{.HP.Stealth.DelayRangeMs}}{{end}}
+      {{- if eq .Name "ssh-proxy"}}
+      # HiFi broker: the operator-fixed backend pool (never attacker-derived, so
+      # no SSRF) and the logical name used in the broker's session events.
+      - QPOT_SSHPROXY_NAME=ssh-proxy
+      - QPOT_SSHPROXY_BACKENDS={{sshBackendCSV $.Config}}
+      {{- end}}
       {{- range $k, $v := $d.Env}}
       - {{$k}}={{$v}}
       {{- end}}
     {{template "security" dict "Config" $.Config "HP" .HP "GlobalLimits" $.Config.Security.ResourceLimits "Name" .Name "FakeHostname" .HP.Stealth.FakeHostname}}
+    {{- if ne .Name "ssh-proxy"}}
     healthcheck:
       test: ["CMD-SHELL", "netstat -tln 2>/dev/null | grep -q ':{{.HP.Port}}' || ss -tln | grep -q ':{{.HP.Port}}'"]
       interval: 30s
       timeout: 10s
       retries: 3
       start_period: 15s
+    {{- end}}
 {{end}}
 
 {{define "dbsecurity"}}
@@ -553,6 +640,12 @@ services:
 		"bridgeName":       bridgeName,
 		"macFor":           macForSeed,
 		"deployFor":        deployProfileFor,
+		// HiFi SSH proxy helpers (see sshproxy.go): whether the ssh-proxy honeypot
+		// is enabled, the real-OpenSSH backend companion services to render, and
+		// the broker's QPOT_SSHPROXY_BACKENDS value.
+		"sshProxyEnabled":  sshProxyEnabled,
+		"sshProxyBackends": sshProxyBackends,
+		"sshBackendCSV":    sshBackendCSV,
 		// hostPort resolves the collision-free host port assigned to a
 		// (honeypot, container port) pair. Built once per Generate() so the
 		// whole stack shares one consistent, unique assignment.
@@ -1278,6 +1371,10 @@ func GetHoneypotImage(name string) string {
 		"miniprint":  "ghcr.io/telekom-security/miniprint:24.04.1",  // printer (JetDirect)
 		"sentrypeer": "ghcr.io/telekom-security/sentrypeer:24.04.1", // SIP/VoIP
 		"wordpot":    "ghcr.io/telekom-security/wordpot:24.04.1",    // WordPress
+		// High-interaction SSH proxy (HiFi): the QPot-built L4 broker and the
+		// real-OpenSSH backend. See docker/ssh-proxy and docker/ssh-backend.
+		"ssh-proxy":   "ghcr.io/yurillab/qpot-ssh-proxy:latest",
+		"ssh-backend": "ghcr.io/yurillab/qpot-ssh-backend:latest",
 	}
 
 	if img, ok := images[name]; ok {
@@ -1296,6 +1393,7 @@ func (g *ComposeGenerator) ValidateHoneypot(name string) error {
 		"mailoney", "medpot", "dicompot", "redishoneypot",
 		"beelzebub", "galah", "go-pot", "h0neytr4p", "hellpot",
 		"log4pot", "miniprint", "sentrypeer", "wordpot",
+		"ssh-proxy",
 	}
 
 	for _, s := range supported {

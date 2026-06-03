@@ -513,6 +513,29 @@ func Default(instanceName string) *Config {
 			"miniprint":  {Enabled: false, Port: 9100, RiskLevel: "low", Sandbox: true},
 			"sentrypeer": {Enabled: false, Port: 5060, RiskLevel: "medium", Sandbox: true},
 			"wordpot":    {Enabled: false, Port: 80, RiskLevel: "medium", Sandbox: true},
+			// High-interaction SSH proxy (HiFi). Disabled by default and marked
+			// CRITICAL: enabling it stands up REAL OpenSSH backends (genuine code
+			// execution) behind a transparent L4 broker, which is what fully
+			// closes the protocol-fingerprinting gap. Only run it with the
+			// isolation runtime (gVisor/Kata) and the egress lock the compose
+			// renderer applies. custom_config["backends"] sets the backend count
+			// (default 2). See doc/ssh-hifi-proxy.md.
+			"ssh-proxy": {
+				Enabled:   false,
+				Port:      22,
+				RiskLevel: "critical",
+				Sandbox:   true,
+				Resources: HoneypotResources{
+					UseCustomLimits: true,
+					MaxCPUPercent:   50.0,
+					MaxMemoryMB:     512,
+					MaxPids:         256,
+				},
+				Stealth: HoneypotStealth{Enabled: true},
+				CustomConfig: map[string]string{
+					"backends": "2",
+				},
+			},
 		},
 		Ports: PortConfig{
 			BasePort:     10000,

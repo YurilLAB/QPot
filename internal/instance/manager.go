@@ -392,7 +392,12 @@ func (m *Manager) StartHoneypot(ctx context.Context, name string) error {
 	slog.Info("Starting honeypot", "name", name, "instance", m.config.InstanceName)
 
 	composeFile := m.config.GetDockerComposePath()
-	cmd := exec.CommandContext(ctx, "docker", "compose", "-f", composeFile, "up", "-d", name)
+	// Enabling ssh-proxy must bring up its real-OpenSSH backend companions too,
+	// or the broker has nothing to forward to. The service names are generated
+	// by us (fixed "ssh-backend-N" pattern), never user input, so appending them
+	// to the argv is injection-safe.
+	args := append([]string{"compose", "-f", composeFile, "up", "-d", name}, m.companionServices(name)...)
+	cmd := exec.CommandContext(ctx, "docker", args...)
 	cmd.Dir = m.config.DataPath
 
 	output, err := cmd.CombinedOutput()
@@ -400,6 +405,17 @@ func (m *Manager) StartHoneypot(ctx context.Context, name string) error {
 		return fmt.Errorf("failed to start honeypot: %w\nOutput: %s", err, output)
 	}
 
+	return nil
+}
+
+// companionServices returns the additional compose service names that must be
+// started/stopped together with a honeypot. Only ssh-proxy has companions (its
+// HiFi backends); every other honeypot returns nil. The names are derived
+// deterministically (sshproxy.go), so they are safe to pass to docker.
+func (m *Manager) companionServices(name string) []string {
+	if name == sshProxyHoneypot && sshProxyEnabled(m.config) {
+		return sshBackendServiceNames(m.config)
+	}
 	return nil
 }
 
@@ -411,7 +427,9 @@ func (m *Manager) StopHoneypot(ctx context.Context, name string) error {
 	slog.Info("Stopping honeypot", "name", name, "instance", m.config.InstanceName)
 
 	composeFile := m.config.GetDockerComposePath()
-	cmd := exec.CommandContext(ctx, "docker", "compose", "-f", composeFile, "stop", name)
+	// Stop the HiFi backends alongside the broker (see companionServices).
+	args := append([]string{"compose", "-f", composeFile, "stop", name}, m.companionServices(name)...)
+	cmd := exec.CommandContext(ctx, "docker", args...)
 	cmd.Dir = m.config.DataPath
 
 	output, err := cmd.CombinedOutput()
@@ -605,6 +623,26 @@ func (m *Manager) generateServiceConfigs() error {
 				}
 				if err := os.WriteFile(dest, []byte(content), 0644); err != nil {
 					return fmt.Errorf("failed to write honeyfs/%s for cowrie: %w", rel, err)
+				}
+			}
+		}
+
+		// HiFi ssh-proxy: pre-create each real-OpenSSH backend's persisted
+		// host-key dir and log dir, so the bind mounts resolve to real
+		// directories owned by us (rather than docker creating them as root). The
+		// backend sshd writes host keys to /etc/ssh and recordings to
+		// /var/log/ssh-backend; both must be writable by the in-container user.
+		if name == sshProxyHoneypot {
+			for _, svc := range sshBackendServiceNames(m.config) {
+				base := filepath.Join(m.config.DataPath, "honeypots", sshBackendDataDir, svc)
+				for _, sub := range []string{"etc-ssh", "logs"} {
+					dir := filepath.Join(base, sub)
+					if err := os.MkdirAll(dir, 0750); err != nil {
+						return fmt.Errorf("failed to create ssh-backend %s dir for %q: %w", sub, svc, err)
+					}
+					if err := os.Chmod(dir, 0777); err != nil {
+						return fmt.Errorf("failed to chmod ssh-backend %s dir for %q: %w", sub, svc, err)
+					}
 				}
 			}
 		}
