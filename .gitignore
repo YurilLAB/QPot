@@ -8,3 +8,7 @@ install_tpot.log
 # Python bytecode caches (e.g. clickhouse-kibana connector tests)
 __pycache__/
 *.pyc
+
+# Compiled Go binaries (built locally / in CI smoke runs)
+/qpot
+/qpot-sshproxy

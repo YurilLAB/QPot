@@ -406,8 +406,33 @@ honeypots:
 > detection and default-config tells (the bulk of real-world automated
 > fingerprinting), but it does **not** defeat single-packet protocol
 > fingerprinting (Vetterl & Clayton, WOOT'18), which is rooted in the honeypot's
-> Python transport libraries. Only a high-interaction / real-OpenSSH proxy mode
-> addresses that class.
+> Python transport libraries. The class is addressed by **high-interaction SSH
+> proxy ("HiFi") mode** (below), which terminates the attacker's handshake at a
+> real OpenSSH daemon.
+
+### High-Interaction SSH Proxy (HiFi mode)
+
+To close the protocol-fingerprinting gap *entirely*, QPot can front a pool of
+**real OpenSSH backends** with a transparent Layer-4 broker
+(`internal/proxy` + `cmd/qpot-sshproxy`, images under `docker/ssh-proxy` and
+`docker/ssh-backend`). The broker speaks **no SSH** — it splices opaque TCP bytes
+— so the attacker's SSH handshake terminates at genuine OpenSSH and there is no
+emulated Python transport to fingerprint. Unlike Cowrie's own "proxy mode" (where
+the attacker still handshakes against Cowrie's Python transport), this leaves
+nothing of ours on the protocol path.
+
+Because the backend is genuine code execution, it is wrapped in defense-in-depth:
+an **egress-locked `internal:true` network** (no outbound — it can never pivot,
+scan, mine, or DDoS), gVisor/Kata isolation, a minimal capability set, resource
+caps, per-session **reset**, and full PTY session recording. The broker itself
+runs distroless/non-root with **no docker access** and cannot be turned into an
+SSRF primitive (backends come only from config). Admission control (per-IP rate +
+per-IP/global concurrency caps) bounds load on the finite backend pool.
+
+See **[doc/ssh-hifi-proxy.md](doc/ssh-hifi-proxy.md)** for the architecture, the
+full security audit (findings + mitigations), the ready-to-use compose recipe,
+and honest limitations. The broker is tested under `-race` and fuzzed
+(transparency, admission control, config/encoding).
 
 ### Database Migrations
 

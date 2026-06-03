@@ -1,0 +1,50 @@
+# QPot high-interaction SSH backend sshd_config.
+#
+# This is a REAL OpenSSH server (that is the whole point — no emulated transport
+# to fingerprint). It is configured to (a) accept the weak credentials attackers
+# try, so they get a genuine shell we can record, and (b) refuse to be turned
+# into a network pivot, as defense-in-depth on top of the egress-locked network.
+
+Port 22
+AddressFamily any
+ListenAddress 0.0.0.0
+
+HostKey /etc/ssh/ssh_host_ed25519_key
+HostKey /etc/ssh/ssh_host_rsa_key
+HostKey /etc/ssh/ssh_host_ecdsa_key
+
+# VERBOSE logs every authentication attempt and the offered key fingerprints —
+# the structured capture the collector ingests, in addition to the recorded PTY.
+LogLevel VERBOSE
+SyslogFacility AUTH
+
+# We WANT logins: the value of a high-interaction honeypot is the post-login
+# behaviour. Password auth and root login are intentionally enabled.
+PermitRootLogin yes
+PasswordAuthentication yes
+PubkeyAuthentication yes
+PermitEmptyPasswords no
+KbdInteractiveAuthentication no
+UsePAM yes
+
+# A real server's grace/auth limits, so the pre-auth behaviour matches OpenSSH.
+LoginGraceTime 120
+MaxAuthTries 6
+MaxSessions 10
+
+# Defense-in-depth: even though the backend sits on an egress-locked internal
+# network, explicitly refuse every forwarding/tunnelling primitive so a real
+# shell here can NEVER be used to reach another host, open a reverse tunnel, or
+# pivot — belt-and-braces against an egress misconfiguration.
+AllowTcpForwarding no
+AllowAgentForwarding no
+AllowStreamLocalForwarding no
+GatewayPorts no
+PermitTunnel no
+X11Forwarding no
+PermitUserRC no
+
+PrintMotd no
+PrintLastLog yes
+AcceptEnv LANG LC_*
+Subsystem sftp internal-sftp
