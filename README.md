@@ -40,8 +40,8 @@
 | ClickHouse Database | No | Yes - High-performance analytics |
 | QPot ID Tracking | No | Yes - Instance identification |
 | Per-Instance Identity | No (identical everywhere) | Yes - Unique SSH version/hostname/kernel per instance |
-| Credential Personas | No (default phil/richard tell) | Yes - 16 realistic personas, UserDB-enforced |
-| Consistent Fake Filesystem | No (stock, identical) | Yes - /etc/passwd, os-release match the persona |
+| Credential Personas | No (default phil/richard tell) | Yes - 22 realistic personas, UserDB-enforced |
+| Consistent Fake Filesystem | No (stock, identical) | Yes - /etc/passwd, os-release, /proc/version, /etc/timezone match the persona/kernel |
 | Stealth Mode | No | Yes - Anti-fingerprinting |
 | Yuril Integration | No | Yes - Native ecosystem support |
 | Database Migrations | No | Yes - Versioned schema management |

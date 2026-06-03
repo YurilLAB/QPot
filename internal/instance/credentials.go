@@ -187,6 +187,62 @@ var credentialTemplates = []credentialTemplate{
 			{"server", []string{"server2023"}},
 		},
 	},
+	{
+		Name: "jump-bastion", Description: "Bastion / jump host (centralized SSH access)",
+		Users: []credUser{
+			{"admin", []string{"Admin@123", "admin"}},
+			{"ansible", []string{"ansible", "Ansible2023!"}},
+			{"jumpuser", []string{"jump123"}},
+			{"bastion", []string{"bastion"}},
+			{"root", []string{"StrongP@ss1"}},
+		},
+	},
+	{
+		Name: "proxmox-host", Description: "Proxmox VE virtualization host",
+		Users: []credUser{
+			{"root", []string{"proxmox", "Proxmox1!"}}, // PVE root login
+			{"backup", []string{"Backup2023"}},
+			{"monitoring", []string{"monitoring"}},
+		},
+	},
+	{
+		Name: "gitlab-devops", Description: "Self-hosted GitLab / CI runner",
+		Users: []credUser{
+			{"git", []string{"git"}},
+			{"gitlab-runner", []string{"gitlab", "runner123"}},
+			{"deployer", []string{"Deploy@2024"}},
+			{"ci", []string{"ci123"}},
+			{"root", []string{"GitLab2023!"}},
+		},
+	},
+	{
+		Name: "monitoring-stack", Description: "Monitoring stack (Grafana/Prometheus/Zabbix)",
+		Users: []credUser{
+			{"grafana", []string{"admin"}}, // Grafana default admin/admin
+			{"zabbix", []string{"zabbix"}},
+			{"prometheus", []string{"prometheus"}},
+			{"monitor", []string{"Monitor2023"}},
+			{"root", []string{"M0nitor!"}},
+		},
+	},
+	{
+		Name: "raspberry-pi", Description: "Raspberry Pi (Raspbian/Debian default)",
+		Users: []credUser{
+			{"pi", []string{"raspberry", "raspberrypi"}}, // the famous default
+			{"root", []string{"raspberry"}},
+			{"admin", []string{"admin"}},
+		},
+	},
+	{
+		Name: "ftp-fileserver", Description: "FTP / file server (vsftpd/proftpd)",
+		Users: []credUser{
+			{"ftp", []string{"ftp"}},
+			{"ftpadmin", []string{"ftpadmin", "FtpAdmin2023"}},
+			{"share", []string{"share123"}},
+			{"backup", []string{"backup"}},
+			{"root", []string{"Files2023!"}},
+		},
+	},
 }
 
 // credentialTemplateByName returns the template with the given name, or false.

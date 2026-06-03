@@ -53,6 +53,9 @@ var serviceAccounts = map[string]string{ // username -> home dir
 	"oracle": "/opt/oracle", "dovecot": "/usr/lib/dovecot", "apache": "/var/www",
 	"nagios": "/var/lib/nagios", "jenkins": "/var/lib/jenkins", "git": "/var/lib/git",
 	"cpanel": "/usr/local/cpanel", "ftpuser": "/srv/ftp", "ubnt": "/home/ubnt",
+	"gitlab-runner": "/home/gitlab-runner", "grafana": "/usr/share/grafana",
+	"zabbix": "/var/lib/zabbix", "prometheus": "/var/lib/prometheus",
+	"ftp": "/srv/ftp",
 }
 
 // presentInBase reports whether a username already exists in the system base.
@@ -72,8 +75,32 @@ func generateHoneyfs(t credentialTemplate, p distroProfile, hostname string) map
 		"etc/os-release": osRelease(p, hostname),
 		"etc/issue":      issue(p),
 		"etc/motd":       motd(p),
+		// /proc/version must agree with `uname -r` / `uname -v`; Cowrie's static
+		// default contradicts the per-instance kernel/distro we advertise. (This
+		// path exists in Cowrie's fake filesystem, so overriding it is served;
+		// /etc/machine-id and /etc/lsb-release are NOT in the fs, so writing them
+		// would never be read - and would yield a "No such file" tell instead.)
+		"proc/version": procVersion(p),
+		// /etc/timezone must agree with the shell's clock (cowrie timezone=UTC);
+		// the file exists in the fake fs and `cat /etc/timezone` is common recon.
+		"etc/timezone": "Etc/UTC\n",
 	}
 	return files
+}
+
+// procVersion builds a realistic /proc/version consistent with the distro
+// profile's kernel release (uname -r) and build string (uname -v).
+func procVersion(p distroProfile) string {
+	builder, gcc := "buildd@lcy02-amd64-079", "gcc (Ubuntu 11.4.0-1ubuntu1~22.04) 11.4.0"
+	low := strings.ToLower(p.OSPretty)
+	switch {
+	case strings.Contains(low, "debian"):
+		builder, gcc = "debian-kernel@lists.debian.org", "gcc-12 (Debian 12.2.0-14) 12.2.0"
+	case strings.Contains(low, "centos"):
+		builder, gcc = "mockbuild@kbuilder.bsys.centos.org", "gcc (GCC) 4.8.5 20150623 (Red Hat 4.8.5-44)"
+	}
+	return fmt.Sprintf("Linux version %s (%s) (%s, GNU ld) %s\n",
+		p.KernelVersion, builder, gcc, p.KernelBuildString)
 }
 
 // etcHosts builds a standard Debian/Ubuntu /etc/hosts. The 127.0.1.1 line must

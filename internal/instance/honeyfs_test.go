@@ -126,3 +126,48 @@ func TestHoneyfsMOTDPerDistro(t *testing.T) {
 		t.Error("generateHoneyfs must always emit etc/motd (its mount source)")
 	}
 }
+
+// TestHoneyfsProcVersionConsistent verifies /proc/version agrees with the
+// distro profile's kernel release and build string (a mismatch with `uname` is
+// itself a fingerprint).
+func TestHoneyfsProcVersionConsistent(t *testing.T) {
+	for _, p := range distroProfiles {
+		pv := procVersion(p)
+		if !strings.HasPrefix(pv, "Linux version "+p.KernelVersion+" ") {
+			t.Errorf("%s: /proc/version does not start with the kernel release: %q", p.OSPretty, pv)
+		}
+		if !strings.Contains(pv, p.KernelBuildString) {
+			t.Errorf("%s: /proc/version missing the uname build string", p.OSPretty)
+		}
+		if !strings.HasSuffix(pv, "\n") {
+			t.Errorf("%s: /proc/version should end with a newline", p.OSPretty)
+		}
+	}
+}
+
+// TestHoneyfsFilesAreMounted is the data-loss/tell guard: every file
+// generateHoneyfs produces must be bind-mounted into Cowrie by the deploy
+// profile, otherwise the generated (consistent) content is never served and the
+// image's stock file shows through - reintroducing the very tell we fixed.
+func TestHoneyfsFilesAreMounted(t *testing.T) {
+	files := generateHoneyfs(credentialTemplates[0], distroProfiles[0], "host")
+	mounts := map[string]bool{}
+	for _, v := range deployProfileFor("cowrie").Volumes {
+		if strings.HasPrefix(v.HostSubdir, "honeyfs/") {
+			mounts[strings.TrimPrefix(v.HostSubdir, "honeyfs/")] = true
+		}
+	}
+	for rel := range files {
+		if !mounts[rel] {
+			t.Errorf("honeyfs file %q is generated but not mounted into Cowrie (stock file would show through)", rel)
+		}
+	}
+}
+
+// TestHoneyfsTimezone checks /etc/timezone matches cowrie's UTC clock.
+func TestHoneyfsTimezone(t *testing.T) {
+	files := generateHoneyfs(credentialTemplates[0], distroProfiles[0], "h")
+	if got := files["etc/timezone"]; got != "Etc/UTC\n" {
+		t.Errorf("etc/timezone = %q, want %q", got, "Etc/UTC\n")
+	}
+}

@@ -98,6 +98,11 @@ func deployProfileFor(name string) honeypotDeploy {
 				// motd, which is a global fingerprint and a tell on a non-Debian
 				// profile.
 				{HostSubdir: "honeyfs/etc/motd", ContainerPath: "/home/cowrie/cowrie/honeyfs/etc/motd", File: true},
+				// A /proc/version consistent with the advertised kernel, and an
+				// /etc/timezone matching the shell clock. (Both paths exist in
+				// Cowrie's fake fs, so overriding them is actually served.)
+				{HostSubdir: "honeyfs/proc/version", ContainerPath: "/home/cowrie/cowrie/honeyfs/proc/version", File: true},
+				{HostSubdir: "honeyfs/etc/timezone", ContainerPath: "/home/cowrie/cowrie/honeyfs/etc/timezone", File: true},
 			},
 			Ports:        []int{22, 23},
 			ConfigSubdir: "etc",
