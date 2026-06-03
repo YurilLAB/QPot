@@ -44,7 +44,7 @@ type sshBackend struct {
 
 // sshProxyEnabled reports whether the HiFi ssh-proxy honeypot is enabled.
 func sshProxyEnabled(cfg *config.Config) bool {
-	hp, ok := cfg.Honeypots[sshProxyHoneypot]
+	hp, ok := cfg.GetHoneypotConfig(sshProxyHoneypot)
 	return ok && hp.Enabled
 }
 
@@ -54,7 +54,7 @@ func sshProxyEnabled(cfg *config.Config) bool {
 // of real-RCE containers.
 func sshBackendCount(cfg *config.Config) int {
 	n := defaultSSHBackends
-	if hp, ok := cfg.Honeypots[sshProxyHoneypot]; ok {
+	if hp, ok := cfg.GetHoneypotConfig(sshProxyHoneypot); ok {
 		if v := strings.TrimSpace(hp.CustomConfig["backends"]); v != "" {
 			if parsed, err := strconv.Atoi(v); err == nil {
 				n = parsed
@@ -100,7 +100,7 @@ func sshProxyBackends(cfg *config.Config) []sshBackend {
 // seed via the same hostname pool as the rest of QPot's identity deception, or
 // pinned via the ssh-proxy stealth FakeHostname.
 func sshBackendHostname(cfg *config.Config) string {
-	if hp, ok := cfg.Honeypots[sshProxyHoneypot]; ok && hp.Stealth.FakeHostname != "" {
+	if hp, ok := cfg.GetHoneypotConfig(sshProxyHoneypot); ok && hp.Stealth.FakeHostname != "" {
 		if h := sanitizeHostname(hp.Stealth.FakeHostname); h != "" {
 			return h
 		}
@@ -156,7 +156,7 @@ func sshBackendUsersCSV(cfg *config.Config) string {
 		seed = cfg.InstanceName
 	}
 	explicit := ""
-	if hp, ok := cfg.Honeypots[sshProxyHoneypot]; ok {
+	if hp, ok := cfg.GetHoneypotConfig(sshProxyHoneypot); ok {
 		explicit = hp.Stealth.CredentialTemplate
 	}
 	tmpl := selectCredentialTemplate(explicit, seed)

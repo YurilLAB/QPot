@@ -90,9 +90,19 @@ func (b *TTPBuilder) GetActiveSessions() []*database.TTPSession {
 	b.mu.RLock()
 	defer b.mu.RUnlock()
 
+	// Return independent DEEP copies, not the live *TTPSession pointers. The
+	// worker goroutine mutates those objects (and their slices) under the write
+	// lock; handing out the live pointers would let a caller read them after this
+	// RLock is released and race the worker. Copying the slices here (under the
+	// lock) makes each returned session a self-contained snapshot.
 	result := make([]*database.TTPSession, 0, len(b.sessions))
 	for _, s := range b.sessions {
-		result = append(result, s.session)
+		cp := *s.session
+		cp.SourceIPs = append([]string(nil), s.session.SourceIPs...)
+		cp.KillChainStages = append([]string(nil), s.session.KillChainStages...)
+		cp.Techniques = append([]string(nil), s.session.Techniques...)
+		cp.IOCIDs = append([]string(nil), s.session.IOCIDs...)
+		result = append(result, &cp)
 	}
 	return result
 }

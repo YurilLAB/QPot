@@ -338,7 +338,9 @@ func (m *Manager) Status(ctx context.Context) (*Status, error) {
 	// container's name/image/label) and reported stopped-but-present
 	// containers as healthy.
 	entries := parseComposePS(output)
-	for name, hp := range m.config.Honeypots {
+	// Snapshot under the config lock: Status is served by the web server
+	// concurrently with POST /api/honeypots, which mutates the map.
+	for name, hp := range m.config.SnapshotHoneypots() {
 		hs := HoneypotStatus{
 			Name: name,
 			Port: hp.Port,
@@ -381,7 +383,7 @@ func (m *Manager) isConfiguredHoneypot(name string) bool {
 	if name == "" {
 		return false
 	}
-	_, ok := m.config.Honeypots[name]
+	_, ok := m.config.GetHoneypotConfig(name)
 	return ok
 }
 
@@ -476,17 +478,23 @@ func (m *Manager) GetLogs(ctx context.Context, honeypot string, follow bool, tai
 	}
 
 	go func() {
+		// Always reap the child and close its pipe, even on the early ctx.Done
+		// return below. Without this Wait(), killing the process leaves a zombie
+		// and leaks the stdout pipe FD on every /api/logs request that caps out or
+		// whose client disconnects (its context is cancelled when the handler
+		// returns) - exhausting FDs/PIDs under dashboard polling. Wait() runs
+		// before close(logs) (defers are LIFO).
 		defer close(logs)
+		defer func() { _ = cmd.Wait() }()
 		scanner := bufio.NewScanner(stdout)
 		for scanner.Scan() {
 			select {
 			case <-ctx.Done():
-				cmd.Process.Kill()
+				_ = cmd.Process.Kill()
 				return
 			case logs <- scanner.Text():
 			}
 		}
-		cmd.Wait()
 	}()
 
 	return logs, nil

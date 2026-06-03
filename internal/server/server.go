@@ -589,9 +589,10 @@ func (s *Server) handleHoneypots(w http.ResponseWriter, r *http.Request) {
 
 	switch r.Method {
 	case http.MethodGet:
-		// List honeypots
+		// List honeypots. Snapshot under the config lock so we never range the
+		// live map while a concurrent POST enables/disables a honeypot.
 		var list []map[string]interface{}
-		for name, hp := range s.config.Honeypots {
+		for name, hp := range s.config.SnapshotHoneypots() {
 			// Check if running
 			running := false
 			if s.manager != nil {
@@ -1132,7 +1133,7 @@ func (s *Server) isKnownHoneypot(name string) bool {
 	if name == "" {
 		return false
 	}
-	_, ok := s.config.Honeypots[name]
+	_, ok := s.config.GetHoneypotConfig(name)
 	return ok
 }
 

@@ -88,6 +88,37 @@ type Config struct {
 	Yuril        YurilConfig               `yaml:"yuril"`
 	Response     ResponseConfig            `yaml:"response"`
 	Collector    CollectorConfig           `yaml:"collector"`
+
+	// hpMu guards concurrent access to the Honeypots map. The web server mutates
+	// it (EnableHoneypot/DisableHoneypot on the POST /api/honeypots path) from one
+	// goroutine while other request goroutines read it (GET handlers, Status,
+	// Save's marshal) — without this, Go's runtime aborts with "concurrent map
+	// read and map write" and the whole process dies. Always accessed via the
+	// accessor methods below; unexported so YAML ignores it.
+	hpMu sync.RWMutex
+}
+
+// GetHoneypotConfig returns the config for one honeypot under a read lock, so it
+// is safe to call concurrently with EnableHoneypot/DisableHoneypot.
+func (c *Config) GetHoneypotConfig(name string) (HoneypotConfig, bool) {
+	c.hpMu.RLock()
+	defer c.hpMu.RUnlock()
+	hp, ok := c.Honeypots[name]
+	return hp, ok
+}
+
+// SnapshotHoneypots returns a shallow copy of the Honeypots map taken under a
+// read lock, so callers can range over it without racing a concurrent
+// enable/disable. HoneypotConfig values are copied; the per-honeypot maps/slices
+// inside them are shared (read-only by convention).
+func (c *Config) SnapshotHoneypots() map[string]HoneypotConfig {
+	c.hpMu.RLock()
+	defer c.hpMu.RUnlock()
+	out := make(map[string]HoneypotConfig, len(c.Honeypots))
+	for k, v := range c.Honeypots {
+		out[k] = v
+	}
+	return out
 }
 
 // CollectorConfig configures the Vector log collector.
@@ -743,7 +774,11 @@ func Save(cfg *Config) error {
 		}
 	}
 
+	// Read-lock while marshalling: yaml.Marshal iterates the Honeypots map, which
+	// a concurrent EnableHoneypot/DisableHoneypot would otherwise be writing.
+	cfg.hpMu.RLock()
 	data, err := yaml.Marshal(cfg)
+	cfg.hpMu.RUnlock()
 	if err != nil {
 		return fmt.Errorf("failed to marshal config: %w", err)
 	}
@@ -761,6 +796,8 @@ func Save(cfg *Config) error {
 
 // EnableHoneypot enables a honeypot
 func (c *Config) EnableHoneypot(name string) {
+	c.hpMu.Lock()
+	defer c.hpMu.Unlock()
 	if hp, ok := c.Honeypots[name]; ok {
 		hp.Enabled = true
 		c.Honeypots[name] = hp
@@ -769,6 +806,8 @@ func (c *Config) EnableHoneypot(name string) {
 
 // DisableHoneypot disables a honeypot
 func (c *Config) DisableHoneypot(name string) {
+	c.hpMu.Lock()
+	defer c.hpMu.Unlock()
 	if hp, ok := c.Honeypots[name]; ok {
 		hp.Enabled = false
 		c.Honeypots[name] = hp

@@ -46,28 +46,28 @@ func TestAlertingConfigured(t *testing.T) {
 	action := config.ResponseAction{Name: "fw", Command: "true"}
 	cases := []struct {
 		name string
-		cfg  config.Config
+		cfg  *config.Config
 		want bool
 	}{
-		{"disabled", config.Config{Alerts: config.AlertConfig{Enabled: false, WebhookURL: "http://x"}}, false},
-		{"webhook only", config.Config{Alerts: config.AlertConfig{Enabled: true, WebhookURL: "http://x"}}, true},
-		{"hooks only (the regression)", config.Config{
+		{"disabled", &config.Config{Alerts: config.AlertConfig{Enabled: false, WebhookURL: "http://x"}}, false},
+		{"webhook only", &config.Config{Alerts: config.AlertConfig{Enabled: true, WebhookURL: "http://x"}}, true},
+		{"hooks only (the regression)", &config.Config{
 			Alerts:   config.AlertConfig{Enabled: true},
 			Response: config.ResponseConfig{Enabled: true, OnAttackDetected: []config.ResponseAction{action}},
 		}, true},
-		{"both", config.Config{
+		{"both", &config.Config{
 			Alerts:   config.AlertConfig{Enabled: true, WebhookURL: "http://x"},
 			Response: config.ResponseConfig{Enabled: true, OnAttackDetected: []config.ResponseAction{action}},
 		}, true},
-		{"enabled but nothing to do", config.Config{Alerts: config.AlertConfig{Enabled: true}}, false},
-		{"response enabled but no actions", config.Config{
+		{"enabled but nothing to do", &config.Config{Alerts: config.AlertConfig{Enabled: true}}, false},
+		{"response enabled but no actions", &config.Config{
 			Alerts:   config.AlertConfig{Enabled: true},
 			Response: config.ResponseConfig{Enabled: true},
 		}, false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			s := &Server{config: &tc.cfg}
+			s := &Server{config: tc.cfg}
 			if got := s.alertingConfigured(); got != tc.want {
 				t.Errorf("alertingConfigured() = %v, want %v", got, tc.want)
 			}
