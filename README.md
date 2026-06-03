@@ -402,13 +402,28 @@ honeypots:
       delay_range_ms: 50
 ```
 
+- **Normalized SSH algorithm negotiation** — Cowrie's default `KEXINIT` is itself
+  a fingerprint: stock Cowrie advertises legacy `blowfish-cbc`/`cast128-cbc`
+  ciphers (which OpenSSH hasn't offered by default since 7.0), a *malformed*
+  `hmac-sha2-56` MAC name no real server sends, and `zlib`-first compression —
+  and that exact list is the well-known, widely-blocklisted "stock Cowrie" HASSH.
+  QPot overrides the cipher/MAC/compression lists with a modern, OpenSSH-like set
+  (`aes*-ctr` / `hmac-sha2-*` / `none,zlib@openssh.com`), restricted to what
+  Cowrie's transport actually implements so negotiation never breaks. *Verified
+  live against the real Cowrie 24.04 image:* the server now offers exactly that
+  set, removing the obvious tells and moving its HASSH off the blocklisted value.
+
 > **Honest limitation:** config-level deception defeats keyword/Shodan/script
 > detection and default-config tells (the bulk of real-world automated
-> fingerprinting), but it does **not** defeat single-packet protocol
-> fingerprinting (Vetterl & Clayton, WOOT'18), which is rooted in the honeypot's
-> Python transport libraries. The class is addressed by **high-interaction SSH
-> proxy ("HiFi") mode** (below), which terminates the attacker's handshake at a
-> real OpenSSH daemon.
+> fingerprinting), and the algorithm normalization above removes the most obvious
+> `KEXINIT`/HASSH tells. But it does **not** fully defeat single-packet protocol
+> fingerprinting (Vetterl & Clayton, WOOT'18): the **key-exchange** and
+> **host-key-algorithm** lists and the deeper packet-level behavior are baked into
+> Cowrie's Python (Twisted/`conch`) transport and are not config-controllable, so
+> a determined fingerprinter can still tell a normalized Cowrie from real OpenSSH.
+> That class is closed **entirely** only by **high-interaction SSH proxy ("HiFi")
+> mode** (below), which terminates the attacker's handshake at a real OpenSSH
+> daemon — nothing of ours speaks SSH on the wire.
 
 ### High-Interaction SSH Proxy (HiFi mode)
 

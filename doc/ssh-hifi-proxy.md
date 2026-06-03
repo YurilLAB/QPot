@@ -19,8 +19,17 @@ no matter how convincing the post-login shell, filesystem, or credentials are.
 QPot’s config-level deception (per-instance identity, credential personas,
 consistent fake filesystem, realistic `/proc`, timeouts — see the README’s
 *Deception & Anti-Fingerprinting* section) raises the bar against keyword/Shodan/
-script detection, but it **cannot** defeat this class: the tell is in the
-transport library, not the content.
+script detection. QPot also **normalizes the SSH algorithm negotiation** it *can*
+reach via `cowrie.cfg` — overriding Cowrie’s tell-tale default cipher/MAC/
+compression lists (legacy `blowfish-cbc`/`cast128-cbc`, the malformed
+`hmac-sha2-56`, `zlib`-first) with a modern OpenSSH-like set, which removes those
+obvious tells and shifts the server HASSH off the blocklisted stock-Cowrie value
+(verified live against the Cowrie 24.04 image). **But that is only a partial
+mitigation:** the `KEXINIT` **key-exchange** and **host-key-algorithm** lists and
+the deeper packet-level behavior live in Cowrie’s Twisted/`conch` transport, are
+not config-controllable, and still differ from OpenSSH. So config-level work
+**cannot** fully defeat this class — the tell is ultimately in the transport
+library, not the content.
 
 ### Why Cowrie’s own “proxy mode” does **not** close it
 

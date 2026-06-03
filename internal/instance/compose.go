@@ -1274,6 +1274,23 @@ enabled = true
 # The [shell] ssh_version above only changes the in-shell 'ssh -V' output; this
 # [ssh] version is what a remote scanner actually sees during version exchange.
 version = SSH-2.0-%s
+# Normalize the SSH algorithm negotiation so the KEXINIT looks like a real modern
+# OpenSSH instead of stock Cowrie. Cowrie's default lists are themselves a
+# fingerprint: they advertise legacy blowfish-cbc / cast128-cbc / 3des-cbc (which
+# OpenSSH has not offered by default since 7.0), a MALFORMED "hmac-sha2-56" MAC
+# name (a dead giveaway - no real server sends that), and list compression with
+# zlib before none. Restricting to the modern CTR ciphers + SHA-2 MACs that
+# Cowrie's Twisted-conch transport actually implements (a strict subset of
+# Cowrie's own supported set, so this never breaks negotiation) both removes those
+# tells and shifts the server's HASSH off the well-known, widely-blocklisted
+# stock-Cowrie value. NOTE: this normalizes the cipher/MAC/compression components
+# of the KEXINIT; the key-exchange list and the Python transport's deeper
+# packet-level behavior still differ from OpenSSH, so this RAISES the bar against
+# HASSH / algorithm-list fingerprinting but does not fully defeat single-packet
+# protocol fingerprinting - only HiFi proxy mode does (see doc/ssh-hifi-proxy.md).
+ciphers = aes128-ctr,aes192-ctr,aes256-ctr
+macs = hmac-sha2-256,hmac-sha2-512,hmac-sha1
+compression = none,zlib@openssh.com
 # Persist the SSH host keys in the writable, per-instance etc/ mount. Cowrie's
 # default key paths are relative to its working dir, which QPot mounts read-only,
 # so on first start key generation (and therefore the entire SSH service) died

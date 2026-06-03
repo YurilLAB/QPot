@@ -141,6 +141,59 @@ func TestCowrieConfigRunsWithoutBreakingShell(t *testing.T) {
 	}
 }
 
+// TestCowrieSSHAlgorithmsNormalized verifies QPot overrides Cowrie's
+// fingerprintable default SSH algorithm lists with a modern-OpenSSH-like set.
+// Stock Cowrie advertises legacy ciphers (blowfish-cbc/cast128-cbc) and a
+// MALFORMED "hmac-sha2-56" MAC name that no real server sends - both are strong
+// tells and they also pin the well-known, blocklisted stock-Cowrie HASSH. The
+// override must (a) be present, (b) restrict ciphers to the modern CTR set,
+// (c) use only well-formed SHA-2 MAC names, and (d) never reintroduce a tell.
+func TestCowrieSSHAlgorithmsNormalized(t *testing.T) {
+	cfg := config.Default("cowrie-algos")
+	cfg.QPotID = "qp_algos00000000000000001"
+	g := &ComposeGenerator{Config: cfg}
+	c := g.generateCowrieConfig(cfg.Honeypots["cowrie"])
+
+	ciphers := lineValue(c, "ciphers = ")
+	macs := lineValue(c, "macs = ")
+	comp := lineValue(c, "compression = ")
+	if ciphers == "" || macs == "" || comp == "" {
+		t.Fatalf("cowrie.cfg missing normalized algorithm lists: ciphers=%q macs=%q compression=%q", ciphers, macs, comp)
+	}
+	// (b) ciphers: only the modern CTR set (no legacy cbc/blowfish/cast128/3des).
+	if ciphers != "aes128-ctr,aes192-ctr,aes256-ctr" {
+		t.Errorf("ciphers = %q, want the modern CTR-only set", ciphers)
+	}
+	// (d) the dead-giveaway tells must be gone from the actual config VALUES
+	// (comment text may legitimately name them when explaining the override).
+	var values strings.Builder
+	for _, ln := range strings.Split(c, "\n") {
+		if t := strings.TrimSpace(ln); t == "" || strings.HasPrefix(t, "#") {
+			continue
+		}
+		values.WriteString(ln)
+		values.WriteString("\n")
+	}
+	for _, tell := range []string{"blowfish-cbc", "cast128-cbc", "hmac-sha2-56", "hmac-md5"} {
+		if strings.Contains(values.String(), tell) {
+			t.Errorf("cowrie.cfg still advertises the fingerprint tell %q", tell)
+		}
+	}
+	// (c) every MAC must be a well-formed name (sha2-256/512 or sha1), not the
+	// malformed "sha2-56".
+	for _, m := range strings.Split(macs, ",") {
+		switch m {
+		case "hmac-sha2-256", "hmac-sha2-512", "hmac-sha1":
+		default:
+			t.Errorf("unexpected/ malformed MAC %q in %q", m, macs)
+		}
+	}
+	// compression: OpenSSH lists none first; "zlib" (bare) is not an OpenSSH algo.
+	if comp != "none,zlib@openssh.com" {
+		t.Errorf("compression = %q, want %q", comp, "none,zlib@openssh.com")
+	}
+}
+
 // lineValue returns the trimmed value following the first occurrence of key
 // (which should include the trailing "= ") on its own line.
 func lineValue(s, key string) string {
