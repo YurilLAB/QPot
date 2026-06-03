@@ -156,6 +156,13 @@ parties, is a liability — so the backend is wrapped in defense-in-depth:
    an **external** supervisor, never by the attacker-facing containers.
 4. **Resource bounds.** Per-container CPU/memory/PID limits; broker admission
    control (rate + concurrency caps) bounds load on the finite, expensive pool.
+   **Pool sizing matters:** the pool is non-blocking (one backend per live
+   connection, fail-fast on exhaustion), so a connection that lingers — even one
+   that just sits in the auth phase — holds a backend until it closes or hits the
+   backend's `LoginGraceTime` (120 s) / the broker's idle timeout (15 min). Size
+   `custom_config["backends"]` for expected concurrency; with the default 2, two
+   simultaneous slow sessions can transiently exhaust the pool (further attempts
+   are cleanly rejected with `no_backend_available`, never queued).
 5. **Ephemerality.** Backends are reset/rolled back between sessions
    (`ResetFunc` / external `docker restart` or snapshot rollback), so no attacker
    inherits another’s changes (planted creds, persistence, dropped tooling).
@@ -380,3 +387,27 @@ go test -race ./internal/proxy/ ./internal/instance/
 go test ./internal/proxy/   -run '^$' -fuzz '^FuzzSpliceTransparency$'        -fuzztime 30s
 go test ./internal/instance/ -run '^$' -fuzz '^FuzzSSHProxyRenderInvariants$' -fuzztime 30s
 ```
+
+### End-to-end live verification
+
+The full path was verified live by building the backend image, running the
+broker (`cmd/qpot-sshproxy`) in front of a real-OpenSSH backend, and probing
+through it:
+
+* **The handshake terminates at real OpenSSH.** The server `KEXINIT` read
+  *through the broker* is byte-identical to the backend's direct `KEXINIT` — same
+  banner (`SSH-2.0-OpenSSH_9.2p1 Debian-…`), same modern OpenSSH algorithm lists
+  (`sntrup761x25519-sha512`, `chacha20-poly1305@openssh.com`, ETM/umac MACs,
+  `rsa-sha2-512` host keys — none of which Cowrie's conch can emit), and the
+  **same `hasshServer`**. The splice is perfectly transparent and the attacker
+  sees a genuine OpenSSH fingerprint, not an emulator's. (Contrast: a normalized
+  Cowrie still emits a conch `KEXINIT` / different HASSH.)
+* **A real interactive shell.** A genuine SSH client logs in and runs commands
+  (`uname -a`, `cat /etc/os-release`, `id`) against real bash on a real Debian 12
+  backend.
+* **Real authentication.** The persona credentials are accepted and wrong
+  passwords / non-existent users are rejected **by the backend `sshd`** — the
+  broker performs no auth (it only splices bytes).
+* **Capture + admission control.** The broker writes one NDJSON session record
+  per connection (`src_ip`, `bytes_in/out`, `duration_ms`, `reason`) and cleanly
+  emits `no_backend_available` when the finite pool is exhausted.
