@@ -498,6 +498,58 @@ class TestAggFuzz(unittest.TestCase):
             assert_no_structural_injection(sql)
 
 
+class TestEnrichment(unittest.TestCase):
+    """p0f/fatt -> connection enrichment (attacker OS / JA3 joined by IP)."""
+
+    def test_build_enrichment_query(self):
+        sql = main.build_enrichment_query(["1.2.3.4", "5.6.7.8"])
+        self.assertIn("FROM events", sql)
+        self.assertIn("honeypot IN ('p0f', 'fatt')", sql)
+        self.assertIn("argMax(command, timestamp)", sql)
+        self.assertIn("'1.2.3.4'", sql)
+        self.assertIn("GROUP BY source_ip, honeypot", sql)
+        assert_no_structural_injection(sql)
+
+    def test_build_enrichment_query_escapes_ips(self):
+        # An injection-y "IP" must stay inside its quoted literal.
+        sql = main.build_enrichment_query(["x') OR 1=1 --"])
+        assert_no_structural_injection(sql)
+
+    def test_apply_enrichment_attaches_os_and_ja3(self):
+        hits = [
+            {"_source": {"source_ip": "1.1.1.1", "type": "Cowrie"}},
+            {"_source": {"source_ip": "2.2.2.2", "type": "Dionaea"}},
+            {"_source": {"source_ip": "9.9.9.9", "type": "Heralding"}},
+        ]
+        emap = {
+            "1.1.1.1": {"p0f": "Linux 3.x", "fatt": "769,47-53,..."},
+            "2.2.2.2": {"p0f": "Windows NT"},
+        }
+        main.apply_enrichment(hits, emap)
+        self.assertEqual(hits[0]["_source"]["qpot_enrichment"], {"os": "Linux 3.x", "ja3": "769,47-53,..."})
+        self.assertEqual(hits[1]["_source"]["qpot_enrichment"], {"os": "Windows NT"})
+        # No data for 9.9.9.9 -> no enrichment object.
+        self.assertNotIn("qpot_enrichment", hits[2]["_source"])
+
+    def test_fuzz_enrichment_query_ips(self):
+        # Source IPs come from stored events (attacker-influenced), so the
+        # enrichment query must never let one escape its quoted literal.
+        rnd = random.Random(99)
+        payloads = ["1.2.3.4", "::1", "x') OR 1=1 --", "'; DROP TABLE events; --",
+                    "a\\'b", "", "日本", "' UNION SELECT password FROM events --"]
+        for _ in range(3000):
+            ips = [rnd.choice(payloads) for _ in range(rnd.randint(1, 4))]
+            sql = main.build_enrichment_query(ips)
+            assert_no_structural_injection(sql)
+
+    def test_enrichment_fields_in_schema(self):
+        self.assertEqual(main.EVENTS_FIELD_TYPES.get("qpot_enrichment.os"), "keyword")
+        self.assertEqual(main.EVENTS_FIELD_TYPES.get("qpot_enrichment.ja3"), "keyword")
+        # _field_caps exposes them so Kibana can show/aggregate them.
+        caps = main._field_caps_payload("logstash-*")["fields"]
+        self.assertIn("qpot_enrichment.os", caps)
+
+
 class TestEndpointRouting(unittest.TestCase):
     """Exercise the real handlers: Kibana system-index ops route to the saved-
     object store (never ClickHouse), and _bulk applies there."""

@@ -413,6 +413,43 @@ def build_ch_query(index: str, es_query: Dict, size: int = 10, aggs: Dict = None
     return ch_query.strip()
 
 
+# Whether to enrich honeypot connections with the attacker's p0f OS and fatt
+# JA3/HASSH fingerprint (joined by source_ip at read time). Default on.
+ENRICH_SENSORS = os.getenv("QPOT_ENRICH", "1").lower() not in ("0", "false", "no", "off", "")
+
+
+def build_enrichment_query(source_ips: List[str]) -> str:
+    """Return SQL for the latest p0f OS and fatt fingerprint per source_ip,
+    restricted to the given IPs. argMax picks the most recent value. IPs are
+    escaped via ch_quote."""
+    ip_list = ", ".join(ch_quote(ip) for ip in source_ips)
+    return (
+        f"SELECT source_ip, honeypot, argMax(command, timestamp) AS fp "
+        f"FROM {EVENTS_TABLE} "
+        f"WHERE honeypot IN ('p0f', 'fatt') AND command != '' "
+        f"AND source_ip IN ({ip_list}) "
+        f"GROUP BY source_ip, honeypot"
+    )
+
+
+def apply_enrichment(hits: List[Dict], enrichment: Dict[str, Dict[str, str]]) -> None:
+    """Attach a qpot_enrichment object (attacker OS / JA3) to each hit whose
+    source_ip has p0f/fatt data. Mutates hits in place."""
+    for h in hits:
+        src = h.get("_source", {})
+        ip = src.get("source_ip") or src.get("src_ip")
+        info = enrichment.get(ip)
+        if not info:
+            continue
+        enr = {}
+        if info.get("p0f"):
+            enr["os"] = info["p0f"]
+        if info.get("fatt"):
+            enr["ja3"] = info["fatt"]
+        if enr:
+            src["qpot_enrichment"] = enr
+
+
 def ch_row_to_es_hit(row: tuple, columns: List[str]) -> Dict:
     """Convert a ClickHouse `events` row into an Elasticsearch hit shaped the
     way QPot's consumers (the T-Pot attack map, Kibana dashboards) expect.
@@ -594,6 +631,9 @@ EVENTS_FIELD_TYPES = {
     "geoip.latitude": "float",
     "geoip.longitude": "float",
     "geoip.location": "geo_point",
+    # Read-time enrichment: attacker OS (p0f) / fingerprint (fatt) joined by IP.
+    "qpot_enrichment.os": "keyword",
+    "qpot_enrichment.ja3": "keyword",
 }
 
 
@@ -682,6 +722,22 @@ async def search(index: str, request: Request):
             result = client.execute(ch_query, with_column_types=True)
             rows, columns = result[0], [c[0] for c in result[1]]
             hits = [ch_row_to_es_hit(row, columns) for row in rows]
+
+            # Enrich honeypot connections with the attacker's p0f OS / fatt
+            # fingerprint (joined by source_ip) so each connection in Discover /
+            # the attack map carries who/what the NSM sensors saw.
+            if ENRICH_SENSORS and hits:
+                ips = {h["_source"].get("source_ip") for h in hits}
+                ips = [ip for ip in ips if ip and ip != "0.0.0.0"]
+                if ips:
+                    try:
+                        eres = client.execute(build_enrichment_query(ips))
+                        emap: Dict[str, Dict[str, str]] = {}
+                        for ip, hp, fp in eres:
+                            emap.setdefault(ip, {})[hp] = fp
+                        apply_enrichment(hits, emap)
+                    except Exception:
+                        pass  # enrichment is best-effort; never fail the search
 
         # Total. With track_total_hits or any aggregation, compute the real
         # matching count; otherwise the hit count is enough.

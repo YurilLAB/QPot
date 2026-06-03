@@ -106,6 +106,10 @@ working on top of it so users lose nothing:
   - **p0f** passive OS fingerprints (`collector.ingest_p0f`) — "Attacker OS" panel.
   - **fatt** JA3/HASSH network fingerprints (`collector.ingest_fatt`) — "Top
     Client Fingerprints" panel.
+  - **Connection enrichment**: the connector joins each honeypot connection
+    with the attacker's p0f OS and fatt JA3 for the same source IP (read-time,
+    by `source_ip`), exposed as `qpot_enrichment.os` / `qpot_enrichment.ja3` in
+    Discover / the attack map (toggle with `QPOT_ENRICH`).
 - **nginx** portal, **Spiderfoot**, **CyberChef** and **Elasticvue** are wired
   through the QPot nginx config (`docker/nginx/dist/conf/qpot.conf`).
 
