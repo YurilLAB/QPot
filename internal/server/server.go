@@ -145,6 +145,7 @@ func (s *Server) setupRoutes() {
 	// Intelligence API routes
 	s.mux.HandleFunc("/api/techniques", s.withQPotAuth(s.handleTechniques))
 	s.mux.HandleFunc("/api/iocs", s.withQPotAuth(s.handleIOCs))
+	s.mux.HandleFunc("/api/iocs/export", s.withQPotAuth(s.handleIOCExport))
 	s.mux.HandleFunc("/api/ttps", s.withQPotAuth(s.handleTTPs))
 	s.mux.HandleFunc("/api/intelligence", s.withQPotAuth(s.handleIntelligenceSummary))
 
@@ -928,6 +929,57 @@ func (s *Server) handleIOCs(w http.ResponseWriter, r *http.Request) {
 	}
 
 	s.sendJSON(w, iocs)
+}
+
+// handleIOCExport exports extracted IOCs in a threat-intel interchange format.
+// Currently MISP (the de-facto honeypot/TIP sharing standard); the response is
+// a single importable MISP event. Optional ?type= / ?honeypot= filters and a
+// ?limit= (default 1000, max 10000) apply. This is the standards-based way to
+// feed QPot's findings into a SIEM/TIP without any external dependency.
+func (s *Server) handleIOCExport(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if s.database == nil {
+		s.sendError(w, http.StatusServiceUnavailable, "database not available")
+		return
+	}
+
+	format := strings.ToLower(r.URL.Query().Get("format"))
+	if format == "" {
+		format = "misp"
+	}
+	if format != "misp" {
+		s.sendError(w, http.StatusBadRequest, "unsupported export format (supported: misp)")
+		return
+	}
+
+	filter := database.IOCFilter{Limit: 1000}
+	if t := r.URL.Query().Get("type"); t != "" {
+		filter.Types = []string{t}
+	}
+	if hp := r.URL.Query().Get("honeypot"); hp != "" {
+		filter.Honeypots = []string{hp}
+	}
+	if l := r.URL.Query().Get("limit"); l != "" {
+		if n, err := strconv.Atoi(l); err == nil && n > 0 {
+			if n > 10000 {
+				n = 10000
+			}
+			filter.Limit = n
+		}
+	}
+
+	iocs, err := s.database.GetIOCs(r.Context(), filter)
+	if err != nil {
+		s.sendInternalError(w, "get iocs failed", err)
+		return
+	}
+
+	event := intelligence.BuildMISPEvent(iocs, s.config.InstanceName, time.Now())
+	w.Header().Set("Content-Disposition", `attachment; filename="qpot-misp-event.json"`)
+	s.sendJSON(w, event)
 }
 
 // handleTTPs returns TTP session records.

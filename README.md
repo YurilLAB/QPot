@@ -56,7 +56,7 @@
 | Kibana Dashboards | Yes (ELK) | Yes - over ClickHouse, **auto-provisioned** (zero setup) |
 | Attack Map | Yes | Yes - over ClickHouse (country-centroid geo) |
 | NSM Sensor Ingest | Yes (Logstash→ES) | Yes - Suricata/p0f/fatt via Vector→ClickHouse |
-| IOC Export | No | Yes - Attacker blocklist API |
+| IOC Export | No | Yes - blocklist API **and MISP threat-intel export** |
 | GeoIP Enrichment | No | Yes - Optional MaxMind via Vector (`collector.geoip_db_path`) |
 | Startup Diagnostics | No | Yes - Per-honeypot start/fail report with the failure reason |
 | CI / Supply Chain | No | Yes - GitHub Actions: build, gofmt, vet, race tests, govulncheck, fuzz smoke |
@@ -529,6 +529,7 @@ Sessions stay open until 30 minutes of inactivity. Shared infrastructure (AWS, G
 | `GET /api/ttps` | Active and completed TTP campaign sessions |
 | `GET /api/intelligence` | Intelligence summary (techniques, IOC counts, active sessions) |
 | `GET /api/ioc` | Unique attacker IP list for firewall blocklist generation |
+| `GET /api/iocs/export?format=misp` | Extracted IOCs as an importable MISP event (TIP/SIEM sharing) |
 
 ### Intelligence Configuration
 
