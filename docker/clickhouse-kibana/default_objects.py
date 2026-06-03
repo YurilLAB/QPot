@@ -51,9 +51,9 @@ def _kibana_fields(field_types: Dict[str, str]) -> str:
     return json.dumps(fields)
 
 
-def _search_source() -> str:
+def _search_source(query: str = "") -> str:
     return json.dumps({
-        "query": {"query": "", "language": "kuery"},
+        "query": {"query": query, "language": "kuery"},
         "filter": [],
         "indexRefName": "kibanaSavedObjectMeta.searchSourceJSON.index",
     })
@@ -64,7 +64,7 @@ def _ip_reference():
              "type": "index-pattern", "id": INDEX_PATTERN_ID}]
 
 
-def _viz(vid, title, vis_type, aggs, params=None):
+def _viz(vid, title, vis_type, aggs, params=None, query=""):
     """A classic aggregation-based visualization saved object."""
     vis_state = {"title": title, "type": vis_type, "aggs": aggs,
                  "params": params or {}}
@@ -78,7 +78,7 @@ def _viz(vid, title, vis_type, aggs, params=None):
                 "uiStateJSON": "{}",
                 "description": "",
                 "version": 1,
-                "kibanaSavedObjectMeta": {"searchSourceJSON": _search_source()},
+                "kibanaSavedObjectMeta": {"searchSourceJSON": _search_source(query)},
             },
             "references": _ip_reference(),
             "managed": False,
@@ -157,6 +157,11 @@ def build_saved_objects(field_types: Dict[str, str], es_version: str) -> List[Di
         _viz("qpot-top-dest-ports", "QPot - Top Targeted Ports", "table",
              [_count_metric(), _terms_bucket("dest_port", size=20, schema="bucket")],
              {"perPage": 10}),
+        # Showcases T-Pot's Suricata network IDS, now ingested into QPot: top
+        # alert signatures, scoped to Suricata events (type -> honeypot).
+        _viz("qpot-suricata-signatures", "QPot - Top Network Alerts (Suricata)", "table",
+             [_count_metric(), _terms_bucket("command", size=20, schema="bucket")],
+             {"perPage": 10}, query="type:suricata"),
     ]
     objs.extend(vizzes)
 
@@ -172,6 +177,7 @@ def build_saved_objects(field_types: Dict[str, str], es_version: str) -> List[Di
         ("qpot-top-usernames", 16, 20, 16, 14),
         ("qpot-top-passwords", 32, 20, 16, 14),
         ("qpot-top-dest-ports", 0, 34, 24, 14),
+        ("qpot-suricata-signatures", 24, 34, 24, 14),
     ]
     for i, (vid, x, y, w, h) in enumerate(layout):
         ref = f"panel_{i}"
@@ -224,4 +230,5 @@ def panel_aggregations() -> Dict[str, Dict]:
         "top_usernames": {"2": {"terms": {"field": "username", "size": 20}}},
         "top_passwords": {"2": {"terms": {"field": "password", "size": 20}}},
         "top_dest_ports": {"2": {"terms": {"field": "dest_port", "size": 20}}},
+        "suricata_signatures": {"2": {"terms": {"field": "command", "size": 20}}},
     }

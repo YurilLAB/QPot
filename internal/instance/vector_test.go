@@ -81,6 +81,86 @@ func TestVectorTimescaleHasNoPhantomColumns(t *testing.T) {
 	}
 }
 
+func genVectorCfg(t *testing.T, mut func(*config.Config)) string {
+	t.Helper()
+	cfg := config.Default("vec-test")
+	cfg.QPotID = "qp_vectorvectorvectorvecto"
+	hp := cfg.Honeypots["cowrie"]
+	hp.Enabled = true
+	cfg.Honeypots["cowrie"] = hp
+	if mut != nil {
+		mut(cfg)
+	}
+	sb, err := security.NewSandbox(&cfg.Security)
+	if err != nil {
+		t.Fatal(err)
+	}
+	out, err := (&ComposeGenerator{Config: cfg, Sandbox: sb}).GenerateVectorConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return out
+}
+
+// TestVectorSuricataIngestion verifies T-Pot's Suricata EVE alerts are ingested
+// into the same events store (so they show up in QPot's dashboards/attack map),
+// mapped onto the shared schema, with only alert events kept.
+func TestVectorSuricataIngestion(t *testing.T) {
+	out := genVectorCfg(t, nil) // IngestSuricata defaults true, GeoIP off
+	for _, want := range []string{
+		"suricata_eve:",
+		"/data/suricata/log/eve.json",
+		"suricata_events:",
+		`.honeypot = "suricata"`,
+		`!= "alert"`, // non-alert events dropped
+		"abort",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("vector config missing Suricata marker %q", want)
+		}
+	}
+	// With GeoIP off, Suricata events join the stealth filter directly.
+	fs := out[strings.Index(out, "filter_stealth:"):]
+	fs = fs[:strings.Index(fs, "condition:")]
+	if !strings.Contains(fs, "- suricata_events") {
+		t.Error("filter_stealth should take suricata_events as input when GeoIP is off")
+	}
+	// Suricata alerts must bypass the stealth probe-drop.
+	if !strings.Contains(out, `== "suricata" {`) {
+		t.Error("stealth filter must never drop Suricata IDS alerts")
+	}
+}
+
+// TestVectorSuricataWithGeoIP verifies Suricata events are geo-enriched (joined
+// at enrich_geoip) rather than added a second time at the filter.
+func TestVectorSuricataWithGeoIP(t *testing.T) {
+	out := genVectorCfg(t, func(c *config.Config) {
+		c.Collector.GeoIPDBPath = "/usr/share/GeoIP/GeoLite2-City.mmdb"
+	})
+	eg := out[strings.Index(out, "enrich_geoip:"):]
+	eg = eg[:strings.Index(eg, "source:")]
+	if !strings.Contains(eg, "- suricata_events") {
+		t.Error("enrich_geoip should geo-enrich suricata_events when GeoIP is on")
+	}
+	// It must not ALSO be added directly at the filter (it arrives via geoip).
+	fs := out[strings.Index(out, "filter_stealth:"):]
+	fs = fs[:strings.Index(fs, "condition:")]
+	if strings.Contains(fs, "- suricata_events") {
+		t.Error("suricata_events must not feed filter_stealth directly when GeoIP is on (double ingest)")
+	}
+}
+
+// TestVectorSuricataDisabled verifies the Suricata source/transform vanish when
+// ingestion is turned off.
+func TestVectorSuricataDisabled(t *testing.T) {
+	out := genVectorCfg(t, func(c *config.Config) { c.Collector.IngestSuricata = false })
+	for _, marker := range []string{"suricata_eve", "suricata_events", "/data/suricata"} {
+		if strings.Contains(out, marker) {
+			t.Errorf("Suricata config present despite IngestSuricata=false: %q", marker)
+		}
+	}
+}
+
 // TestVectorGeoIPOptional verifies GeoIP enrichment is omitted unless a DB path
 // is configured, so Vector starts without a MaxMind mmdb (its absence
 // previously prevented the collector from starting at all).

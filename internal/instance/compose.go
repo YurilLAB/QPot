@@ -677,6 +677,16 @@ sources:
       condition_pattern: '^\{'
       timeout_ms: 1000
 {{end}}{{end}}
+{{- if .Config.Collector.IngestSuricata}}
+  # T-Pot's Suricata network IDS writes one EVE JSON object per line. Harmless
+  # when Suricata is not deployed (the glob simply matches nothing).
+  suricata_eve:
+    type: file
+    include:
+      - "/data/suricata/log/eve.json"
+      - "/data/suricata/log/*.json"
+    read_from: end
+{{- end}}
 
 transforms:
   add_qpot_metadata:
@@ -728,11 +738,52 @@ transforms:
       .qpot_id = "{{.Config.QPotID}}"
       .qpot_instance = "{{.Config.InstanceName}}"
       .timestamp = format_timestamp!(now(), "%Y-%m-%d %H:%M:%S%.3f")
+{{if .Config.Collector.IngestSuricata}}
+  # Map Suricata EVE alerts onto the shared events schema so they appear in the
+  # dashboards / attack map alongside honeypot hits. Only "alert" events are
+  # kept; the high-volume flow/stats/dns/http records are dropped.
+  suricata_events:
+    type: remap
+    inputs:
+      - suricata_eve
+    source: |
+      if is_string(.message) && starts_with(strip_whitespace(string!(.message)), "{") {
+        parsed, perr = parse_json(string!(.message))
+        if perr == null {
+          . = merge(., object(parsed) ?? {})
+        }
+      }
+      # Keep only IDS alerts; drop flow/stats/dns/http/tls noise.
+      if (to_string(.event_type) ?? "") != "alert" {
+        abort
+      }
+      .honeypot = "suricata"
+      .source_ip = to_string(.src_ip) ?? "0.0.0.0"
+      .source_port = to_int(.src_port) ?? 0
+      .dest_port = to_int(.dest_port) ?? 0
+      .protocol = downcase(to_string(.proto) ?? "")
+      .event_type = "alert"
+      # Surface the signature so it is visible/searchable; richer detail goes to
+      # the metadata map (a real column in the events table).
+      .command = to_string(.alert.signature) ?? ""
+      .metadata = {
+        "signature": to_string(.alert.signature) ?? "",
+        "category": to_string(.alert.category) ?? "",
+        "severity": to_string(.alert.severity) ?? "",
+        "sensor": "suricata"
+      }
+      .qpot_id = "{{.Config.QPotID}}"
+      .qpot_instance = "{{.Config.InstanceName}}"
+      .timestamp = format_timestamp!(now(), "%Y-%m-%d %H:%M:%S%.3f")
+{{end}}
 {{if .Config.Collector.GeoIPDBPath}}
   enrich_geoip:
     type: remap
     inputs:
       - add_qpot_metadata
+{{- if .Config.Collector.IngestSuricata}}
+      - suricata_events
+{{- end}}
     source: |
       # GeoIP enrichment using the MaxMind GeoLite2 enrichment table
       if exists(.source_ip) && .source_ip != "0.0.0.0" && .source_ip != "127.0.0.1" {
@@ -753,14 +804,25 @@ transforms:
     inputs:
       # Feeds from enrich_geoip when GeoIP is configured, else directly from
       # add_qpot_metadata (GeoIP is optional so Vector can start without an mmdb).
+      # When GeoIP is off, Suricata events join here directly; when it is on,
+      # they arrive already enriched via enrich_geoip.
       - {{if .Config.Collector.GeoIPDBPath}}enrich_geoip{{else}}add_qpot_metadata{{end}}
+{{- if and .Config.Collector.IngestSuricata (not .Config.Collector.GeoIPDBPath)}}
+      - suricata_events
+{{- end}}
     condition: |
       # Drop events whose message contains a known scanner signature (stealth).
       # Substring match via contains() — match_any expects regexes, and
       # contains avoids regex-escaping the operator-supplied probe strings.
+      # Suricata IDS alerts are never stealth-filtered: dropping an alert because
+      # its EVE JSON mentions a scanner signature would discard real IDS data.
       {{- if .Config.Stealth.BlockCommonProbes}}
-      msg = downcase(string(.message) ?? "")
-      !({{range $i, $probe := .Config.Stealth.BlockedProbes}}{{if $i}} || {{end}}contains(msg, {{vrlStr $probe}}){{end}})
+      if (to_string(.honeypot) ?? "") == "suricata" {
+        true
+      } else {
+        msg = downcase(string(.message) ?? "")
+        !({{range $i, $probe := .Config.Stealth.BlockedProbes}}{{if $i}} || {{end}}contains(msg, {{vrlStr $probe}}){{end}})
+      }
       {{- else}}
       true
       {{- end}}

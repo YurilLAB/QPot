@@ -20,6 +20,12 @@ type AlertConfig struct {
 	WebhookURL string   `yaml:"webhook_url"` // Slack/Discord/generic webhook
 	Threshold  int      `yaml:"threshold"`   // events per minute to trigger
 	Honeypots  []string `yaml:"honeypots"`   // which honeypots to alert on (empty = all)
+	// Cooldown debounces alerting: once an alert fires (webhook and/or response
+	// hooks), further triggers are suppressed until the cooldown elapses. This
+	// prevents alert fatigue and stops a sustained attack from re-running a
+	// firewall/SOAR hook every minute. Zero means no cooldown (alert each
+	// minute the threshold is exceeded). Default 5m.
+	Cooldown time.Duration `yaml:"cooldown"`
 }
 
 // ResponseConfig configures local commands to execute when an alert
@@ -91,6 +97,14 @@ type CollectorConfig struct {
 	// Vector pipeline omits the enrichment table entirely — otherwise Vector
 	// refuses to start because the enrichment-table file does not exist.
 	GeoIPDBPath string `yaml:"geoip_db_path"`
+
+	// IngestSuricata controls whether the Vector pipeline also ingests
+	// Suricata's EVE JSON (/data/suricata/log/eve.json) — T-Pot's network IDS.
+	// When true (the default), Suricata alert events flow into the same events
+	// store as honeypot logs, so they appear in the dashboards / attack map /
+	// Kibana. Harmless when Suricata is not deployed: the file source simply
+	// matches nothing. Set false to ignore Suricata even if present.
+	IngestSuricata bool `yaml:"ingest_suricata"`
 }
 
 // YurilConfig controls the forwarder that pushes classified IOCs into the
@@ -524,8 +538,9 @@ func Default(instanceName string) *Config {
 		},
 		Alerts: AlertConfig{
 			Enabled:   false,
-			Threshold: 10,         // 10 events per minute before alerting
-			Honeypots: []string{}, // empty = alert on all honeypots
+			Threshold: 10,              // 10 events per minute before alerting
+			Honeypots: []string{},      // empty = alert on all honeypots
+			Cooldown:  5 * time.Minute, // debounce: at most one alert per 5 min
 		},
 		Intelligence: IntelligenceConfig{
 			Enabled:          true,
@@ -534,6 +549,11 @@ func Default(instanceName string) *Config {
 			WorkerBatchSize:  500,
 			InactivityWindow: 30 * time.Minute,
 			FetchATTCK:       true,
+		},
+		Collector: CollectorConfig{
+			// Ingest Suricata's EVE alerts by default so T-Pot's network IDS
+			// data shows up in QPot when Suricata is deployed (no-op otherwise).
+			IngestSuricata: true,
 		},
 	}
 }
