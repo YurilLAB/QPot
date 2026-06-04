@@ -337,10 +337,13 @@ func TestHostnamePersonaCoherence(t *testing.T) {
 		}
 	}
 
-	// Deterministic for a fixed seed.
+	// Deterministic for a fixed seed (two separate calls; kept in vars so the
+	// determinism check is not a literal X != X that staticcheck SA4000 flags).
 	p := selectCredentialTemplate("", "qp_stable")
-	if hostnameForPersona(p, "qp_stable") != hostnameForPersona(p, "qp_stable") {
-		t.Error("hostnameForPersona not deterministic for a fixed seed")
+	first := hostnameForPersona(p, "qp_stable")
+	second := hostnameForPersona(p, "qp_stable")
+	if first != second {
+		t.Errorf("hostnameForPersona not deterministic for a fixed seed: %q != %q", first, second)
 	}
 
 	// Every persona's hostname pool must be sanitize-safe for BOTH the cowrie.cfg
