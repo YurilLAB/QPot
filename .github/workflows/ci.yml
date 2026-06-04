@@ -20,7 +20,14 @@ name: CI
 #                  mutation are exercised on every push.
 #   connector-test - the ClickHouse-Kibana connector's ES->SQL translation is
 #                  injection-safe (stdlib unittest + a 20k-iteration fuzz loop).
-# (CodeQL semantic analysis runs from its own workflow, codeql.yml.)
+#   shellcheck   - the installer + ops shell scripts lint clean at error level.
+#   actionlint   - the workflows themselves (and their embedded run: scripts)
+#                  are valid and shellcheck-clean - CI scripts are code too.
+#   mod-hygiene  - go.mod/go.sum verify against their hashes and are tidy.
+#   cross-build  - both binaries compile for every shipped OS/arch.
+#   coverage     - reports total/per-package coverage and guards a low floor.
+# (CodeQL semantic analysis runs from its own workflow, codeql.yml; deeper
+#  scheduled fuzzing runs from fuzz.yml.)
 
 on:
   push:
@@ -42,6 +49,7 @@ env:
   GOVULNCHECK_VERSION: v1.1.4
   GOSEC_VERSION: v2.22.7
   STATICCHECK_VERSION: "2025.1.1"
+  ACTIONLINT_VERSION: v1.7.7
 
 jobs:
   build-test:
@@ -98,7 +106,7 @@ jobs:
       - name: Smoke-run the CLI
         run: |
           set -euo pipefail
-          export HOME="$(mktemp -d)"
+          HOME="$(mktemp -d)"; export HOME
           ./qpot --version
           ./qpot --help >/dev/null
           ./qpot honeypot list
@@ -318,3 +326,148 @@ jobs:
             docker/ssh-backend/files/entrypoint.sh \
             docker/ssh-backend/files/rec-shell.sh
           echo "shellcheck (error level) clean"
+
+  actionlint:
+    name: Workflow lint (actionlint)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Run actionlint
+        # The CI workflows are code too: a bug in an embedded run: script (bad
+        # quoting, an undefined var, a wrong redirect) can make a check silently
+        # pass or skip. actionlint validates every workflow's YAML, expressions,
+        # and deprecated runners/actions, AND shellchecks the run: scripts
+        # (shellcheck is preinstalled on the runner and auto-detected). Installed
+        # via go install so it is pinned by module checksum, like the other tools.
+        run: |
+          set -euo pipefail
+          go install "github.com/rhysd/actionlint/cmd/actionlint@${ACTIONLINT_VERSION}"
+          "$(go env GOPATH)/bin/actionlint" -color
+          echo "actionlint clean"
+
+  mod-hygiene:
+    name: go.mod tidy & verify
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Verify modules and tidiness
+        # go mod verify confirms the downloaded dependencies match go.sum (their
+        # recorded hashes) - a supply-chain integrity check. go mod tidy must then
+        # be a no-op: if it changes go.mod/go.sum, the committed files are out of
+        # sync with the imports (stale or missing requirements), which we fail on
+        # so the dependency set is always exactly what the code uses.
+        run: |
+          set -euo pipefail
+          go mod verify
+          go mod tidy
+          if ! git diff --quiet -- go.mod go.sum; then
+            echo "::error::go.mod/go.sum are not tidy. Run 'go mod tidy' and commit the result."
+            git --no-pager diff -- go.mod go.sum
+            exit 1
+          fi
+          echo "modules verified and tidy"
+
+  cross-build:
+    name: Cross-compile ${{ matrix.goos }}/${{ matrix.goarch }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { goos: linux, goarch: amd64 }
+          - { goos: linux, goarch: arm64 }
+          - { goos: linux, goarch: arm }
+          - { goos: darwin, goarch: amd64 }
+          - { goos: darwin, goarch: arm64 }
+          - { goos: windows, goarch: amd64 }
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Build both binaries for the target platform
+        # QPot installs across many distros and architectures (the installer
+        # supports amd64/arm64/arm). A platform-specific break - a build tag, a
+        # syscall, an import that is not portable - would otherwise only surface
+        # on a user's machine. CGO is off so these are the same static binaries
+        # the release ships. Both the CLI and the HiFi SSH-proxy broker must build.
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          CGO_ENABLED: "0"
+        run: |
+          set -euo pipefail
+          go build -o /dev/null ./cmd/qpot
+          go build -o /dev/null ./cmd/qpot-sshproxy
+          echo "built qpot + qpot-sshproxy for ${GOOS}/${GOARCH}"
+
+  coverage:
+    name: Test coverage report
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Measure and report coverage
+        # Produce a coverage profile across all packages and surface BOTH the total
+        # and a per-package breakdown in the job log and the step summary, so a
+        # reviewer can see at a glance which packages the tests actually exercise
+        # (the core logic - proxy/intelligence/instance/config - is well covered;
+        # the thin cmd/* CLI wrappers and DB code that needs a live database are
+        # not, which is why the total floor is deliberately conservative). The
+        # floor only guards against a catastrophic collapse (e.g. a whole
+        # package's tests being deleted), not normal churn; the profile is
+        # uploaded for offline inspection (go tool cover -html=coverage.out).
+        run: |
+          set -euo pipefail
+          go test -covermode=atomic -coverprofile=coverage.out ./...
+          go tool cover -func=coverage.out > coverage.txt
+          total=$(awk '/^total:/ {print $3+0}' coverage.txt)
+          echo "Total coverage: ${total}%"
+          # Per-package average (group the per-function lines by their package dir).
+          perpkg=$(awk '
+            /^total:/ {next}
+            { n=split($1,a,"/"); pkg=""; for(i=1;i<n;i++) pkg=pkg a[i]"/";
+              sub(/^github.com\/qpot\/qpot\//,"",pkg); cov[pkg]+=$3+0; cnt[pkg]++ }
+            END { for (k in cov) printf "%6.1f%%  %s\n", cov[k]/cnt[k], k }
+          ' coverage.txt | sort -n)
+          {
+            echo "## Test coverage";
+            echo "**Total: ${total}%**";
+            echo "";
+            echo '```';
+            echo "$perpkg";
+            echo '```';
+          } >> "$GITHUB_STEP_SUMMARY"
+          echo "$perpkg"
+          floor=30
+          awk -v t="$total" -v f="$floor" 'BEGIN { if (t+0 < f+0) { printf("::error::total coverage %.1f%% is below the %d%% floor\n", t, f); exit 1 } }'
+          echo "coverage ${total}% >= ${floor}% floor"
+      - name: Upload coverage profile
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-profile
+          path: |
+            coverage.out
+            coverage.txt
+          if-no-files-found: warn

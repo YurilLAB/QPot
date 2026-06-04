@@ -25,11 +25,11 @@ jobs:
         LABELS=$(jq -r '.issue.labels[].name' "$GITHUB_EVENT_PATH")
         for label in $LABELS; do
           if [ "$label" = "investigate" ]; then
-            echo "skip=true" >> $GITHUB_ENV
+            echo "skip=true" >> "$GITHUB_ENV"
             exit 0
           fi
         done
-        echo "skip=false" >> $GITHUB_ENV
+        echo "skip=false" >> "$GITHUB_ENV"
 
     - name: Check issue for basic support info
       if: env.skip != 'true'
@@ -46,9 +46,9 @@ jobs:
         done
         
         if [ ${#MISSING_INFO[@]} -ne 0 ]; then
-          echo "missing=true" >> $GITHUB_ENV
+          echo "missing=true" >> "$GITHUB_ENV"
         else
-          echo "missing=false" >> $GITHUB_ENV
+          echo "missing=false" >> "$GITHUB_ENV"
         fi
 
     - name: Add "no basic support info" label if necessary

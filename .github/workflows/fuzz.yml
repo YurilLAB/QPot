@@ -1,0 +1,111 @@
+name: Extended Fuzzing
+
+# The CI fuzz-smoke job runs every Fuzz* target for only ~10s on each push -
+# enough to exercise the seed corpora and catch a target that no longer
+# compiles or crashes immediately, but far too short to find deeper bugs. This
+# workflow runs the same targets for much longer on a schedule (and on demand),
+# so the mutation engine has time to explore. A real finding (panic or a
+# "Failing input written") fails the job AND uploads the crashing input as an
+# artifact so it can be added to testdata/ as a regression seed.
+#
+# It deliberately does NOT run on every push (long fuzzing on every PR would be
+# wasteful and slow); CI's fuzz-smoke covers the per-push signal.
+
+on:
+  schedule:
+    # Nightly at 04:17 UTC (off the hour to avoid the cron rush).
+    - cron: "17 4 * * *"
+  workflow_dispatch:
+    inputs:
+      fuzztime:
+        description: "Seconds to fuzz each target"
+        required: false
+        default: "120"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: fuzz-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  extended-fuzz:
+    name: Fuzz each target (${{ github.event.inputs.fuzztime || '120' }}s)
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Fuzz every target
+        env:
+          FUZZTIME: ${{ github.event.inputs.fuzztime || '120' }}
+        run: |
+          # errexit is intentionally OFF: we inspect each target's exit code
+          # ourselves to distinguish a real crash from Go's short-fuzztime
+          # deadline flake (a worker mid-exec when the deadline fires), exactly
+          # as the CI fuzz-smoke job does. The `fail` var + final exit carry the
+          # job status.
+          set -uo pipefail
+          set +e
+
+          # Discover "<package> <FuzzName>" pairs. Collect via mapfile so a
+          # failing target reliably fails the job (a pipe into `while` would run
+          # the loop in a subshell and swallow the status).
+          mapfile -t targets < <(
+            grep -rl 'func Fuzz' --include='*_test.go' . | while read -r f; do
+              pkg="./$(dirname "$f")"
+              grep -oE 'func Fuzz[A-Za-z0-9_]+' "$f" | sed 's/^func //' | while read -r fn; do
+                echo "$pkg $fn"
+              done
+            done | sort -u
+          )
+          echo "Fuzzing ${#targets[@]} targets for ${FUZZTIME}s each"
+
+          run_one() { go test "$1" -run '^$' -fuzz "^${2}\$" -fuzztime "${FUZZTIME}s" 2>&1; }
+
+          # A non-zero exit that only reports "context deadline exceeded", with no
+          # panic and no crash input written, is Go's known short-fuzztime flake -
+          # not a finding. A real crash always carries panic:/Failing input
+          # written/runtime error and fails the job.
+          is_flake() {
+            grep -q 'context deadline exceeded' <<<"$1" \
+              && ! grep -qE 'panic:|Failing input written|runtime error' <<<"$1"
+          }
+
+          fail=0
+          for line in "${targets[@]}"; do
+            pkg="${line%% *}"; fn="${line##* }"
+            echo "::group::$pkg $fn"
+            out="$(run_one "$pkg" "$fn")"; rc=$?
+            echo "$out"
+            if [ "$rc" -ne 0 ] && is_flake "$out"; then
+              echo "::warning::$fn hit a fuzzing-deadline flake; retrying once"
+              out="$(run_one "$pkg" "$fn")"; rc=$?
+              echo "$out"
+              if [ "$rc" -ne 0 ] && is_flake "$out"; then
+                echo "::warning::$fn flaked again on the deadline (no crash); treating as pass"
+                rc=0
+              fi
+            fi
+            echo "::endgroup::"
+            if [ "$rc" -ne 0 ]; then echo "::error::fuzz target $fn FAILED (real crash)"; fail=1; fi
+          done
+          exit "$fail"
+
+      - name: Upload any crashing inputs
+        # On a real finding Go writes the reproducer under <pkg>/testdata/fuzz/<Fuzz>/;
+        # capture it so the exact crashing bytes can be replayed locally and added
+        # as a permanent regression seed.
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-crashers
+          path: "**/testdata/fuzz/**"
+          if-no-files-found: warn
