@@ -47,17 +47,31 @@ type distroProfile struct {
 	// OSPretty is the human distro string (e.g. /etc/os-release PRETTY_NAME).
 	OSPretty string
 	// Codename is the release codename (/etc/os-release VERSION_CODENAME), e.g.
-	// "bookworm" or "jammy". Empty for distros that do not use one (CentOS 7).
+	// "bookworm" or "jammy".
 	Codename string
-	// IDLike is the /etc/os-release ID_LIKE value, e.g. "debian" for Ubuntu or
-	// "rhel fedora" for CentOS. Empty for Debian (which has no ID_LIKE).
+	// IDLike is the /etc/os-release ID_LIKE value, e.g. "debian" for Ubuntu.
+	// Empty for Debian itself (which has no ID_LIKE).
 	IDLike string
+	// DebianVersion is the contents of /etc/debian_version. Cowrie's bundled fake
+	// filesystem is a Debian box (it ships /etc/debian_version and apt, and has no
+	// /etc/redhat-release), so every profile here MUST be Debian-family - a RHEL/
+	// CentOS identity would contradict the on-disk apt/dpkg/debian_version and is
+	// an immediate tell. Debian releases report a point version ("12.5"); Ubuntu,
+	// being derived from Debian testing, reports the matching "<codename>/sid".
+	DebianVersion string
 }
 
 // distroProfiles are realistic, internally-consistent identities drawn from
 // common real-world Linux servers. Each pairs an OpenSSH version actually
 // shipped by that distro release with that release's kernel. None of these is
 // the static value T-Pot's Cowrie advertises by default.
+//
+// All profiles are Debian-family (Debian or its Ubuntu derivative) on purpose:
+// Cowrie's bundled fake filesystem is a Debian install (apt, dpkg,
+// /etc/debian_version, no /etc/redhat-release), so a RHEL/CentOS identity would
+// contradict the on-disk evidence the moment an attacker runs `apt`, `dpkg -l`,
+// or `cat /etc/debian_version`. Ubuntu is itself Debian-derived and shares that
+// layout, so it stays coherent.
 var distroProfiles = []distroProfile{
 	{
 		SSHVersion:        "OpenSSH_8.2p1 Ubuntu-4ubuntu0.11",
@@ -68,6 +82,7 @@ var distroProfiles = []distroProfile{
 		OSPretty:          "Ubuntu 20.04.6 LTS",
 		Codename:          "focal",
 		IDLike:            "debian",
+		DebianVersion:     "bullseye/sid",
 	},
 	{
 		SSHVersion:        "OpenSSH_8.4p1 Debian-5+deb11u3",
@@ -77,6 +92,7 @@ var distroProfiles = []distroProfile{
 		OperatingSystem:   "GNU/Linux",
 		OSPretty:          "Debian GNU/Linux 11 (bullseye)",
 		Codename:          "bullseye",
+		DebianVersion:     "11.9",
 	},
 	{
 		SSHVersion:        "OpenSSH_8.9p1 Ubuntu-3ubuntu0.6",
@@ -87,6 +103,7 @@ var distroProfiles = []distroProfile{
 		OSPretty:          "Ubuntu 22.04.3 LTS",
 		Codename:          "jammy",
 		IDLike:            "debian",
+		DebianVersion:     "bookworm/sid",
 	},
 	{
 		SSHVersion:        "OpenSSH_9.2p1 Debian-2+deb12u3",
@@ -96,15 +113,7 @@ var distroProfiles = []distroProfile{
 		OperatingSystem:   "GNU/Linux",
 		OSPretty:          "Debian GNU/Linux 12 (bookworm)",
 		Codename:          "bookworm",
-	},
-	{
-		SSHVersion:        "OpenSSH_7.4",
-		KernelVersion:     "3.10.0-1160.105.1.el7.x86_64",
-		KernelBuildString: "#1 SMP Thu Dec 7 15:39:45 UTC 2023",
-		HardwarePlatform:  "x86_64",
-		OperatingSystem:   "GNU/Linux",
-		OSPretty:          "CentOS Linux 7 (Core)",
-		IDLike:            "rhel fedora",
+		DebianVersion:     "12.5",
 	},
 	{
 		SSHVersion:        "OpenSSH_9.6p1 Ubuntu-3ubuntu13.4",
@@ -115,7 +124,35 @@ var distroProfiles = []distroProfile{
 		OSPretty:          "Ubuntu 24.04 LTS",
 		Codename:          "noble",
 		IDLike:            "debian",
+		DebianVersion:     "trixie/sid",
 	},
+}
+
+// memProfile is a realistic total-RAM size (in kB) for the emulated box. Cowrie's
+// `free` builtin reads /proc/meminfo directly, and the stock honeyfs ships a
+// 256 MB MemTotal while `free` actually opens the REAL container /proc/meminfo
+// (leaking the Docker host's true RAM and disagreeing with `cat /proc/meminfo`).
+// We pin a believable server size per instance and render it into BOTH the
+// honeyfs /proc/meminfo (the `cat` path) and a bind mount over the real
+// /proc/meminfo (the `free` path) so the two agree and never leak the host.
+type memProfile struct {
+	TotalKB int
+	SwapKB  int
+}
+
+// memProfiles are common dedicated/VPS memory sizes. The seed selects one so two
+// QPot deployments do not report an identical /proc/meminfo.
+var memProfiles = []memProfile{
+	{TotalKB: 4 * 1024 * 1024, SwapKB: 2 * 1024 * 1024},
+	{TotalKB: 8 * 1024 * 1024, SwapKB: 2 * 1024 * 1024},
+	{TotalKB: 16 * 1024 * 1024, SwapKB: 4 * 1024 * 1024},
+	{TotalKB: 32 * 1024 * 1024, SwapKB: 8 * 1024 * 1024},
+}
+
+// memForSeed returns a per-instance memory size. A distinct salt keeps it
+// uncorrelated with the distro/CPU choice.
+func memForSeed(seed string) memProfile {
+	return memProfiles[seededIndex("mem:"+seed, len(memProfiles))]
 }
 
 // realisticHostnames is a pool of plausible production-server hostnames. None is
@@ -185,6 +222,14 @@ var personaHostnames = map[string][]string{
 	"monitoring-stack": {"grafana", "monitor-01", "zabbix-srv", "prometheus-1"},
 	"raspberry-pi":     {"raspberrypi", "pi-01", "rpi-home", "octopi"},
 	"ftp-fileserver":   {"ftp", "fileserver", "files-01", "ftp-prod"},
+	"docker-host":      {"docker-01", "dockerhost", "swarm-node-1", "container-host"},
+	"nextcloud":        {"nextcloud", "cloud-01", "nc-prod", "files-cloud"},
+	"home-assistant":   {"homeassistant", "hass-01", "smarthome", "hassio"},
+	"media-server":     {"plex-01", "mediaserver", "jellyfin", "htpc"},
+	"vpn-gateway":      {"vpn-01", "vpn-gw", "wg-gateway", "openvpn"},
+	"unifi-controller": {"unifi", "unifi-01", "network-ctrl", "controller"},
+	"message-broker":   {"kafka-1", "broker-01", "kafka-prod", "msg-broker"},
+	"wordpress-lamp":   {"wordpress", "wp-01", "blog-prod", "lamp-web"},
 }
 
 // hostnameForPersona returns a per-instance hostname coherent with the persona's

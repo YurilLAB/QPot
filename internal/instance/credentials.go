@@ -243,6 +243,83 @@ var credentialTemplates = []credentialTemplate{
 			{"root", []string{"Files2023!"}},
 		},
 	},
+	{
+		Name: "docker-host", Description: "Docker / container host",
+		Users: []credUser{
+			{"ubuntu", []string{"ubuntu"}},
+			{"dockeradmin", []string{"docker", "Docker@2023"}},
+			{"deploy", []string{"deploy123"}},
+			{"jenkins", []string{"jenkins"}},
+			{"root", []string{"Docker2023!"}},
+		},
+	},
+	{
+		Name: "nextcloud", Description: "Self-hosted Nextcloud / web file share",
+		Users: []credUser{
+			{"ncadmin", []string{"nextcloud", "Nextcloud1"}},
+			{"www-data", []string{"webadmin"}},
+			{"admin", []string{"changeme"}},
+			{"cloud", []string{"cloud123"}},
+			{"root", []string{"Cloud@2023"}},
+		},
+	},
+	{
+		Name: "home-assistant", Description: "Home Assistant smart-home hub",
+		Users: []credUser{
+			{"root", []string{"hassio"}},
+			{"homeassistant", []string{"homeassistant"}},
+			{"pi", []string{"homeassistant", "raspberry"}},
+			{"hass", []string{"hass"}},
+		},
+	},
+	{
+		Name: "media-server", Description: "Media server (Plex/Jellyfin/HTPC)",
+		Users: []credUser{
+			{"plex", []string{"plex"}},
+			{"jellyfin", []string{"jellyfin"}},
+			{"media", []string{"media123"}},
+			{"kodi", []string{"kodi"}}, // OSMC/LibreELEC default
+			{"root", []string{"Media2023"}},
+		},
+	},
+	{
+		Name: "vpn-gateway", Description: "VPN gateway (OpenVPN/WireGuard)",
+		Users: []credUser{
+			{"openvpn", []string{"openvpn"}},
+			{"admin", []string{"admin", "Admin@123"}},
+			{"vpnuser", []string{"vpn123"}},
+			{"root", []string{"Vpn@2023"}},
+		},
+	},
+	{
+		Name: "unifi-controller", Description: "UniFi network controller",
+		Users: []credUser{
+			{"ubnt", []string{"ubnt"}}, // Ubiquiti default
+			{"unifi", []string{"unifi"}},
+			{"admin", []string{"admin", "ubnt"}},
+			{"root", []string{"UniFi2023!"}},
+		},
+	},
+	{
+		Name: "message-broker", Description: "Message broker (Kafka/RabbitMQ/Zookeeper)",
+		Users: []credUser{
+			{"kafka", []string{"kafka"}},
+			{"rabbitmq", []string{"rabbitmq", "guest"}}, // RabbitMQ default guest
+			{"zookeeper", []string{"zookeeper"}},
+			{"admin", []string{"admin"}},
+			{"root", []string{"Kafka2023!"}},
+		},
+	},
+	{
+		Name: "wordpress-lamp", Description: "WordPress on a LAMP stack",
+		Users: []credUser{
+			{"wpadmin", []string{"wordpress", "Wordpress1"}},
+			{"www-data", []string{"webmaster2023"}},
+			{"mysql", []string{"mysql"}},
+			{"admin", []string{"Admin2023!"}},
+			{"root", []string{"Lamp@2023"}},
+		},
+	},
 }
 
 // credentialTemplateByName returns the template with the given name, or false.

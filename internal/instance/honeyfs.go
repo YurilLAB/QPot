@@ -2,6 +2,7 @@ package instance
 
 import (
 	"fmt"
+	"hash/fnv"
 	"strings"
 )
 
@@ -69,19 +70,34 @@ func presentInBase(u string) bool {
 // /proc/cpuinfo.
 func generateHoneyfs(t credentialTemplate, p distroProfile, hostname, seed string) map[string]string {
 	hostname = sanitizeConfigValue(hostname)
+	mem := memForSeed(seed)
 	files := map[string]string{
 		"etc/passwd":     etcPasswd(t),
 		"etc/group":      etcGroup(t),
 		"etc/hostname":   hostname + "\n",
 		"etc/hosts":      etcHosts(hostname),
 		"etc/os-release": osRelease(p, hostname),
-		"etc/issue":      issue(p),
-		"etc/motd":       motd(p),
+		// /usr/lib/os-release is the canonical location modern distros ship; on a
+		// real box /etc/os-release is a symlink to it, so the two must read
+		// identically. Stock honeyfs leaves it empty, so `cat /usr/lib/os-release`
+		// returns nothing while `cat /etc/os-release` has content - an easy tell.
+		"usr/lib/os-release": osRelease(p, hostname),
+		"etc/issue":          issue(p),
+		"etc/motd":           motd(p),
+		// /etc/debian_version is present in Cowrie's (Debian) fake fs and is common
+		// recon. Stock ships a fixed "12.5"; we render the value matching the
+		// advertised release (Debian point version, or "<codename>/sid" on Ubuntu)
+		// so it agrees with /etc/os-release and the SSH banner.
+		"etc/debian_version": p.DebianVersion + "\n",
+		// /etc/resolv.conf, /etc/ssh/sshd_config and /etc/fstab all exist in the
+		// fake fs but ship EMPTY, so `cat` on any of them returns nothing on a box
+		// that obviously has DNS, a running sshd and a mounted root - three direct
+		// tells. Fill them with realistic, internally-consistent content.
+		"etc/resolv.conf":     resolvConf(p, hostname),
+		"etc/ssh/sshd_config": sshdConfig(p),
+		"etc/fstab":           fstab(seed, mem),
 		// /proc/version must agree with `uname -r` / `uname -v`; Cowrie's static
-		// default contradicts the per-instance kernel/distro we advertise. (This
-		// path exists in Cowrie's fake filesystem, so overriding it is served;
-		// /etc/machine-id and /etc/lsb-release are NOT in the fs, so writing them
-		// would never be read - and would yield a "No such file" tell instead.)
+		// default contradicts the per-instance kernel/distro we advertise.
 		"proc/version": procVersion(p),
 		// /etc/timezone must agree with the shell's clock (cowrie timezone=UTC);
 		// the file exists in the fake fs and `cat /etc/timezone` is common recon.
@@ -89,23 +105,30 @@ func generateHoneyfs(t credentialTemplate, p distroProfile, hostname, seed strin
 		// /proc/cpuinfo exists in Cowrie's fake fs and `cat /proc/cpuinfo` is one
 		// of the first recon commands. Cowrie's stock file is globally identical
 		// (same model/MHz on every honeypot) - a fingerprint. We emit a realistic,
-		// per-instance server CPU. The processor COUNT is pinned to 2 to match
-		// Cowrie's hard-coded `nproc`/`free` builtins (which we verified ignore
-		// honeyfs and always report 2 CPUs / ~16 GB); a cpuinfo with a different
-		// core count than `nproc` would be a tell.
+		// per-instance server CPU at a fixed 2-vcpu count (see procCPUInfo).
 		"proc/cpuinfo": procCPUInfo(cpuModelForSeed(seed)),
+		// /proc/meminfo, /proc/swaps and /proc/mounts: stock meminfo claims 256 MB
+		// while `free` (which opens the REAL /proc/meminfo) leaks the Docker host's
+		// true RAM - both a tell and a contradiction. We render a believable,
+		// per-instance size here AND bind-mount this same file over the real
+		// /proc/meminfo (see deploy.go) so `cat /proc/meminfo` and `free` agree and
+		// neither leaks the host. swaps/mounts are filled to match.
+		"proc/meminfo": procMeminfo(mem),
+		"proc/swaps":   procSwaps(mem),
+		"proc/mounts":  procMounts(),
 	}
 	return files
 }
 
 // procCPUInfo renders a realistic /proc/cpuinfo for exactly two logical CPUs.
 //
-// The two-CPU count is deliberate and load-bearing: Cowrie implements `nproc`
-// and `free` as Python builtins that ignore honeyfs and always report 2 CPUs
-// (and ~16 GB RAM). If /proc/cpuinfo listed a different number of "processor"
-// entries than `nproc` prints, the disagreement would itself be a honeypot tell.
-// So only the CPU *model* varies per instance (via cpuModelForSeed); the count
-// stays fixed at two, presented as a 2-vCPU KVM guest (the common VPS shape).
+// The CPU *model* varies per instance (via cpuModelForSeed) so two deployments
+// do not share an identical /proc/cpuinfo, but the processor *count* is pinned
+// at two - a believable small VPS shape - rather than seeded: it keeps the file
+// stable across regenerations and avoids contradicting the 2-vcpu story the rest
+// of the profile tells. (Cowrie does not implement `nproc`, and `free` reads the
+// /proc/meminfo we bind-mount, so there is no builtin reporting a different core
+// count to disagree with.)
 func procCPUInfo(m cpuModel) string {
 	var b strings.Builder
 	for cpu := 0; cpu < 2; cpu++ {
@@ -313,4 +336,257 @@ func extractVersion(pretty string) string {
 		}
 	}
 	return ""
+}
+
+// uuidForSeed returns a deterministic RFC-4122-shaped UUID derived from seed.
+// Used for /etc/fstab device identifiers so each instance has stable, unique,
+// realistic UUIDs (real fstabs reference filesystems by UUID, not /dev names).
+func uuidForSeed(seed string) string {
+	h := func(s string) uint32 {
+		f := fnv.New32a()
+		_, _ = f.Write([]byte(s))
+		return f.Sum32()
+	}
+	a := h("uuid-a:" + seed)
+	b := h("uuid-b:" + seed)
+	c := h("uuid-c:" + seed)
+	d := h("uuid-d:" + seed)
+	// Shape as xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx (version 4, variant 1).
+	return fmt.Sprintf("%08x-%04x-4%03x-%x%03x-%04x%08x",
+		a, b&0xffff, (b>>16)&0xfff, 8+(c&0x3), (c>>2)&0xfff, (c>>16)&0xffff, d)
+}
+
+// resolvConf renders a believable /etc/resolv.conf. Stock honeyfs leaves it
+// empty, so `cat /etc/resolv.conf` returns nothing on a box that clearly resolves
+// names. Ubuntu servers typically run systemd-resolved (the 127.0.0.53 stub);
+// Debian servers more often carry static upstream resolvers. Either is realistic
+// for that distro, so we branch on it to stay coherent with /etc/os-release.
+func resolvConf(p distroProfile, hostname string) string {
+	if strings.Contains(strings.ToLower(p.OSPretty), "ubuntu") {
+		return "# This file is managed by man:systemd-resolved(8). Do not edit.\n" +
+			"#\n" +
+			"# This is a dynamic resolv.conf file for connecting local clients to the\n" +
+			"# internal DNS stub resolver of systemd-resolved. This file lists all\n" +
+			"# configured search domains.\n" +
+			"#\n" +
+			"# Run \"resolvectl status\" to see details about the uplink DNS servers\n" +
+			"# currently in use.\n" +
+			"nameserver 127.0.0.53\n" +
+			"options edns0 trust-ad\n" +
+			"search .\n"
+	}
+	return "nameserver 1.1.1.1\n" +
+		"nameserver 8.8.8.8\n" +
+		"nameserver 8.8.4.4\n"
+}
+
+// fstab renders a realistic /etc/fstab for an ext4 root + EFI + swapfile box,
+// with per-instance UUIDs. Stock honeyfs ships it empty, so `cat /etc/fstab`
+// returns nothing on a machine that obviously has a mounted root - a tell.
+func fstab(seed string, mem memProfile) string {
+	rootUUID := uuidForSeed("root:" + seed)
+	efiUUID := uuidForSeed("efi:" + seed)
+	var b strings.Builder
+	b.WriteString("# /etc/fstab: static file system information.\n")
+	b.WriteString("#\n")
+	b.WriteString("# Use 'blkid' to print the universally unique identifier for a\n")
+	b.WriteString("# device; this may be used with UUID= as a more robust way to name devices\n")
+	b.WriteString("# that works even if disks are added and removed. See fstab(5).\n")
+	b.WriteString("#\n")
+	b.WriteString("# <file system> <mount point>   <type>  <options>       <dump>  <pass>\n")
+	b.WriteString("# / was on /dev/sda1 during installation\n")
+	fmt.Fprintf(&b, "UUID=%s /               ext4    errors=remount-ro 0       1\n", rootUUID)
+	b.WriteString("# /boot/efi was on /dev/sda15 during installation\n")
+	fmt.Fprintf(&b, "UUID=%s  /boot/efi       vfat    umask=0077      0       1\n", efiUUID[:8])
+	if mem.SwapKB > 0 {
+		b.WriteString("/swapfile                                 none            swap    sw              0       0\n")
+	}
+	return b.String()
+}
+
+// sshdConfig renders a realistic /etc/ssh/sshd_config for a Debian/Ubuntu box.
+// Stock honeyfs ships it empty, yet sshd is plainly running (the attacker just
+// logged in over it), so an empty config is a tell. The content is the standard
+// distribution default - mostly the commented-out defaults a real install keeps,
+// plus the handful of active lines Debian/Ubuntu ship - and contains nothing
+// that contradicts the advertised OpenSSH version.
+func sshdConfig(p distroProfile) string {
+	sftp := "/usr/lib/openssh/sftp-server"
+	return `# This is the sshd server system-wide configuration file.  See
+# sshd_config(5) for more information.
+
+# This sshd was compiled with PATH=/usr/bin:/bin:/usr/sbin:/sbin
+
+# The strategy used for options in the default sshd_config shipped with
+# OpenSSH is to specify options with their default value where
+# possible, but leave them commented.  Uncommented options override the
+# default value.
+
+Include /etc/ssh/sshd_config.d/*.conf
+
+#Port 22
+#AddressFamily any
+#ListenAddress 0.0.0.0
+#ListenAddress ::
+
+#HostKey /etc/ssh/ssh_host_rsa_key
+#HostKey /etc/ssh/ssh_host_ecdsa_key
+#HostKey /etc/ssh/ssh_host_ed25519_key
+
+# Ciphers and keying
+#RekeyLimit default none
+
+# Logging
+#SyslogFacility AUTH
+#LogLevel INFO
+
+# Authentication:
+
+#LoginGraceTime 2m
+#PermitRootLogin prohibit-password
+#StrictModes yes
+#MaxAuthTries 6
+#MaxSessions 10
+
+#PubkeyAuthentication yes
+
+# To disable tunneled clear text passwords, change to no here!
+#PasswordAuthentication yes
+#PermitEmptyPasswords no
+
+# Change to yes to enable challenge-response passwords (beware issues with
+# some PAM modules and threads)
+KbdInteractiveAuthentication no
+
+#KerberosAuthentication no
+#GSSAPIAuthentication no
+
+# Set this to 'yes' to enable PAM authentication, account processing,
+# and session processing.
+UsePAM yes
+
+#AllowAgentForwarding yes
+#AllowTcpForwarding yes
+#GatewayPorts no
+X11Forwarding yes
+#X11DisplayOffset 10
+#PrintMotd yes
+#PrintLastLog yes
+#TCPKeepAlive yes
+#PermitUserEnvironment no
+#Compression delayed
+#ClientAliveInterval 0
+#ClientAliveCountMax 3
+#UseDNS no
+#PidFile /run/sshd.pid
+#MaxStartups 10:30:100
+#PermitTunnel no
+
+# Allow client to pass locale environment variables
+AcceptEnv LANG LC_*
+
+# override default of no subsystems
+Subsystem	sftp	` + sftp + `
+`
+}
+
+// procMeminfo renders a realistic /proc/meminfo for the given memory size. It
+// includes every field a real meminfo carries (so `cat /proc/meminfo` looks
+// genuine) and, crucially, the eight keys Cowrie's `free` builtin parses
+// (MemTotal/MemFree/MemAvailable/Buffers/Cached/SwapTotal/SwapFree/Shmem) with
+// internally-consistent values, since this same file is bind-mounted over the
+// real /proc/meminfo that `free` reads.
+func procMeminfo(mem memProfile) string {
+	total := mem.TotalKB
+	// Believable proportions for a lightly-loaded server.
+	free := total * 58 / 100
+	buffers := total * 2 / 100
+	cached := total * 24 / 100
+	available := free + cached + buffers
+	shmem := total / 512
+	swapTotal := mem.SwapKB
+	swapFree := swapTotal
+	sReclaim := total * 3 / 100
+	slab := sReclaim + total/100
+	f := func(k string, v int) string { return fmt.Sprintf("%-16s%9d kB\n", k+":", v) }
+	var b strings.Builder
+	b.WriteString(f("MemTotal", total))
+	b.WriteString(f("MemFree", free))
+	b.WriteString(f("MemAvailable", available))
+	b.WriteString(f("Buffers", buffers))
+	b.WriteString(f("Cached", cached))
+	b.WriteString(f("SwapCached", 0))
+	b.WriteString(f("Active", total*30/100))
+	b.WriteString(f("Inactive", total*18/100))
+	b.WriteString(f("Active(anon)", total*12/100))
+	b.WriteString(f("Inactive(anon)", total/100))
+	b.WriteString(f("Active(file)", total*18/100))
+	b.WriteString(f("Inactive(file)", total*17/100))
+	b.WriteString(f("Unevictable", 0))
+	b.WriteString(f("Mlocked", 0))
+	b.WriteString(f("SwapTotal", swapTotal))
+	b.WriteString(f("SwapFree", swapFree))
+	b.WriteString(f("Dirty", 128))
+	b.WriteString(f("Writeback", 0))
+	b.WriteString(f("AnonPages", total*13/100))
+	b.WriteString(f("Mapped", total*3/100))
+	b.WriteString(f("Shmem", shmem))
+	b.WriteString(f("KReclaimable", sReclaim))
+	b.WriteString(f("Slab", slab))
+	b.WriteString(f("SReclaimable", sReclaim))
+	b.WriteString(f("SUnreclaim", total/100))
+	b.WriteString(f("KernelStack", 8192))
+	b.WriteString(f("PageTables", total/256))
+	b.WriteString(f("NFS_Unstable", 0))
+	b.WriteString(f("Bounce", 0))
+	b.WriteString(f("WritebackTmp", 0))
+	b.WriteString(f("CommitLimit", total/2+swapTotal))
+	b.WriteString(f("Committed_AS", total*20/100))
+	b.WriteString(f("VmallocTotal", 34359738367))
+	b.WriteString(f("VmallocUsed", total/400))
+	b.WriteString(f("VmallocChunk", 0))
+	b.WriteString(f("Percpu", 2048))
+	b.WriteString(f("HardwareCorrupted", 0))
+	b.WriteString(f("AnonHugePages", 0))
+	b.WriteString(f("ShmemHugePages", 0))
+	b.WriteString(f("ShmemPmdMapped", 0))
+	b.WriteString(f("Hugepagesize", 2048))
+	b.WriteString(f("DirectMap4k", total*8/100))
+	b.WriteString(f("DirectMap2M", total*92/100))
+	return b.String()
+}
+
+// procSwaps renders /proc/swaps consistent with the meminfo swap size. Stock
+// honeyfs ships it empty.
+func procSwaps(mem memProfile) string {
+	b := "Filename\t\t\t\tType\t\tSize\t\tUsed\t\tPriority\n"
+	if mem.SwapKB > 0 {
+		b += fmt.Sprintf("/swapfile                               file\t\t%d\t\t0\t\t-2\n", mem.SwapKB)
+	}
+	return b
+}
+
+// procMounts renders a realistic /proc/mounts for an ext4-root server. Stock
+// honeyfs ships a near-empty file; `cat /proc/mounts` (and `mount`) is common
+// recon, and the absence of the usual kernel pseudo-filesystems is a tell.
+func procMounts() string {
+	return strings.Join([]string{
+		"sysfs /sys sysfs rw,nosuid,nodev,noexec,relatime 0 0",
+		"proc /proc proc rw,nosuid,nodev,noexec,relatime 0 0",
+		"udev /dev devtmpfs rw,nosuid,relatime,size=8155316k,nr_inodes=2038829,mode=755 0 0",
+		"devpts /dev/pts devpts rw,nosuid,noexec,relatime,gid=5,mode=620,ptmxmode=000 0 0",
+		"tmpfs /run tmpfs rw,nosuid,nodev,noexec,relatime,size=1639292k,mode=755 0 0",
+		"/dev/sda1 / ext4 rw,relatime,errors=remount-ro 0 0",
+		"securityfs /sys/kernel/security securityfs rw,nosuid,nodev,noexec,relatime 0 0",
+		"tmpfs /dev/shm tmpfs rw,nosuid,nodev 0 0",
+		"tmpfs /run/lock tmpfs rw,nosuid,nodev,noexec,relatime,size=5120k 0 0",
+		"cgroup2 /sys/fs/cgroup cgroup2 rw,nosuid,nodev,noexec,relatime,nsdelegate,memory_recursiveprot 0 0",
+		"pstore /sys/fs/pstore pstore rw,nosuid,nodev,noexec,relatime 0 0",
+		"bpf /sys/fs/bpf bpf rw,nosuid,nodev,noexec,relatime,mode=700 0 0",
+		"mqueue /dev/mqueue mqueue rw,nosuid,nodev,noexec,relatime 0 0",
+		"debugfs /sys/kernel/debug debugfs rw,nosuid,nodev,noexec,relatime 0 0",
+		"tracefs /sys/kernel/tracing tracefs rw,nosuid,nodev,noexec,relatime 0 0",
+		"/dev/sda15 /boot/efi vfat rw,relatime,fmask=0077,dmask=0077,codepage=437,iocharset=ascii,shortname=mixed,errors=remount-ro 0 0",
+		"tmpfs /run/user/0 tmpfs rw,nosuid,nodev,relatime,size=1639288k,nr_inodes=409822,mode=700 0 0",
+	}, "\n") + "\n"
 }

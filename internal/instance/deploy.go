@@ -114,10 +114,29 @@ func deployProfileFor(name string) honeypotDeploy {
 				// Cowrie's fake fs, so overriding them is actually served.)
 				{HostSubdir: "honeyfs/proc/version", ContainerPath: "/home/cowrie/cowrie/honeyfs/proc/version", File: true},
 				{HostSubdir: "honeyfs/etc/timezone", ContainerPath: "/home/cowrie/cowrie/honeyfs/etc/timezone", File: true},
-				// A per-instance, realistic /proc/cpuinfo (2 CPUs, to match Cowrie's
-				// hard-coded nproc/free builtins). Overrides the stock globally-
-				// identical cpuinfo, which is a cross-deployment fingerprint.
+				// A per-instance, realistic /proc/cpuinfo (2 CPUs). Overrides the
+				// stock globally-identical cpuinfo, which is a cross-deployment
+				// fingerprint.
 				{HostSubdir: "honeyfs/proc/cpuinfo", ContainerPath: "/home/cowrie/cowrie/honeyfs/proc/cpuinfo", File: true},
+				// Additional recon files the stock honeyfs leaves empty or wrong, so
+				// `cat` on a box that obviously has DNS / a running sshd / a mounted
+				// root / RAM does not betray the honeypot. All exist in cowrie's fake
+				// fs (verified against fs.pickle), so these overrides are actually
+				// served. See honeyfs.go for the per-file rationale.
+				{HostSubdir: "honeyfs/usr/lib/os-release", ContainerPath: "/home/cowrie/cowrie/honeyfs/usr/lib/os-release", File: true},
+				{HostSubdir: "honeyfs/etc/debian_version", ContainerPath: "/home/cowrie/cowrie/honeyfs/etc/debian_version", File: true},
+				{HostSubdir: "honeyfs/etc/resolv.conf", ContainerPath: "/home/cowrie/cowrie/honeyfs/etc/resolv.conf", File: true},
+				{HostSubdir: "honeyfs/etc/ssh/sshd_config", ContainerPath: "/home/cowrie/cowrie/honeyfs/etc/ssh/sshd_config", File: true},
+				{HostSubdir: "honeyfs/etc/fstab", ContainerPath: "/home/cowrie/cowrie/honeyfs/etc/fstab", File: true},
+				{HostSubdir: "honeyfs/proc/meminfo", ContainerPath: "/home/cowrie/cowrie/honeyfs/proc/meminfo", File: true},
+				{HostSubdir: "honeyfs/proc/swaps", ContainerPath: "/home/cowrie/cowrie/honeyfs/proc/swaps", File: true},
+				{HostSubdir: "honeyfs/proc/mounts", ContainerPath: "/home/cowrie/cowrie/honeyfs/proc/mounts", File: true},
+				// Bind the SAME generated meminfo over the REAL /proc/meminfo too:
+				// cowrie's `free` builtin does open("/proc/meminfo") against the
+				// container's real proc (not honeyfs), so without this it leaks the
+				// Docker host's true RAM and disagrees with `cat /proc/meminfo`. With
+				// it, `free` and `cat` report the same believable per-instance size.
+				{HostSubdir: "honeyfs/proc/meminfo", ContainerPath: "/proc/meminfo", File: true},
 			},
 			Ports:        []int{22, 23},
 			ConfigSubdir: "etc",
