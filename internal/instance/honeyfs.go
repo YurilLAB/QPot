@@ -497,18 +497,20 @@ Subsystem	sftp	` + sftp + `
 // internally-consistent values, since this same file is bind-mounted over the
 // real /proc/meminfo that `free` reads.
 func procMeminfo(mem memProfile) string {
-	total := mem.TotalKB
+	// int64 throughout: a few fields (notably VmallocTotal, ~32 TiB in kB) exceed
+	// 2^31, so plain int would overflow on 32-bit build targets (linux/arm).
+	total := int64(mem.TotalKB)
 	// Believable proportions for a lightly-loaded server.
 	free := total * 58 / 100
 	buffers := total * 2 / 100
 	cached := total * 24 / 100
 	available := free + cached + buffers
 	shmem := total / 512
-	swapTotal := mem.SwapKB
+	swapTotal := int64(mem.SwapKB)
 	swapFree := swapTotal
 	sReclaim := total * 3 / 100
 	slab := sReclaim + total/100
-	f := func(k string, v int) string { return fmt.Sprintf("%-16s%9d kB\n", k+":", v) }
+	f := func(k string, v int64) string { return fmt.Sprintf("%-16s%9d kB\n", k+":", v) }
 	var b strings.Builder
 	b.WriteString(f("MemTotal", total))
 	b.WriteString(f("MemFree", free))
