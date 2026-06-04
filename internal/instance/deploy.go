@@ -45,6 +45,14 @@ type honeypotDeploy struct {
 	// requires (e.g. conpot's CONPOT_* args). Keys are sorted for deterministic
 	// output.
 	Env map[string]string
+	// ExtraCaps are Linux capabilities to ADD back to the cap_drop=ALL bounding
+	// set, beyond the default SETUID/SETGID (+ NET_BIND_SERVICE for privileged
+	// ports). Needed when an image's entrypoint binary carries FILE capabilities:
+	// the kernel refuses to execve a file whose permitted file-caps are not in the
+	// process bounding set (EPERM), even if the program never uses them. E.g.
+	// log4pot's /usr/bin/python3 has cap_net_bind_service=ep but binds only 8080,
+	// so without NET_BIND_SERVICE in the bounding set the interpreter cannot start.
+	ExtraCaps []string
 	// Command overrides the image's default CMD. Set only when the image's own
 	// entrypoint would defeat QPot's generated config (e.g. cowrie:24.04.1 ships
 	// a start-cowrie-persona launcher that copies a RANDOM built-in persona's
@@ -241,8 +249,17 @@ func deployProfileFor(name string) honeypotDeploy {
 			Ports:   []int{25},
 		}
 	case "ddospot":
+		// Each pot (generic/ntp/dns/ssdp/chargen) opens a SQLite DB at db/<pot>.
+		// sqlite3 and writes a per-pot log; under a read-only root those dirs MUST
+		// be writable mounts or every pot dies with "unable to open database file"
+		// at init and nothing binds (only the mgmt socket), leaving the honeypot
+		// unhealthy. Mirror T-Pot's reference compose: logs + bl + db.
 		return honeypotDeploy{
-			Volumes:  []deployVolume{{HostSubdir: "logs", ContainerPath: "/opt/ddospot/ddospot/logs"}},
+			Volumes: []deployVolume{
+				{HostSubdir: "logs", ContainerPath: "/opt/ddospot/ddospot/logs"},
+				{HostSubdir: "bl", ContainerPath: "/opt/ddospot/ddospot/bl"},
+				{HostSubdir: "db", ContainerPath: "/opt/ddospot/ddospot/db"},
+			},
 			UDPPorts: []int{19, 53, 123, 161, 1900},
 		}
 	case "ciscoasa":
@@ -339,6 +356,10 @@ func deployProfileFor(name string) honeypotDeploy {
 				{HostSubdir: "payloads", ContainerPath: "/var/log/log4pot/payloads"},
 			},
 			Ports: []int{8080},
+			// The image's /usr/bin/python3 carries cap_net_bind_service=ep; under
+			// cap_drop=ALL the kernel won't exec it ("operation not permitted")
+			// unless the cap is in the bounding set, even though log4pot binds 8080.
+			ExtraCaps: []string{"NET_BIND_SERVICE"},
 		}
 	case "miniprint":
 		return honeypotDeploy{

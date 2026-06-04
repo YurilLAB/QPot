@@ -487,3 +487,62 @@ func TestConfigSubdirIsMounted(t *testing.T) {
 		}
 	}
 }
+
+// TestLog4potHasNetBindCap guards the fix for log4pot exiting with "exec
+// /usr/bin/python3: operation not permitted": the image's python3 carries
+// cap_net_bind_service=ep, and under cap_drop=ALL the kernel refuses to exec a
+// setcap binary whose caps are not in the bounding set - even though log4pot
+// binds only 8080. The profile must add NET_BIND_SERVICE, and it must render
+// into the generated compose cap_add.
+func TestLog4potHasNetBindCap(t *testing.T) {
+	d := deployProfileFor("log4pot")
+	found := false
+	for _, c := range d.ExtraCaps {
+		if c == "NET_BIND_SERVICE" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("log4pot must request NET_BIND_SERVICE (its setcap python3 won't exec without it), got ExtraCaps=%v", d.ExtraCaps)
+	}
+
+	cfg := config.Default("l4cap")
+	cfg.QPotID = "qp_l4capl4capl4capl4cap001"
+	for n := range cfg.Honeypots {
+		hp := cfg.Honeypots[n]
+		hp.Enabled = n == "log4pot"
+		cfg.Honeypots[n] = hp
+	}
+	sb, _ := security.NewSandbox(&cfg.Security)
+	g := &ComposeGenerator{Config: cfg, Sandbox: sb}
+	out, err := g.Generate()
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The log4pot service block must carry NET_BIND_SERVICE in cap_add.
+	if !strings.Contains(out, "NET_BIND_SERVICE") {
+		t.Error("generated compose for log4pot is missing the NET_BIND_SERVICE cap_add")
+	}
+}
+
+// TestDdospotHasWritableDBMounts guards the fix for ddospot's pots all dying
+// with "sqlite3 unable to open database file": each pot opens a SQLite DB under
+// db/ and writes a log, so under a read-only root the db/ and logs/ dirs must be
+// writable mounts. Without db/ no pot binds and the honeypot is unhealthy.
+func TestDdospotHasWritableDBMounts(t *testing.T) {
+	d := deployProfileFor("ddospot")
+	want := map[string]string{
+		"logs": "/opt/ddospot/ddospot/logs",
+		"db":   "/opt/ddospot/ddospot/db",
+		"bl":   "/opt/ddospot/ddospot/bl",
+	}
+	got := map[string]string{}
+	for _, v := range d.Volumes {
+		got[v.HostSubdir] = v.ContainerPath
+	}
+	for sub, path := range want {
+		if got[sub] != path {
+			t.Errorf("ddospot must mount %q at %q (writable), got %q", sub, path, got[sub])
+		}
+	}
+}

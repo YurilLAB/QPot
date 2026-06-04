@@ -86,6 +86,28 @@ func TestAllocatePortInValidRange(t *testing.T) {
 	}
 }
 
+// TestAllocatePortBelowEphemeral is the regression guard for the intermittent
+// "address already in use" bind failure seen with the full honeypot set: a
+// published host port allocated inside the Linux ephemeral range (default
+// 32768..60999) races the kernel's dynamic port allocator. Every auto-allocated
+// port must stay strictly below the ephemeral floor.
+func TestAllocatePortBelowEphemeral(t *testing.T) {
+	const ephemeralFloor = 32768
+	for _, name := range []string{"a", "prod", "instance-x", "z9", "verylonginstancenamevalue"} {
+		cfg := Default(name)
+		for _, base := range []int{20, 22, 23, 25, 53, 80, 102, 443, 445, 1433, 3306, 5060, 5432, 5900, 6379, 8080, 9100, 9200, 11112} {
+			p := cfg.AllocatePortFor("some-honeypot", base)
+			if p < 10000 || p >= ephemeralFloor {
+				t.Errorf("instance %q base %d: host port %d is outside [10000,%d) (ephemeral-range collision risk)", name, base, p, ephemeralFloor)
+			}
+		}
+	}
+	// The spread constant itself must keep base(10000)+spread below the floor.
+	if 10000+HostPortSpread > ephemeralFloor {
+		t.Errorf("HostPortSpread=%d puts the top host port (%d) into the ephemeral range (>=%d)", HostPortSpread, 10000+HostPortSpread, ephemeralFloor)
+	}
+}
+
 func TestGetEnabledHoneypots(t *testing.T) {
 	cfg := Default("test")
 	enabled := cfg.GetEnabledHoneypots()

@@ -459,6 +459,15 @@ func newHoneypotCommand() *cobra.Command {
 				return fmt.Errorf("failed to load config: %w", err)
 			}
 
+			// Reject unknown honeypot names up front. Without this, a typo (e.g.
+			// "cowrei") was silently written into the config as an enabled
+			// honeypot, then `qpot up` would try to deploy a honeypot with no
+			// image/profile - a confusing late failure. ValidateHoneypot only
+			// reads the supported list, so a bare generator is enough.
+			if err := (&instance.ComposeGenerator{Config: cfg}).ValidateHoneypot(hpName); err != nil {
+				return err
+			}
+
 			cfg.EnableHoneypot(hpName)
 			if err := config.Save(cfg); err != nil {
 				return fmt.Errorf("failed to save config: %w", err)

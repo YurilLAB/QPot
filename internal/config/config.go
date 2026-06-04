@@ -889,6 +889,18 @@ func (c *Config) AllocatePort(basePort int) int {
 // honeypot name into the hash so two honeypots that both listen on the same
 // container port (e.g. cowrie and heralding both on 22) still get distinct host
 // ports and do not collide. Deterministic per (instance, honeypot, port).
+// HostPortSpread is the width of the host-port window QPot auto-allocates
+// published honeypot ports within, starting at the (>=10000) base. It is capped
+// so the window stays BELOW the Linux ephemeral range (default
+// net.ipv4.ip_local_port_range = 32768..60999): with base 10000 the top port is
+// 31999. Publishing inside the ephemeral range races the kernel's dynamic
+// allocator - another container's outbound connection (or docker-proxy) can grab
+// the same number first, and `docker compose up` then fails with "address
+// already in use" intermittently (observed with the full 26-honeypot set, where
+// heralding got 39734). Keeping the window below the ephemeral floor removes that
+// race. buildHostPortMap (compose.go) uses the same window for its dedup probe.
+const HostPortSpread = 22000
+
 func (c *Config) AllocatePortFor(honeypot string, basePort int) int {
 	if !c.Ports.AutoAllocate {
 		return basePort
@@ -910,9 +922,9 @@ func (c *Config) AllocatePortFor(honeypot string, basePort int) int {
 	if base < 1024 {
 		base = 10000
 	}
-	// Spread host ports across [base, base+50000) so an instance's ~50 ports
-	// rarely collide.
-	return base + int(h%50000)
+	// Spread host ports across [base, base+HostPortSpread) so an instance's ~50
+	// ports rarely collide.
+	return base + int(h%HostPortSpread)
 }
 
 // GetDockerComposePath returns path to docker-compose file

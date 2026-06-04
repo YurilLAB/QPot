@@ -53,7 +53,10 @@ func vrlStringLiteral(s string) string {
 // a taken port is linearly probed upward (wrapping in range) until free. The
 // instance's infra ports (database) are reserved first so honeypots avoid them.
 func (g *ComposeGenerator) buildHostPortMap() map[string]int {
-	const rangeSize = 50000
+	// Same window as config.AllocatePortFor: a width kept below the Linux
+	// ephemeral range so published ports never race the kernel's dynamic
+	// allocator (see config.HostPortSpread).
+	const rangeSize = config.HostPortSpread
 	base := g.Config.Ports.BasePort
 	if base < 1024 {
 		base = 10000
@@ -644,7 +647,8 @@ services:
     cap_add:
       - SETUID
       - SETGID
-      {{if or $dep.NeedsNetBind (and .HP.Port (lt .HP.Port 1024))}}- NET_BIND_SERVICE{{end}}{{end}}
+      {{if or $dep.NeedsNetBind (and .HP.Port (lt .HP.Port 1024))}}- NET_BIND_SERVICE{{end}}{{range $dep.ExtraCaps}}
+      - {{.}}{{end}}{{end}}
 
     # No user override: each honeypot image already runs as its own non-root
     # user (e.g. cowrie=2000). Forcing a different uid breaks the image's file

@@ -47,6 +47,15 @@ func TestAllHoneypotsComposeTogether(t *testing.T) {
 			// legitimately share a host port number, so check them separately).
 			assertUnique(t, "TCP host port", regexp.MustCompile(`-\s+"(\d+):\d+"`), out)
 			assertUnique(t, "UDP host port", regexp.MustCompile(`-\s+"(\d+):\d+/udp"`), out)
+			// No published host port may land in the Linux ephemeral range
+			// (default >= 32768): that races the kernel's dynamic allocator and
+			// makes `docker compose up` fail to bind intermittently (heralding hit
+			// this with the full set). See config.HostPortSpread.
+			for _, m := range regexp.MustCompile(`-\s+"(\d+):\d+(?:/udp)?"`).FindAllStringSubmatch(out, -1) {
+				if p := atoiTest(m[1]); p >= 32768 {
+					t.Errorf("host port %d is in the ephemeral range (>=32768); risks an intermittent bind collision", p)
+				}
+			}
 			// Linux bridge names and container names must be unique.
 			assertUnique(t, "bridge name", regexp.MustCompile(`com\.docker\.network\.bridge\.name:\s+(\S+)`), out)
 			assertUnique(t, "container name", regexp.MustCompile(`container_name:\s+(\S+)`), out)
@@ -66,6 +75,18 @@ func TestAllHoneypotsComposeTogether(t *testing.T) {
 			}
 		})
 	}
+}
+
+// atoiTest parses a non-negative integer port string for the tests.
+func atoiTest(s string) int {
+	n := 0
+	for _, c := range s {
+		if c < '0' || c > '9' {
+			return -1
+		}
+		n = n*10 + int(c-'0')
+	}
+	return n
 }
 
 // assertUnique extracts capture group 1 of re from s and fails if any value
