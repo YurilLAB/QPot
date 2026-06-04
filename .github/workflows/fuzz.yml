@@ -104,7 +104,7 @@ jobs:
         # capture it so the exact crashing bytes can be replayed locally and added
         # as a permanent regression seed.
         if: failure()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: fuzz-crashers
           path: "**/testdata/fuzz/**"
