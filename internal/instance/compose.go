@@ -1257,6 +1257,20 @@ func (g *ComposeGenerator) generateCowrieHoneyfs() map[string]string {
 	return generateHoneyfs(persona, profileForSeed(seed), hostname, seed)
 }
 
+// generateCowrieFsPatch returns the Python script that, run at container start,
+// adds the persona's human users' home directories to Cowrie's fake filesystem
+// (see cowriefs.go). The user set + uids mirror generateCowrieHoneyfs/etcPasswd
+// so /home/<user>, its ownership, and /etc/passwd stay consistent.
+func (g *ComposeGenerator) generateCowrieFsPatch() string {
+	seed := g.Config.QPotID
+	if seed == "" {
+		seed = g.Config.InstanceName
+	}
+	hp := g.Config.Honeypots["cowrie"]
+	persona := selectCredentialTemplate(hp.Stealth.CredentialTemplate, seed)
+	return cowrieFsPatchScript(cowrieHomeUsers(persona, seed))
+}
+
 // generateCowrieConfig generates TPOT-compatible Cowrie config.
 //
 // The system identity (hostname, advertised SSH version, kernel/uname fields)
@@ -1331,13 +1345,14 @@ auth_class = UserDB
 etc_path = etc
 
 [shell]
-# Path (relative to cowrie's working dir, /home/cowrie/cowrie) to the pickled
-# fake filesystem. This MUST match where the image ships fs.pickle
-# (src/cowrie/data/fs.pickle in telekom-security/cowrie); a wrong path makes
-# Cowrie fail to load the filesystem and the shell channel dies on every login -
-# a broken honeypot and an obvious tell. The healthcheck only probes the port,
-# so this is not caught without an actual login.
-filesystem = src/cowrie/data/fs.pickle
+# Path to the pickled fake filesystem. QPot patches the image's base pickle at
+# container start to add the persona's home directories (see cowriefs.go) and
+# writes the result to the writable tmpfs /tmp/cowrie/fs.pickle, so point Cowrie
+# there. The startup script always produces this file (the unchanged base pickle
+# on any patch error), so the path is guaranteed populated before twistd starts;
+# a missing/wrong path would make Cowrie fail to load the fs and kill the shell
+# on every login - a broken honeypot the port-only healthcheck would not catch.
+filesystem = /tmp/cowrie/fs.pickle
 kernel_version = %s
 kernel_build_string = %s
 hardware_platform = %s

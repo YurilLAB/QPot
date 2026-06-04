@@ -426,8 +426,16 @@ func TestCowrieBypassesImagePersonaLauncher(t *testing.T) {
 	if len(d.Command) == 0 {
 		t.Fatal("cowrie must override the image command to bypass start-cowrie-persona")
 	}
-	if d.Command[0] != "/usr/bin/twistd" || d.Command[len(d.Command)-1] != "cowrie" {
-		t.Errorf("cowrie command should run twistd ... cowrie, got %v", d.Command)
+	// The command runs the fake-fs patch script then execs twistd cowrie; it must
+	// not invoke the image's start-cowrie-persona launcher.
+	joined := strings.Join(d.Command, " ")
+	for _, want := range []string{"qpot_patch_fs.py", "exec /usr/bin/twistd", "cowrie"} {
+		if !strings.Contains(joined, want) {
+			t.Errorf("cowrie command missing %q, got %v", want, d.Command)
+		}
+	}
+	if strings.Contains(joined, "start-cowrie-persona") {
+		t.Error("cowrie command must not use the image's start-cowrie-persona launcher")
 	}
 	if d.WorkingDir != "/home/cowrie/cowrie" {
 		t.Errorf("cowrie working_dir must be /home/cowrie/cowrie so etc/cowrie.cfg + etc/userdb.txt + honeyfs resolve to QPot's mounts, got %q", d.WorkingDir)
@@ -442,17 +450,19 @@ func TestCowrieBypassesImagePersonaLauncher(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(out, `command: ["/usr/bin/twistd"`) {
-		t.Error("compose did not render the cowrie command override")
+	if !strings.Contains(out, "exec /usr/bin/twistd --nodaemon") {
+		t.Error("compose did not render the cowrie twistd command")
+	}
+	if !strings.Contains(out, "qpot_patch_fs.py") {
+		t.Error("compose did not render the cowrie fs-patch startup step")
 	}
 	if !strings.Contains(out, "working_dir: /home/cowrie/cowrie") {
 		t.Error("compose did not render the cowrie working_dir")
 	}
-	// The twistd-cowrie override must appear exactly once (only the cowrie
-	// service), and a stock honeypot like endlessh (also enabled by default, no
-	// Command in its profile) must NOT get one.
-	if n := strings.Count(out, `["/usr/bin/twistd"`); n != 1 {
-		t.Errorf("the cowrie twistd command override should render exactly once, got %d", n)
+	// The twistd-cowrie command must appear exactly once (only the cowrie service);
+	// a stock honeypot like endlessh (also enabled by default, no Command) must not.
+	if n := strings.Count(out, "exec /usr/bin/twistd"); n != 1 {
+		t.Errorf("the cowrie twistd command should render exactly once, got %d", n)
 	}
 }
 

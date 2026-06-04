@@ -137,6 +137,9 @@ func deployProfileFor(name string) honeypotDeploy {
 				// Docker host's true RAM and disagrees with `cat /proc/meminfo`. With
 				// it, `free` and `cat` report the same believable per-instance size.
 				{HostSubdir: "honeyfs/proc/meminfo", ContainerPath: "/proc/meminfo", File: true},
+				// The generated fake-fs patch script (cowriefs.go), run at startup
+				// before twistd to add the persona home directories.
+				{HostSubdir: "qpot_patch_fs.py", ContainerPath: "/home/cowrie/cowrie/qpot_patch_fs.py", File: true},
 			},
 			Ports:        []int{22, 23},
 			ConfigSubdir: "etc",
@@ -149,10 +152,15 @@ func deployProfileFor(name string) honeypotDeploy {
 			// ourselves with WorkingDir=/home/cowrie/cowrie makes cowrie read
 			// etc/cowrie.cfg + etc/userdb.txt + honeyfs from QPot's mounts, so the
 			// curated credential persona, coherent hostname and SSH-algorithm
-			// normalization actually take effect. PYTHONPATH is already baked into
-			// the image env, and the default fs.pickle ships at the path our
-			// cowrie.cfg references, so no other image setup is lost.
-			Command:    []string{"/usr/bin/twistd", "--nodaemon", "--pidfile", "/tmp/cowrie/cowrie.pid", "cowrie"},
+			// normalization actually take effect. PYTHONPATH is baked into the image
+			// env. We first run qpot_patch_fs.py, which writes the persona-patched
+			// fake filesystem to /tmp/cowrie/fs.pickle (the path cowrie.cfg's
+			// `filesystem` points at), then exec twistd. The script always produces
+			// that file - the unchanged base pickle on any error - so cowrie's shell
+			// never starts without a valid filesystem.
+			Command: []string{"/bin/sh", "-c",
+				"python3 /home/cowrie/cowrie/qpot_patch_fs.py 2>>/tmp/cowrie/patch.log; " +
+					"exec /usr/bin/twistd --nodaemon --pidfile /tmp/cowrie/cowrie.pid cowrie"},
 			WorkingDir: "/home/cowrie/cowrie",
 		}
 	case "endlessh":

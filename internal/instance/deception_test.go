@@ -125,9 +125,11 @@ func TestCowrieConfigRunsWithoutBreakingShell(t *testing.T) {
 	if shellVer == "" || bannerVer == "" || shellVer != bannerVer {
 		t.Errorf("[ssh] version (%q) does not match [shell] ssh_version (%q)", bannerVer, shellVer)
 	}
-	// (3) the filesystem pickle path must be the one the image ships.
-	if !strings.Contains(c, "filesystem = src/cowrie/data/fs.pickle") {
-		t.Error("cowrie.cfg points [shell] filesystem at a path the image does not ship; the shell dies on login")
+	// (3) the filesystem pickle path must be the writable tmpfs path the startup
+	// patch script populates (the persona-home-patched pickle); a path the script
+	// does not write would make cowrie fail to load the fs and kill the shell.
+	if !strings.Contains(c, "filesystem = /tmp/cowrie/fs.pickle") {
+		t.Error("cowrie.cfg [shell] filesystem must point at /tmp/cowrie/fs.pickle (written by qpot_patch_fs.py)")
 	}
 	// (4) SSH host keys must live under the writable etc/ mount, not cowrie's
 	// read-only working dir, or key generation crashes the whole SSH service on

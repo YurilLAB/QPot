@@ -633,6 +633,13 @@ func (m *Manager) generateServiceConfigs() error {
 					return fmt.Errorf("failed to write honeyfs/%s for cowrie: %w", rel, err)
 				}
 			}
+			// The fake-fs patch script (cowriefs.go) runs at container start to add
+			// the persona home directories to Cowrie's filesystem. The deploy
+			// profile mounts it at /home/cowrie/cowrie/qpot_patch_fs.py.
+			if err := os.WriteFile(filepath.Join(hpDir, "qpot_patch_fs.py"),
+				[]byte(generator.generateCowrieFsPatch()), 0644); err != nil {
+				return fmt.Errorf("failed to write cowrie fs patch script: %w", err)
+			}
 		}
 
 		// HiFi ssh-proxy: pre-create each real-OpenSSH backend's persisted
