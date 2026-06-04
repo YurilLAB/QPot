@@ -301,6 +301,91 @@ func TestCowrieUserDBNoDefaultTell(t *testing.T) {
 	}
 }
 
+// TestHostnamePersonaCoherence guards the "no persona/host mismatch" invariant:
+// the auto-derived hostname must belong to the SAME persona Cowrie enforces, so
+// the shell prompt/etc agree with the accounts that work. Before this, hostname
+// and persona were drawn from independent salts, so a voip-pbx persona could
+// present "db-prod" - a contradiction a human attacker would spot.
+func TestHostnamePersonaCoherence(t *testing.T) {
+	// Every persona that has a hostname pool must draw its derived hostname from
+	// THAT pool, for a spread of seeds.
+	for _, seed := range []string{"qp_a1", "qp_b2", "qp_c3", "qp_d4", "qp_e5", "qp_f6", "qp_g7", "qp_h8"} {
+		persona := selectCredentialTemplate("", seed)
+		got := hostnameForPersona(persona, seed)
+		pool := personaHostnames[persona.Name]
+		if len(pool) == 0 {
+			continue // persona intentionally uses the generic fallback
+		}
+		found := false
+		for _, h := range pool {
+			if h == got {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Errorf("seed %s: persona %q got hostname %q outside its pool %v", seed, persona.Name, got, pool)
+		}
+	}
+
+	// Every key in personaHostnames must name a real persona. A typo'd key would
+	// never match and the persona would silently fall back to the generic pool,
+	// quietly reintroducing the mismatch this map exists to prevent.
+	for name := range personaHostnames {
+		if _, ok := credentialTemplateByName(name); !ok {
+			t.Errorf("personaHostnames key %q does not match any credential persona (typo? renamed persona?)", name)
+		}
+	}
+
+	// Deterministic for a fixed seed.
+	p := selectCredentialTemplate("", "qp_stable")
+	if hostnameForPersona(p, "qp_stable") != hostnameForPersona(p, "qp_stable") {
+		t.Error("hostnameForPersona not deterministic for a fixed seed")
+	}
+
+	// Every persona's hostname pool must be sanitize-safe for BOTH the cowrie.cfg
+	// path (sanitizeConfigValue) and the ssh-proxy hostname: field (sanitizeHostname),
+	// and must not reintroduce a known-default hostname.
+	for name, pool := range personaHostnames {
+		for _, h := range pool {
+			if h == "" {
+				t.Errorf("persona %q has an empty hostname", name)
+			}
+			if sanitizeHostname(h) != h {
+				t.Errorf("persona %q hostname %q is not a clean DNS/Linux hostname (sanitizeHostname=%q)", name, h, sanitizeHostname(h))
+			}
+			if h == tpotStaticHostname || h == cowrieDefaultHost {
+				t.Errorf("persona %q reuses a known-default hostname %q", name, h)
+			}
+		}
+	}
+
+	// The whole point: across instances we should see the derived cowrie hostname
+	// land inside the active persona's pool, end to end through the renderer.
+	for _, id := range []string{"qp_e2e0000000000000000001", "qp_e2e0000000000000000002", "qp_e2e0000000000000000003"} {
+		cfg := config.Default("coherence")
+		cfg.QPotID = id
+		g := &ComposeGenerator{Config: cfg}
+		c := g.generateCowrieConfig(cfg.Honeypots["cowrie"])
+		host := lineValue(c, "hostname = ")
+		persona := selectCredentialTemplate("", id)
+		pool := personaHostnames[persona.Name]
+		if len(pool) == 0 {
+			continue
+		}
+		inPool := false
+		for _, h := range pool {
+			if h == host {
+				inPool = true
+				break
+			}
+		}
+		if !inPool {
+			t.Errorf("instance %s: cowrie.cfg hostname %q not in persona %q pool %v", id, host, persona.Name, pool)
+		}
+	}
+}
+
 // TestCredentialTemplates validates the 10 personas are realistic and free of
 // known honeypot tells.
 func TestCredentialTemplates(t *testing.T) {

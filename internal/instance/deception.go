@@ -142,10 +142,62 @@ func profileForSeed(seed string) distroProfile {
 	return distroProfiles[seededIndex(seed, len(distroProfiles))]
 }
 
-// hostnameForSeed returns a per-instance hostname. A second, differently-salted
-// index keeps the hostname uncorrelated with the distro choice.
+// hostnameForSeed returns a per-instance hostname from the generic pool. A
+// second, differently-salted index keeps the hostname uncorrelated with the
+// distro choice. This is the fallback used when no credential persona is in
+// play (or a persona defines no role-specific names); persona-driven honeypots
+// should prefer hostnameForPersona so the name matches the accepted accounts.
 func hostnameForSeed(seed string) string {
 	return realisticHostnames[seededIndex("host:"+seed, len(realisticHostnames))]
+}
+
+// personaHostnames maps each credential persona to role-appropriate hostnames.
+// When a honeypot derives its identity from a persona (Cowrie, the HiFi
+// ssh-proxy), the per-instance hostname is drawn from THIS pool rather than the
+// generic one, so the shell prompt, /etc/hostname and /etc/hosts match the kind
+// of box the accepted credentials imply. Without this, the hostname and persona
+// were chosen from independent salts, so a "voip-pbx" persona (asterisk/freepbx
+// logins) could present "db-prod" - an internal contradiction a human attacker
+// notices (a database server with only PBX accounts and no DB daemon). Keeping
+// the two coherent is the "no persona/host mismatch" invariant credentials.go
+// promises. Names avoid the known T-Pot/Cowrie defaults (srv01/svr04) and reuse
+// across personas (vps-3, router) is intentional and realistic.
+var personaHostnames = map[string][]string{
+	"corp-ubuntu":      {"app-server-01", "appsrv-prod", "corp-app-02", "web-app-1"},
+	"edge-router":      {"gw-01", "edge-fw", "border-gw", "router-01"},
+	"web-hosting":      {"web01", "cpanel-host", "www-prod", "hosting-02"},
+	"db-server":        {"db-prod", "db01", "postgres-01", "mysql-prod"},
+	"dev-ci":           {"ci-runner-1", "jenkins-01", "build-node-2", "dev-ci"},
+	"nas-storage":      {"nas-01", "storage-1", "fileshare", "synology"},
+	"iot-camera":       {"ipcam-01", "camera-1", "ipc-front", "cam-lobby"},
+	"mail-server":      {"mail", "mx1", "smtp-01", "mailsrv"},
+	"k8s-node":         {"k8s-worker-1", "kube-node-3", "worker-02", "node-07"},
+	"legacy-centos":    {"centos-app", "legacy-db", "vps-3", "oldbox-1"},
+	"soho-router":      {"openwrt", "home-gw", "router", "mikrotik"},
+	"voip-pbx":         {"pbx-01", "asterisk", "freepbx", "voip-gw"},
+	"cctv-nvr":         {"nvr-01", "dvr-1", "cctv-rec", "nvr-back"},
+	"cloud-default":    {"ip-10-0-1-23", "cloud-vm-1", "vps-3", "ec2-prod"},
+	"abandoned-vps":    {"vps-3", "vm-01", "srv-app-04", "host-12"},
+	"game-server":      {"ts3-server", "game-01", "mc-prod", "steam-1"},
+	"jump-bastion":     {"bastion", "jump-01", "jumpbox", "bastion-prod"},
+	"proxmox-host":     {"pve", "proxmox-01", "vmhost-1", "pve-node-2"},
+	"gitlab-devops":    {"gitlab", "git-runner-1", "scm-prod", "ci-gitlab"},
+	"monitoring-stack": {"grafana", "monitor-01", "zabbix-srv", "prometheus-1"},
+	"raspberry-pi":     {"raspberrypi", "pi-01", "rpi-home", "octopi"},
+	"ftp-fileserver":   {"ftp", "fileserver", "files-01", "ftp-prod"},
+}
+
+// hostnameForPersona returns a per-instance hostname coherent with the persona's
+// role, drawn from that persona's own pool so the name matches the box the
+// accepted credentials imply. If the persona defines no names (a new persona, or
+// one deliberately left generic) it falls back to the generic pool. The same
+// "host:"+seed salt as hostnameForSeed keeps the choice stable per instance.
+func hostnameForPersona(t credentialTemplate, seed string) string {
+	pool := personaHostnames[t.Name]
+	if len(pool) == 0 {
+		return hostnameForSeed(seed)
+	}
+	return pool[seededIndex("host:"+seed, len(pool))]
 }
 
 // cpuModel bundles the fields a realistic /proc/cpuinfo reports for one CPU

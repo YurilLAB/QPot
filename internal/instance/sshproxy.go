@@ -109,7 +109,15 @@ func sshBackendHostname(cfg *config.Config) string {
 	if seed == "" {
 		seed = cfg.InstanceName
 	}
-	return hostnameForSeed(seed)
+	// Coherent with the same credential persona the backends enforce
+	// (sshBackendUsersCSV), so the hostname an attacker sees matches the accounts
+	// that work - the pool tells one consistent story instead of pairing, say, a
+	// PBX login set with a "db-prod" prompt.
+	explicit := ""
+	if hp, ok := cfg.GetHoneypotConfig(sshProxyHoneypot); ok {
+		explicit = hp.Stealth.CredentialTemplate
+	}
+	return hostnameForPersona(selectCredentialTemplate(explicit, seed), seed)
 }
 
 // sanitizeHostname reduces s to a valid DNS/Linux hostname: only letters,

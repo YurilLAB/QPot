@@ -208,6 +208,61 @@ func (g *ComposeGenerator) buildSubnetMap() map[string]string {
 	return assign
 }
 
+// listenHealthCheck builds the CMD-SHELL test that verifies a honeypot is
+// actually listening on at least one of its expected INTERNAL ports.
+//
+// It reads /proc/net/tcp{,6} (or /proc/net/udp{,6} for UDP-only honeypots)
+// directly rather than shelling out to netstat/ss. The previous check
+// (`netstat -tln | grep ':PORT' || ss -tln | grep ':PORT'`) had two fatal flaws
+// that left every affected container perpetually "unhealthy" - so QPot's startup
+// verifier reported the honeypot as "did not start" even though it was serving:
+//
+//  1. It probed .HP.Port (the host/config port), but several honeypots listen on
+//     a DIFFERENT internal port - cowrie on 22/23 (not 2222, because QPot's own
+//     cowrie.cfg moves it to the standard ports) and endlessh on 2222 (not 2223)
+//     - so the grep could never match.
+//  2. Many minimal honeypot images ship neither netstat nor ss (cowrie has
+//     netstat but not ss; others have neither), so the check failed closed.
+//
+// /proc/net is always present on Linux and needs no tools, so this works across
+// busybox, distroless-with-shell and full distros alike. A listening socket is
+// identified by a zero remote address (rem_port ":0000"): an established
+// connection carries a non-zero peer port, so matching ":PORT <hexrem>:0000"
+// selects only the bound listener. Ports are 4-digit uppercase hex (the
+// /proc/net encoding); any one expected port listening is enough to call the
+// service up. Returns "" only when no port is known (caller omits healthcheck).
+func listenHealthCheck(d honeypotDeploy, fallbackPort int) string {
+	ports := d.Ports
+	files := "/proc/net/tcp /proc/net/tcp6"
+	if len(ports) == 0 && len(d.UDPPorts) > 0 {
+		ports = d.UDPPorts
+		files = "/proc/net/udp /proc/net/udp6"
+	}
+	if len(ports) == 0 {
+		if fallbackPort <= 0 {
+			return ""
+		}
+		ports = []int{fallbackPort}
+	}
+	seen := map[string]bool{}
+	hexes := make([]string, 0, len(ports))
+	for _, p := range ports {
+		if p <= 0 || p > 65535 {
+			continue
+		}
+		h := fmt.Sprintf("%04X", p)
+		if !seen[h] {
+			seen[h] = true
+			hexes = append(hexes, h)
+		}
+	}
+	if len(hexes) == 0 {
+		return ""
+	}
+	return fmt.Sprintf("grep -qE ':(%s) [0-9A-F]+:0000 ' %s 2>/dev/null",
+		strings.Join(hexes, "|"), files)
+}
+
 // Generate generates a Docker Compose file
 func (g *ComposeGenerator) Generate() (string, error) {
 	tmpl := `# QPot Instance: {{.Config.InstanceName}}
@@ -422,6 +477,15 @@ services:
     {{end}}
     {{- $d := deployFor .Name}}
     {{- $hpName := .Name}}
+    {{- if $d.Command}}
+    # Run the service directly instead of the image's default entrypoint; see the
+    # deploy profile (deploy.go) for why - e.g. cowrie's launcher would otherwise
+    # override QPot's generated config with a random built-in persona.
+    command: [{{range $i, $c := $d.Command}}{{if $i}}, {{end}}"{{$c}}"{{end}}]
+    {{- end}}
+    {{- if $d.WorkingDir}}
+    working_dir: {{$d.WorkingDir}}
+    {{- end}}
     ports:
     {{- if or $d.Ports $d.UDPPorts}}
     {{- range $p := $d.Ports}}
@@ -485,12 +549,17 @@ services:
       {{- end}}
     {{template "security" dict "Config" $.Config "HP" .HP "GlobalLimits" $.Config.Security.ResourceLimits "Name" .Name "FakeHostname" .HP.Stealth.FakeHostname}}
     {{- if ne .Name "ssh-proxy"}}
+    {{- $hc := listenCheck $d .HP.Port}}
+    {{- if $hc}}
     healthcheck:
-      test: ["CMD-SHELL", "netstat -tln 2>/dev/null | grep -q ':{{.HP.Port}}' || ss -tln | grep -q ':{{.HP.Port}}'"]
+      # Probe the real internal listen port(s) via /proc/net (tool-independent);
+      # see listenHealthCheck for why netstat/ss and .HP.Port were both wrong.
+      test: ["CMD-SHELL", "{{$hc}}"]
       interval: 30s
       timeout: 10s
       retries: 3
       start_period: 15s
+    {{- end}}
     {{- end}}
 {{end}}
 
@@ -644,6 +713,10 @@ services:
 		"bridgeName":       bridgeName,
 		"macFor":           macForSeed,
 		"deployFor":        deployProfileFor,
+		// listenCheck builds the container healthcheck command, probing the actual
+		// INTERNAL listen ports from the deploy profile (not the host/config port)
+		// via /proc/net so it needs no netstat/ss. See listenHealthCheck.
+		"listenCheck": listenHealthCheck,
 		// HiFi SSH proxy helpers (see sshproxy.go): whether the ssh-proxy honeypot
 		// is enabled, the real-OpenSSH backend companion services to render, and
 		// the broker's QPOT_SSHPROXY_BACKENDS value.
@@ -1176,7 +1249,10 @@ func (g *ComposeGenerator) generateCowrieHoneyfs() map[string]string {
 	persona := selectCredentialTemplate(hp.Stealth.CredentialTemplate, seed)
 	hostname := hp.Stealth.FakeHostname
 	if hostname == "" {
-		hostname = hostnameForSeed(seed)
+		// Coherent with the persona's role (a db-server box gets a db-style
+		// name, not an unrelated one) so /etc/hostname, /etc/hosts and the shell
+		// prompt match the accounts in /etc/passwd.
+		hostname = hostnameForPersona(persona, seed)
 	}
 	return generateHoneyfs(persona, profileForSeed(seed), hostname, seed)
 }
@@ -1197,7 +1273,12 @@ func (g *ComposeGenerator) generateCowrieConfig(hp config.HoneypotConfig) string
 
 	hostname := hp.Stealth.FakeHostname
 	if hostname == "" {
-		hostname = hostnameForSeed(seed)
+		// Derive a hostname coherent with the credential persona Cowrie will
+		// enforce (see generateCowrieUserDB), so the prompt the attacker sees
+		// matches the accounts that actually work - not an unrelated name from a
+		// separate salt (the old "db-prod" + voip-pbx tell).
+		persona := selectCredentialTemplate(hp.Stealth.CredentialTemplate, seed)
+		hostname = hostnameForPersona(persona, seed)
 	}
 
 	kernel := hp.Stealth.FakeKernel

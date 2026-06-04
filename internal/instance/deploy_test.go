@@ -345,6 +345,117 @@ func TestEveryHoneypotCollectsLogs(t *testing.T) {
 	}
 }
 
+// TestListenHealthCheckProbesInternalPort guards the bug where the container
+// healthcheck probed .HP.Port (the host/config port) with netstat/ss - neither
+// of which is even present in many honeypot images - so every container whose
+// internal listen port differed from its config port (cowrie 22/23 vs 2222,
+// endlessh 2222 vs 2223) sat 'unhealthy' forever and QPot reported it as failed.
+func TestListenHealthCheckProbesInternalPort(t *testing.T) {
+	// cowrie listens internally on 22 (0016) and 23 (0017) - NOT 2222 (08AE).
+	cowrie := listenHealthCheck(deployProfileFor("cowrie"), 2222)
+	for _, want := range []string{"0016", "0017", "/proc/net/tcp"} {
+		if !strings.Contains(cowrie, want) {
+			t.Errorf("cowrie healthcheck %q missing %q", cowrie, want)
+		}
+	}
+	if strings.Contains(cowrie, "08AE") {
+		t.Errorf("cowrie healthcheck must NOT probe the config port 2222 (08AE): %q", cowrie)
+	}
+	// It must not depend on netstat/ss (absent from minimal images).
+	for _, bad := range []string{"netstat", "ss "} {
+		if strings.Contains(cowrie, bad) {
+			t.Errorf("healthcheck must not rely on %q (not in minimal images): %q", bad, cowrie)
+		}
+	}
+
+	// endlessh listens internally on 2222 (08AE), not its config port 2223 (08AF).
+	end := listenHealthCheck(deployProfileFor("endlessh"), 2223)
+	if !strings.Contains(end, "08AE") || strings.Contains(end, "08AF") {
+		t.Errorf("endlessh healthcheck should probe internal 2222 (08AE), not config 2223 (08AF): %q", end)
+	}
+
+	// UDP-only honeypot (ddospot) must probe /proc/net/udp, not tcp.
+	udp := listenHealthCheck(deployProfileFor("ddospot"), 53)
+	if !strings.Contains(udp, "/proc/net/udp") || strings.Contains(udp, "/proc/net/tcp") {
+		t.Errorf("ddospot (UDP-only) healthcheck should read /proc/net/udp: %q", udp)
+	}
+
+	// Generic profile (no ports in profile) falls back to the supplied config port.
+	gen := listenHealthCheck(honeypotDeploy{}, 8080) // 8080 = 0x1F90
+	if !strings.Contains(gen, "1F90") {
+		t.Errorf("generic healthcheck should fall back to config port 8080 (1F90): %q", gen)
+	}
+	// No port at all -> empty (caller omits the healthcheck).
+	if got := listenHealthCheck(honeypotDeploy{}, 0); got != "" {
+		t.Errorf("listenHealthCheck with no ports should return empty, got %q", got)
+	}
+}
+
+// TestComposeHealthcheckRendersInternalPort is the end-to-end guard: the
+// generated cowrie service must carry a healthcheck that greps the real internal
+// port (0016) out of /proc/net/tcp, and must not reference the old netstat check.
+func TestComposeHealthcheckRendersInternalPort(t *testing.T) {
+	cfg := config.Default("hc-render")
+	cfg.QPotID = "qp_hcrenderhcrenderhcren01"
+	sb, _ := security.NewSandbox(&cfg.Security)
+	g := &ComposeGenerator{Config: cfg, Sandbox: sb}
+	out, err := g.Generate()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out, "/proc/net/tcp") {
+		t.Error("generated compose healthcheck no longer reads /proc/net/tcp")
+	}
+	if strings.Contains(out, "netstat -tln") {
+		t.Error("generated compose still uses the broken netstat/ss healthcheck")
+	}
+	// The cowrie healthcheck must probe 0016 (port 22), not 08AE (port 2222).
+	if !strings.Contains(out, ":(0016") && !strings.Contains(out, "0016|") && !strings.Contains(out, "|0016") {
+		t.Errorf("cowrie healthcheck does not probe internal port 22 (0016)")
+	}
+}
+
+// TestCowrieBypassesImagePersonaLauncher guards the bug where cowrie:24.04.1's
+// start-cowrie-persona launcher copied a RANDOM built-in persona's cowrie.cfg
+// into a runtime dir and ran from there, silently overriding QPot's mounted
+// config - so the curated credential personas (auth_class=UserDB), the
+// coherent hostname and the SSH-algorithm normalization never took effect.
+// QPot must run cowrie itself from /home/cowrie/cowrie with its own config.
+func TestCowrieBypassesImagePersonaLauncher(t *testing.T) {
+	d := deployProfileFor("cowrie")
+	if len(d.Command) == 0 {
+		t.Fatal("cowrie must override the image command to bypass start-cowrie-persona")
+	}
+	if d.Command[0] != "/usr/bin/twistd" || d.Command[len(d.Command)-1] != "cowrie" {
+		t.Errorf("cowrie command should run twistd ... cowrie, got %v", d.Command)
+	}
+	if d.WorkingDir != "/home/cowrie/cowrie" {
+		t.Errorf("cowrie working_dir must be /home/cowrie/cowrie so etc/cowrie.cfg + etc/userdb.txt + honeyfs resolve to QPot's mounts, got %q", d.WorkingDir)
+	}
+
+	// And it must actually render into the compose.
+	cfg := config.Default("cowrie-cmd")
+	cfg.QPotID = "qp_cowriecmdcowriecmdcmd01"
+	sb, _ := security.NewSandbox(&cfg.Security)
+	g := &ComposeGenerator{Config: cfg, Sandbox: sb}
+	out, err := g.Generate()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out, `command: ["/usr/bin/twistd"`) {
+		t.Error("compose did not render the cowrie command override")
+	}
+	if !strings.Contains(out, "working_dir: /home/cowrie/cowrie") {
+		t.Error("compose did not render the cowrie working_dir")
+	}
+	// The twistd-cowrie override must appear exactly once (only the cowrie
+	// service), and a stock honeypot like endlessh (also enabled by default, no
+	// Command in its profile) must NOT get one.
+	if n := strings.Count(out, `["/usr/bin/twistd"`); n != 1 {
+		t.Errorf("the cowrie twistd command override should render exactly once, got %d", n)
+	}
+}
+
 // TestConfigSubdirIsMounted guards that any ConfigSubdir (where generated
 // configs like cowrie.cfg are written) is itself under a mounted volume,
 // otherwise the honeypot can't read its generated config.

@@ -45,6 +45,17 @@ type honeypotDeploy struct {
 	// requires (e.g. conpot's CONPOT_* args). Keys are sorted for deterministic
 	// output.
 	Env map[string]string
+	// Command overrides the image's default CMD. Set only when the image's own
+	// entrypoint would defeat QPot's generated config (e.g. cowrie:24.04.1 ships
+	// a start-cowrie-persona launcher that copies a RANDOM built-in persona's
+	// cowrie.cfg into a runtime dir and runs from there, overriding the config
+	// QPot mounts - so QPot's credential personas, hostname and SSH-algorithm
+	// settings never take effect). Empty means "use the image default".
+	Command []string
+	// WorkingDir overrides the container working directory. Paired with Command
+	// when QPot must run the service from a specific CWD so its relative config
+	// paths (etc/cowrie.cfg, etc/userdb.txt, honeyfs/) resolve to QPot's mounts.
+	WorkingDir string
 }
 
 // NeedsNetBind reports whether the honeypot binds a privileged port (<1024)
@@ -110,6 +121,20 @@ func deployProfileFor(name string) honeypotDeploy {
 			},
 			Ports:        []int{22, 23},
 			ConfigSubdir: "etc",
+			// Bypass the image's start-cowrie-persona launcher and run cowrie
+			// directly from /home/cowrie/cowrie. That launcher picks a RANDOM
+			// built-in persona, copies its cowrie.cfg into /tmp/cowrie/runtime and
+			// execs twistd from there - so cowrie reads the persona's config
+			// (auth_class=AuthRandom, the image's identity) and QPot's mounted
+			// cowrie.cfg/userdb.txt/honeyfs are silently ignored. Running twistd
+			// ourselves with WorkingDir=/home/cowrie/cowrie makes cowrie read
+			// etc/cowrie.cfg + etc/userdb.txt + honeyfs from QPot's mounts, so the
+			// curated credential persona, coherent hostname and SSH-algorithm
+			// normalization actually take effect. PYTHONPATH is already baked into
+			// the image env, and the default fs.pickle ships at the path our
+			// cowrie.cfg references, so no other image setup is lost.
+			Command:    []string{"/usr/bin/twistd", "--nodaemon", "--pidfile", "/tmp/cowrie/cowrie.pid", "cowrie"},
+			WorkingDir: "/home/cowrie/cowrie",
 		}
 	case "endlessh":
 		// Verified: endlessh redirects its log to /var/log/endlessh and listens
