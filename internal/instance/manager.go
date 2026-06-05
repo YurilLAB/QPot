@@ -737,6 +737,14 @@ func List() ([]InstanceInfo, error) {
 func Remove(ctx context.Context, name string) error {
 	slog.Info("Removing QPot instance", "name", name)
 
+	// Don't let Remove "succeed" on a name that doesn't exist: config.Load below
+	// auto-creates a default config (and dir), so without this guard
+	// `remove <typo>` would create-then-delete an empty instance and report
+	// success, masking the typo.
+	if _, err := os.Stat(config.Default(name).DataPath); os.IsNotExist(err) {
+		return fmt.Errorf("instance %q does not exist", name)
+	}
+
 	cfg, err := config.Load(name)
 	if err != nil {
 		return fmt.Errorf("failed to load config: %w", err)

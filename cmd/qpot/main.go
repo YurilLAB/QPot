@@ -301,6 +301,14 @@ func newInstanceCommand() *cobra.Command {
 				return err
 			}
 
+			// Refuse to clobber an existing instance. Re-running create would
+			// otherwise overwrite its config and mint a NEW QPot ID, silently
+			// wiping the enabled honeypots, cluster membership, Yuril settings and
+			// the identity used for attack tracking - a data-loss footgun.
+			if _, statErr := os.Stat(config.Default(name).ConfigPath); statErr == nil {
+				return fmt.Errorf("instance %q already exists; remove it first with 'qpot instance remove %s' or choose another name", name, name)
+			}
+
 			// Generate QPot ID
 			qpotID, err := instance.GenerateID(name)
 			if err != nil {
