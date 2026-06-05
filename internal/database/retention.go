@@ -192,7 +192,6 @@ func (rm *RetentionManager) ExecutePolicy(ctx context.Context, policyID string) 
 			result.Errors = append(result.Errors, err.Error())
 		} else {
 			result.Archived = archived
-			policy.TotalArchived += archived
 		}
 	}
 
@@ -203,14 +202,21 @@ func (rm *RetentionManager) ExecutePolicy(ctx context.Context, policyID string) 
 		result.Errors = append(result.Errors, err.Error())
 	} else {
 		result.HotDeleted = deleted
-		policy.TotalDeleted += deleted
 	}
 
-	// Update policy stats
+	// Apply this run's stats to the shared policy under the write lock. The
+	// archive/delete work above runs WITHOUT the lock (slow DB queries), but
+	// these fields are read by ListPolicies/GetPolicy/RunScheduledChecks under
+	// RLock, so the writes must be synchronized or they data-race (a torn
+	// LastRun/NextRun pointer read is possible otherwise).
 	now := time.Now()
-	policy.LastRun = &now
 	nextRun := rm.calculateNextRun(policy.Schedule, now)
+	rm.mu.Lock()
+	policy.TotalArchived += result.Archived
+	policy.TotalDeleted += result.HotDeleted
+	policy.LastRun = &now
 	policy.NextRun = &nextRun
+	rm.mu.Unlock()
 
 	result.CompletedAt = time.Now()
 	slog.Info("Retention policy completed",
@@ -389,26 +395,30 @@ func (rm *RetentionManager) DeletePolicy(id string) {
 func (rm *RetentionManager) RunScheduledChecks(ctx context.Context) ([]*RetentionResult, error) {
 	var results []*RetentionResult
 
+	// Decide which policies are DUE while holding the read lock - Enabled and
+	// NextRun are mutable fields written by ExecutePolicy under the write lock,
+	// so reading them outside the lock would data-race. Collect the due IDs, then
+	// release the lock before the (slow) executions.
 	rm.mu.RLock()
-	snapshot := make([]*RetentionPolicy, 0, len(rm.policies))
+	now := time.Now()
+	var dueIDs []string
 	for _, policy := range rm.policies {
-		snapshot = append(snapshot, policy)
-	}
-	rm.mu.RUnlock()
-
-	for _, policy := range snapshot {
 		if !policy.Enabled {
 			continue
 		}
-
-		if policy.NextRun == nil || time.Now().After(*policy.NextRun) {
-			result, err := rm.ExecutePolicy(ctx, policy.ID)
-			if err != nil {
-				slog.Error("Failed to execute policy", "policy", policy.ID, "error", err)
-				continue
-			}
-			results = append(results, result)
+		if policy.NextRun == nil || now.After(*policy.NextRun) {
+			dueIDs = append(dueIDs, policy.ID)
 		}
+	}
+	rm.mu.RUnlock()
+
+	for _, id := range dueIDs {
+		result, err := rm.ExecutePolicy(ctx, id)
+		if err != nil {
+			slog.Error("Failed to execute policy", "policy", id, "error", err)
+			continue
+		}
+		results = append(results, result)
 	}
 
 	return results, nil

@@ -1387,6 +1387,10 @@ func (m *Manager) sync() {
 				resp.Body.Close()
 
 				m.mu.Lock()
+				if m.cluster == nil { // concurrent LeaveCluster while we did network I/O
+					m.mu.Unlock()
+					return
+				}
 				m.peerIntel[peerIntel.NodeID] = &peerIntel
 				// Update event count for this peer node based on intel total.
 				if node, ok := m.cluster.Nodes[peer.id]; ok {
@@ -1404,6 +1408,10 @@ func (m *Manager) sync() {
 
 	// Aggregate total event counts across all known nodes and log a summary.
 	m.mu.RLock()
+	if m.cluster == nil { // concurrent LeaveCluster
+		m.mu.RUnlock()
+		return
+	}
 	var totalEvents int64
 	for _, node := range m.cluster.Nodes {
 		totalEvents += node.Stats.TotalEvents
