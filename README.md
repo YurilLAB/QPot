@@ -9,6 +9,12 @@
 </p>
 
 <p align="center">
+  <em>Part of the Yuril suite — managed from <a href="https://yurillab.dev/ypanel">ypanel</a>,
+  the unified operator control panel. See <a href="docs/ypanel.md">docs/ypanel.md</a>
+  for how QPot connects + current status.</em>
+</p>
+
+<p align="center">
   <a href="https://github.com/YurilLAB/QPot/releases"><img src="https://img.shields.io/github/v/release/YurilLAB/QPot?style=flat-square&color=blue" alt="Release"></a>
   <a href="https://golang.org"><img src="https://img.shields.io/badge/Go-1.23+-00ADD8.svg?style=flat-square" alt="Go Version"></a>
   <a href="https://docker.com"><img src="https://img.shields.io/badge/Docker-Required-2496ED.svg?style=flat-square" alt="Docker"></a>
