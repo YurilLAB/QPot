@@ -25,6 +25,10 @@ name: CI
 #                  are valid and shellcheck-clean - CI scripts are code too.
 #   mod-hygiene  - go.mod/go.sum verify against their hashes and are tidy.
 #   cross-build  - both binaries compile for every shipped OS/arch.
+#   distro-runtime - the static binary actually launches and runs (CLI smoke)
+#                  inside a matrix of real distro containers (Debian, Ubuntu,
+#                  Fedora, Rocky, openSUSE, and musl-based Alpine) - catches
+#                  runtime-portability breaks a cross-compile cannot.
 #   coverage     - reports total/per-package coverage and guards a low floor.
 # (CodeQL semantic analysis runs from its own workflow, codeql.yml; deeper
 #  scheduled fuzzing runs from fuzz.yml.)
@@ -322,7 +326,7 @@ jobs:
           shellcheck --version
           shellcheck -S error \
             install.sh deploy.sh update.sh uninstall.sh genuser.sh \
-            scripts/install.sh \
+            scripts/install.sh scripts/distro-smoke.sh \
             docker/ssh-backend/files/entrypoint.sh \
             docker/ssh-backend/files/rec-shell.sh
           echo "shellcheck (error level) clean"
@@ -415,6 +419,31 @@ jobs:
           go build -o /dev/null ./cmd/qpot
           go build -o /dev/null ./cmd/qpot-sshproxy
           echo "built qpot + qpot-sshproxy for ${GOOS}/${GOARCH}"
+
+  distro-runtime:
+    name: Run binary on a Linux distro matrix
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Build the static binary
+        # CGO off so this is the same self-contained binary the release ships -
+        # the one that must run on musl (Alpine) as well as glibc.
+        env:
+          CGO_ENABLED: "0"
+        run: go build -o qpot ./cmd/qpot
+      - name: Smoke-run on every distro
+        # cross-build proves QPot *compiles* for each target; this proves it
+        # actually *launches and runs* on the major packaging families
+        # (Debian/Ubuntu/Fedora/Rocky/openSUSE) and on musl (Alpine), which a
+        # cross-compile can never catch. Images come from rate-limit-free mirrors
+        # so the job is reproducible. The runner already has a docker daemon.
+        run: scripts/distro-smoke.sh ./qpot
 
   coverage:
     name: Test coverage report
