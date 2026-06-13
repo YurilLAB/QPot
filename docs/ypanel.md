@@ -64,7 +64,7 @@ bandwidth, per-honeypot state, and a link to its WebUI.
 | Per-instance QPot-ID auth, isKnownHoneypot guard  | **implemented** |
 | ypanel QPot section (overview/instances/honeypots/clusters/events) | **implemented** — reads live when connected, honest demo otherwise |
 | Worker operator-plane: enroll + snapshot push + read endpoints + control-job queue | **implemented in the activation-server worker and verified live end-to-end** (enroll → push → read → enqueue → apply against a real worker + D1). Production deploy of those routes is the remaining ship step (gated). |
-| **QPot phone-home agent** (enroll → push snapshots → poll + apply jobs) | **the one piece QPot still needs** — see the checklist below |
+| **QPot phone-home agent** (push snapshots → poll + apply jobs) | **implemented** (this repo, `internal/ypanel` + the `qpot ypanel` CLI). Runs as a goroutine under `qpot up`; builds the snapshot in-process from the manager + config + database; applies honeypot enable/disable jobs straight through the manager. Configure with `qpot ypanel setup`, verify with `qpot ypanel test`. |
 | Captured-session feed (`/sessions`, attacker transcripts) | **not wired** — ypanel asks for it, the worker doesn't serve it yet; the Sessions tab degrades to an honest empty state. See *Further improvements*. |
 | Canary (honeytoken) subsystem (`/api/canaries`, `/api/canaries/trips`, `/c/<token>` beacon) | **implemented** (this repo, `internal/canary` + `internal/server`). Canary trips already flow into the events store tagged `honeypot:"canary"`, so they ride the existing snapshot `recentEvents` with no agent change. A dedicated canaries summary block is specified below for a future Canaries panel. See [docs/canary.md](canary.md). |
 
@@ -75,9 +75,19 @@ switch from demo to live automatically — no panel changes required.
 
 ## What QPot must have ON for ypanel to work
 
-ypanel + the worker side are done. The remaining work is **in this repo**: a
-phone-home **agent** that bridges a QPot instance to the operator plane. To make
-ypanel light up live, QPot needs all four of these ON:
+ypanel, the worker, **and the QPot phone-home agent are now all implemented**.
+The agent lives in this repo (`internal/ypanel`, wired into `qpot up` and the
+`qpot ypanel` CLI). The four pieces below describe the contract it satisfies;
+they are kept as the spec of record. To make ypanel light up live, an operator
+enrols the host in the panel, runs `qpot ypanel setup`, and the four pieces below
+are all ON:
+
+> **Note on the snapshot's `recentEvents`:** the worker validates each event's
+> `honeypot` against its closed honeypot-type enum, which does **not** include
+> `canary`. The agent therefore filters `recentEvents` to known honeypot types,
+> so canary trips do not yet appear in the panel's event feed. Closing that is a
+> worker-first change: add `canary` to the worker enum, then to the agent's
+> `knownHoneypotTypes`, per the contract discipline at the end of this doc.
 
 ### 1. The instance local API — *already implemented*
 `GET /api/status`, `GET /api/stats`, `GET /api/honeypots`,
@@ -167,9 +177,11 @@ locally via the instance API, then ack. Vocabulary today: `honeypot.enable` /
 — `POST /instances/:id/power` answers "not remotely controllable" by design, so
 the agent does **not** need to honour a remote start/stop.
 
-> Net: items 1 is done; **2–4 are the agent to build in QPot.** Until the agent
-> ships, the worker endpoints are live but receive no data, so ypanel stays on
-> honest demo for QPot.
+> Net: items 1–4 are **all implemented**. Item 1 is the local API; items 2–4 are
+> the `internal/ypanel` agent (enrolment via `qpot ypanel setup`, snapshot push,
+> control-job poll/apply), running under `qpot up`. Once an operator enrols a host
+> and the agent is pushing, ypanel's QPot screens switch from demo to live
+> automatically — no panel changes required.
 
 ---
 

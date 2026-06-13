@@ -12,12 +12,12 @@
 //
 // Auth on every call:
 //
-//	Authorization: Bearer DIREC-YPANEL <license_jws> <enroll_token>
+//		Authorization: Bearer DIREC-YPANEL <license_jws> <enroll_token>
 //
-//   - license_jws  — the Ed25519 JWS cached by Yuril/DireC activation. The agent
-//     READS it; it never signs (the private key stays on the worker).
-//   - enroll_token — minted ONCE by the operator in the panel and provisioned on
-//     the host (config ypanel.enroll_token).
+//	  - license_jws  — the Ed25519 JWS cached by Yuril/DireC activation. The agent
+//	    READS it; it never signs (the private key stays on the worker).
+//	  - enroll_token — minted ONCE by the operator in the panel and provisioned on
+//	    the host (config ypanel.enroll_token).
 //
 // The per-instance QPot-ID is the LOCAL API secret and is never part of this
 // contract: it never reaches the worker or the panel.
@@ -93,7 +93,7 @@ func New(cfg *config.Config, mgr *instance.Manager, version string) (*Agent, err
 		version: version,
 		http:    &http.Client{Timeout: 15 * time.Second},
 		log: func(format string, args ...any) {
-			slog.Info("ypanel-agent: "+fmt.Sprintf(format, args...))
+			slog.Info("ypanel-agent: " + fmt.Sprintf(format, args...))
 		},
 	}
 

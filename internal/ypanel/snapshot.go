@@ -106,32 +106,21 @@ func (a *Agent) buildSnapshot(ctx context.Context) map[string]any {
 }
 
 // honeypots maps QPot's configured honeypots to the snapshot shape, filtered to
-// the worker's known-type enum and to the worker's 32-entry ceiling. Running
-// state comes from the manager; enabled state from config.
+// the worker's known-type enum and to the worker's 32-entry ceiling. The
+// snapshot's single per-honeypot "enabled" bool is the OPERATOR-controlled
+// configured state — exactly what the panel's enable/disable toggle binds to and
+// what the worker counts into honeypotsRunning — so it must mirror config, not a
+// momentary container health read. (Gating on a live manager.Status would shell
+// out to `docker ps` every push and make the toggle flap during a restart.)
 func (a *Agent) honeypots(hits map[string]int) []snapHoneypot {
-	running := map[string]bool{}
-	if a.manager != nil {
-		if status, _ := a.manager.Status(context.Background()); status != nil {
-			for _, hp := range status.Honeypots {
-				running[hp.Name] = hp.Running
-			}
-		}
-	}
-
 	out := make([]snapHoneypot, 0, len(a.cfg.Honeypots))
 	for name, hp := range a.cfg.SnapshotHoneypots() {
 		if !knownHoneypotTypes[name] {
 			continue // unknown type would reject the whole snapshot
 		}
-		// "enabled" on the panel means actively serving: config-enabled AND, when
-		// the manager knows about it, actually running.
-		enabled := hp.Enabled
-		if r, ok := running[name]; ok {
-			enabled = enabled && r
-		}
 		out = append(out, snapHoneypot{
 			Type:    name,
-			Enabled: enabled,
+			Enabled: hp.Enabled,
 			Port:    clampPort(hp.Port),
 			Hits24h: hits[name],
 		})
