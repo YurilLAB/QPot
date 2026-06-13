@@ -30,6 +30,7 @@ import (
 	"github.com/qpot/qpot/internal/instance"
 	"github.com/qpot/qpot/internal/intelligence"
 	"github.com/qpot/qpot/internal/server"
+	"github.com/qpot/qpot/internal/ypanel"
 	"github.com/qpot/qpot/internal/yuril"
 	"github.com/spf13/cobra"
 	"golang.org/x/term"
@@ -99,6 +100,8 @@ Each QPot instance has a unique ID (qp_*) for tracking and authentication.`,
 	rootCmd.AddCommand(newConfigCommand())
 	rootCmd.AddCommand(newDBCommand())
 	rootCmd.AddCommand(newYurilCommand())
+	rootCmd.AddCommand(newCanaryCommand())
+	rootCmd.AddCommand(newYpanelCommand())
 
 	return rootCmd.ExecuteContext(ctx)
 }
@@ -176,6 +179,21 @@ func newUpCommand() *cobra.Command {
 					}()
 					slog.Info("Web server started", "addr", fmt.Sprintf("%s:%d", cfg.WebUI.BindAddr, cfg.WebUI.Port))
 				}
+			}
+
+			// Start the ypanel phone-home agent if enabled. It reports this
+			// instance to the operator console and applies allow-listed honeypot
+			// enable/disable jobs. A construction failure is logged but never
+			// blocks `qpot up` — QPot must stay up even if the operator plane is
+			// misconfigured or unreachable.
+			if ag, err := ypanel.New(cfg, mgr, version); err != nil {
+				slog.Warn("ypanel agent disabled due to error", "error", err)
+			} else if ag != nil {
+				go func() {
+					if err := ag.Run(ctx); err != nil {
+						slog.Error("ypanel agent error", "error", err)
+					}
+				}()
 			}
 
 			if !detach {
@@ -2162,4 +2180,318 @@ func fetchYurilHealth(ctx context.Context, baseURL, qpotID string) (map[string]i
 		return nil, fmt.Errorf("decode health: %w", err)
 	}
 	return payload, nil
+}
+
+// localBaseURL builds the URL of this instance's local API. A wildcard or empty
+// bind address is rewritten to a loopback address so the CLI actually connects
+// (dialing 0.0.0.0 / :: is not portable, notably on Windows).
+func localBaseURL(cfg *config.Config) string {
+	host := cfg.WebUI.BindAddr
+	switch host {
+	case "", "0.0.0.0", "::", "[::]":
+		host = "127.0.0.1"
+	}
+	return fmt.Sprintf("http://%s:%d", host, cfg.WebUI.Port)
+}
+
+// canaryAPI performs an authenticated request against the local canary API and
+// decodes a JSON object response. A connection failure is reported as the
+// server not running, since canaries are runtime objects owned by `qpot up`.
+func canaryAPI(ctx context.Context, cfg *config.Config, qpotID, method, path string, body interface{}) (map[string]interface{}, error) {
+	var rdr io.Reader
+	if body != nil {
+		b, err := json.Marshal(body)
+		if err != nil {
+			return nil, err
+		}
+		rdr = bytes.NewReader(b)
+	}
+	reqCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	req, err := http.NewRequestWithContext(reqCtx, method, localBaseURL(cfg)+path, rdr)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("X-QPot-ID", qpotID)
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("server not reachable (run 'qpot up' first): %w", err)
+	}
+	defer resp.Body.Close()
+	payload := map[string]interface{}{}
+	// A body is optional (e.g. some errors); ignore decode EOF on empty bodies.
+	if err := json.NewDecoder(resp.Body).Decode(&payload); err != nil && !errors.Is(err, io.EOF) {
+		return nil, fmt.Errorf("decode response: %w", err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		msg, _ := payload["error"].(string)
+		if msg == "" {
+			msg = resp.Status
+		}
+		return nil, fmt.Errorf("%s", msg)
+	}
+	return payload, nil
+}
+
+// loadCanaryContext loads config + QPot ID for a canary subcommand.
+func loadCanaryContext(instanceName string) (*config.Config, string, error) {
+	cfg, err := config.Load(instanceName)
+	if err != nil {
+		return nil, "", fmt.Errorf("failed to load config: %w", err)
+	}
+	id, err := instance.LoadID(instanceName)
+	if err != nil || id == nil {
+		return nil, "", fmt.Errorf("no QPot ID for instance %q (run 'qpot up' first)", instanceName)
+	}
+	return cfg, id.ID, nil
+}
+
+// newCanaryCommand creates the canary (honeytoken) management command.
+func newCanaryCommand() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "canary",
+		Short: "Manage canaries (honeytokens)",
+		Long: `Mint and manage canaries: decoy artifacts planted inside your real estate
+that fire a high-fidelity alert the moment anyone touches them.
+
+Canaries complement QPot's honeypots. A honeypot catches the attacker who scans
+and connects from outside; a canary catches the one who is already inside and
+opens a file, reads a credential, or follows a link they never should have.
+Because nobody legitimately interacts with a canary, a single trip is a
+near-zero-false-positive, critical alert.
+
+Kinds:
+  web   a beacon URL; any HTTP fetch of it is a trip. Plant it as a fake
+        bookmark, a link in a config comment, an "internal admin" URL.
+  file  a document that beacons when opened. Plant it as bait on a share
+        ("Q4-salaries.html"). Download it with 'qpot canary artifact'.
+  aws   a realistic but fake AWS key pair. Trips when its value shows up in a
+        captured honeypot session — i.e. it was stolen and replayed.
+
+Canaries are runtime objects owned by a running instance, so 'qpot up' must be
+active. Set 'canary.base_url' in the instance config so minted URLs point at
+wherever this QPot is reachable.
+
+Examples:
+  qpot canary create --kind aws  --name ci-runner --memo "planted in Jenkins"
+  qpot canary create --kind web  --name wiki-link --memo "fake intranet bookmark"
+  qpot canary create --kind file --name q4-salaries --memo "HR share"
+  qpot canary list
+  qpot canary trips
+  qpot canary artifact cnry_abc123 --out bait.html
+  qpot canary rm cnry_abc123`,
+	}
+
+	cmd.AddCommand(newCanaryCreateCommand())
+	cmd.AddCommand(newCanaryListCommand())
+	cmd.AddCommand(newCanaryTripsCommand())
+	cmd.AddCommand(newCanaryArtifactCommand())
+	cmd.AddCommand(newCanaryRemoveCommand())
+	return cmd
+}
+
+func newCanaryCreateCommand() *cobra.Command {
+	var instanceName, kind, name, memo string
+	cmd := &cobra.Command{
+		Use:   "create",
+		Short: "Mint a new canary",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if kind == "" {
+				return fmt.Errorf("--kind is required (web, file, or aws)")
+			}
+			cfg, id, err := loadCanaryContext(instanceName)
+			if err != nil {
+				return err
+			}
+			resp, err := canaryAPI(cmd.Context(), cfg, id, http.MethodPost, "/api/canaries",
+				map[string]string{"kind": kind, "name": name, "memo": memo})
+			if err != nil {
+				return err
+			}
+			fmt.Printf("[OK] Created canary %v (%v)\n", resp["id"], resp["kind"])
+			if name != "" {
+				fmt.Printf("     Name: %s\n", name)
+			}
+			if memo != "" {
+				fmt.Printf("     Memo: %s\n", memo)
+			}
+			if u, ok := resp["url"].(string); ok {
+				fmt.Printf("     URL:  %s\n", u)
+				if strings.HasPrefix(u, "/c/") {
+					fmt.Println("     [!] Set canary.base_url in the config so this URL is plantable off-host.")
+				}
+			}
+			if ak, ok := resp["access_key_id"].(string); ok {
+				fmt.Printf("     AWS_ACCESS_KEY_ID:     %s\n", ak)
+				fmt.Printf("     AWS_SECRET_ACCESS_KEY: %v\n", resp["secret_access_key"])
+				fmt.Println("     Plant this pair where only an intruder would find it.")
+			}
+			return nil
+		},
+	}
+	cmd.Flags().StringVarP(&instanceName, "instance", "i", "default", "instance name")
+	cmd.Flags().StringVarP(&kind, "kind", "k", "", "canary kind: web, file, or aws (required)")
+	cmd.Flags().StringVarP(&name, "name", "n", "", "human label")
+	cmd.Flags().StringVarP(&memo, "memo", "m", "", "where it is planted (shown with every trip)")
+	return cmd
+}
+
+func newCanaryListCommand() *cobra.Command {
+	var instanceName string
+	cmd := &cobra.Command{
+		Use:   "list",
+		Short: "List canaries",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			cfg, id, err := loadCanaryContext(instanceName)
+			if err != nil {
+				return err
+			}
+			resp, err := canaryAPI(cmd.Context(), cfg, id, http.MethodGet, "/api/canaries", nil)
+			if err != nil {
+				return err
+			}
+			items, _ := resp["canaries"].([]interface{})
+			if len(items) == 0 {
+				fmt.Println("No canaries. Mint one with 'qpot canary create'.")
+				return nil
+			}
+			fmt.Printf("%-22s %-6s %-20s %-6s %s\n", "ID", "KIND", "NAME", "TRIPS", "MEMO")
+			for _, it := range items {
+				c, _ := it.(map[string]interface{})
+				fmt.Printf("%-22v %-6v %-20v %-6v %v\n",
+					c["id"], c["kind"], truncField(c["name"], 20), c["trips"], c["memo"])
+			}
+			return nil
+		},
+	}
+	cmd.Flags().StringVarP(&instanceName, "instance", "i", "default", "instance name")
+	return cmd
+}
+
+func newCanaryTripsCommand() *cobra.Command {
+	var instanceName string
+	var limit int
+	cmd := &cobra.Command{
+		Use:   "trips",
+		Short: "Show recent canary trips (the alerts)",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			cfg, id, err := loadCanaryContext(instanceName)
+			if err != nil {
+				return err
+			}
+			path := fmt.Sprintf("/api/canaries/trips?limit=%d", limit)
+			resp, err := canaryAPI(cmd.Context(), cfg, id, http.MethodGet, path, nil)
+			if err != nil {
+				return err
+			}
+			trips, _ := resp["trips"].([]interface{})
+			if len(trips) == 0 {
+				fmt.Println("No trips recorded. (That is good — nobody has touched a canary.)")
+				return nil
+			}
+			fmt.Printf("%-24s %-9s %-16s %-20s %s\n", "TIME", "CHANNEL", "SOURCE IP", "NAME", "DETAIL")
+			for _, it := range trips {
+				t, _ := it.(map[string]interface{})
+				fmt.Printf("%-24v %-9v %-16v %-20v %v\n",
+					t["time"], t["channel"], t["source_ip"], truncField(t["name"], 20), t["detail"])
+			}
+			return nil
+		},
+	}
+	cmd.Flags().StringVarP(&instanceName, "instance", "i", "default", "instance name")
+	cmd.Flags().IntVar(&limit, "limit", 100, "max trips to show")
+	return cmd
+}
+
+func newCanaryArtifactCommand() *cobra.Command {
+	var instanceName, out string
+	cmd := &cobra.Command{
+		Use:   "artifact <canary-id>",
+		Short: "Download the document artifact for a file canary",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			cfg, id, err := loadCanaryContext(instanceName)
+			if err != nil {
+				return err
+			}
+			reqCtx, cancel := context.WithTimeout(cmd.Context(), 5*time.Second)
+			defer cancel()
+			url := localBaseURL(cfg) + "/api/canaries/artifact?id=" + args[0]
+			req, err := http.NewRequestWithContext(reqCtx, http.MethodGet, url, nil)
+			if err != nil {
+				return err
+			}
+			req.Header.Set("X-QPot-ID", id)
+			resp, err := http.DefaultClient.Do(req)
+			if err != nil {
+				return fmt.Errorf("server not reachable (run 'qpot up' first): %w", err)
+			}
+			defer resp.Body.Close()
+			if resp.StatusCode != http.StatusOK {
+				return fmt.Errorf("artifact download failed: %s", resp.Status)
+			}
+			data, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+			if err != nil {
+				return err
+			}
+			dest := out
+			if dest == "" {
+				dest = args[0] + ".html"
+				if cd := resp.Header.Get("Content-Disposition"); strings.Contains(cd, "filename=") {
+					if i := strings.Index(cd, `filename="`); i >= 0 {
+						rest := cd[i+len(`filename="`):]
+						if j := strings.IndexByte(rest, '"'); j >= 0 {
+							dest = rest[:j]
+						}
+					}
+				}
+			}
+			if err := os.WriteFile(dest, data, 0o600); err != nil {
+				return fmt.Errorf("write artifact: %w", err)
+			}
+			fmt.Printf("[OK] Wrote %s (%d bytes). Plant it where an intruder would look.\n", dest, len(data))
+			return nil
+		},
+	}
+	cmd.Flags().StringVarP(&instanceName, "instance", "i", "default", "instance name")
+	cmd.Flags().StringVarP(&out, "out", "o", "", "output file (default: the canary's suggested name)")
+	return cmd
+}
+
+func newCanaryRemoveCommand() *cobra.Command {
+	var instanceName string
+	cmd := &cobra.Command{
+		Use:     "rm <canary-id>",
+		Aliases: []string{"remove", "delete"},
+		Short:   "Remove a canary",
+		Args:    cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			cfg, id, err := loadCanaryContext(instanceName)
+			if err != nil {
+				return err
+			}
+			if _, err := canaryAPI(cmd.Context(), cfg, id, http.MethodDelete,
+				"/api/canaries?id="+args[0], nil); err != nil {
+				return err
+			}
+			fmt.Printf("[OK] Removed canary %s\n", args[0])
+			return nil
+		},
+	}
+	cmd.Flags().StringVarP(&instanceName, "instance", "i", "default", "instance name")
+	return cmd
+}
+
+// truncField renders a value as a string truncated to n runes for table output.
+func truncField(v interface{}, n int) string {
+	s := fmt.Sprintf("%v", v)
+	if len(s) > n {
+		if n > 1 {
+			return s[:n-1] + "…"
+		}
+		return s[:n]
+	}
+	return s
 }

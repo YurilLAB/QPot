@@ -83,6 +83,7 @@ qpot --version
 | `qpot docker` | Inspect and manage the underlying Docker containers. |
 | `qpot db` | Inspect schema versions and run/roll back migrations. |
 | `qpot cluster` | Pair multiple nodes into a managed group (aliases: `group`, `pair`, `networking`). |
+| `qpot canary` | Mint and manage canaries (honeytokens) — decoy artifacts that alert on any interaction. |
 | `qpot yuril` | Configure and inspect the Yuril Security Suite integration. |
 | `qpot config` | Open or print the instance config file. |
 | `qpot id` | Show the QPot ID for an instance. |
@@ -402,6 +403,66 @@ Both take no flags beyond the global ones.
 ```bash
 qpot cluster status   # cluster summary: ID, name, node counts, total events
 qpot cluster nodes    # per-node table: ID, name, address, status, events
+```
+
+---
+
+## Canaries — `qpot canary`
+
+Mint and manage **canaries** (honeytokens): decoy artifacts planted inside your
+real estate that fire a critical alert the moment anyone touches them. They
+complement the honeypot containers — a honeypot catches the attacker who
+connects from outside; a canary catches the one already inside who opens a file,
+reads a credential, or follows a link they never should have.
+
+Canaries are runtime objects owned by a **running** instance, so `qpot up` must
+be active; the CLI talks to the instance's local API (QPot-ID auth). Set
+`canary.base_url` in the instance config so minted URLs point at wherever this
+QPot is reachable. See [docs/canary.md](../docs/canary.md) for the full design.
+
+Kinds: `web` (a beacon URL), `file` (a document that beacons when opened),
+`aws` (a fake AWS key pair that trips when its value appears in a captured
+session).
+
+### `qpot canary create`
+
+```bash
+qpot canary create --kind aws  --name ci-runner   --memo "planted in Jenkins"
+qpot canary create --kind web  --name wiki-link   --memo "fake intranet bookmark"
+qpot canary create --kind file --name q4-salaries --memo "HR share"
+```
+
+| Flag | Description |
+|------|-------------|
+| `-k, --kind` | `web`, `file`, or `aws` (required) |
+| `-n, --name` | Human label |
+| `-m, --memo` | Where it is planted — echoed on every trip, so the alert is actionable |
+| `-i, --instance` | Instance name (default `default`) |
+
+For `aws` the command prints the access key id and secret to plant; for
+`web`/`file` it prints the beacon URL.
+
+### `qpot canary list` / `qpot canary trips`
+
+```bash
+qpot canary list            # ID, kind, name, lifetime trip count, memo
+qpot canary trips --limit 50  # recent trips (the alerts), newest first
+```
+
+### `qpot canary artifact`
+
+Download a file canary's document so you can plant it.
+
+```bash
+qpot canary artifact cnry_abc123 --out Q4-Salaries.html
+```
+
+`--out` defaults to the canary's suggested filename.
+
+### `qpot canary rm`
+
+```bash
+qpot canary rm cnry_abc123   # aliases: remove, delete
 ```
 
 ---

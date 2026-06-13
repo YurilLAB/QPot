@@ -12,8 +12,9 @@ import (
 // fakeDB is a minimal database.Database for server handler tests. It records
 // IOCs passed to InsertIOC and returns zero values everywhere else.
 type fakeDB struct {
-	mu   sync.Mutex
-	iocs []*database.IOC
+	mu     sync.Mutex
+	iocs   []*database.IOC
+	events []*database.Event
 }
 
 func (f *fakeDB) InsertIOC(ctx context.Context, ioc *database.IOC) error {
@@ -36,14 +37,31 @@ func (f *fakeDB) insertedIOCs() []*database.IOC {
 	return out
 }
 
-func (f *fakeDB) Connect(ctx context.Context) error                           { return nil }
-func (f *fakeDB) Close() error                                                { return nil }
-func (f *fakeDB) Ping(ctx context.Context) error                              { return nil }
-func (f *fakeDB) InitializeSchema(ctx context.Context) error                  { return nil }
-func (f *fakeDB) GetSchemaVersion(ctx context.Context) (int, error)           { return 1, nil }
-func (f *fakeDB) SetSchemaVersion(ctx context.Context, v int) error           { return nil }
-func (f *fakeDB) InsertEvent(ctx context.Context, e *database.Event) error    { return nil }
-func (f *fakeDB) InsertEvents(ctx context.Context, e []*database.Event) error { return nil }
+func (f *fakeDB) Connect(ctx context.Context) error                 { return nil }
+func (f *fakeDB) Close() error                                      { return nil }
+func (f *fakeDB) Ping(ctx context.Context) error                    { return nil }
+func (f *fakeDB) InitializeSchema(ctx context.Context) error        { return nil }
+func (f *fakeDB) GetSchemaVersion(ctx context.Context) (int, error) { return 1, nil }
+func (f *fakeDB) SetSchemaVersion(ctx context.Context, v int) error { return nil }
+func (f *fakeDB) InsertEvent(ctx context.Context, e *database.Event) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.events = append(f.events, e)
+	return nil
+}
+func (f *fakeDB) InsertEvents(ctx context.Context, e []*database.Event) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.events = append(f.events, e...)
+	return nil
+}
+func (f *fakeDB) insertedEvents() []*database.Event {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	out := make([]*database.Event, len(f.events))
+	copy(out, f.events)
+	return out
+}
 func (f *fakeDB) GetEvents(ctx context.Context, fl database.EventFilter) ([]*database.Event, error) {
 	return nil, nil
 }

@@ -86,8 +86,10 @@ type Config struct {
 	Alerts       AlertConfig               `yaml:"alerts"`
 	Intelligence IntelligenceConfig        `yaml:"intelligence"`
 	Yuril        YurilConfig               `yaml:"yuril"`
+	Ypanel       YpanelConfig              `yaml:"ypanel"`
 	Response     ResponseConfig            `yaml:"response"`
 	Collector    CollectorConfig           `yaml:"collector"`
+	Canary       CanaryConfig              `yaml:"canary"`
 
 	// hpMu guards concurrent access to the Honeypots map. The web server mutates
 	// it (EnableHoneypot/DisableHoneypot on the POST /api/honeypots path) from one
@@ -150,6 +152,35 @@ type CollectorConfig struct {
 	IngestFatt bool `yaml:"ingest_fatt"`
 }
 
+// CanaryConfig controls the canary (honeytoken) subsystem: decoy artifacts
+// planted inside the operator's real estate that fire a high-fidelity alert on
+// any interaction. Canaries complement the honeypot containers — honeypots
+// catch the attacker who connects from outside, canaries catch the one who is
+// already inside and touches something they shouldn't.
+type CanaryConfig struct {
+	// Enabled turns the subsystem on. When true the web server serves the
+	// public beacon endpoint (/c/<token>) and the management API; the
+	// intelligence worker also watches captured sessions for planted
+	// credential values. Default true.
+	Enabled bool `yaml:"enabled"`
+
+	// BaseURL is the public origin under which beacon URLs are minted, e.g.
+	// "https://assets.example.com". It must point at wherever this QPot web
+	// server is reachable so a planted token actually phones home. When empty,
+	// URLs are rendered path-only (/c/<token>) and the operator is warned.
+	BaseURL string `yaml:"base_url"`
+
+	// Decoy selects the response served from /c/<token> so the beacon does not
+	// look like an alerting endpoint:
+	//   "notfound" (default) — a plain 404, indistinguishable from a dead link
+	//   "pixel"              — a 1x1 transparent GIF (for <img>/document beacons)
+	// Any other value falls back to "notfound".
+	Decoy string `yaml:"decoy"`
+
+	// MaxTrips bounds the retained trip history in canaries.json. Default 500.
+	MaxTrips int `yaml:"max_trips"`
+}
+
 // YurilConfig controls the forwarder that pushes classified IOCs into the
 // Yuril Security Suite. When Enabled is false the forwarder is never
 // constructed and QPot runs standalone.
@@ -161,6 +192,55 @@ type YurilConfig struct {
 	BatchSize int           `yaml:"batch_size"` // max indicators per POST; defaults to 200
 	Timeout   time.Duration `yaml:"timeout"`    // HTTP timeout; defaults to 10s
 	VerifyTLS bool          `yaml:"verify_tls"` // defaults to true
+}
+
+// YpanelConfig controls the phone-home agent that bridges this QPot instance to
+// the ypanel operator console (Yuril Security's unified control panel) via the
+// DireC activation worker — the "operator plane". When Enabled the agent runs
+// as a goroutine under `qpot up`: it pushes a status snapshot on a heartbeat and
+// polls + applies allow-listed honeypot enable/disable jobs the operator issues.
+//
+// The per-instance QPot-ID never participates in this contract; the agent
+// authenticates to the worker with a cached license JWS (read, never signed,
+// from the Yuril/DireC activation file) plus a one-time enrollment token minted
+// by the operator in the panel. See docs/ypanel.md for the full model.
+type YpanelConfig struct {
+	// Enabled turns the phone-home agent on. When false the agent is never
+	// constructed and QPot reports to no operator plane.
+	Enabled bool `yaml:"enabled"`
+
+	// Base is the ypanel worker base URL. Defaults to the production worker.
+	Base string `yaml:"base"`
+
+	// InstanceID is the operator-issued instance id (qp_… + 24 base32), handed
+	// out by the panel when the host is enrolled. Public, not a secret.
+	InstanceID string `yaml:"instance_id"`
+
+	// EnrollToken is the one-time enrollment token (yp_… + 48 hex) shown once at
+	// enrolment and provisioned onto the host. It is the agent's identity to the
+	// worker; treat it as a secret.
+	EnrollToken string `yaml:"enroll_token"`
+
+	// LicenseJWS is the cached license JWS, inline. Usually empty — prefer
+	// LicenseJWSPath so the credential lives in one file owned by activation.
+	LicenseJWS string `yaml:"license_jws"`
+
+	// LicenseJWSPath points at the activation-cached license file (the agent
+	// reads it; it never signs). When empty the agent probes the well-known
+	// Yuril/DireC locations (see ResolveLicenseJWS).
+	LicenseJWSPath string `yaml:"license_jws_path"`
+
+	// Region is a free-text region label surfaced on the panel's Instances page
+	// (e.g. "EU · Frankfurt"). Cosmetic.
+	Region string `yaml:"region"`
+
+	// PushInterval is the snapshot heartbeat cadence. Default 30s, clamped
+	// [5s, 1h] at runtime.
+	PushInterval time.Duration `yaml:"push_interval"`
+
+	// JobsInterval is the control-job poll cadence. Default 60s, clamped
+	// [5s, 1h] at runtime.
+	JobsInterval time.Duration `yaml:"jobs_interval"`
 }
 
 // DatabaseConfig contains database connection settings
@@ -624,6 +704,17 @@ func Default(instanceName string) *Config {
 			IngestP0f:      true,
 			IngestFatt:     true,
 		},
+		Canary: CanaryConfig{
+			Enabled:  true,
+			Decoy:    "notfound",
+			MaxTrips: 500,
+		},
+		Ypanel: YpanelConfig{
+			Enabled:      false,
+			Base:         "https://ypanel.yurillab.dev",
+			PushInterval: 30 * time.Second,
+			JobsInterval: 60 * time.Second,
+		},
 	}
 }
 
@@ -769,6 +860,28 @@ func (c *Config) Validate() []string {
 		}
 		if strings.TrimSpace(c.Yuril.APIKey) == "" {
 			warnings = append(warnings, "yuril.api_key is empty; the receiver may reject unauthenticated batches")
+		}
+	}
+
+	// ypanel phone-home agent: if enabled it needs a worker URL and the three
+	// credentials (instance id, enrollment token, a license JWS). Missing pieces
+	// are a warning, not fatal — the agent reports "not enrolled" and idles so
+	// `qpot up` still starts. This mirrors the fail-loud-not-closed intent above.
+	if c.Ypanel.Enabled {
+		base := strings.TrimSpace(c.Ypanel.Base)
+		if base == "" {
+			warnings = append(warnings, "ypanel.enabled=true but ypanel.base is empty; agent will not start")
+		} else if u, err := url.Parse(base); err != nil || (u.Scheme != "http" && u.Scheme != "https") {
+			warnings = append(warnings, fmt.Sprintf("ypanel.base %q is not a valid http(s) URL", base))
+		}
+		if strings.TrimSpace(c.Ypanel.InstanceID) == "" {
+			warnings = append(warnings, "ypanel.instance_id is empty; enrol the host in the panel and run 'qpot ypanel setup'")
+		}
+		if strings.TrimSpace(c.Ypanel.EnrollToken) == "" {
+			warnings = append(warnings, "ypanel.enroll_token is empty; the worker will reject the agent until it is set")
+		}
+		if strings.TrimSpace(c.Ypanel.LicenseJWS) == "" && strings.TrimSpace(c.Ypanel.LicenseJWSPath) == "" {
+			warnings = append(warnings, "ypanel has no license_jws or license_jws_path; the agent will probe the well-known activation paths and idle if none is found")
 		}
 	}
 

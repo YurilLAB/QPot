@@ -17,6 +17,17 @@ type Forwarder interface {
 	Forward(ctx context.Context, batchID string, iocs []*database.IOC) error
 }
 
+// CanaryMatcher inspects each processed event for any planted canary
+// (honeytoken) value and records a trip when one is found. It is defined here
+// — rather than importing the canary package directly — to keep the
+// intelligence package free of that dependency and avoid an import cycle. The
+// server wires in a concrete implementation backed by the canary store.
+type CanaryMatcher interface {
+	// MatchEvent reports whether event tripped a canary (and records it). It
+	// must be safe for concurrent use and must never block on slow I/O.
+	MatchEvent(ctx context.Context, event *database.Event) bool
+}
+
 // Worker periodically classifies unclassified events in the background.
 type Worker struct {
 	classifier *Classifier
@@ -24,6 +35,7 @@ type Worker struct {
 	interval   time.Duration
 	batchSize  int
 	forwarder  Forwarder
+	canary     CanaryMatcher
 }
 
 // Sane fallbacks so a Worker built from a partially-specified config never
@@ -60,6 +72,14 @@ func (w *Worker) WithForwarder(f Forwarder) *Worker {
 	return w
 }
 
+// WithCanaryMatcher attaches a canary matcher so captured sessions are scanned
+// for planted honeytoken values as they are classified. Returns the worker to
+// allow fluent wiring. A nil matcher is ignored at match time.
+func (w *Worker) WithCanaryMatcher(m CanaryMatcher) *Worker {
+	w.canary = m
+	return w
+}
+
 // Run starts the worker loop. Blocks until ctx is cancelled.
 func (w *Worker) Run(ctx context.Context) {
 	ticker := time.NewTicker(w.interval)
@@ -91,6 +111,19 @@ func (w *Worker) runOnce(ctx context.Context) int {
 	}
 
 	iocs := w.classifier.ClassifyBatch(ctx, events)
+
+	// Scan captured sessions for planted canary (honeytoken) values. A hit
+	// means an attacker exfiltrated a token and replayed it against our own
+	// deception estate — a high-fidelity signal. Canary trip events
+	// (honeypot="canary") are skipped so a recorded trip can never re-trip.
+	if w.canary != nil {
+		for _, event := range events {
+			if event.Honeypot == "canary" {
+				continue
+			}
+			w.canary.MatchEvent(ctx, event)
+		}
+	}
 
 	for _, event := range events {
 		if !event.Classified {

@@ -63,6 +63,20 @@ func (c *Classifier) Classify(ctx context.Context, event *database.Event) []*dat
 	return iocs
 }
 
+// ExtractIOCs runs only the IOC extractor over an event, without applying any
+// ATT&CK rule. It is used for events that are already classified out-of-band
+// (e.g. canary trips, which are ground truth and must not have their technique
+// fields overwritten by a heuristic rule) but whose source IP / payload should
+// still feed the IOC store and downstream forwarding. Extracted IOCs inherit
+// the event's existing TechniqueID.
+func (c *Classifier) ExtractIOCs(event *database.Event) []*database.IOC {
+	iocs := c.extractor.Extract(event)
+	for _, ioc := range iocs {
+		ioc.TechniqueID = event.TechniqueID
+	}
+	return iocs
+}
+
 // ClassifyBatch classifies a slice of events. Returns all extracted IOCs.
 func (c *Classifier) ClassifyBatch(ctx context.Context, events []*database.Event) []*database.IOC {
 	var all []*database.IOC

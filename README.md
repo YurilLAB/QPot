@@ -57,6 +57,7 @@
 | Threat Intel (ATT&CK) | No | Yes - Auto MITRE ATT&CK classification |
 | IOC Tracking | No | Yes - Automated IOC extraction & dedup |
 | TTP Session Analysis | No | Yes - Behavioral campaign fingerprinting |
+| Canaries (Honeytokens) | No | Yes - planted decoy artifacts (web/file/AWS-key) that fire a critical alert on any interaction |
 | Alert Webhooks | No | Yes - Slack/Discord/generic thresholds |
 | Attack-Response Hooks | No | Yes - shell hooks on threshold (firewall/SOAR), debounced |
 | Kibana Dashboards | Yes (ELK) | Yes - over ClickHouse, **auto-provisioned** (zero setup) |
@@ -635,6 +636,53 @@ intelligence:
 
 ---
 
+## Canaries (Honeytokens)
+
+Canaries are QPot's second deception primitive, complementary to the honeypot
+containers. A **honeypot** is a decoy *system* an attacker connects to from
+outside; a **canary** is a decoy *artifact* planted **inside** your real estate —
+a fake AWS key in a CI runner, a tempting `Q4-salaries.html` on a file share, a
+beacon URL hidden in a config comment — that fires the moment anyone touches it.
+Because nobody legitimately interacts with a canary, **a single trip is a
+near-zero-false-positive, critical alert**: honeypots tell you the perimeter is
+being scanned, canaries tell you someone is already *inside* and moving through
+your data.
+
+A trip is recorded as an event tagged `honeypot="canary"`, so it rides the
+*existing* pipeline — activity feed, IOC extraction, Yuril forwarding, the ypanel
+snapshot — with no special-casing.
+
+| Kind | What it is | How it trips |
+|------|-----------|--------------|
+| `web` | A unique beacon URL (`/c/<token>`) | Any HTTP GET of the URL |
+| `file` | An HTML document that beacons when opened/previewed | Its embedded beacon URL is fetched |
+| `aws` | A realistic but fake AWS access-key pair | Its key id/secret shows up in a captured honeypot session (stolen + replayed) |
+
+```bash
+qpot canary create --kind aws  --name ci-runner   --memo "planted in Jenkins"
+qpot canary create --kind file --name q4-salaries --memo "HR share"
+qpot canary list
+qpot canary trips                            # the alerts, newest first
+qpot canary artifact cnry_abc123 --out bait.html
+qpot canary rm cnry_abc123
+```
+
+```yaml
+canary:
+  enabled: true
+  base_url: https://assets.example.com   # public origin where THIS QPot is reachable
+  decoy: notfound                        # /c/<token> response: "notfound" (404) | "pixel" (1x1 GIF)
+  max_trips: 500
+```
+
+The beacon endpoint (`/c/<token>`) is deliberately unauthenticated — a canary URL
+must be reachable by whoever trips it — and returns an identical innocuous decoy
+whether or not the token is real, so it is not an enumeration oracle.
+`base_url` must point at wherever this QPot's web server is reachable so a planted
+token can phone home. AWS-credential canaries trip purely on value-matching inside
+captured sessions (requires `intelligence.enabled`, the default) and need no
+exposure. Full details in **[docs/canary.md](docs/canary.md)**.
+
 ## Alerting & Attack-Response Hooks
 
 QPot can fire webhook alerts to Slack, Discord, or any HTTP endpoint when attack
@@ -743,6 +791,13 @@ qpot cluster join --id <id>      # Pair another node into the group
 qpot cluster status              # Show the group summary
 qpot cluster nodes               # List paired nodes
 qpot cluster leave               # Unpair this node
+
+# Canaries (honeytokens) — requires a running instance (qpot up)
+qpot canary create --kind web|file|aws --name <n> --memo <where>  # mint a canary
+qpot canary list                 # list canaries
+qpot canary trips                # show recent trips (the alerts)
+qpot canary artifact <id>        # download a file canary's document
+qpot canary rm <id>              # remove a canary
 
 # Yuril Security Suite integration
 qpot yuril setup                 # Interactive setup (endpoint, API key, TLS)
@@ -1054,13 +1109,16 @@ QPot/
 │   │   ├── migration.go         # Schema migrations
 │   │   ├── retention.go         # Data retention & archival
 │   │   └── pool.go              # Connection pooling
+│   ├── canary/           # Canary (honeytoken) subsystem
+│   │   ├── canary.go            # Token/credential minting, file artifact, event mapping
+│   │   └── store.go             # Persisted registry + trip recording + value matching
 │   ├── intelligence/     # Threat intelligence engine
 │   │   ├── attck.go             # MITRE ATT&CK loader (fetch + embedded fallback)
 │   │   ├── rules.go             # Classification rules (16 built-in)
 │   │   ├── classifier.go        # Real-time event classifier
 │   │   ├── ioc.go               # IOC extractor
 │   │   ├── ttp.go               # Behavioral TTP session builder
-│   │   └── worker.go            # Background backfill worker
+│   │   └── worker.go            # Background backfill worker + canary matcher
 │   ├── security/         # Sandboxing and isolation
 │   ├── instance/         # Instance lifecycle
 │   └── server/           # API server

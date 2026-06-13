@@ -66,6 +66,7 @@ bandwidth, per-honeypot state, and a link to its WebUI.
 | Worker operator-plane: enroll + snapshot push + read endpoints + control-job queue | **implemented in the activation-server worker and verified live end-to-end** (enroll → push → read → enqueue → apply against a real worker + D1). Production deploy of those routes is the remaining ship step (gated). |
 | **QPot phone-home agent** (enroll → push snapshots → poll + apply jobs) | **the one piece QPot still needs** — see the checklist below |
 | Captured-session feed (`/sessions`, attacker transcripts) | **not wired** — ypanel asks for it, the worker doesn't serve it yet; the Sessions tab degrades to an honest empty state. See *Further improvements*. |
+| Canary (honeytoken) subsystem (`/api/canaries`, `/api/canaries/trips`, `/c/<token>` beacon) | **implemented** (this repo, `internal/canary` + `internal/server`). Canary trips already flow into the events store tagged `honeypot:"canary"`, so they ride the existing snapshot `recentEvents` with no agent change. A dedicated canaries summary block is specified below for a future Canaries panel. See [docs/canary.md](canary.md). |
 
 When the QPot agent is pushing and a client is enrolled, ypanel's QPot screens
 switch from demo to live automatically — no panel changes required.
@@ -128,8 +129,24 @@ for a reference producer):
     { "id": "ev_a1", "ts": "2026-06-07T22:14:05Z", "severity": "critical",
       "honeypot": "cowrie", "srcIp": "203.0.113.66", "country": "RU", "port": 22,
       "intent": "ssh brute force", "tactic": "TA0006 Credential Access",
-      "rawLine": "login attempt root/admin123" }
-  ]
+      "rawLine": "login attempt root/admin123" },
+    // Canary trips ride this same array. They arrive as events with
+    // honeypot:"canary" and severity:"critical"; the agent maps QPot's canary
+    // trip event straight through. No new wiring needed for the Events feed.
+    { "id": "trip_9f2", "ts": "2026-06-07T22:31:10Z", "severity": "critical",
+      "honeypot": "canary", "srcIp": "203.0.113.50", "country": "RU",
+      "intent": "canary tripped (aws / ci-runner)", "tactic": "TA0005 Defense Evasion",
+      "rawLine": "AKIA… key replayed; planted in Jenkins" }
+  ],
+  "canaries": {                                          // → optional, for a future Canaries panel
+    "total": 12, "tripped24h": 1,
+    "recentTrips": [                                     // mirror /api/canaries/trips
+      { "id": "trip_9f2", "canaryId": "cnry_abc", "kind": "aws",
+        "name": "ci-runner", "memo": "planted in Jenkins", "channel": "honeypot",
+        "ts": "2026-06-07T22:31:10Z", "srcIp": "203.0.113.50",
+        "detail": "matched in cowrie session" }
+    ]
+  }
 }
 ```
 
@@ -186,6 +203,15 @@ Ordered roughly by value once the agent is live:
    feed; populate `tactic` consistently and add an optional `iocs[]`).
 7. **Honeypot registry sync.** Expose QPot's honeypot catalogue (type → label,
    port, protocol) so ypanel labels new honeypot types without a panel release.
+8. **Canaries panel + remote minting.** Canary trips already surface in the
+   Events feed today. The next step is a dedicated **Canaries** tab fed by the
+   `canaries` snapshot block above (totals + recent trips), and — following the
+   same allow-list discipline — adding `canary.create` / `canary.remove` to the
+   worker's control vocabulary and the agent's job applier so an operator can
+   mint and retire canaries from ypanel. Treat minted credentials as sensitive:
+   return them once on create, never re-list the AWS secret to the browser after
+   that. The agent reads from `/api/canaries` + `/api/canaries/trips`; whole-
+   token values (the AWS secret) stay host-side beyond the create response.
 
 When any of these land, follow the same contract discipline: **add the verb/field
 to the worker (allow-listed, validated, tenant-scoped) first, then the agent, then

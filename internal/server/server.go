@@ -18,6 +18,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/qpot/qpot/internal/canary"
 	"github.com/qpot/qpot/internal/cluster"
 	"github.com/qpot/qpot/internal/config"
 	"github.com/qpot/qpot/internal/database"
@@ -46,6 +47,10 @@ type Server struct {
 	// the /api/yuril/health endpoint and `qpot yuril status` can expose
 	// its activity counters. nil when Yuril forwarding is disabled.
 	forwarder *yuril.Forwarder
+
+	// canaries is the canary (honeytoken) registry. nil when the subsystem is
+	// disabled, in which case the beacon and management routes are not served.
+	canaries *canary.Store
 
 	// lastAlert is when the alert loop last fired (webhook/response hooks),
 	// used to debounce alerting within Alerts.Cooldown. Touched only by the
@@ -100,6 +105,17 @@ func New(cfg *config.Config) (*Server, error) {
 		s.cluster = cm
 	}
 
+	// Load the canary (honeytoken) registry when the subsystem is enabled.
+	// A load failure (e.g. a corrupt canaries.json) is logged but non-fatal —
+	// QPot must still come up; the operator can investigate the store file.
+	if cfg.Canary.Enabled {
+		if cs, err := canary.NewStore(cfg.DataPath, cfg.Canary.MaxTrips); err != nil {
+			slog.Warn("Canary store failed to load; canary subsystem disabled this run", "error", err)
+		} else {
+			s.canaries = cs
+		}
+	}
+
 	// Wire up the intelligence subsystem when enabled.
 	if cfg.Intelligence.Enabled {
 		loader := intelligence.NewATTCKLoader(cfg.Intelligence.ATTCKDataPath)
@@ -120,6 +136,11 @@ func New(cfg *config.Config) (*Server, error) {
 				w = w.WithForwarder(fwd)
 				s.forwarder = fwd
 				slog.Info("Yuril forwarder enabled", "endpoint", cfg.Yuril.Endpoint)
+			}
+			// Let the worker scan captured sessions for planted canary
+			// credential values as it classifies them.
+			if s.canaries != nil {
+				w = w.WithCanaryMatcher(&canaryMatcher{s: s})
 			}
 			s.worker = w
 		}
@@ -148,6 +169,18 @@ func (s *Server) setupRoutes() {
 	s.mux.HandleFunc("/api/iocs/export", s.withQPotAuth(s.handleIOCExport))
 	s.mux.HandleFunc("/api/ttps", s.withQPotAuth(s.handleTTPs))
 	s.mux.HandleFunc("/api/intelligence", s.withQPotAuth(s.handleIntelligenceSummary))
+
+	// Canary (honeytoken) subsystem. Only mounted when enabled.
+	if s.canaries != nil {
+		// PUBLIC beacon endpoint — deliberately UNauthenticated: a canary URL
+		// must be reachable by whoever triggers it. It records a trip and
+		// returns an innocuous decoy (404 / pixel) that reveals nothing.
+		s.mux.HandleFunc("/c/", s.handleCanaryBeacon)
+		// Authenticated management API.
+		s.mux.HandleFunc("/api/canaries", s.withQPotAuth(s.handleCanaries))
+		s.mux.HandleFunc("/api/canaries/trips", s.withQPotAuth(s.handleCanaryTrips))
+		s.mux.HandleFunc("/api/canaries/artifact", s.withQPotAuth(s.handleCanaryArtifact))
+	}
 
 	// Pairing / Networking: the honeypot "group" (paired QPot nodes).
 	s.mux.HandleFunc("/api/cluster", s.withQPotAuth(s.handleCluster))
@@ -532,8 +565,11 @@ func securityHeaders(next http.Handler) http.Handler {
 
 func (s *Server) authMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// Skip auth for static files (they handle their own auth)
-		if r.URL.Path == "/" || strings.HasPrefix(r.URL.Path, "/static/") {
+		// Skip auth for static files (they handle their own auth) and for the
+		// public canary beacon (/c/<token>), which must be reachable by anyone
+		// who triggers a planted token — that is the whole point of a canary.
+		if r.URL.Path == "/" || strings.HasPrefix(r.URL.Path, "/static/") ||
+			strings.HasPrefix(r.URL.Path, "/c/") {
 			next.ServeHTTP(w, r)
 			return
 		}
