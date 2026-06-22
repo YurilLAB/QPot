@@ -24,4 +24,11 @@ paths = [
 regexes = [
   '''sk-proj-123456''',
   '''sk-X{4,}''',
+  # Credential *alphabets* (not secrets) used to shape decoy AWS canary tokens
+  # in internal/canary/canary.go: the base32 (A-Z2-7) and base64 character sets.
+  # They are fixed, public, well-known constants, but their length + entropy
+  # trip gitleaks' generic-api-key rule. Match the exact alphabets so real
+  # high-entropy strings in the same file are still detected.
+  '''ABCDEFGHIJKLMNOPQRSTUVWXYZ234567''',
+  '''ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789\+/''',
 ]
