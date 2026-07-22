@@ -33,9 +33,15 @@ type credentialTemplate struct {
 	Users       []credUser
 }
 
-// credentialTemplates are 10 internally-consistent system personas. Sourced
+// credentialTemplates are 30 internally-consistent system personas. Sourced
 // from real attacker credential studies (see file header). Each is a plausible
 // internet-exposed box with a handful of working accounts.
+//
+// NOTE on the "legacy-centos" persona: the emulated OS is always Debian-family
+// (Cowrie's fake fs ships apt/dpkg/debian_version and no /etc/redhat-release, so
+// a RHEL identity would contradict the on-disk evidence - see deception.go). Its
+// centos/redhat account names reflect the accounts an operator might carry onto a
+// migrated box; the box still presents a Debian/Ubuntu /etc/os-release.
 var credentialTemplates = []credentialTemplate{
 	{
 		Name: "corp-ubuntu", Description: "Corporate Ubuntu application server",

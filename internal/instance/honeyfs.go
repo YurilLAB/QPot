@@ -184,13 +184,11 @@ func bogomipsFor(mhz string) string {
 // procVersion builds a realistic /proc/version consistent with the distro
 // profile's kernel release (uname -r) and build string (uname -v).
 func procVersion(p distroProfile) string {
+	// All distro profiles are Debian-family (see deception.go), so only the
+	// Ubuntu default and the Debian branch can ever apply here.
 	builder, gcc := "buildd@lcy02-amd64-079", "gcc (Ubuntu 11.4.0-1ubuntu1~22.04) 11.4.0"
-	low := strings.ToLower(p.OSPretty)
-	switch {
-	case strings.Contains(low, "debian"):
+	if strings.Contains(strings.ToLower(p.OSPretty), "debian") {
 		builder, gcc = "debian-kernel@lists.debian.org", "gcc-12 (Debian 12.2.0-14) 12.2.0"
-	case strings.Contains(low, "centos"):
-		builder, gcc = "mockbuild@kbuilder.bsys.centos.org", "gcc (GCC) 4.8.5 20150623 (Red Hat 4.8.5-44)"
 	}
 	return fmt.Sprintf("Linux version %s (%s) (%s, GNU ld) %s\n",
 		p.KernelVersion, builder, gcc, p.KernelBuildString)
@@ -325,9 +323,6 @@ func osRelease(p distroProfile, hostname string) string {
 	case strings.Contains(low, "debian"):
 		id, name = "debian", "Debian GNU/Linux"
 		versionID = extractVersion(pretty)
-	case strings.Contains(low, "centos"):
-		id, name = "centos", "CentOS Linux"
-		versionID = extractVersion(pretty)
 	}
 	var b strings.Builder
 	fmt.Fprintf(&b, "PRETTY_NAME=\"%s\"\n", pretty)
@@ -362,9 +357,6 @@ func osRelease(p distroProfile, hostname string) string {
 		b.WriteString("HOME_URL=\"https://www.debian.org/\"\n")
 		b.WriteString("SUPPORT_URL=\"https://www.debian.org/support\"\n")
 		b.WriteString("BUG_REPORT_URL=\"https://bugs.debian.org/\"\n")
-	case "centos":
-		b.WriteString("HOME_URL=\"https://www.centos.org/\"\n")
-		b.WriteString("BUG_REPORT_URL=\"https://bugs.centos.org/\"\n")
 	default:
 		b.WriteString("HOME_URL=\"https://www." + id + ".org/\"\n")
 	}
