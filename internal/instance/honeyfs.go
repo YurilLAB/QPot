@@ -86,7 +86,7 @@ func generateHoneyfs(t credentialTemplate, p distroProfile, hostname, seed strin
 		// returns nothing while `cat /etc/os-release` has content - an easy tell.
 		"usr/lib/os-release": osRelease(p, hostname),
 		"etc/issue":          issue(p),
-		"etc/motd":           motd(p),
+		"etc/motd":           motd(p, seed),
 		// /etc/debian_version is present in Cowrie's (Debian) fake fs and is common
 		// recon. Stock ships a fixed "12.5"; we render the value matching the
 		// advertised release (Debian point version, or "<codename>/sid" on Ubuntu)
@@ -219,17 +219,57 @@ Debian GNU/Linux comes with ABSOLUTELY NO WARRANTY, to the extent
 permitted by applicable law.
 `
 
-// motd returns the static /etc/motd appropriate for the profile's distro.
-// Cowrie's default honeyfs ships the Debian boilerplate on EVERY honeypot, which
-// is both a globally-identical fingerprint and a tell on a non-Debian box (the
-// os-release says Ubuntu/CentOS but `cat /etc/motd` shows "Debian GNU/Linux").
-// Real Ubuntu and CentOS systems have an empty static /etc/motd (their login
-// banner is generated dynamically), so only Debian gets the boilerplate.
-func motd(p distroProfile) string {
-	if strings.Contains(strings.ToLower(p.OSPretty), "debian") {
-		return debianMOTD
+// motd returns a per-instance /etc/motd - the login-time message the attacker
+// sees on EVERY session, and the single most-repeated piece of "communication"
+// a honeypot emits. Cowrie's default ships the Debian boilerplate on every box (a
+// globally-identical fingerprint, and a tell on a non-Debian box). We instead
+// derive it from the distro AND a seed-picked STYLE, so the greeting differs
+// across deployments rather than being one canned response:
+//
+//   - Ubuntu boxes show the real update-motd shape (welcome/version line, the
+//     canonical doc/management/support links, and a per-instance "N updates can
+//     be applied / M security updates" count) - the exact stable parts of a real
+//     Ubuntu login (volatile load/memory stats are deliberately omitted so two
+//     logins never show a suspiciously-identical live figure).
+//   - a MIXTURE of three styles varies it further: full, links-stripped, or
+//     fronted by an "authorized access only" legal banner (common on corporate /
+//     bastion boxes). Debian keeps its standard boilerplate, optionally behind the
+//     same banner.
+//
+// The Ubuntu version/kernel in the banner match uname; the update counts and
+// banner choice come from the seed, so no two deployments greet identically.
+func motd(p distroProfile, seed string) string {
+	low := strings.ToLower(p.OSPretty)
+	style := seededIndex("motdstyle:"+seed, 3)
+	var b strings.Builder
+	if style == 2 {
+		b.WriteString("*******************************************************************\n")
+		b.WriteString("*                                                                 *\n")
+		b.WriteString("*  Authorized access only. All activity on this system is logged  *\n")
+		b.WriteString("*  and monitored. Disconnect now if you are not an authorized      *\n")
+		b.WriteString("*  user.                                                          *\n")
+		b.WriteString("*                                                                 *\n")
+		b.WriteString("*******************************************************************\n\n")
 	}
-	return ""
+	if strings.Contains(low, "ubuntu") {
+		fmt.Fprintf(&b, "Welcome to %s (GNU/Linux %s x86_64)\n\n", p.OSPretty, p.KernelVersion)
+		if style != 1 {
+			b.WriteString(" * Documentation:  https://help.ubuntu.com\n")
+			b.WriteString(" * Management:     https://landscape.canonical.com\n")
+			b.WriteString(" * Support:        https://ubuntu.com/pro\n\n")
+		}
+		// Force >=2 pending (and >=2 security) updates so the wording is always
+		// plural (matches real Ubuntu grammar) and avoids a singular-edge tell.
+		upd := 4 + seededIndex("motdupd:"+seed, 80)
+		sec := 2 + seededIndex("motdsec:"+seed, upd/2)
+		fmt.Fprintf(&b, "%d updates can be applied immediately.\n", upd)
+		fmt.Fprintf(&b, "%d of these updates are standard security updates.\n", sec)
+		b.WriteString("To see these additional updates run: apt list --upgradable\n\n")
+		return b.String()
+	}
+	// Debian (all non-Ubuntu profiles are Debian): standard boilerplate.
+	b.WriteString(debianMOTD)
+	return b.String()
 }
 
 // etcPasswd builds /etc/passwd = system base + the persona's accounts, so every

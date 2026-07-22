@@ -106,19 +106,44 @@ func TestHoneyfsEtcHostsConsistent(t *testing.T) {
 	}
 }
 
-// TestHoneyfsMOTDPerDistro guards that the Debian boilerplate motd is only used
-// on Debian profiles (it is a tell on Ubuntu/CentOS, which have an empty static
-// /etc/motd), and that generateHoneyfs always emits the file so its bind mount
-// never resolves to a missing source.
+// TestHoneyfsMOTDPerDistro guards that the login MOTD is distro-appropriate,
+// per-instance (a MIXTURE of styles/counts, not one canned response), and never
+// leaks the wrong distro. Ubuntu shows the real update-motd shape; Debian keeps
+// its boilerplate; the corporate legal-banner style appears for some seeds.
 func TestHoneyfsMOTDPerDistro(t *testing.T) {
+	seeds := []string{"a", "b", "c", "d", "e", "f", "g", "h", "i", "j"}
 	for _, p := range distroProfiles {
-		m := motd(p)
 		isDebian := strings.Contains(strings.ToLower(p.OSPretty), "debian")
-		if isDebian && !strings.Contains(m, "Debian GNU/Linux comes with ABSOLUTELY NO WARRANTY") {
-			t.Errorf("Debian profile %q should have the Debian motd", p.OSPretty)
+		variants := map[string]bool{}
+		bannerSeen := false
+		for _, s := range seeds {
+			m := motd(p, s)
+			variants[m] = true
+			if strings.Contains(m, "Authorized access only") {
+				bannerSeen = true
+			}
+			if isDebian {
+				if !strings.Contains(m, "Debian GNU/Linux comes with ABSOLUTELY NO WARRANTY") {
+					t.Errorf("Debian profile %q should carry the Debian motd", p.OSPretty)
+				}
+			} else {
+				if strings.Contains(m, "Debian GNU/Linux") {
+					t.Errorf("Ubuntu profile %q leaks Debian motd boilerplate", p.OSPretty)
+				}
+				if !strings.Contains(m, "Welcome to "+p.OSPretty) {
+					t.Errorf("Ubuntu profile %q motd missing welcome/version line: %q", p.OSPretty, m)
+				}
+				if !strings.Contains(m, "updates can be applied immediately") {
+					t.Errorf("Ubuntu profile %q motd missing update count", p.OSPretty)
+				}
+			}
 		}
-		if !isDebian && strings.Contains(m, "Debian GNU/Linux") {
-			t.Errorf("non-Debian profile %q leaks Debian motd boilerplate", p.OSPretty)
+		// Per-instance variation: the greeting is not one canned string.
+		if len(variants) < 2 {
+			t.Errorf("profile %q motd does not vary across seeds (%d variants)", p.OSPretty, len(variants))
+		}
+		if !bannerSeen {
+			t.Errorf("profile %q never shows the legal-banner style across %d seeds", p.OSPretty, len(seeds))
 		}
 	}
 	files := generateHoneyfs(credentialTemplates[0], distroProfiles[0], "h", "seed1")
