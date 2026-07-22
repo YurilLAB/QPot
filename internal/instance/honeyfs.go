@@ -1,6 +1,8 @@
 package instance
 
 import (
+	"crypto/sha512"
+	"encoding/hex"
 	"fmt"
 	"hash/fnv"
 	"strconv"
@@ -257,10 +259,44 @@ func etcPasswd(t credentialTemplate) string {
 	return b.String()
 }
 
+// humanLoginUsers returns the persona's human login accounts (not root, not a
+// base system account, not a service account) in persona order. These are the
+// users that get a /home/<name>, a shell and - being the box's administrators -
+// membership in sudo/adm. Deterministic and dedup'd, matching etcPasswd's set.
+func humanLoginUsers(t credentialTemplate) []string {
+	var out []string
+	seen := map[string]bool{}
+	for _, u := range t.Users {
+		name := sanitizeConfigValue(u.Username)
+		if name == "" || seen[name] || presentInBase(name) {
+			continue
+		}
+		seen[name] = true
+		if _, isService := serviceAccounts[name]; isService {
+			continue
+		}
+		out = append(out, name)
+	}
+	return out
+}
+
 // etcGroup builds a matching /etc/group with a primary group per persona user.
+// The human login accounts are added to sudo (gid 27) and adm (gid 4): a box
+// whose ~/.bash_history is full of `sudo ...` must have its admin users actually
+// IN the sudo group, or `id`/`groups`/`getent group sudo` contradicts the
+// history (an empty sudo group on an admin box is a tell). A `shadow` group
+// (gid 42) is also present so /etc/shadow's root:shadow ownership resolves.
 func etcGroup(t credentialTemplate) string {
+	humans := humanLoginUsers(t)
+	admins := strings.Join(humans, ",")
 	var b strings.Builder
-	b.WriteString("root:x:0:\nsudo:x:27:\nwww-data:x:33:\nstaff:x:50:\nusers:x:100:\n")
+	b.WriteString("root:x:0:\n")
+	fmt.Fprintf(&b, "adm:x:4:%s\n", admins)
+	fmt.Fprintf(&b, "sudo:x:27:%s\n", admins)
+	b.WriteString("www-data:x:33:\n")
+	b.WriteString("shadow:x:42:\n")
+	b.WriteString("staff:x:50:\n")
+	b.WriteString("users:x:100:\n")
 	gid := 1000
 	seen := map[string]bool{}
 	for _, u := range t.Users {
@@ -638,4 +674,243 @@ func procMounts(mem memProfile, seed string) string {
 		"/dev/sda15 /boot/efi vfat rw,relatime,fmask=0077,dmask=0077,codepage=437,iocharset=ascii,shortname=mixed,errors=remount-ro 0 0",
 		fmt.Sprintf("tmpfs /run/user/0 tmpfs rw,nosuid,nodev,relatime,size=%dk,nr_inodes=%d,mode=700 0 0", runUserSize, runUserInodes),
 	}, "\n") + "\n"
+}
+
+// --- per-instance system-identity files served via the fs-patch realfile path
+// (see cowriefs.go). These are files the stock fake fs either lacks a node for
+// (machine-id, lsb-release), ships as an empty size-0 node (/proc/loadavg,
+// /proc/sys/kernel/*), or fills with content that contradicts QPot's rewritten
+// /etc/passwd (/etc/shadow). Each is generated coherently with the same
+// persona/distro/hostname/seed the rest of the identity uses. ---
+
+// machineIDForSeed returns a per-instance /etc/machine-id: 32 lowercase hex
+// (128-bit), created once per install on every systemd distro. Stock Cowrie
+// ships none, so `cat /etc/machine-id` is empty/absent on a box that plainly
+// runs systemd (a tell), and a fixed value would be a perfect cross-deployment
+// correlator - so it must be unique per instance. /var/lib/dbus/machine-id is
+// the same value on a real box.
+func machineIDForSeed(seed string) string {
+	sum := sha512.Sum512([]byte("machine-id:" + seed))
+	return hex.EncodeToString(sum[:16])
+}
+
+// lsbRelease returns /etc/lsb-release for Ubuntu profiles (Debian ships none by
+// default). An Ubuntu box whose /etc/os-release says "Ubuntu 22.04" but whose
+// /etc/lsb-release is empty/absent is an internal contradiction, and
+// `lsb_release -a` reads this file. Returns "" for non-Ubuntu (caller omits it).
+func lsbRelease(p distroProfile) string {
+	if !strings.Contains(strings.ToLower(p.OSPretty), "ubuntu") {
+		return ""
+	}
+	ver := extractVersion(p.OSPretty)
+	return fmt.Sprintf("DISTRIB_ID=Ubuntu\nDISTRIB_RELEASE=%s\nDISTRIB_CODENAME=%s\nDISTRIB_DESCRIPTION=\"%s\"\n",
+		ver, p.Codename, p.OSPretty)
+}
+
+// procLoadavg returns a believable /proc/loadavg. The three load figures are
+// 0.00 to stay CONSISTENT with Cowrie's `w`, which hardcodes "load average:
+// 0.00, 0.00, 0.00" - a non-zero /proc/loadavg would contradict `w`. The
+// running/total task counts and last-pid vary per instance. (Stock ships this
+// as an empty size-0 node, so `cat /proc/loadavg` returns nothing - a tell.)
+func procLoadavg(seed string) string {
+	total := 90 + seededIndex("loadprocs:"+seed, 240)
+	lastpid := 1200 + seededIndex("lastpid:"+seed, 30000)
+	return fmt.Sprintf("0.00 0.00 0.00 1/%d %d\n", total, lastpid)
+}
+
+// shadowSaltForSeed returns a stable 16-char crypt salt (from the crypt(3)
+// alphabet) for a user, derived from the seed so hashes are per-instance and
+// deterministic.
+func shadowSaltForSeed(name, seed string) string {
+	sum := sha512.Sum512([]byte("shadowsalt:" + name + ":" + seed))
+	b := make([]byte, 16)
+	for i := 0; i < 16; i++ {
+		b[i] = cryptAlphabet[sum[i]&0x3f]
+	}
+	return string(b)
+}
+
+// etcShadow builds /etc/shadow consistent with the generated /etc/passwd: every
+// account that can actually log in (the persona's users, incl. root and any
+// service account the persona accepts) carries a REAL $6$ sha512-crypt hash of
+// its primary password, so an attacker who dumps and cracks shadow recovers a
+// password that genuinely works - reinforcing the illusion rather than
+// contradicting it. Locked system accounts (daemon, bin, sshd, ...) get "*".
+func etcShadow(t credentialTemplate, seed string) string {
+	pw := map[string]string{} // username -> primary (first) password
+	for _, u := range t.Users {
+		name := sanitizeConfigValue(u.Username)
+		if name == "" || len(u.Passwords) == 0 {
+			continue
+		}
+		if _, ok := pw[name]; !ok {
+			pw[name] = u.Passwords[0]
+		}
+	}
+	lastchg := 19000 + seededIndex("shadowage:"+seed, 700) // days since epoch (~2022-2024)
+	field := func(name string) string {
+		if p, ok := pw[name]; ok {
+			return sha512Crypt(p, shadowSaltForSeed(name, seed))
+		}
+		return "*"
+	}
+	var b strings.Builder
+	emit := func(name string) {
+		fmt.Fprintf(&b, "%s:%s:%d:0:99999:7:::\n", name, field(name), lastchg)
+	}
+	// Base system accounts, in the same order as systemPasswd.
+	for _, ln := range strings.Split(systemPasswd, "\n") {
+		if i := strings.Index(ln, ":"); i > 0 {
+			emit(ln[:i])
+		}
+	}
+	// Persona users appended after the base set (same dedup rules as etcPasswd).
+	seen := map[string]bool{}
+	for _, u := range t.Users {
+		name := sanitizeConfigValue(u.Username)
+		if name == "" || seen[name] || presentInBase(name) {
+			continue
+		}
+		seen[name] = true
+		emit(name)
+	}
+	return b.String()
+}
+
+// seqRepeat returns src repeated/truncated to exactly n bytes (a helper for
+// sha512Crypt's P/S sequences).
+func seqRepeat(src []byte, n int) []byte {
+	out := make([]byte, n)
+	for i := 0; i < n; i++ {
+		out[i] = src[i%len(src)]
+	}
+	return out
+}
+
+// cryptAlphabet is the crypt(3) base64 alphabet (NOT standard base64 ordering).
+const cryptAlphabet = "./0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
+
+// sha512Crypt implements the glibc SHA-512 crypt ($6$) scheme (Ulrich Drepper's
+// spec, 5000 rounds) so a generated /etc/shadow hash actually verifies against
+// the given password - matching `openssl passwd -6` and glibc crypt(3) exactly.
+func sha512Crypt(password, salt string) string {
+	const rounds = 5000
+	if len(salt) > 16 {
+		salt = salt[:16]
+	}
+	key := []byte(password)
+	saltb := []byte(salt)
+
+	// Digest B = SHA512(key + salt + key).
+	bh := sha512.New()
+	bh.Write(key)
+	bh.Write(saltb)
+	bh.Write(key)
+	digestB := bh.Sum(nil)
+
+	// Digest A.
+	ah := sha512.New()
+	ah.Write(key)
+	ah.Write(saltb)
+	for cnt := len(key); cnt > 0; {
+		if cnt > 64 {
+			ah.Write(digestB)
+			cnt -= 64
+		} else {
+			ah.Write(digestB[:cnt])
+			cnt = 0
+		}
+	}
+	for i := len(key); i > 0; i >>= 1 {
+		if i&1 == 1 {
+			ah.Write(digestB)
+		} else {
+			ah.Write(key)
+		}
+	}
+	digestA := ah.Sum(nil)
+
+	// DP -> P (length len(key)).
+	dp := sha512.New()
+	for i := 0; i < len(key); i++ {
+		dp.Write(key)
+	}
+	p := seqRepeat(dp.Sum(nil), len(key))
+
+	// DS -> S (length len(salt)).
+	dsh := sha512.New()
+	for i := 0; i < 16+int(digestA[0]); i++ {
+		dsh.Write(saltb)
+	}
+	s := seqRepeat(dsh.Sum(nil), len(saltb))
+
+	// Rounds.
+	c := digestA
+	for i := 0; i < rounds; i++ {
+		h := sha512.New()
+		if i&1 == 1 {
+			h.Write(p)
+		} else {
+			h.Write(c)
+		}
+		if i%3 != 0 {
+			h.Write(s)
+		}
+		if i%7 != 0 {
+			h.Write(p)
+		}
+		if i&1 == 1 {
+			h.Write(c)
+		} else {
+			h.Write(p)
+		}
+		c = h.Sum(nil)
+	}
+	return "$6$" + salt + "$" + b64Crypt(c)
+}
+
+// b64Crypt encodes the 64-byte SHA-512 digest with the crypt(3) byte
+// permutation and alphabet (86 chars). glibc's b64_from_24bit(B2,B1,B0) treats
+// the first source byte as the high byte of the 24-bit group.
+func b64Crypt(c []byte) string {
+	order := [][3]int{
+		{0, 21, 42}, {22, 43, 1}, {44, 2, 23}, {3, 24, 45}, {25, 46, 4}, {47, 5, 26},
+		{6, 27, 48}, {28, 49, 7}, {50, 8, 29}, {9, 30, 51}, {31, 52, 10}, {53, 11, 32},
+		{12, 33, 54}, {34, 55, 13}, {56, 14, 35}, {15, 36, 57}, {37, 58, 16}, {59, 17, 38},
+		{18, 39, 60}, {40, 61, 19}, {62, 20, 41},
+	}
+	var out []byte
+	emit := func(w uint, n int) {
+		for i := 0; i < n; i++ {
+			out = append(out, cryptAlphabet[w&0x3f])
+			w >>= 6
+		}
+	}
+	for _, g := range order {
+		emit(uint(c[g[0]])<<16|uint(c[g[1]])<<8|uint(c[g[2]]), 4)
+	}
+	emit(uint(c[63]), 2)
+	return string(out)
+}
+
+// embeddedSystemFiles returns the per-instance system-identity files planted
+// into the fake fs by the startup patch (cowriefs.go), coherent with the same
+// persona/distro/hostname/seed the rest of the deception uses. hostname must be
+// the SAME name cowrie.cfg/etc-hostname advertise.
+func embeddedSystemFiles(t credentialTemplate, p distroProfile, hostname, seed string) []embeddedFile {
+	machineID := machineIDForSeed(seed) + "\n"
+	files := []embeddedFile{
+		{Path: "/etc/machine-id", UID: 0, GID: 0, Mode: 0o100444, Content: machineID},
+		{Path: "/var/lib/dbus/machine-id", UID: 0, GID: 0, Mode: 0o100444, Content: machineID},
+		{Path: "/etc/shadow", UID: 0, GID: 42, Mode: 0o100640, Content: etcShadow(t, seed)},
+		{Path: "/proc/loadavg", UID: 0, GID: 0, Mode: 0o100444, Content: procLoadavg(seed)},
+		{Path: "/proc/sys/kernel/hostname", UID: 0, GID: 0, Mode: 0o100644, Content: sanitizeConfigValue(hostname) + "\n"},
+		{Path: "/proc/sys/kernel/osrelease", UID: 0, GID: 0, Mode: 0o100444, Content: p.KernelVersion + "\n"},
+		{Path: "/proc/sys/kernel/ostype", UID: 0, GID: 0, Mode: 0o100444, Content: "Linux\n"},
+		{Path: "/proc/sys/kernel/version", UID: 0, GID: 0, Mode: 0o100444, Content: p.KernelBuildString + "\n"},
+	}
+	if lsb := lsbRelease(p); lsb != "" {
+		files = append(files, embeddedFile{Path: "/etc/lsb-release", UID: 0, GID: 0, Mode: 0o100644, Content: lsb})
+	}
+	return files
 }

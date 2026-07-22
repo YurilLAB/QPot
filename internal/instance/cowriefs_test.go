@@ -70,15 +70,16 @@ func itoa(n int) string {
 // the correct cowrie type. It also fuzz-checks that arbitrary persona content
 // cannot corrupt the embedding.
 func TestCowrieFsPatchScriptValid(t *testing.T) {
-	users := []homeUser{
-		{Name: "jmartin", UID: 1000, History: "ls -la\ncd /var/www\nexit\n"},
-		{Name: "swilson", UID: 1001, History: "whoami\nexit\n"},
+	files := []embeddedFile{
+		{Path: "/home/jmartin/.bash_history", UID: 1000, GID: 1000, Mode: 0o100600, Content: "ls -la\ncd /var/www\nexit\n"},
+		{Path: "/etc/machine-id", UID: 0, GID: 0, Mode: 0o100444, Content: "0123456789abcdef0123456789abcdef\n"},
 	}
-	s := cowrieFsPatchScript(users)
+	s := cowrieFsPatchScript(files, []string{"jmartin"})
 	// Must point at the writable pickle and have the base-copy fallback.
 	for _, want := range []string{
 		`OUT = "/tmp/cowrie/fs.pickle"`,
 		`BASE = "/home/cowrie/cowrie/src/cowrie/data/fs.pickle"`,
+		`REALDIR = "/tmp/cowrie/qpotfs"`,
 		"shutil.copy(BASE, OUT)", // fallback
 		"pickle.loads(data)",     // validate round-trip before commit
 		"T_DIR, T_FILE = 1, 2",   // correct cowrie node types
@@ -87,27 +88,30 @@ func TestCowrieFsPatchScriptValid(t *testing.T) {
 			t.Errorf("patch script missing %q", want)
 		}
 	}
-	// Extract the base64 blob and confirm it decodes to the exact user set.
+	// The realfile mechanism is what makes content served: the node must point at
+	// a real file, never rely on inline node content.
+	if !strings.Contains(s, "rf = REALDIR") || !strings.Contains(s, "T_FILE, uid, gid, size, mode, NOW, [], None, rf") {
+		t.Error("patch script must set the node realfile to a written tmpfs path (Cowrie serves A_REALFILE, not inline content)")
+	}
+	// The first base64 blob is the FILES payload; confirm it decodes and carries
+	// the exact files with content intact.
 	const marker = `b64decode("`
 	i := strings.Index(s, marker)
 	if i < 0 {
-		t.Fatal("patch script has no base64 user blob")
+		t.Fatal("patch script has no base64 files blob")
 	}
 	rest := s[i+len(marker):]
 	j := strings.Index(rest, `"`)
-	if j < 0 {
-		t.Fatal("unterminated base64 blob")
-	}
 	raw, err := base64.StdEncoding.DecodeString(rest[:j])
 	if err != nil {
-		t.Fatalf("embedded user blob is not valid base64: %v", err)
+		t.Fatalf("embedded files blob is not valid base64: %v", err)
 	}
 	var got []map[string]any
 	if err := json.Unmarshal(raw, &got); err != nil {
-		t.Fatalf("embedded user blob is not valid JSON: %v", err)
+		t.Fatalf("embedded files blob is not valid JSON: %v", err)
 	}
-	if len(got) != 2 || got[0]["name"] != "jmartin" || got[1]["name"] != "swilson" {
-		t.Errorf("embedded users mismatch: %v", got)
+	if len(got) != 2 || got[0]["path"] != "/home/jmartin/.bash_history" || got[0]["content"] != "ls -la\ncd /var/www\nexit\n" {
+		t.Errorf("embedded files mismatch: %v", got)
 	}
 }
 
@@ -116,24 +120,24 @@ func TestCowrieFsPatchScriptValid(t *testing.T) {
 // base64+JSON channel, and the script body itself stays single-block (no early
 // termination of the b64 literal).
 func TestCowrieFsPatchScriptInjectionSafe(t *testing.T) {
-	evil := []homeUser{
-		{Name: "a\"); import os; os.system('x')#", UID: 1000, History: "\"\n'''\n)+1"},
-		{Name: "b\nrm -rf /\n", UID: 1001, History: "`backtick`$(cmd)"},
+	evil := []embeddedFile{
+		{Path: "/home/a\"); import os; os.system('x')#/.bash_history", UID: 1000, GID: 1000, Mode: 0o100600, Content: "\"\n'''\n)+1"},
+		{Path: "/home/b/.bash_history", UID: 1001, GID: 1001, Mode: 0o100600, Content: "`backtick`$(cmd)\nrm -rf /\n"},
 	}
-	s := cowrieFsPatchScript(evil)
-	// The only base64 literal must decode and round-trip the exact hostile data.
+	s := cowrieFsPatchScript(evil, []string{"a", "b"})
+	// The FILES base64 literal must decode and round-trip the exact hostile data.
 	i := strings.Index(s, `b64decode("`) + len(`b64decode("`)
 	j := strings.Index(s[i:], `"`)
 	raw, err := base64.StdEncoding.DecodeString(s[i : i+j])
 	if err != nil {
 		t.Fatalf("hostile input broke the base64 blob: %v", err)
 	}
-	var got []homeUser
+	var got []embeddedFile
 	if err := json.Unmarshal(raw, &got); err != nil {
 		t.Fatalf("hostile input broke the JSON: %v", err)
 	}
-	if got[0].Name != evil[0].Name || got[1].History != evil[1].History {
-		t.Error("hostile username/history not preserved intact through the embedding")
+	if got[0].Path != evil[0].Path || got[1].Content != evil[1].Content {
+		t.Error("hostile path/content not preserved intact through the embedding")
 	}
 }
 

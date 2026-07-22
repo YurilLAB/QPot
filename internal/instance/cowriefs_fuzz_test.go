@@ -24,14 +24,19 @@ func FuzzCowrieFsPatch(f *testing.F) {
 			{Username: "deploy", Passwords: []string{"d"}},
 		}}
 		users := cowrieHomeUsers(tmpl, seed) // must not panic
-		script := cowrieFsPatchScript(users) // must not panic
+		// The full embedded-file set (home content + system files) is what the
+		// deploy-time patch embeds; hostile usernames flow into file paths here.
+		files := append(cowrieHomeFiles(tmpl, seed),
+			embeddedSystemFiles(tmpl, profileForSeed(seed), "host", seed)...)
+		script := cowrieFsPatchScript(files, personaHomeNames(tmpl, seed)) // must not panic
 
-		// Exactly one base64 user blob, and it must decode + JSON-parse back to the
-		// same users (no field can corrupt or escape the embedding).
+		// The FIRST base64 blob is the FILES payload; it must decode + JSON-parse
+		// back to the same files (no path/content can corrupt or escape the
+		// embedding and break the generated Python).
 		marker := `b64decode("`
 		i := strings.Index(script, marker)
 		if i < 0 {
-			t.Fatal("patch script missing base64 user blob")
+			t.Fatal("patch script missing base64 files blob")
 		}
 		rest := script[i+len(marker):]
 		j := strings.IndexByte(rest, '"')
@@ -42,20 +47,20 @@ func FuzzCowrieFsPatch(f *testing.F) {
 		if err != nil {
 			t.Fatalf("embedded blob not valid base64: %v", err)
 		}
-		var got []homeUser
+		var got []embeddedFile
 		if err := json.Unmarshal(raw, &got); err != nil {
 			t.Fatalf("embedded blob not valid JSON: %v", err)
 		}
-		if len(got) != len(users) {
-			t.Fatalf("round-trip user count mismatch: got %d want %d", len(got), len(users))
+		if len(got) != len(files) {
+			t.Fatalf("round-trip file count mismatch: got %d want %d", len(got), len(files))
 		}
-		for k := range users {
-			if got[k].Name != users[k].Name || got[k].UID != users[k].UID || got[k].History != users[k].History {
-				t.Errorf("user %d not preserved through embedding: %+v vs %+v", k, got[k], users[k])
+		for k := range files {
+			if got[k].Path != files[k].Path || got[k].Content != files[k].Content || got[k].UID != files[k].UID {
+				t.Errorf("file %d not preserved through embedding: %+v vs %+v", k, got[k], files[k])
 			}
 		}
 		// Home users must never include root or service accounts and must have a
-		// strictly-increasing-from-1000 uid space shared with etcPasswd.
+		// uid space starting at 1000 shared with etcPasswd.
 		for _, hu := range users {
 			if hu.Name == "" || hu.Name == "root" {
 				t.Errorf("home user must not be empty/root: %q", hu.Name)

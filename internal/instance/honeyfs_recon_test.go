@@ -82,13 +82,13 @@ func TestHoneyfsMeminfoConsistent(t *testing.T) {
 		if mi["MemTotal"] == mem.TotalKB {
 			t.Errorf("seed %s: MemTotal is the exact power-of-two nominal %d - real firmware/kernel reserve a few percent", seed, mem.TotalKB)
 		}
-		if !(mi["MemTotal"] < mem.TotalKB && mi["MemTotal"] > mem.TotalKB*94/100) {
+		if mi["MemTotal"] >= mem.TotalKB || mi["MemTotal"] <= mem.TotalKB*94/100 {
 			t.Errorf("seed %s: MemTotal=%d not within (94%%, 100%%) of nominal %d", seed, mi["MemTotal"], mem.TotalKB)
 		}
 		if mi["SwapTotal"] != mem.SwapKB {
 			t.Errorf("seed %s: SwapTotal=%d, want %d", seed, mi["SwapTotal"], mem.SwapKB)
 		}
-		if !(mi["MemFree"] <= mi["MemAvailable"] && mi["MemAvailable"] <= mi["MemTotal"]) {
+		if mi["MemFree"] > mi["MemAvailable"] || mi["MemAvailable"] > mi["MemTotal"] {
 			t.Errorf("seed %s: meminfo values not sane: free=%d avail=%d total=%d", seed, mi["MemFree"], mi["MemAvailable"], mi["MemTotal"])
 		}
 		// swaps file must report the same swap size.
@@ -258,7 +258,7 @@ func TestHoneyfsFstabEfiIsFatVolumeID(t *testing.T) {
 			if r == '-' {
 				continue
 			}
-			if !((r >= '0' && r <= '9') || (r >= 'A' && r <= 'F')) {
+			if (r < '0' || r > '9') && (r < 'A' || r > 'F') {
 				t.Errorf("seed %s: EFI vfat id %q has non-hex rune %q", seed, id, string(r))
 			}
 		}
@@ -308,6 +308,129 @@ func TestHoneyfsProcMountsSizesTrackRAM(t *testing.T) {
 		}
 		if udev == 8155316 {
 			t.Errorf("seed %s: udev size is the old hardcoded 8155316k", seed)
+		}
+	}
+}
+
+// TestEtcShadowMatchesPasswdAndCracks guards that /etc/shadow is coherent with
+// the generated /etc/passwd and that every login account's hash actually
+// verifies against its primary password (an attacker who cracks shadow recovers
+// a working password), while pure system accounts stay locked ("*").
+func TestEtcShadowMatchesPasswdAndCracks(t *testing.T) {
+	for _, tmpl := range credentialTemplates {
+		shadow := etcShadow(tmpl, "seedS")
+		lines := map[string]string{}
+		for _, ln := range strings.Split(shadow, "\n") {
+			if ln == "" {
+				continue
+			}
+			f := strings.SplitN(ln, ":", 3)
+			if len(f) >= 2 {
+				lines[f[0]] = f[1]
+			}
+		}
+		// root and every persona account must exist in shadow.
+		if _, ok := lines["root"]; !ok {
+			t.Errorf("persona %q: shadow has no root line", tmpl.Name)
+		}
+		// Locked system account example: daemon must be "*".
+		if lines["daemon"] != "*" {
+			t.Errorf("persona %q: daemon should be locked '*', got %q", tmpl.Name, lines["daemon"])
+		}
+		// Every account the persona accepts must carry a $6$ hash that cracks back.
+		for _, u := range tmpl.Users {
+			name := sanitizeConfigValue(u.Username)
+			if name == "" || len(u.Passwords) == 0 {
+				continue
+			}
+			field, ok := lines[name]
+			if !ok {
+				t.Errorf("persona %q: login user %q missing from shadow", tmpl.Name, name)
+				continue
+			}
+			if !strings.HasPrefix(field, "$6$") {
+				t.Errorf("persona %q: login user %q shadow field not a $6$ hash: %q", tmpl.Name, name, field)
+				continue
+			}
+			seg := strings.Split(field, "$")
+			if len(seg) < 4 || sha512Crypt(u.Passwords[0], seg[2]) != field {
+				t.Errorf("persona %q: %q shadow hash does not crack to primary password", tmpl.Name, name)
+			}
+		}
+	}
+}
+
+// TestMachineIDPerInstanceUnique guards that /etc/machine-id is a 32-hex,
+// per-seed value (a fixed value would be a cross-deployment fingerprint).
+func TestMachineIDPerInstanceUnique(t *testing.T) {
+	seen := map[string]bool{}
+	for _, s := range []string{"a", "b", "c", "d", "e", "f", "g", "h"} {
+		id := machineIDForSeed(s)
+		if len(id) != 32 {
+			t.Errorf("machine-id %q is not 32 hex chars", id)
+		}
+		for _, r := range id {
+			if (r < '0' || r > '9') && (r < 'a' || r > 'f') {
+				t.Errorf("machine-id %q has non-hex rune", id)
+				break
+			}
+		}
+		seen[id] = true
+	}
+	if len(seen) < 2 {
+		t.Errorf("machine-id must vary across seeds, got %d distinct", len(seen))
+	}
+	// Deterministic per seed.
+	if a, b := machineIDForSeed("stable"), machineIDForSeed("stable"); a != b {
+		t.Error("machine-id must be deterministic for a fixed seed")
+	}
+}
+
+// TestLsbReleaseCoherence guards that /etc/lsb-release is emitted for Ubuntu
+// profiles (and agrees with /etc/os-release) and omitted for Debian.
+func TestLsbReleaseCoherence(t *testing.T) {
+	for _, p := range distroProfiles {
+		lsb := lsbRelease(p)
+		if strings.Contains(strings.ToLower(p.OSPretty), "ubuntu") {
+			if !strings.Contains(lsb, "DISTRIB_ID=Ubuntu") {
+				t.Errorf("%q: Ubuntu profile must emit lsb-release", p.OSPretty)
+			}
+			if !strings.Contains(lsb, "DISTRIB_CODENAME="+p.Codename) {
+				t.Errorf("%q: lsb-release codename must match profile %q", p.OSPretty, p.Codename)
+			}
+			if !strings.Contains(lsb, p.OSPretty) {
+				t.Errorf("%q: lsb-release DESCRIPTION must match os-release pretty name", p.OSPretty)
+			}
+		} else if lsb != "" {
+			t.Errorf("%q: non-Ubuntu profile must NOT emit lsb-release, got %q", p.OSPretty, lsb)
+		}
+	}
+}
+
+// TestEtcGroupSudoMembership guards that human admin users are actually in the
+// sudo group - a box whose history is full of `sudo` but whose sudo group is
+// empty is a tell.
+func TestEtcGroupSudoMembership(t *testing.T) {
+	for _, tmpl := range credentialTemplates {
+		group := etcGroup(tmpl)
+		humans := humanLoginUsers(tmpl)
+		var sudoLine string
+		for _, ln := range strings.Split(group, "\n") {
+			if strings.HasPrefix(ln, "sudo:") {
+				sudoLine = ln
+			}
+		}
+		if sudoLine == "" {
+			t.Fatalf("persona %q: /etc/group has no sudo group", tmpl.Name)
+		}
+		for _, h := range humans {
+			if !strings.Contains(sudoLine+",", ":"+h+",") && !strings.Contains(sudoLine+",", ","+h+",") {
+				t.Errorf("persona %q: human user %q not in sudo group: %q", tmpl.Name, h, sudoLine)
+			}
+		}
+		// shadow group must exist so /etc/shadow's root:shadow ownership resolves.
+		if !strings.Contains(group, "shadow:x:42:") {
+			t.Errorf("persona %q: /etc/group missing shadow group (gid 42)", tmpl.Name)
 		}
 	}
 }

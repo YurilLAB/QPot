@@ -1262,9 +1262,12 @@ func (g *ComposeGenerator) generateCowrieHoneyfs() map[string]string {
 }
 
 // generateCowrieFsPatch returns the Python script that, run at container start,
-// adds the persona's human users' home directories to Cowrie's fake filesystem
-// (see cowriefs.go). The user set + uids mirror generateCowrieHoneyfs/etcPasswd
-// so /home/<user>, its ownership, and /etc/passwd stay consistent.
+// builds the persona home directories AND the per-instance system files
+// (machine-id, shadow, lsb-release, /proc/sys/kernel/*, ...) in Cowrie's fake
+// filesystem, and removes any stock home absent from /etc/passwd (see
+// cowriefs.go / honeyfs.go). The persona, distro profile, hostname and uids all
+// mirror generateCowrieHoneyfs/generateCowrieConfig so every artifact stays
+// consistent.
 func (g *ComposeGenerator) generateCowrieFsPatch() string {
 	seed := g.Config.QPotID
 	if seed == "" {
@@ -1272,7 +1275,14 @@ func (g *ComposeGenerator) generateCowrieFsPatch() string {
 	}
 	hp := g.Config.Honeypots["cowrie"]
 	persona := selectCredentialTemplate(hp.Stealth.CredentialTemplate, seed)
-	return cowrieFsPatchScript(cowrieHomeUsers(persona, seed))
+	profile := profileForSeed(seed)
+	hostname := hp.Stealth.FakeHostname
+	if hostname == "" {
+		hostname = hostnameForPersona(persona, seed)
+	}
+	files := append(cowrieHomeFiles(persona, seed),
+		embeddedSystemFiles(persona, profile, hostname, seed)...)
+	return cowrieFsPatchScript(files, personaHomeNames(persona, seed))
 }
 
 // generateCowrieConfig generates TPOT-compatible Cowrie config.
