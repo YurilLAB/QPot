@@ -155,6 +155,25 @@ func memForSeed(seed string) memProfile {
 	return memProfiles[seededIndex("mem:"+seed, len(memProfiles))]
 }
 
+// memTotalKB returns the realistic MemTotal a real machine reports for a nominal
+// RAM size. A real box NEVER reports an exact power-of-two MemTotal: firmware,
+// the kernel image and reserved regions carve out a few percent, so a nominal
+// 4 GiB VM reports something like 4025480 kB, not 4194304. We subtract a
+// seed-derived reservation in [2.5%, 5%) of nominal, which also makes two
+// same-size deployments report DIFFERENT (non-identical) meminfo. /proc/meminfo
+// and the /proc/mounts tmpfs sizes both derive from this so they agree.
+func memTotalKB(mem memProfile, seed string) int64 {
+	nominal := int64(mem.TotalKB)
+	band := nominal / 40 // 2.5% of nominal
+	if band <= 0 {
+		return nominal
+	}
+	h := fnv.New64a()
+	_, _ = h.Write([]byte("memresv:" + seed))
+	resv := band + int64(h.Sum64()%uint64(band)) // [2.5%, 5%) of nominal
+	return nominal - resv
+}
+
 // realisticHostnames is a pool of plausible production-server hostnames. None is
 // Cowrie's default "svr04" or T-Pot's "srv01".
 var realisticHostnames = []string{
@@ -259,7 +278,42 @@ type cpuModel struct {
 	MHz       string // cpu MHz (string so we can keep the ".000" form)
 	CacheKB   int    // cache size in KB ("cache size")
 	Flags     string // the CPU flags line (per-vendor, KVM-guest typical)
+	// Bugs is the `bugs:` line every kernel since ~2018 prints (all advertised
+	// distro kernels are 5.4+). It MUST be microarchitecture-correct: AMD parts
+	// are not affected by Meltdown/L1TF/MDS so they never list cpu_meltdown/l1tf/
+	// mds, whereas Intel Haswell/Broadwell carry the full set. A cpuinfo with a
+	// modern flags line but no `bugs:` line at all is anomalous on a 6.x kernel.
+	Bugs string
+	// CPUIDLevel is the max CPUID leaf (`cpuid level`). Varies by microarch;
+	// hardcoding a Haswell-era 13 for an AMD EPYC or an Ice Lake Xeon is a tell.
+	CPUIDLevel int
+	// AddressSizes is the `address sizes` line. Intel server parts report
+	// "46 bits physical, 48 bits virtual"; AMD EPYC reports "48 bits physical".
+	AddressSizes string
 }
+
+// Vendor-representative `bugs:` lines, keyed by the microarchitecture's real
+// vulnerability exposure so each block is internally consistent with its
+// vendor_id/family/model. Sourced from real /proc/cpuinfo of these parts.
+const (
+	// Haswell/Broadwell (Xeon v3/v4): the full pre-mitigation Intel set.
+	bugsIntelHaswell = "cpu_meltdown spectre_v1 spectre_v2 spec_store_bypass l1tf mds swapgs itlb_multihit srbds mmio_stale_data retbleed"
+	// Cascade Lake (Xeon Gold 62xxR): Meltdown/L1TF fixed in silicon, adds TAA/GDS.
+	bugsIntelCascade = "spectre_v1 spectre_v2 spec_store_bypass swapgs taa itlb_multihit mmio_stale_data retbleed gds"
+	// Ice Lake-SP (Xeon Platinum 83xxC): MDS/TAA fixed in silicon.
+	bugsIntelIceLake = "spectre_v1 spectre_v2 spec_store_bypass swapgs mmio_stale_data retbleed eibrs_pbrsb gds"
+	// AMD Zen1 (EPYC 74xx): no Meltdown; sysret quirk + Spectre family + SSB.
+	bugsAMDZen1 = "sysret_ss_attrs spectre_v1 spectre_v2 spec_store_bypass"
+	// AMD Zen2 (EPYC 73xx): adds Retbleed + SRSO exposure.
+	bugsAMDZen2 = "sysret_ss_attrs spectre_v1 spectre_v2 spec_store_bypass retbleed srso"
+	// AMD Zen3 (EPYC 77xx): Retbleed not applicable; carries SRSO.
+	bugsAMDZen3 = "sysret_ss_attrs spectre_v1 spectre_v2 spec_store_bypass srso"
+)
+
+const (
+	addrIntelServer = "46 bits physical, 48 bits virtual"
+	addrAMDServer   = "48 bits physical, 48 bits virtual"
+)
 
 // intelKVMFlags / amdKVMFlags are the CPU flag sets a typical KVM guest exposes
 // for that vendor — long, real, and a strong realism signal (a too-short or
@@ -275,13 +329,13 @@ const amdKVMFlags = "fpu vme de pse tsc msr pae mce cx8 apic sep mtrr pge mca cm
 // is fixed at 2 elsewhere to match Cowrie's hard-coded `nproc`/`free` builtins —
 // see procCPUInfo — so only the model varies, not the core count.)
 var cpuModels = []cpuModel{
-	{VendorID: "GenuineIntel", ModelName: "Intel(R) Xeon(R) Platinum 8370C CPU @ 2.80GHz", Family: 6, Model: 106, Stepping: 6, Microcode: "0xd0003d1", MHz: "2793.436", CacheKB: 49152, Flags: intelKVMFlags},
-	{VendorID: "GenuineIntel", ModelName: "Intel(R) Xeon(R) CPU E5-2680 v4 @ 2.40GHz", Family: 6, Model: 79, Stepping: 1, Microcode: "0xb000040", MHz: "2399.996", CacheKB: 35840, Flags: intelKVMFlags},
-	{VendorID: "GenuineIntel", ModelName: "Intel(R) Xeon(R) Gold 6248R CPU @ 3.00GHz", Family: 6, Model: 85, Stepping: 7, Microcode: "0x5003604", MHz: "2999.998", CacheKB: 36608, Flags: intelKVMFlags},
-	{VendorID: "GenuineIntel", ModelName: "Intel(R) Xeon(R) CPU E5-2650 v3 @ 2.30GHz", Family: 6, Model: 63, Stepping: 2, Microcode: "0x43", MHz: "2299.998", CacheKB: 25600, Flags: intelKVMFlags},
-	{VendorID: "AuthenticAMD", ModelName: "AMD EPYC 7401P 24-Core Processor", Family: 23, Model: 1, Stepping: 2, Microcode: "0x8001250", MHz: "1996.250", CacheKB: 512, Flags: amdKVMFlags},
-	{VendorID: "AuthenticAMD", ModelName: "AMD EPYC 7763 64-Core Processor", Family: 25, Model: 1, Stepping: 1, Microcode: "0xa001144", MHz: "2445.406", CacheKB: 512, Flags: amdKVMFlags},
-	{VendorID: "AuthenticAMD", ModelName: "AMD EPYC 7302P 16-Core Processor", Family: 23, Model: 49, Stepping: 0, Microcode: "0x830104d", MHz: "2994.374", CacheKB: 512, Flags: amdKVMFlags},
+	{VendorID: "GenuineIntel", ModelName: "Intel(R) Xeon(R) Platinum 8370C CPU @ 2.80GHz", Family: 6, Model: 106, Stepping: 6, Microcode: "0xd0003d1", MHz: "2793.436", CacheKB: 49152, Flags: intelKVMFlags, Bugs: bugsIntelIceLake, CPUIDLevel: 27, AddressSizes: addrIntelServer},
+	{VendorID: "GenuineIntel", ModelName: "Intel(R) Xeon(R) CPU E5-2680 v4 @ 2.40GHz", Family: 6, Model: 79, Stepping: 1, Microcode: "0xb000040", MHz: "2399.996", CacheKB: 35840, Flags: intelKVMFlags, Bugs: bugsIntelHaswell, CPUIDLevel: 20, AddressSizes: addrIntelServer},
+	{VendorID: "GenuineIntel", ModelName: "Intel(R) Xeon(R) Gold 6248R CPU @ 3.00GHz", Family: 6, Model: 85, Stepping: 7, Microcode: "0x5003604", MHz: "2999.998", CacheKB: 36608, Flags: intelKVMFlags, Bugs: bugsIntelCascade, CPUIDLevel: 22, AddressSizes: addrIntelServer},
+	{VendorID: "GenuineIntel", ModelName: "Intel(R) Xeon(R) CPU E5-2650 v3 @ 2.30GHz", Family: 6, Model: 63, Stepping: 2, Microcode: "0x43", MHz: "2299.998", CacheKB: 25600, Flags: intelKVMFlags, Bugs: bugsIntelHaswell, CPUIDLevel: 15, AddressSizes: addrIntelServer},
+	{VendorID: "AuthenticAMD", ModelName: "AMD EPYC 7401P 24-Core Processor", Family: 23, Model: 1, Stepping: 2, Microcode: "0x8001250", MHz: "1996.250", CacheKB: 512, Flags: amdKVMFlags, Bugs: bugsAMDZen1, CPUIDLevel: 13, AddressSizes: addrAMDServer},
+	{VendorID: "AuthenticAMD", ModelName: "AMD EPYC 7763 64-Core Processor", Family: 25, Model: 1, Stepping: 1, Microcode: "0xa001144", MHz: "2445.406", CacheKB: 512, Flags: amdKVMFlags, Bugs: bugsAMDZen3, CPUIDLevel: 16, AddressSizes: addrAMDServer},
+	{VendorID: "AuthenticAMD", ModelName: "AMD EPYC 7302P 16-Core Processor", Family: 23, Model: 49, Stepping: 0, Microcode: "0x830104d", MHz: "2994.374", CacheKB: 512, Flags: amdKVMFlags, Bugs: bugsAMDZen2, CPUIDLevel: 16, AddressSizes: addrAMDServer},
 }
 
 // cpuModelForSeed returns a per-instance CPU model. A distinct salt keeps the

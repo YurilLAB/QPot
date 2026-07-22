@@ -3,6 +3,7 @@ package instance
 import (
 	"fmt"
 	"hash/fnv"
+	"strconv"
 	"strings"
 )
 
@@ -113,9 +114,9 @@ func generateHoneyfs(t credentialTemplate, p distroProfile, hostname, seed strin
 		// per-instance size here AND bind-mount this same file over the real
 		// /proc/meminfo (see deploy.go) so `cat /proc/meminfo` and `free` agree and
 		// neither leaks the host. swaps/mounts are filled to match.
-		"proc/meminfo": procMeminfo(mem),
+		"proc/meminfo": procMeminfo(mem, seed),
 		"proc/swaps":   procSwaps(mem),
-		"proc/mounts":  procMounts(),
+		"proc/mounts":  procMounts(mem, seed),
 	}
 	return files
 }
@@ -149,17 +150,33 @@ func procCPUInfo(m cpuModel) string {
 		fmt.Fprintf(&b, "initial apicid\t: %d\n", cpu)
 		fmt.Fprintf(&b, "fpu\t\t: yes\n")
 		fmt.Fprintf(&b, "fpu_exception\t: yes\n")
-		fmt.Fprintf(&b, "cpuid level\t: 13\n")
+		fmt.Fprintf(&b, "cpuid level\t: %d\n", m.CPUIDLevel)
 		fmt.Fprintf(&b, "wp\t\t: yes\n")
 		fmt.Fprintf(&b, "flags\t\t: %s\n", m.Flags)
-		fmt.Fprintf(&b, "bogomips\t: %s\n", m.MHz)
+		fmt.Fprintf(&b, "bugs\t\t: %s\n", m.Bugs)
+		// BogoMIPS on modern x86 is ~2x the CPU's rated base clock (e.g. a 2.80 GHz
+		// part reports ~5586.87, i.e. 2*2793.436), NOT equal to `cpu MHz`. bogomips
+		// == cpu MHz is a well-known emulation artifact, so derive it as 2*MHz.
+		fmt.Fprintf(&b, "bogomips\t: %s\n", bogomipsFor(m.MHz))
 		fmt.Fprintf(&b, "clflush size\t: 64\n")
 		fmt.Fprintf(&b, "cache_alignment\t: 64\n")
-		fmt.Fprintf(&b, "address sizes\t: 46 bits physical, 48 bits virtual\n")
+		fmt.Fprintf(&b, "address sizes\t: %s\n", m.AddressSizes)
 		fmt.Fprintf(&b, "power management:\n")
 		b.WriteString("\n")
 	}
 	return b.String()
+}
+
+// bogomipsFor renders a realistic BogoMIPS string for a given "cpu MHz" value:
+// ~2x the base clock, keeping two decimals the way real /proc/cpuinfo does. If
+// the MHz string is unparseable it falls back to the input so the file is never
+// malformed.
+func bogomipsFor(mhz string) string {
+	f, err := strconv.ParseFloat(strings.TrimSpace(mhz), 64)
+	if err != nil {
+		return mhz
+	}
+	return strconv.FormatFloat(f*2, 'f', 2, 64)
 }
 
 // procVersion builds a realistic /proc/version consistent with the distro
@@ -356,6 +373,16 @@ func uuidForSeed(seed string) string {
 		a, b&0xffff, (b>>16)&0xfff, 8+(c&0x3), (c>>2)&0xfff, (c>>16)&0xffff, d)
 }
 
+// fatVolumeIDForSeed returns a FAT/vfat volume serial in the canonical
+// XXXX-XXXX uppercase form blkid/fstab use for an EFI System Partition. Derived
+// from the seed so it is stable and unique per instance.
+func fatVolumeIDForSeed(seed string) string {
+	h := fnv.New32a()
+	_, _ = h.Write([]byte("fatvol:" + seed))
+	v := h.Sum32()
+	return fmt.Sprintf("%04X-%04X", v>>16, v&0xffff)
+}
+
 // resolvConf renders a believable /etc/resolv.conf. Stock honeyfs leaves it
 // empty, so `cat /etc/resolv.conf` returns nothing on a box that clearly resolves
 // names. Ubuntu servers typically run systemd-resolved (the 127.0.0.53 stub);
@@ -385,7 +412,11 @@ func resolvConf(p distroProfile, hostname string) string {
 // returns nothing on a machine that obviously has a mounted root - a tell.
 func fstab(seed string, mem memProfile) string {
 	rootUUID := uuidForSeed("root:" + seed)
-	efiUUID := uuidForSeed("efi:" + seed)
+	// The EFI System Partition is vfat/FAT32. blkid and fstab express a FAT
+	// volume's 32-bit serial as XXXX-XXXX (uppercase hex, with the dash) - NOT a
+	// full RFC-4122 UUID and NOT lowercase. Rendering an ext4-style id on a vfat
+	// line is an impossible format that flags a fabricated fstab.
+	efiID := fatVolumeIDForSeed("efi:" + seed)
 	var b strings.Builder
 	b.WriteString("# /etc/fstab: static file system information.\n")
 	b.WriteString("#\n")
@@ -397,7 +428,7 @@ func fstab(seed string, mem memProfile) string {
 	b.WriteString("# / was on /dev/sda1 during installation\n")
 	fmt.Fprintf(&b, "UUID=%s /               ext4    errors=remount-ro 0       1\n", rootUUID)
 	b.WriteString("# /boot/efi was on /dev/sda15 during installation\n")
-	fmt.Fprintf(&b, "UUID=%s  /boot/efi       vfat    umask=0077      0       1\n", efiUUID[:8])
+	fmt.Fprintf(&b, "UUID=%s  /boot/efi       vfat    umask=0077      0       1\n", efiID)
 	if mem.SwapKB > 0 {
 		b.WriteString("/swapfile                                 none            swap    sw              0       0\n")
 	}
@@ -496,10 +527,12 @@ Subsystem	sftp	` + sftp + `
 // (MemTotal/MemFree/MemAvailable/Buffers/Cached/SwapTotal/SwapFree/Shmem) with
 // internally-consistent values, since this same file is bind-mounted over the
 // real /proc/meminfo that `free` reads.
-func procMeminfo(mem memProfile) string {
+func procMeminfo(mem memProfile, seed string) string {
 	// int64 throughout: a few fields (notably VmallocTotal, ~32 TiB in kB) exceed
 	// 2^31, so plain int would overflow on 32-bit build targets (linux/arm).
-	total := int64(mem.TotalKB)
+	// MemTotal is the realistic (non-power-of-two, per-instance) size, not the
+	// round nominal - see memTotalKB.
+	total := memTotalKB(mem, seed)
 	// Believable proportions for a lightly-loaded server.
 	free := total * 58 / 100
 	buffers := total * 2 / 100
@@ -571,13 +604,27 @@ func procSwaps(mem memProfile) string {
 // procMounts renders a realistic /proc/mounts for an ext4-root server. Stock
 // honeyfs ships a near-empty file; `cat /proc/mounts` (and `mount`) is common
 // recon, and the absence of the usual kernel pseudo-filesystems is a tell.
-func procMounts() string {
+//
+// The devtmpfs (/dev) and tmpfs (/run, /run/user/0) SIZES are derived from the
+// per-instance RAM, not hardcoded: real Linux sizes devtmpfs at ~half of RAM and
+// /run at ~10%, so a fixed "size=8155316k" (≈8 GB) both contradicts the box's
+// own /proc/meminfo (impossible - larger than total RAM - on the 4 GB profile)
+// and is byte-identical across every deployment (a cross-QPot fingerprint). We
+// compute them from the same MemTotal /proc/meminfo reports (memTotalKB) so the
+// two agree, with the real nr_inodes≈size/4 relationship.
+func procMounts(mem memProfile, seed string) string {
+	total := memTotalKB(mem, seed)
+	devSize := total / 2 // devtmpfs defaults to ~half of RAM
+	devInodes := devSize / 4
+	runSize := total / 10 // /run tmpfs defaults to ~10% of RAM
+	runUserSize := runSize - 4
+	runUserInodes := runUserSize / 4
 	return strings.Join([]string{
 		"sysfs /sys sysfs rw,nosuid,nodev,noexec,relatime 0 0",
 		"proc /proc proc rw,nosuid,nodev,noexec,relatime 0 0",
-		"udev /dev devtmpfs rw,nosuid,relatime,size=8155316k,nr_inodes=2038829,mode=755 0 0",
+		fmt.Sprintf("udev /dev devtmpfs rw,nosuid,relatime,size=%dk,nr_inodes=%d,mode=755 0 0", devSize, devInodes),
 		"devpts /dev/pts devpts rw,nosuid,noexec,relatime,gid=5,mode=620,ptmxmode=000 0 0",
-		"tmpfs /run tmpfs rw,nosuid,nodev,noexec,relatime,size=1639292k,mode=755 0 0",
+		fmt.Sprintf("tmpfs /run tmpfs rw,nosuid,nodev,noexec,relatime,size=%dk,mode=755 0 0", runSize),
 		"/dev/sda1 / ext4 rw,relatime,errors=remount-ro 0 0",
 		"securityfs /sys/kernel/security securityfs rw,nosuid,nodev,noexec,relatime 0 0",
 		"tmpfs /dev/shm tmpfs rw,nosuid,nodev 0 0",
@@ -589,6 +636,6 @@ func procMounts() string {
 		"debugfs /sys/kernel/debug debugfs rw,nosuid,nodev,noexec,relatime 0 0",
 		"tracefs /sys/kernel/tracing tracefs rw,nosuid,nodev,noexec,relatime 0 0",
 		"/dev/sda15 /boot/efi vfat rw,relatime,fmask=0077,dmask=0077,codepage=437,iocharset=ascii,shortname=mixed,errors=remount-ro 0 0",
-		"tmpfs /run/user/0 tmpfs rw,nosuid,nodev,relatime,size=1639288k,nr_inodes=409822,mode=700 0 0",
+		fmt.Sprintf("tmpfs /run/user/0 tmpfs rw,nosuid,nodev,relatime,size=%dk,nr_inodes=%d,mode=700 0 0", runUserSize, runUserInodes),
 	}, "\n") + "\n"
 }
