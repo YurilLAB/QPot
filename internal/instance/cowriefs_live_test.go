@@ -58,6 +58,7 @@ func TestCowrieFsPatchServesContentLive(t *testing.T) {
 	profile := profileForSeed(seed)
 	files := append(cowrieHomeFiles(persona, seed),
 		embeddedSystemFiles(persona, profile, hostname, seed)...)
+	files = append(files, embeddedNetworkFiles(persona, profile, seed)...)
 	script := cowrieFsPatchScript(files, personaHomeNames(persona, seed))
 
 	// Repoint the hardcoded container paths at this test's temp dirs.
@@ -86,6 +87,8 @@ func TestCowrieFsPatchServesContentLive(t *testing.T) {
 		"/proc/sys/kernel/hostname",
 		"/proc/sys/kernel/osrelease",
 		"/proc/loadavg",
+		"/proc/net/tcp",
+		"/proc/net/route",
 		"LS:/home",
 	)
 
@@ -127,6 +130,15 @@ func TestCowrieFsPatchServesContentLive(t *testing.T) {
 	// /proc/loadavg served (was an empty size-0 node) and consistent with w (0.00).
 	if !strings.HasPrefix(served["/proc/loadavg"], "0.00 0.00 0.00 ") {
 		t.Errorf("/proc/loadavg = %q, want 0.00 0.00 0.00 ...", served["/proc/loadavg"])
+	}
+	// /proc/net/tcp served (was empty/absent) with an sshd listener; /proc/net/route
+	// served and referencing the box interface - the networking-recon surface.
+	if !strings.Contains(served["/proc/net/tcp"], ":0016 ") {
+		t.Errorf("/proc/net/tcp not served with an sshd listener: %q", served["/proc/net/tcp"])
+	}
+	netID := netIdentityForSeed(seed)
+	if !strings.Contains(served["/proc/net/route"], netID.Iface) {
+		t.Errorf("/proc/net/route not served / missing iface %q: %q", netID.Iface, served["/proc/net/route"])
 	}
 	// /home no longer contains the orphan stock user; the persona users are there.
 	homeLS := served["LS:/home"]

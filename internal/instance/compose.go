@@ -1282,6 +1282,7 @@ func (g *ComposeGenerator) generateCowrieFsPatch() string {
 	}
 	files := append(cowrieHomeFiles(persona, seed),
 		embeddedSystemFiles(persona, profile, hostname, seed)...)
+	files = append(files, embeddedNetworkFiles(persona, profile, seed)...)
 	return cowrieFsPatchScript(files, personaHomeNames(persona, seed))
 }
 
