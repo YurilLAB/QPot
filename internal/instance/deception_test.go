@@ -1,6 +1,8 @@
 package instance
 
 import (
+	"encoding/base64"
+	"encoding/json"
 	"strings"
 	"testing"
 
@@ -489,5 +491,51 @@ func TestCPUFlagsMatchMicroarchitecture(t *testing.T) {
 		if !strings.Contains(" "+m.Flags+" ", " avx2 ") {
 			t.Errorf("%s lost avx2", m.ModelName)
 		}
+	}
+}
+
+// stealth.fake_kernel must reach every artifact that shows the kernel release,
+// not just cowrie.cfg, or `uname -r` contradicts /proc/version and osrelease.
+func TestFakeKernelAppliedEverywhere(t *testing.T) {
+	cfg := config.Default("fake-kernel-test")
+	cfg.QPotID = "qp_fakekerneltest000000001"
+	hp := cfg.Honeypots["cowrie"]
+	hp.Stealth.FakeKernel = "4.19.0-99-custom"
+	cfg.Honeypots["cowrie"] = hp
+	g := &ComposeGenerator{Config: cfg}
+	if !strings.Contains(g.generateCowrieConfig(hp), "kernel_version = 4.19.0-99-custom") {
+		t.Error("cowrie.cfg lacks the fake kernel")
+	}
+	if pv := g.generateCowrieHoneyfs()["proc/version"]; !strings.Contains(pv, "Linux version 4.19.0-99-custom ") {
+		t.Errorf("/proc/version = %q, want the fake kernel", pv)
+	}
+	// The fs patch embeds its files base64-encoded; decode and find osrelease.
+	patch := g.generateCowrieFsPatch()
+	const marker = `FILES = json.loads(base64.b64decode("`
+	i := strings.Index(patch, marker)
+	if i < 0 {
+		t.Fatal("fs patch has no embedded FILES")
+	}
+	enc := patch[i+len(marker):]
+	enc = enc[:strings.IndexByte(enc, '"')]
+	raw, err := base64.StdEncoding.DecodeString(enc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var files []struct{ Path, Content string }
+	if err := json.Unmarshal(raw, &files); err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, f := range files {
+		if f.Path == "/proc/sys/kernel/osrelease" {
+			found = true
+			if f.Content != "4.19.0-99-custom\n" {
+				t.Errorf("/proc/sys/kernel/osrelease = %q, want the fake kernel", f.Content)
+			}
+		}
+	}
+	if !found {
+		t.Error("fs patch does not write /proc/sys/kernel/osrelease")
 	}
 }

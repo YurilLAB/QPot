@@ -1304,7 +1304,19 @@ func (g *ComposeGenerator) generateCowrieHoneyfs() map[string]string {
 		// prompt match the accounts in /etc/passwd.
 		hostname = hostnameForPersona(persona, seed)
 	}
-	return generateHoneyfs(persona, profileForSeed(seed), hostname, seed)
+	return generateHoneyfs(persona, cowrieProfile(hp, seed), hostname, seed)
+}
+
+// cowrieProfile is the instance's distro profile with the operator's
+// stealth.fake_kernel applied. Every Cowrie artifact (cowrie.cfg's uname,
+// /proc/version, /proc/sys/kernel/osrelease, the MOTD) must be built from this
+// one profile; overriding only cowrie.cfg made `uname -r` contradict them.
+func cowrieProfile(hp config.HoneypotConfig, seed string) distroProfile {
+	p := profileForSeed(seed)
+	if k := sanitizeConfigValue(hp.Stealth.FakeKernel); k != "" {
+		p.KernelVersion = k
+	}
+	return p
 }
 
 // generateCowrieFsPatch returns the Python script that, run at container start,
@@ -1321,7 +1333,7 @@ func (g *ComposeGenerator) generateCowrieFsPatch() string {
 	}
 	hp := g.Config.Honeypots["cowrie"]
 	persona := selectCredentialTemplate(hp.Stealth.CredentialTemplate, seed)
-	profile := profileForSeed(seed)
+	profile := cowrieProfile(hp, seed)
 	hostname := hp.Stealth.FakeHostname
 	if hostname == "" {
 		hostname = hostnameForPersona(persona, seed)
@@ -1344,7 +1356,7 @@ func (g *ComposeGenerator) generateCowrieConfig(hp config.HoneypotConfig) string
 	if seed == "" {
 		seed = g.Config.InstanceName
 	}
-	profile := profileForSeed(seed)
+	profile := cowrieProfile(hp, seed)
 
 	hostname := hp.Stealth.FakeHostname
 	if hostname == "" {
@@ -1356,10 +1368,7 @@ func (g *ComposeGenerator) generateCowrieConfig(hp config.HoneypotConfig) string
 		hostname = hostnameForPersona(persona, seed)
 	}
 
-	kernel := hp.Stealth.FakeKernel
-	if kernel == "" {
-		kernel = profile.KernelVersion
-	}
+	kernel := profile.KernelVersion
 
 	// A non-empty BannerString explicitly overrides the advertised SSH
 	// version; otherwise use the per-instance profile's version (never the
