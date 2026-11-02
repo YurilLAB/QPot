@@ -503,6 +503,19 @@ func fstab(seed string, mem memProfile) string {
 	return b.String()
 }
 
+// kbdInteractiveKeyword returns the sshd_config keyword the advertised OpenSSH
+// release ships: KbdInteractiveAuthentication replaced
+// ChallengeResponseAuthentication in OpenSSH 8.7, so older releases (Ubuntu
+// 20.04's 8.2, Debian 11's 8.4) must use the old name.
+func kbdInteractiveKeyword(sshVersion string) string {
+	var major, minor int
+	if _, err := fmt.Sscanf(sshVersion, "OpenSSH_%d.%d", &major, &minor); err == nil &&
+		(major < 8 || (major == 8 && minor < 7)) {
+		return "ChallengeResponseAuthentication"
+	}
+	return "KbdInteractiveAuthentication"
+}
+
 // sshdConfig renders a realistic /etc/ssh/sshd_config for a Debian/Ubuntu box.
 // Stock honeyfs ships it empty, yet sshd is plainly running (the attacker just
 // logged in over it), so an empty config is a tell. The content is the standard
@@ -555,7 +568,7 @@ Include /etc/ssh/sshd_config.d/*.conf
 
 # Change to yes to enable challenge-response passwords (beware issues with
 # some PAM modules and threads)
-KbdInteractiveAuthentication no
+` + kbdInteractiveKeyword(p.SSHVersion) + ` no
 
 #KerberosAuthentication no
 #GSSAPIAuthentication no

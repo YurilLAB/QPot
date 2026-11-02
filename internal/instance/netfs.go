@@ -140,12 +140,16 @@ var personaServices = map[string][]service{
 }
 
 // servicesForPersona returns the box's full listening set: sshd(22), the
-// systemd-resolved stub, and the persona's role services. The result is stable
+// systemd-resolved stub (Ubuntu only: Debian does not run systemd-resolved by
+// default and its resolv.conf lists real nameservers, so a 127.0.0.53 listener
+// there contradicts it), and the persona's role services. The result is stable
 // per persona (a real box's listener set does not change between logins) but
 // differs across personas - a MIXTURE, not one universal set.
-func servicesForPersona(t credentialTemplate) []service {
+func servicesForPersona(t credentialTemplate, p distroProfile) []service {
 	out := []service{{22, anyAddr, "tcp"}} // sshd, always
-	out = append(out, service{53, stubDNS, "udp"}, service{53, stubDNS, "tcp"})
+	if strings.HasPrefix(p.OSPretty, "Ubuntu") {
+		out = append(out, service{53, stubDNS, "udp"}, service{53, stubDNS, "tcp"})
+	}
 	out = append(out, personaServices[t.Name]...)
 	return out
 }
@@ -321,7 +325,7 @@ iface %s inet static
 // config as embedded files (served via the fs-patch realfile mechanism).
 func embeddedNetworkFiles(t credentialTemplate, p distroProfile, seed string) []embeddedFile {
 	id := netIdentityForSeed(seed)
-	svcs := servicesForPersona(t)
+	svcs := servicesForPersona(t, p)
 	files := []embeddedFile{
 		{Path: "/proc/net/tcp", UID: 0, GID: 0, Mode: 0o100444, Content: procNetTCP(id, svcs, seed)},
 		{Path: "/proc/net/tcp6", UID: 0, GID: 0, Mode: 0o100444, Content: procNetTCP6(seed)},

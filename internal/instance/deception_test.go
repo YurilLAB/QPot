@@ -441,3 +441,25 @@ func TestCowrieConfigLogtypeAccepted(t *testing.T) {
 		t.Errorf("cowrie.cfg does not write the JSON log to log/cowrie.json")
 	}
 }
+
+// The emulated sshd must not offer keyboard-interactive auth that the box's own
+// sshd_config disables, and sshd_config must use the keyword its OpenSSH
+// release actually had (KbdInteractiveAuthentication only exists from 8.7).
+func TestKbdInteractiveConsistent(t *testing.T) {
+	cfg := config.Default("kbd-test")
+	cfg.QPotID = "qp_kbdtest00000000000000001"
+	c := (&ComposeGenerator{Config: cfg}).generateCowrieConfig(cfg.Honeypots["cowrie"])
+	if !strings.Contains(c, "auth_keyboard_interactive_enabled = false") {
+		t.Error("cowrie offers keyboard-interactive auth but sshd_config disables it")
+	}
+	for _, p := range distroProfiles {
+		sc := sshdConfig(p)
+		old := strings.Contains(p.SSHVersion, "OpenSSH_8.2") || strings.Contains(p.SSHVersion, "OpenSSH_8.4")
+		if old && !strings.Contains(sc, "\nChallengeResponseAuthentication no\n") {
+			t.Errorf("%s (%s): pre-8.7 sshd_config must use ChallengeResponseAuthentication", p.OSPretty, p.SSHVersion)
+		}
+		if !old && !strings.Contains(sc, "\nKbdInteractiveAuthentication no\n") {
+			t.Errorf("%s (%s): sshd_config must use KbdInteractiveAuthentication", p.OSPretty, p.SSHVersion)
+		}
+	}
+}

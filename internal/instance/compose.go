@@ -1467,7 +1467,7 @@ ed25519_private_key = etc/ssh_host_ed25519_key
 listen_endpoints = tcp:22:interface=0.0.0.0
 sftp_enabled = true
 forwarding = false
-auth_keyboard_interactive_enabled = true
+auth_keyboard_interactive_enabled = false
 
 [telnet]
 enabled = true

@@ -90,7 +90,7 @@ func TestProcNetTCPConsistent(t *testing.T) {
 	for _, name := range []string{"db-server", "mail-server", "jump-bastion", "web-hosting"} {
 		tmpl, _ := credentialTemplateByName(name)
 		id := netIdentityForSeed("seedN")
-		svcs := servicesForPersona(tmpl)
+		svcs := servicesForPersona(tmpl, distroProfiles[0])
 		out := procNetTCP(id, svcs, "seedN")
 		if !strings.HasPrefix(out, "  sl  local_address") {
 			t.Errorf("%s: /proc/net/tcp missing header", name)
@@ -116,8 +116,8 @@ func TestProcNetTCPConsistent(t *testing.T) {
 	// Persona-specific service ports actually appear.
 	checkPort := func(persona string, port int) {
 		tmpl, _ := credentialTemplateByName(persona)
-		out := procNetTCP(netIdentityForSeed("x"), servicesForPersona(tmpl), "x") +
-			procNetUDP(netIdentityForSeed("x"), servicesForPersona(tmpl), "x")
+		out := procNetTCP(netIdentityForSeed("x"), servicesForPersona(tmpl, distroProfiles[0]), "x") +
+			procNetUDP(netIdentityForSeed("x"), servicesForPersona(tmpl, distroProfiles[0]), "x")
 		if !strings.Contains(out, fmt.Sprintf(":%04X ", port)) {
 			t.Errorf("persona %s: expected service port %d not in /proc/net", persona, port)
 		}
@@ -185,6 +185,23 @@ func TestProcNetNeverEmpty(t *testing.T) {
 	for _, f := range embeddedNetworkFiles(tmpl, distroProfiles[0], "seedE") {
 		if strings.TrimSpace(f.Content) == "" {
 			t.Errorf("%s came out empty", f.Path)
+		}
+	}
+}
+
+// The systemd-resolved stub listener (127.0.0.53:53) must appear only where
+// resolv.conf actually points at it: Ubuntu, not Debian.
+func TestStubResolverOnlyOnUbuntu(t *testing.T) {
+	tmpl, _ := credentialTemplateByName("db-server")
+	for _, p := range distroProfiles {
+		hasStub := false
+		for _, s := range servicesForPersona(tmpl, p) {
+			if s.Port == 53 && s.Bind == stubDNS {
+				hasStub = true
+			}
+		}
+		if ubuntu := strings.HasPrefix(p.OSPretty, "Ubuntu"); hasStub != ubuntu {
+			t.Errorf("%s: stub resolver listener = %v, want %v", p.OSPretty, hasStub, ubuntu)
 		}
 	}
 }
