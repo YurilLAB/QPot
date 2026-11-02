@@ -60,8 +60,12 @@ func (b *TTPBuilder) Update(event *database.Event) (*database.TTPSession, bool) 
 		if now.IsZero() {
 			now = time.Now().UTC()
 		}
+		// The session ID names this activity episode, not the campaign: once a
+		// session expires and is flushed, the same campaign returning later
+		// starts a new session. Reusing the bare fingerprint made that new
+		// session overwrite the stored one (all backends upsert by ID).
 		sess := &database.TTPSession{
-			SessionID:           fp,
+			SessionID:           fmt.Sprintf("%s-%d", fp, now.UnixNano()),
 			CampaignFingerprint: fp,
 			FirstSeen:           now,
 			LastSeen:            now,

