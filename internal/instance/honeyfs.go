@@ -275,9 +275,18 @@ func motd(p distroProfile, seed string) string {
 // etcPasswd builds /etc/passwd = system base + the persona's accounts, so every
 // username the userdb accepts actually exists on the box.
 func etcPasswd(t credentialTemplate) string {
+	accepted := acceptedLogins(t)
 	var b strings.Builder
-	b.WriteString(systemPasswd)
-	b.WriteString("\n")
+	// A base account the userdb lets an attacker log in as (e.g. backup) must
+	// have a real shell: a successful login as a user whose passwd entry says
+	// /usr/sbin/nologin is a contradiction any `getent passwd $USER` exposes.
+	for _, line := range strings.Split(systemPasswd, "\n") {
+		if name, _, _ := strings.Cut(line, ":"); accepted[name] {
+			line = strings.Replace(line, ":/usr/sbin/nologin", ":/bin/bash", 1)
+		}
+		b.WriteString(line)
+		b.WriteString("\n")
+	}
 	uid := 1000
 	seen := map[string]bool{}
 	for _, u := range t.Users {
@@ -287,14 +296,34 @@ func etcPasswd(t credentialTemplate) string {
 		}
 		seen[name] = true
 		if home, ok := serviceAccounts[name]; ok {
-			// Service account: nologin, lower system-ish uid range.
-			fmt.Fprintf(&b, "%s:x:%d:%d:%s:%s:/usr/sbin/nologin\n", name, uid, uid, name, home)
+			// Service account: system home. It is an accepted login (it is in
+			// the persona), so it gets a shell like e.g. Debian's postgres.
+			shell := "/usr/sbin/nologin"
+			if accepted[name] {
+				shell = "/bin/bash"
+			}
+			fmt.Fprintf(&b, "%s:x:%d:%d:%s:%s:%s\n", name, uid, uid, name, home, shell)
 		} else {
 			fmt.Fprintf(&b, "%s:x:%d:%d:%s,,,:/home/%s:/bin/bash\n", name, uid, uid, name, name)
 		}
 		uid++
 	}
 	return b.String()
+}
+
+// acceptedLogins returns the usernames the persona's userdb accepts at least
+// one password for ("!x" entries only deny).
+func acceptedLogins(t credentialTemplate) map[string]bool {
+	out := map[string]bool{}
+	for _, u := range t.Users {
+		name := sanitizeConfigValue(u.Username)
+		for _, p := range u.Passwords {
+			if name != "" && !strings.HasPrefix(p, "!") {
+				out[name] = true
+			}
+		}
+	}
+	return out
 }
 
 // humanLoginUsers returns the persona's human login accounts (not root, not a
@@ -328,13 +357,54 @@ func etcGroup(t credentialTemplate) string {
 	humans := humanLoginUsers(t)
 	admins := strings.Join(humans, ",")
 	var b strings.Builder
-	b.WriteString("root:x:0:\n")
-	fmt.Fprintf(&b, "adm:x:4:%s\n", admins)
-	fmt.Fprintf(&b, "sudo:x:27:%s\n", admins)
-	b.WriteString("www-data:x:33:\n")
-	b.WriteString("shadow:x:42:\n")
-	b.WriteString("staff:x:50:\n")
-	b.WriteString("users:x:100:\n")
+	// The standard Debian/Ubuntu base groups, so every primary gid in
+	// /etc/passwd (daemon=1 ... nogroup=65534, the systemd/messagebus ones)
+	// resolves; a short /etc/group with dangling gids is a tell.
+	fmt.Fprintf(&b, `root:x:0:
+daemon:x:1:
+bin:x:2:
+sys:x:3:
+adm:x:4:%[1]s
+tty:x:5:
+disk:x:6:
+lp:x:7:
+mail:x:8:
+news:x:9:
+uucp:x:10:
+man:x:12:
+proxy:x:13:
+kmem:x:15:
+dialout:x:20:
+fax:x:21:
+voice:x:22:
+cdrom:x:24:%[1]s
+floppy:x:25:
+tape:x:26:
+sudo:x:27:%[1]s
+audio:x:29:
+dip:x:30:%[1]s
+www-data:x:33:
+backup:x:34:
+operator:x:37:
+list:x:38:
+irc:x:39:
+src:x:40:
+shadow:x:42:
+utmp:x:43:
+video:x:44:
+sasl:x:45:
+plugdev:x:46:%[1]s
+staff:x:50:
+games:x:60:
+users:x:100:
+nogroup:x:65534:
+systemd-journal:x:101:
+systemd-network:x:102:
+systemd-resolve:x:103:
+crontab:x:104:
+_ssh:x:105:
+messagebus:x:106:
+`, admins)
 	gid := 1000
 	seen := map[string]bool{}
 	for _, u := range t.Users {

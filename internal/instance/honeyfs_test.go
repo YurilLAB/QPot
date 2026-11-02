@@ -249,3 +249,33 @@ func TestHoneyfsTimezone(t *testing.T) {
 		t.Errorf("etc/timezone = %q, want %q", got, "Etc/UTC\n")
 	}
 }
+
+// Every primary gid in /etc/passwd must resolve in /etc/group, for every persona.
+func TestEtcGroupCoversPasswdGids(t *testing.T) {
+	for _, tm := range credentialTemplates {
+		have := map[string]bool{}
+		for _, l := range strings.Split(etcGroup(tm), "\n") {
+			if f := strings.Split(l, ":"); len(f) >= 3 {
+				have[f[2]] = true
+			}
+		}
+		for _, l := range strings.Split(etcPasswd(tm), "\n") {
+			if f := strings.Split(l, ":"); len(f) >= 4 && !have[f[3]] {
+				t.Errorf("persona %s: %s has primary gid %s with no /etc/group entry", tm.Name, f[0], f[3])
+			}
+		}
+	}
+}
+
+// An account the userdb accepts a login for must not have a nologin shell.
+func TestAcceptedLoginsHaveShell(t *testing.T) {
+	for _, tm := range credentialTemplates {
+		accepted := acceptedLogins(tm)
+		for _, l := range strings.Split(etcPasswd(tm), "\n") {
+			name, _, _ := strings.Cut(l, ":")
+			if accepted[name] && strings.HasSuffix(l, "nologin") {
+				t.Errorf("persona %s: accepted login %q has a nologin shell: %q", tm.Name, name, l)
+			}
+		}
+	}
+}
