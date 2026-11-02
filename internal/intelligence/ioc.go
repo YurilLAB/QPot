@@ -147,6 +147,9 @@ func init() {
 		"::1/128",
 		"fc00::/7",
 		"fe80::/10",
+		"0.0.0.0/8",
+		"100.64.0.0/10",
+		"240.0.0.0/4",
 	}
 	for _, cidr := range cidrs {
 		_, network, err := net.ParseCIDR(cidr)
@@ -156,11 +159,17 @@ func init() {
 	}
 }
 
-// isPrivateIP returns true if ip is a loopback or RFC1918 address.
+// isPrivateIP returns true if ip is not a routable attacker address: RFC1918,
+// loopback, link-local, unique-local, unspecified (0.0.0.0 / ::, the
+// collector's placeholder for "no source IP"), multicast, "this network"
+// 0.0.0.0/8, carrier-grade NAT, and the reserved/broadcast 240.0.0.0/4.
 func isPrivateIP(ipStr string) bool {
 	ip := net.ParseIP(ipStr)
 	if ip == nil {
 		return true // treat unparseable as private to avoid false positives
+	}
+	if ip.IsUnspecified() || ip.IsMulticast() {
+		return true
 	}
 	for _, network := range privateNets {
 		if network.Contains(ip) {
@@ -168,6 +177,13 @@ func isPrivateIP(ipStr string) bool {
 		}
 	}
 	return false
+}
+
+// isCommandEvent reports whether an event records attacker shell input: the
+// bare legacy "command" type or a honeypot's dotted name for it
+// (cowrie.command.input, adbhoney.command, conpot.modbus.command, ...).
+func isCommandEvent(eventType string) bool {
+	return eventType == "command" || strings.Contains(eventType, ".command")
 }
 
 // Extractor extracts IOCs from honeypot events.
@@ -195,6 +211,34 @@ func (e *Extractor) Extract(event *database.Event) []*database.IOC {
 		}
 	}
 
+	// addURLs extracts URL IOCs (and their host as a domain/IP IOC) from text.
+	addURLs := func(text string) {
+		for _, u := range reURL.FindAllString(text, -1) {
+			u = trimURL(u)
+			if u == "" {
+				continue
+			}
+			iocs = append(iocs, makeIOC(IOCTypeURL, u))
+
+			// Extract the host from the URL. reDomain's character class also
+			// matches dotted-decimal IPv4 literals (e.g. http://203.0.113.9/x),
+			// so an IP-literal host would otherwise be mistyped as a domain.
+			// Classify it as an IP IOC instead - that is what it is, and it
+			// keeps the blocklist/correlation by-type correct.
+			if matches := reDomain.FindStringSubmatch(u); len(matches) > 1 {
+				host := strings.ToLower(matches[1])
+				if net.ParseIP(host) != nil {
+					// A loopback/private/unspecified literal is not an indicator.
+					if !isPrivateIP(host) {
+						iocs = append(iocs, makeIOC(IOCTypeIP, host))
+					}
+				} else {
+					iocs = append(iocs, makeIOC(IOCTypeDomain, host))
+				}
+			}
+		}
+	}
+
 	// Source IP
 	if event.SourceIP != "" && !isPrivateIP(event.SourceIP) {
 		iocs = append(iocs, makeIOC(IOCTypeIP, event.SourceIP))
@@ -213,27 +257,7 @@ func (e *Extractor) Extract(event *database.Event) []*database.IOC {
 		// notes or copy-pasted C2 are captured. The de-fanged copy feeds only
 		// the indicator regexes; the command IOC below keeps the original text.
 		cmd := refang(event.Command)
-		for _, u := range reURL.FindAllString(cmd, -1) {
-			u = trimURL(u)
-			if u == "" {
-				continue
-			}
-			iocs = append(iocs, makeIOC(IOCTypeURL, u))
-
-			// Extract the host from the URL. reDomain's character class also
-			// matches dotted-decimal IPv4 literals (e.g. http://203.0.113.9/x),
-			// so an IP-literal host would otherwise be mistyped as a domain.
-			// Classify it as an IP IOC instead - that is what it is, and it
-			// keeps the blocklist/correlation by-type correct.
-			if matches := reDomain.FindStringSubmatch(u); len(matches) > 1 {
-				host := strings.ToLower(matches[1])
-				if net.ParseIP(host) != nil {
-					iocs = append(iocs, makeIOC(IOCTypeIP, host))
-				} else {
-					iocs = append(iocs, makeIOC(IOCTypeDomain, host))
-				}
-			}
-		}
+		addURLs(cmd)
 
 		// File hashes — longest first (SHA512, then SHA256, SHA1, MD5) to avoid
 		// sub-matching. The \b anchors already make the lengths disjoint, but the
@@ -291,12 +315,18 @@ func (e *Extractor) Extract(event *database.Event) []*database.IOC {
 		// Interesting commands. Trim BEFORE the length check: a whitespace-only
 		// command (e.g. "    ") has byte length > 3 but trims to empty, which
 		// would otherwise produce an empty-value IOC (found by FuzzExtract).
-		if event.EventType == "command" {
+		if isCommandEvent(event.EventType) {
 			cleaned := strings.ToLower(strings.TrimSpace(event.Command))
 			if len(cleaned) > 3 {
 				iocs = append(iocs, makeIOC(IOCTypeCommand, cleaned))
 			}
 		}
+	}
+
+	// A payload that is a bare URL is a download location (cowrie/adbhoney
+	// file_download events carry it there, not in the command).
+	if p := strings.TrimSpace(string(event.Payload)); p != "" && !strings.ContainsAny(p, " \t\r\n") && reURL.MatchString(p) {
+		addURLs(refang(p))
 	}
 
 	// User agent from metadata

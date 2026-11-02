@@ -100,6 +100,15 @@ func compileRules(rules []Rule) []compiledRule {
 
 // DefaultRules returns the built-in classification ruleset.
 // Rules are returned in priority order (highest first).
+// Event-type patterns shared by the default rules. The collector keeps each
+// honeypot's own dotted event names (cowrie.login.failed, heralding.login.failed,
+// dionaea.connection.accept, conpot.modbus.new_connection, endlessh.connection.accept,
+// …), so the rules match those as well as the bare legacy names.
+const (
+	loginFailedPattern = `login[._]failed`
+	connectionPattern  = `^(connection|probe)$|session\.connect$|connection\.accept$|new_connection$|\.probe$`
+)
+
 func DefaultRules() []Rule {
 	return []Rule{
 		// -----------------------------------------------------------------------
@@ -132,7 +141,7 @@ func DefaultRules() []Rule {
 			Priority:    190,
 			Confidence:  1.0,
 			Conditions: []Condition{
-				{Field: "event_type", Pattern: `connection|probe`},
+				{Field: "event_type", Pattern: connectionPattern},
 			},
 		},
 
@@ -164,7 +173,7 @@ func DefaultRules() []Rule {
 			Priority:    170,
 			Confidence:  1.0,
 			Conditions: []Condition{
-				{Field: "event_type", Pattern: `login_failed`},
+				{Field: "event_type", Pattern: loginFailedPattern},
 			},
 		},
 
@@ -181,7 +190,7 @@ func DefaultRules() []Rule {
 			Priority:    160,
 			Confidence:  1.0,
 			Conditions: []Condition{
-				{Field: "event_type", Pattern: `login_failed`},
+				{Field: "event_type", Pattern: loginFailedPattern},
 				// metadata field "unique_usernames" present signals spraying
 				{Field: "metadata_unique_usernames", Pattern: `.+`},
 			},
@@ -200,7 +209,7 @@ func DefaultRules() []Rule {
 			Priority:    150,
 			Confidence:  1.0,
 			Conditions: []Condition{
-				{Field: "event_type", Pattern: `login_failed`},
+				{Field: "event_type", Pattern: loginFailedPattern},
 				// metadata field "attempt_count" present signals repeated attempts
 				{Field: "metadata_attempt_count", Pattern: `.+`},
 			},
@@ -219,7 +228,7 @@ func DefaultRules() []Rule {
 			Priority:    140,
 			Confidence:  1.0,
 			Conditions: []Condition{
-				{Field: "event_type", Pattern: `login_failed`},
+				{Field: "event_type", Pattern: loginFailedPattern},
 			},
 		},
 
@@ -373,7 +382,7 @@ func DefaultRules() []Rule {
 			Priority:    50,
 			Confidence:  1.0,
 			Conditions: []Condition{
-				{Field: "event_type", Pattern: `connection|probe`},
+				{Field: "event_type", Pattern: connectionPattern},
 				// username must be absent (no auth attempted)
 				{Field: "username", Pattern: `.+`, Negate: true},
 			},
