@@ -642,7 +642,7 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 
 	status, err := s.manager.Status(ctx)
 	if err != nil {
-		s.sendError(w, http.StatusInternalServerError, err.Error())
+		s.sendInternalError(w, "status failed", err)
 		return
 	}
 
@@ -768,7 +768,7 @@ func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 
 	events, err := s.database.GetEvents(ctx, filter)
 	if err != nil {
-		s.sendError(w, http.StatusInternalServerError, err.Error())
+		s.sendInternalError(w, "get events failed", err)
 		return
 	}
 
@@ -872,7 +872,7 @@ func (s *Server) handleIOC(w http.ResponseWriter, r *http.Request) {
 
 	attackers, err := s.database.GetTopAttackers(ctx, 1000, since)
 	if err != nil {
-		s.sendError(w, http.StatusInternalServerError, err.Error())
+		s.sendInternalError(w, "get top attackers failed", err)
 		return
 	}
 
@@ -922,7 +922,7 @@ func (s *Server) handleTechniques(w http.ResponseWriter, r *http.Request) {
 	filter := database.EventFilter{Limit: 10000}
 	events, err := s.database.GetEvents(ctx, filter)
 	if err != nil {
-		s.sendError(w, http.StatusInternalServerError, err.Error())
+		s.sendInternalError(w, "get events failed", err)
 		return
 	}
 
@@ -1082,7 +1082,7 @@ func (s *Server) handleTTPs(w http.ResponseWriter, r *http.Request) {
 
 	sessions, err := s.database.GetTTPSessions(ctx, limit)
 	if err != nil {
-		s.sendError(w, http.StatusInternalServerError, err.Error())
+		s.sendInternalError(w, "get TTP sessions failed", err)
 		return
 	}
 

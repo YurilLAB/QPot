@@ -2,10 +2,12 @@ package server
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -122,5 +124,39 @@ func TestCanaryEventTripsOnlyOnce(t *testing.T) {
 	t.Logf("one attacker event -> %d canary trips, %d critical events", n, len(db.insertedEvents()))
 	if n > 1 {
 		t.Errorf("single event re-tripped canary %d times", n)
+	}
+}
+
+// failingDB returns driver-style errors carrying internal details.
+type failingDB struct{ fakeDB }
+
+var errInternalDetail = errors.New(`dial tcp db-internal.corp:9000: password authentication failed for user "qpot"`)
+
+func (f *failingDB) GetEvents(ctx context.Context, fl database.EventFilter) ([]*database.Event, error) {
+	return nil, errInternalDetail
+}
+func (f *failingDB) GetTTPSessions(ctx context.Context, limit int) ([]*database.TTPSession, error) {
+	return nil, errInternalDetail
+}
+
+// API errors must not echo database/driver error text (hosts, users, SQL).
+func TestAPIDoesNotLeakDatabaseErrors(t *testing.T) {
+	s := &Server{
+		config:   &config.Config{QPotID: validTestID},
+		mux:      http.NewServeMux(),
+		database: &failingDB{},
+	}
+	s.setupRoutes()
+	for _, path := range []string{"/api/events", "/api/ttps"} {
+		req := httptest.NewRequest(http.MethodGet, path, nil)
+		req.Header.Set("X-QPot-ID", validTestID)
+		rec := httptest.NewRecorder()
+		s.mux.ServeHTTP(rec, req)
+		if rec.Code != http.StatusInternalServerError {
+			t.Errorf("%s: status %d, want 500", path, rec.Code)
+		}
+		if body := rec.Body.String(); strings.Contains(body, "db-internal") || strings.Contains(body, "password") {
+			t.Errorf("%s leaks the database error: %s", path, body)
+		}
 	}
 }
