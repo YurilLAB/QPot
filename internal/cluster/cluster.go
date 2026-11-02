@@ -296,6 +296,17 @@ type Manager struct {
 }
 
 // NewManager creates a new cluster manager
+// DefaultDataPath returns the directory holding cluster.json (~/.qpot/cluster).
+// The CLI writes the membership there, and the web server and ypanel agent must
+// read it from the same place.
+func DefaultDataPath() (string, error) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(home, ".qpot", "cluster"), nil
+}
+
 func NewManager(dataPath string) *Manager {
 	return &Manager{
 		dataPath:     dataPath,

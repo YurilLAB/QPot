@@ -100,9 +100,11 @@ func New(cfg *config.Config) (*Server, error) {
 
 	// Load the cluster ("group") membership if this node is paired. A missing
 	// cluster.json just means standalone — the Pairing tab will say so.
-	cm := cluster.NewManager(cfg.DataPath)
-	if c, err := cm.LoadCluster(); err == nil && c != nil {
-		s.cluster = cm
+	if dir, err := cluster.DefaultDataPath(); err == nil {
+		cm := cluster.NewManager(dir)
+		if c, err := cm.LoadCluster(); err == nil && c != nil {
+			s.cluster = cm
+		}
 	}
 
 	// Load the canary (honeytoken) registry when the subsystem is enabled.
@@ -587,7 +589,11 @@ func (s *Server) authMiddleware(next http.Handler) http.Handler {
 		}
 
 		user, pass, ok := r.BasicAuth()
-		if !ok || user != s.config.WebUI.Username || pass != s.config.WebUI.Password {
+		// Constant-time compare (both fields evaluated) so response timing
+		// does not leak how much of the username/password matched.
+		userOK := subtle.ConstantTimeCompare([]byte(user), []byte(s.config.WebUI.Username)) == 1
+		passOK := subtle.ConstantTimeCompare([]byte(pass), []byte(s.config.WebUI.Password)) == 1
+		if !ok || !userOK || !passOK {
 			w.Header().Set("WWW-Authenticate", `Basic realm="QPot"`)
 			http.Error(w, "Unauthorized", http.StatusUnauthorized)
 			return

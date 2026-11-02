@@ -99,9 +99,11 @@ func New(cfg *config.Config, mgr *instance.Manager, version string) (*Agent, err
 
 	// Cluster identity is optional; a missing/standalone cluster just means no
 	// clusterId/clusterName in the snapshot.
-	cm := cluster.NewManager(cfg.DataPath)
-	if c, err := cm.LoadCluster(); err == nil && c != nil {
-		a.cluster = cm
+	if dir, err := cluster.DefaultDataPath(); err == nil {
+		cm := cluster.NewManager(dir)
+		if c, err := cm.LoadCluster(); err == nil && c != nil {
+			a.cluster = cm
+		}
 	}
 
 	// Resolve the license JWS now so readiness is known up front.
