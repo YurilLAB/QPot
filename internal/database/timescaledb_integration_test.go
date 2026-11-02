@@ -276,3 +276,8 @@ func TestPGCollectorIngestView(t *testing.T) {
 		t.Fatalf("GetStats: %v", err)
 	}
 }
+
+func TestPGTagsSameTimestampEventsSeparately(t *testing.T) {
+	ts := connectPG(t)
+	checkSameMillisecondTagging(t, ts, "198.51.100.77", func() {})
+}

@@ -831,6 +831,12 @@ func (ts *TimescaleDB) TagEvent(ctx context.Context, event *Event) error {
 	if ts.pool == nil {
 		return fmt.Errorf("not connected")
 	}
+	// Prefer the row id read back by GetUnclassifiedEvents; (source_ip,
+	// timestamp) is ambiguous when several events share a timestamp.
+	where, key1, key2 := "source_ip = $7 AND timestamp = $8", any(event.SourceIP), any(event.Timestamp)
+	if event.ID != "" {
+		where, key1, key2 = "id = $7::bigint AND timestamp = $8", any(event.ID), any(event.Timestamp)
+	}
 	_, err := ts.pool.Exec(ctx, `
 		UPDATE events SET
 			technique_id     = $1,
@@ -840,16 +846,15 @@ func (ts *TimescaleDB) TagEvent(ctx context.Context, event *Event) error {
 			kill_chain_stage = $5,
 			confidence       = $6,
 			classified       = TRUE
-		WHERE source_ip = $7 AND timestamp = $8
-	`,
+		WHERE `+where,
 		event.TechniqueID,
 		event.TechniqueName,
 		event.TacticID,
 		event.TacticName,
 		event.KillChainStage,
 		event.Confidence,
-		event.SourceIP,
-		event.Timestamp,
+		key1,
+		key2,
 	)
 	return err
 }
@@ -1118,7 +1123,7 @@ func (ts *TimescaleDB) GetUnclassifiedEvents(ctx context.Context, limit int) ([]
 		       COALESCE(protocol, ''), COALESCE(event_type, ''), COALESCE(username, ''), COALESCE(password, ''), COALESCE(command, ''),
 		       payload, metadata, COALESCE(country, ''), COALESCE(city, ''), COALESCE(asn, ''),
 		       technique_id, technique_name, tactic_id, tactic_name,
-		       kill_chain_stage, confidence, classified
+		       kill_chain_stage, confidence, classified, id::text
 		FROM events
 		WHERE classified = FALSE
 		ORDER BY timestamp ASC
@@ -1144,7 +1149,7 @@ func (ts *TimescaleDB) GetUnclassifiedEvents(ctx context.Context, limit int) ([]
 			&event.Country, &event.City, &event.ASN,
 			&event.TechniqueID, &event.TechniqueName,
 			&event.TacticID, &event.TacticName,
-			&event.KillChainStage, &event.Confidence, &event.Classified,
+			&event.KillChainStage, &event.Confidence, &event.Classified, &event.ID,
 		); err != nil {
 			return nil, fmt.Errorf("failed to scan event: %w", err)
 		}

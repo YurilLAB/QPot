@@ -132,8 +132,16 @@ func (w *Worker) runOnce(ctx context.Context) int {
 	// newer events from ever being classified.
 	for _, event := range events {
 		event.Classified = true
-		if err := w.db.TagEvent(ctx, event); err != nil {
-			slog.Warn("Intelligence worker: failed to tag event", "error", err)
+	}
+	if bt, ok := w.db.(database.BatchTagger); ok {
+		if err := bt.TagEvents(ctx, events); err != nil {
+			slog.Warn("Intelligence worker: failed to tag events", "error", err, "count", len(events))
+		}
+	} else {
+		for _, event := range events {
+			if err := w.db.TagEvent(ctx, event); err != nil {
+				slog.Warn("Intelligence worker: failed to tag event", "error", err)
+			}
 		}
 	}
 

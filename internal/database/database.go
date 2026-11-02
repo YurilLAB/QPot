@@ -12,6 +12,12 @@ import (
 
 // Event represents a honeypot event
 type Event struct {
+	// ID is the backend's identity for this stored row (ClickHouse event_id,
+	// TimescaleDB id, Elasticsearch _id), set by GetUnclassifiedEvents so
+	// TagEvent updates exactly this row. Empty on events not read back from
+	// the store; TagEvent then falls back to (source_ip, timestamp), which is
+	// ambiguous when several events share a millisecond.
+	ID         string            `json:"id,omitempty"`
 	Timestamp  time.Time         `json:"timestamp"`
 	Honeypot   string            `json:"honeypot"`
 	SourceIP   string            `json:"source_ip"`
@@ -106,6 +112,12 @@ type HoneypotCount struct {
 type TimeSeries struct {
 	Timestamp time.Time `json:"timestamp"`
 	Count     int64     `json:"count"`
+}
+
+// BatchTagger is implemented by backends that tag many events in one round
+// trip (ClickHouse: one synchronous mutation instead of one per event).
+type BatchTagger interface {
+	TagEvents(ctx context.Context, events []*Event) error
 }
 
 // Database is the interface for database operations

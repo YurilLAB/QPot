@@ -1193,8 +1193,9 @@ transforms:
       }
       .metadata = md
 
-      # Classification is the intelligence worker's job; never trust a log
-      # line that already claims one.
+      # Classification is the intelligence worker's job, and event_id is the
+      # database's row identity; never trust a log line that claims either.
+      del(.event_id)
       del(.technique_id)
       del(.technique_name)
       del(.tactic_id)

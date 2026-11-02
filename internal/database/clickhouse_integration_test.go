@@ -274,3 +274,55 @@ func TestClickHouseIOCFilters(t *testing.T) {
 	}
 	checkIOCValueAndSourceFilters(t, db, nil)
 }
+
+func TestClickHouseTagsSameMillisecondEventsSeparately(t *testing.T) {
+	db := connectCH(t)
+	ch := db.(*ClickHouse)
+	if err := ch.conn.Exec(context.Background(), `ALTER TABLE events DELETE WHERE source_ip = '198.51.100.77' SETTINGS mutations_sync = 1`); err != nil {
+		t.Fatal(err)
+	}
+	checkSameMillisecondTagging(t, db, "198.51.100.77", func() {})
+}
+
+// A pre-existing events table (no event_id) gains the column with values that
+// are stable across reads, so its rows can be tagged.
+func TestClickHouseEventIDUpgrade(t *testing.T) {
+	db := connectCH(t)
+	ch := db.(*ClickHouse)
+	ctx := context.Background()
+	if err := ch.conn.Exec(ctx, `ALTER TABLE events DROP COLUMN IF EXISTS event_id`); err != nil {
+		t.Fatal(err)
+	}
+	if err := ch.conn.Exec(ctx, `TRUNCATE TABLE events`); err != nil {
+		t.Fatal(err)
+	}
+	if err := ch.conn.Exec(ctx, `INSERT INTO events (timestamp, honeypot, source_ip, event_type) VALUES (now64(3), 'cowrie', '198.51.100.78', 'x')`); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.InitializeSchema(ctx); err != nil {
+		t.Fatal(err)
+	}
+	var first string
+	deadline := time.Now().Add(20 * time.Second)
+	for {
+		a, err := db.GetUnclassifiedEvents(ctx, 10)
+		if err != nil {
+			t.Fatal(err)
+		}
+		b, err := db.GetUnclassifiedEvents(ctx, 10)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(a) == 1 && len(b) == 1 && a[0].ID == b[0].ID {
+			first = a[0].ID
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("event_id not stable after upgrade: %v / %v", a, b)
+		}
+		time.Sleep(250 * time.Millisecond)
+	}
+	if first == "" || first == "00000000-0000-0000-0000-000000000000" {
+		t.Fatalf("event_id = %q", first)
+	}
+}

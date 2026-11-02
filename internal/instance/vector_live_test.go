@@ -98,7 +98,7 @@ func TestVectorRemapLive(t *testing.T) {
 		"/data/honeypots/cowrie/logs/cowrie.json\t" + `{"eventid":"cowrie.command.input","input":"uname -a","src_ip":"203.0.113.9","session":"s1","protocol":"ssh"}`,
 		// Hostile/odd shapes: injected file/classification keys, wrong types,
 		// out-of-range port, IPv4-mapped address.
-		"/data/honeypots/cowrie/logs/cowrie.json\t" + `{"eventid":"cowrie.command.input","input":"id","src_ip":"::ffff:198.51.100.7","src_port":"70000","file":"/data/honeypots/evil/x","technique_id":"T9999","classified":1,"metadata":[1],"username":{"a":1}}`,
+		"/data/honeypots/cowrie/logs/cowrie.json\t" + `{"eventid":"cowrie.command.input","input":"id","src_ip":"::ffff:198.51.100.7","src_port":"70000","file":"/data/honeypots/evil/x","technique_id":"T9999","classified":1,"event_id":"not-a-uuid","metadata":[1],"username":{"a":1}}`,
 		"/data/honeypots/cowrie/logs/cowrie.json\t" + `{"eventid":"cowrie.login.failed","src_ip":"not-an-ip"}`,
 		"/data/honeypots/cowrie/logs/cowrie.json\t{broken",
 		"/data/honeypots/cowrie/logs/cowrie.log\t2026-11-02 05:09:25 [-] Ready to accept SSH connections",
@@ -138,6 +138,7 @@ func TestVectorRemapLive(t *testing.T) {
 		Metadata   map[string]string `json:"metadata"`
 		Technique  *string           `json:"technique_id"`
 		Classified any               `json:"classified"`
+		EventID    any               `json:"event_id"`
 		QPotID     string            `json:"qpot_id"`
 	}
 	var rows []row
@@ -168,7 +169,7 @@ func TestVectorRemapLive(t *testing.T) {
 		t.Errorf("cowrie command input not mapped to command: %+v", r)
 	}
 	if r := rows[3]; r.Honeypot != "cowrie" || r.SourceIP != "198.51.100.7" || r.SourcePort != 0 ||
-		r.Technique != nil || r.Classified != nil || r.Username != "" || r.Command != "id" {
+		r.Technique != nil || r.Classified != nil || r.EventID != nil || r.Username != "" || r.Command != "id" {
 		t.Errorf("hostile cowrie line not sanitised: %+v", r)
 	}
 	if r := rows[4]; r.SourceIP != "0.0.0.0" {

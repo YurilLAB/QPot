@@ -148,3 +148,11 @@ func TestESIOCFilters(t *testing.T) {
 	es := connectES(t)
 	checkIOCValueAndSourceFilters(t, es, func() { esRefresh(t, es) })
 }
+
+func TestESTagsSameTimestampEventsSeparately(t *testing.T) {
+	es := connectES(t)
+	ip := fmt.Sprintf("198.51.100.%d", 100+time.Now().UnixNano()%100)
+	checkSameMillisecondTagging(t, es, ip, func() {
+		_, _, _ = es.esRequest(context.Background(), http.MethodPost, "/qpot-events-*/_refresh", nil)
+	})
+}

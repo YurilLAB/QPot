@@ -113,7 +113,10 @@ func (ch *ClickHouse) InitializeSchema(ctx context.Context) error {
 			tactic_name String DEFAULT '',
 			kill_chain_stage String DEFAULT '',
 			confidence Float64 DEFAULT 0,
-			classified UInt8 DEFAULT 0
+			classified UInt8 DEFAULT 0,
+			-- Row identity for TagEvent; generated server-side for every
+			-- insert path (the collector never sends it).
+			event_id UUID DEFAULT generateUUIDv4()
 		) ENGINE = MergeTree()
 		PARTITION BY toYYYYMM(timestamp)
 		ORDER BY (timestamp, honeypot, source_ip)
@@ -123,6 +126,9 @@ func (ch *ClickHouse) InitializeSchema(ctx context.Context) error {
 
 	if err := ch.conn.Exec(ctx, eventsTable); err != nil {
 		return fmt.Errorf("failed to create events table: %w", err)
+	}
+	if err := ch.ensureEventID(ctx); err != nil {
+		return err
 	}
 
 	// Create materialized view for hourly statistics
@@ -223,7 +229,10 @@ func (ch *ClickHouse) InsertEvents(ctx context.Context, events []*Event) error {
 		return fmt.Errorf("not connected")
 	}
 
-	batch, err := ch.conn.PrepareBatch(ctx, "INSERT INTO events")
+	// Explicit column list: event_id is left to its server-side default.
+	batch, err := ch.conn.PrepareBatch(ctx, `INSERT INTO events (timestamp, honeypot, source_ip, source_port,
+		dest_port, protocol, event_type, username, password, command, payload, metadata, country, city, asn,
+		technique_id, technique_name, tactic_id, tactic_name, kill_chain_stage, confidence, classified)`)
 	if err != nil {
 		return fmt.Errorf("failed to prepare batch: %w", err)
 	}
@@ -922,10 +931,36 @@ func (ch *ClickHouse) GetPoolStats() PoolStats {
 	}
 }
 
+// ensureEventID adds the event_id identity column to an events table created
+// before it existed, and materializes it so existing rows get a stable value
+// (an un-materialized DEFAULT generateUUIDv4() would be re-evaluated on every
+// read, and such rows could never be tagged).
+func (ch *ClickHouse) ensureEventID(ctx context.Context) error {
+	var n uint64
+	if err := ch.conn.QueryRow(ctx,
+		"SELECT count() FROM system.columns WHERE database = currentDatabase() AND table = 'events' AND name = 'event_id'",
+	).Scan(&n); err != nil {
+		return fmt.Errorf("check events.event_id: %w", err)
+	}
+	if n > 0 {
+		return nil
+	}
+	if err := ch.conn.Exec(ctx, "ALTER TABLE events ADD COLUMN IF NOT EXISTS event_id UUID DEFAULT generateUUIDv4()"); err != nil {
+		return fmt.Errorf("add events.event_id: %w", err)
+	}
+	if err := ch.conn.Exec(ctx, "ALTER TABLE events MATERIALIZE COLUMN event_id"); err != nil {
+		return fmt.Errorf("materialize events.event_id: %w", err)
+	}
+	return nil
+}
+
 // TagEvent updates an event's ATT&CK classification fields in ClickHouse.
 func (ch *ClickHouse) TagEvent(ctx context.Context, event *Event) error {
 	if ch.conn == nil {
 		return fmt.Errorf("not connected")
+	}
+	if event.ID != "" {
+		return ch.TagEvents(ctx, []*Event{event})
 	}
 	query := `
 		ALTER TABLE events UPDATE
@@ -941,7 +976,7 @@ func (ch *ClickHouse) TagEvent(ctx context.Context, event *Event) error {
 	// The timestamp is bound as exact epoch milliseconds: a time.Time argument
 	// is sent at second precision, so "timestamp = ?" never matched a real
 	// (sub-second) event and nothing was ever marked classified.
-	return ch.conn.Exec(ctx, query,
+	return ch.conn.Exec(clickhouse.Context(ctx, clickhouse.WithSettings(clickhouse.Settings{"mutations_sync": 1})), query,
 		event.TechniqueID,
 		event.TechniqueName,
 		event.TacticID,
@@ -951,6 +986,70 @@ func (ch *ClickHouse) TagEvent(ctx context.Context, event *Event) error {
 		event.SourceIP,
 		event.Timestamp.UnixMilli(),
 	)
+}
+
+// tagChunk bounds the size of one tagging mutation's statement.
+const tagChunk = 1000
+
+// TagEvents tags events by their event_id in one mutation per chunk, and waits
+// for it to apply (mutations_sync): ClickHouse mutations are otherwise
+// asynchronous, so the worker's next cycle re-fetched still-unclassified
+// events and re-extracted (double-counted) their IOCs. Events without an ID
+// fall back to TagEvent's (source_ip, timestamp) match.
+func (ch *ClickHouse) TagEvents(ctx context.Context, events []*Event) error {
+	if ch.conn == nil {
+		return fmt.Errorf("not connected")
+	}
+	var withID []*Event
+	for _, e := range events {
+		if e.ID == "" {
+			if err := ch.TagEvent(ctx, e); err != nil {
+				return err
+			}
+			continue
+		}
+		withID = append(withID, e)
+	}
+	sctx := clickhouse.Context(ctx, clickhouse.WithSettings(clickhouse.Settings{"mutations_sync": 1}))
+	for start := 0; start < len(withID); start += tagChunk {
+		chunk := withID[start:min(start+tagChunk, len(withID))]
+		ids := make([]string, len(chunk))
+		tid, tname, aid, aname, kc := make([]string, len(chunk)), make([]string, len(chunk)),
+			make([]string, len(chunk)), make([]string, len(chunk)), make([]string, len(chunk))
+		conf := make([]float64, len(chunk))
+		lo, hi := chunk[0].Timestamp, chunk[0].Timestamp
+		for i, e := range chunk {
+			ids[i], tid[i], tname[i], aid[i], aname[i], kc[i], conf[i] =
+				e.ID, e.TechniqueID, e.TechniqueName, e.TacticID, e.TacticName, e.KillChainStage, e.Confidence
+			if e.Timestamp.Before(lo) {
+				lo = e.Timestamp
+			}
+			if e.Timestamp.After(hi) {
+				hi = e.Timestamp
+			}
+		}
+		// transform() maps each row's id to its own values; the timestamp
+		// bounds let ClickHouse skip partitions that cannot contain them.
+		query := `
+			ALTER TABLE events UPDATE
+				technique_id     = transform(toString(event_id), ?, ?, technique_id),
+				technique_name   = transform(toString(event_id), ?, ?, technique_name),
+				tactic_id        = transform(toString(event_id), ?, ?, tactic_id),
+				tactic_name      = transform(toString(event_id), ?, ?, tactic_name),
+				kill_chain_stage = transform(toString(event_id), ?, ?, kill_chain_stage),
+				confidence       = transform(toString(event_id), ?, ?, confidence),
+				classified       = 1
+			WHERE toString(event_id) IN ?
+			  AND timestamp >= fromUnixTimestamp64Milli(?) AND timestamp <= fromUnixTimestamp64Milli(?)
+		`
+		if err := ch.conn.Exec(sctx, query,
+			ids, tid, ids, tname, ids, aid, ids, aname, ids, kc, ids, conf,
+			ids, lo.UnixMilli(), hi.UnixMilli(),
+		); err != nil {
+			return fmt.Errorf("tag events: %w", err)
+		}
+	}
+	return nil
 }
 
 // InsertIOC inserts or updates an IOC record using ClickHouse REPLACE semantics.
@@ -1145,7 +1244,7 @@ func (ch *ClickHouse) GetUnclassifiedEvents(ctx context.Context, limit int) ([]*
 		       protocol, event_type, username, password, command,
 		       payload, metadata, country, city, asn,
 		       technique_id, technique_name, tactic_id, tactic_name,
-		       kill_chain_stage, confidence, classified
+		       kill_chain_stage, confidence, classified, toString(event_id)
 		FROM events
 		WHERE classified = 0
 		ORDER BY timestamp ASC
@@ -1176,7 +1275,7 @@ func (ch *ClickHouse) GetUnclassifiedEvents(ctx context.Context, limit int) ([]*
 			&event.Country, &event.City, &event.ASN,
 			&event.TechniqueID, &event.TechniqueName,
 			&event.TacticID, &event.TacticName,
-			&event.KillChainStage, &event.Confidence, &classified,
+			&event.KillChainStage, &event.Confidence, &classified, &event.ID,
 		); err != nil {
 			return nil, fmt.Errorf("failed to scan event: %w", err)
 		}

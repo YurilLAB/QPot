@@ -1062,22 +1062,28 @@ func (es *Elasticsearch) ImportData(ctx context.Context, r io.Reader) error {
 
 // TagEvent updates the ATT&CK classification fields on matching events.
 func (es *Elasticsearch) TagEvent(ctx context.Context, event *Event) error {
-	body := map[string]interface{}{
-		"query": map[string]interface{}{
-			"bool": map[string]interface{}{
-				"must": []interface{}{
-					map[string]interface{}{"term": map[string]string{"source_ip": event.SourceIP}},
-					map[string]interface{}{
-						"range": map[string]interface{}{
-							"timestamp": map[string]interface{}{
-								"gte": event.Timestamp.UTC().Format(time.RFC3339Nano),
-								"lte": event.Timestamp.UTC().Format(time.RFC3339Nano),
-							},
+	// Prefer the document id read back by GetUnclassifiedEvents;
+	// (source_ip, timestamp) is ambiguous when events share a timestamp.
+	var query interface{} = map[string]interface{}{
+		"bool": map[string]interface{}{
+			"must": []interface{}{
+				map[string]interface{}{"term": map[string]string{"source_ip": event.SourceIP}},
+				map[string]interface{}{
+					"range": map[string]interface{}{
+						"timestamp": map[string]interface{}{
+							"gte": event.Timestamp.UTC().Format(time.RFC3339Nano),
+							"lte": event.Timestamp.UTC().Format(time.RFC3339Nano),
 						},
 					},
 				},
 			},
 		},
+	}
+	if event.ID != "" {
+		query = map[string]interface{}{"ids": map[string]interface{}{"values": []string{event.ID}}}
+	}
+	body := map[string]interface{}{
+		"query": query,
 		"script": map[string]interface{}{
 			"source": `ctx._source.technique_id = params.technique_id;
 ctx._source.technique_name = params.technique_name;
@@ -1431,6 +1437,7 @@ func (es *Elasticsearch) GetUnclassifiedEvents(ctx context.Context, limit int) (
 		if err != nil {
 			continue
 		}
+		event.ID = hit.ID
 		events = append(events, event)
 	}
 
