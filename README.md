@@ -18,7 +18,7 @@
   <a href="https://github.com/YurilLAB/QPot/releases"><img src="https://img.shields.io/github/v/release/YurilLAB/QPot?style=flat-square&color=blue" alt="Release"></a>
   <a href="https://golang.org"><img src="https://img.shields.io/badge/Go-1.26+-00ADD8.svg?style=flat-square" alt="Go Version"></a>
   <a href="https://docker.com"><img src="https://img.shields.io/badge/Docker-Required-2496ED.svg?style=flat-square" alt="Docker"></a>
-  <a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-green.svg?style=flat-square" alt="License"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/License-GPLv3-blue.svg?style=flat-square" alt="License"></a>
 </p>
 
 ---
@@ -1135,7 +1135,7 @@ QPot/
 
 ## License
 
-MIT License - See [LICENSE](LICENSE)
+GNU General Public License v3.0 - See [LICENSE](LICENSE). QPot builds on [T-Pot](https://github.com/telekom-security/tpotce), which is GPL-3.0.
 
 ---
 
