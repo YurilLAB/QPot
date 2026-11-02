@@ -133,16 +133,22 @@ func (es *Elasticsearch) InitializeSchema(ctx context.Context) error {
 			},
 			"mappings": map[string]interface{}{
 				"properties": map[string]interface{}{
-					"timestamp":        map[string]string{"type": "date"},
-					"honeypot":         map[string]string{"type": "keyword"},
-					"source_ip":        map[string]string{"type": "ip"},
-					"source_port":      map[string]string{"type": "integer"},
-					"dest_port":        map[string]string{"type": "integer"},
-					"protocol":         map[string]string{"type": "keyword"},
-					"event_type":       map[string]string{"type": "keyword"},
-					"username":         map[string]string{"type": "keyword"},
-					"password":         map[string]string{"type": "keyword"},
-					"command":          map[string]string{"type": "text"},
+					"timestamp":   map[string]string{"type": "date"},
+					"honeypot":    map[string]string{"type": "keyword"},
+					"source_ip":   map[string]string{"type": "ip"},
+					"source_port": map[string]string{"type": "integer"},
+					"dest_port":   map[string]string{"type": "integer"},
+					"protocol":    map[string]string{"type": "keyword"},
+					"event_type":  map[string]string{"type": "keyword"},
+					"username":    map[string]string{"type": "keyword"},
+					"password":    map[string]string{"type": "keyword"},
+					// keyword sub-field so top-command terms aggregations work
+					"command": map[string]interface{}{
+						"type": "text",
+						"fields": map[string]interface{}{
+							"keyword": map[string]interface{}{"type": "keyword", "ignore_above": 1024},
+						},
+					},
 					"payload":          map[string]string{"type": "binary"},
 					"metadata":         map[string]string{"type": "object"},
 					"country":          map[string]string{"type": "keyword"},
@@ -618,6 +624,8 @@ func (es *Elasticsearch) GetEventByID(ctx context.Context, id string) (*Event, e
 func (es *Elasticsearch) GetStats(ctx context.Context, since time.Time) (*Stats, error) {
 	body := map[string]interface{}{
 		"size": 0,
+		// Exact totals: without this ES caps hits.total at 10,000.
+		"track_total_hits": true,
 		"query": map[string]interface{}{
 			"range": map[string]interface{}{
 				"timestamp": map[string]string{
@@ -807,6 +815,8 @@ func (es *Elasticsearch) GetTopAttackers(ctx context.Context, limit int, since t
 func (es *Elasticsearch) GetHoneypotStats(ctx context.Context, honeypot string, since time.Time) (*HoneypotStats, error) {
 	body := map[string]interface{}{
 		"size": 0,
+		// Exact totals: without this ES caps hits.total at 10,000.
+		"track_total_hits": true,
 		"query": map[string]interface{}{
 			"bool": map[string]interface{}{
 				"must": []interface{}{
