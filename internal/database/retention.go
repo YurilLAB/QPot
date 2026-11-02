@@ -179,29 +179,43 @@ func (rm *RetentionManager) ExecutePolicy(ctx context.Context, policyID string) 
 		Archived:    0,
 	}
 
-	// Calculate cutoff times
+	// Calculate cutoff times. Everything older than hotCutoff is deleted
+	// below, so that is exactly the data that must be archived first (data
+	// older than coldCutoff is past its archive retention and is not kept).
 	hotCutoff := time.Now().Add(-policy.HotRetention)
-	warmCutoff := time.Now().Add(-policy.WarmRetention)
 	coldCutoff := time.Now().Add(-policy.ColdRetention)
 
-	// Archive cold data before deletion
-	if policy.ArchiveConfig != nil && policy.ColdRetention > 0 {
-		archived, err := rm.archiveData(ctx, policy, coldCutoff, warmCutoff)
+	// RetentionCleanup cannot be limited to particular honeypots, so a
+	// honeypot-scoped policy would delete every honeypot's data. Refuse it.
+	if len(policy.Honeypots) > 0 {
+		err := fmt.Errorf("policy %s is scoped to honeypots %v, but the database backend can only delete across all honeypots", policyID, policy.Honeypots)
+		slog.Error("Refusing retention policy", "error", err)
+		return nil, err
+	}
+
+	// Archive before deletion; never delete data whose archive failed.
+	archiveFailed := false
+	if policy.ArchiveConfig != nil && policy.ColdRetention > 0 && coldCutoff.Before(hotCutoff) {
+		archived, err := rm.archiveData(ctx, policy, coldCutoff, hotCutoff)
 		if err != nil {
 			slog.Error("Failed to archive data", "error", err)
 			result.Errors = append(result.Errors, err.Error())
+			archiveFailed = true
 		} else {
 			result.Archived = archived
 		}
 	}
 
-	// Delete expired hot data
-	deleted, err := rm.deleteExpiredData(ctx, policy, hotCutoff)
-	if err != nil {
-		slog.Error("Failed to delete expired data", "error", err)
-		result.Errors = append(result.Errors, err.Error())
+	if archiveFailed {
+		result.Errors = append(result.Errors, "skipped deletion because archiving failed")
 	} else {
-		result.HotDeleted = deleted
+		deleted, err := rm.deleteExpiredData(ctx, policy, hotCutoff)
+		if err != nil {
+			slog.Error("Failed to delete expired data", "error", err)
+			result.Errors = append(result.Errors, err.Error())
+		} else {
+			result.HotDeleted = deleted
+		}
 	}
 
 	// Apply this run's stats to the shared policy under the write lock. The
