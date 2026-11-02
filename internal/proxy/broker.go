@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -121,7 +122,9 @@ func (b *Broker) Serve(ctx context.Context, ln net.Listener) error {
 	for {
 		conn, err := ln.Accept()
 		if err != nil {
-			if b.closing.Load() || ctx.Err() != nil {
+			// A closed listener never recovers: stop, whoever closed it.
+			// Treating net.ErrClosed as transient spun here forever.
+			if b.closing.Load() || ctx.Err() != nil || errors.Is(err, net.ErrClosed) {
 				break
 			}
 			// Transient accept error (e.g. EMFILE): back off briefly and retry

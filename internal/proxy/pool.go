@@ -73,7 +73,7 @@ func ParseBackends(s string) ([]Backend, error) {
 		if err != nil || host == "" || port == "" {
 			return nil, fmt.Errorf("proxy: invalid backend address %q", addr)
 		}
-		if p := 0; func() bool { _, e := fmt.Sscanf(port, "%d", &p); return e != nil || p < 1 || p > 65535 }() {
+		if !validPort(port) {
 			return nil, fmt.Errorf("proxy: invalid backend port in %q", addr)
 		}
 		if seen[id] {
@@ -86,6 +86,22 @@ func ParseBackends(s string) ([]Backend, error) {
 		return nil, errors.New("proxy: no backends configured")
 	}
 	return out, nil
+}
+
+// validPort reports whether s is a plain decimal port in 1..65535. Sscanf
+// ("%d") accepted trailing junk like "22x" and a sign like "+22".
+func validPort(s string) bool {
+	if s == "" || len(s) > 5 {
+		return false
+	}
+	n := 0
+	for _, c := range s {
+		if c < '0' || c > '9' {
+			return false
+		}
+		n = n*10 + int(c-'0')
+	}
+	return n >= 1 && n <= 65535
 }
 
 // NewPool builds a Pool over a fixed backend set. reset may be nil.
