@@ -1,6 +1,9 @@
 package security
 
 import (
+	"encoding/json"
+	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/qpot/qpot/internal/config"
@@ -51,5 +54,34 @@ func TestNewSandboxUnknownModeDegrades(t *testing.T) {
 		if rt := sb.ContainerRuntime(); rt != "" {
 			t.Errorf("NewSandbox(%q): fallback must use the default runtime (\"\"), got %q", mode, rt)
 		}
+	}
+}
+
+// A runtime binary on PATH is not enough: Docker must have it registered, or
+// the generated compose names a runtime docker refuses.
+func TestRuntimeUsableRequiresDockerRegistration(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "runsc"), []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir)
+	old := dockerRuntimes
+	defer func() { dockerRuntimes = old }()
+
+	dockerRuntimes = func() (map[string]json.RawMessage, error) {
+		return map[string]json.RawMessage{"runc": nil}, nil
+	}
+	if runtimeUsable("runsc", "runsc") {
+		t.Fatal("runsc reported usable although docker does not know it")
+	}
+	dockerRuntimes = func() (map[string]json.RawMessage, error) {
+		return map[string]json.RawMessage{"runc": nil, "runsc": nil}, nil
+	}
+	if !runtimeUsable("runsc", "runsc") {
+		t.Fatal("registered runsc reported unusable")
+	}
+	dockerRuntimes = func() (map[string]json.RawMessage, error) { return nil, os.ErrNotExist }
+	if runtimeUsable("runsc", "runsc") {
+		t.Fatal("runsc reported usable with no reachable docker daemon")
 	}
 }

@@ -2,11 +2,14 @@
 package security
 
 import (
+	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
 	"runtime"
 	"strings"
+	"time"
 
 	"github.com/qpot/qpot/internal/config"
 )
@@ -88,17 +91,43 @@ func NewSandbox(cfg *config.SecurityConfig) (*Sandbox, error) {
 	return sb, nil
 }
 
-// checkGVisor checks if gVisor (runsc) is installed
-func (sb *Sandbox) checkGVisor() bool {
-	_, err := exec.LookPath("runsc")
-	return err == nil
+// dockerRuntimes returns the OCI runtimes the Docker daemon has registered.
+// A variable so tests can stub the daemon.
+var dockerRuntimes = func() (map[string]json.RawMessage, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	out, err := exec.CommandContext(ctx, "docker", "info", "--format", "{{json .Runtimes}}").Output()
+	if err != nil {
+		return nil, err
+	}
+	var rt map[string]json.RawMessage
+	if err := json.Unmarshal(out, &rt); err != nil {
+		return nil, err
+	}
+	return rt, nil
 }
 
-// checkKata checks if Kata Containers is installed
-func (sb *Sandbox) checkKata() bool {
-	_, err := exec.LookPath("kata-runtime")
-	return err == nil
+// runtimeUsable reports whether runtime can actually be used for containers:
+// the binary is installed AND the Docker daemon has it registered. With only
+// the binary present, the compose file would name a runtime docker rejects
+// ("unknown or invalid runtime name") and the containers would not start.
+func runtimeUsable(binary, runtime string) bool {
+	if _, err := exec.LookPath(binary); err != nil {
+		return false
+	}
+	rt, err := dockerRuntimes()
+	if err != nil {
+		return false
+	}
+	_, ok := rt[runtime]
+	return ok
 }
+
+// checkGVisor checks if gVisor (runsc) is installed and registered with Docker.
+func (sb *Sandbox) checkGVisor() bool { return runtimeUsable("runsc", "runsc") }
+
+// checkKata checks if Kata Containers is installed and registered with Docker.
+func (sb *Sandbox) checkKata() bool { return runtimeUsable("kata-runtime", "kata-runtime") }
 
 // checkFirejail checks if Firejail is installed
 func (sb *Sandbox) checkFirejail() bool {
