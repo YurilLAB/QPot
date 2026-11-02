@@ -12,3 +12,5 @@ __pycache__/
 # Compiled Go binaries (built locally / in CI smoke runs)
 /qpot
 /qpot-sshproxy
+/qpot.exe
+/qpot-sshproxy.exe
