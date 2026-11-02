@@ -78,6 +78,9 @@ No security expertise required.
 
 Each QPot instance has a unique ID (qp_*) for tracking and authentication.`,
 		Version: fmt.Sprintf("%s (commit: %s, built: %s)", version, commit, buildDate),
+		// A failing command prints its error, not the whole usage text
+		// (which buried the actual message); --help still shows usage.
+		SilenceUsage: true,
 	}
 
 	// Global flags
