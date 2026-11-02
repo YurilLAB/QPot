@@ -947,13 +947,26 @@ func Save(cfg *Config) error {
 }
 
 // EnableHoneypot enables a honeypot
+//
+// A config written before the honeypot existed has no entry for it (Load does
+// not merge defaults), so the default entry is added; otherwise enabling it
+// reported success but changed nothing. Unknown names are left untouched.
 func (c *Config) EnableHoneypot(name string) {
 	c.hpMu.Lock()
 	defer c.hpMu.Unlock()
-	if hp, ok := c.Honeypots[name]; ok {
-		hp.Enabled = true
-		c.Honeypots[name] = hp
+	hp, ok := c.Honeypots[name]
+	if !ok {
+		def, known := Default(c.InstanceName).Honeypots[name]
+		if !known {
+			return
+		}
+		hp = def
+		if c.Honeypots == nil {
+			c.Honeypots = make(map[string]HoneypotConfig)
+		}
 	}
+	hp.Enabled = true
+	c.Honeypots[name] = hp
 }
 
 // DisableHoneypot disables a honeypot

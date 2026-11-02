@@ -323,3 +323,22 @@ func TestAllocatePortForUniqueAcrossHoneypots(t *testing.T) {
 		}
 	}
 }
+
+// A config saved before a honeypot was added has no entry for it; enabling it
+// must add the default entry rather than silently doing nothing.
+func TestEnableHoneypotAddsMissingEntry(t *testing.T) {
+	cfg := Default("enable-test")
+	delete(cfg.Honeypots, "wordpot")
+	cfg.EnableHoneypot("wordpot")
+	hp, ok := cfg.Honeypots["wordpot"]
+	if !ok || !hp.Enabled {
+		t.Fatalf("wordpot after EnableHoneypot: present=%v enabled=%v", ok, hp.Enabled)
+	}
+	if hp.Port == 0 {
+		t.Error("added entry lacks the default port")
+	}
+	cfg.EnableHoneypot("no-such-honeypot")
+	if _, ok := cfg.Honeypots["no-such-honeypot"]; ok {
+		t.Error("unknown honeypot name was added to the config")
+	}
+}
