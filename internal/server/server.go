@@ -70,7 +70,7 @@ func New(cfg *config.Config) (*Server, error) {
 
 	// Attempt DB connection; log a warning but do not abort server creation.
 	var db database.Database
-	if rawDB, err := database.New(&cfg.Database); err != nil {
+	if rawDB, err := database.New(cfg.DatabaseClient()); err != nil {
 		slog.Warn("Database not available at server start, some API endpoints will be unavailable", "error", err)
 	} else {
 		connectCtx, connectCancel := context.WithTimeout(context.Background(), 15*time.Second)

@@ -1,6 +1,7 @@
 package instance
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 
@@ -177,5 +178,51 @@ func TestComposeDatabaseCanBoot(t *testing.T) {
 		if !strings.Contains(blk, "pids: 1024") {
 			t.Errorf("%s: database pids limit not raised to 1024", dbType)
 		}
+	}
+}
+
+// The database must be reachable from the host-side qpot process (it creates
+// the schema) but only on loopback, on the same port DatabaseClient dials, and
+// never share its host-facing network with a honeypot.
+func TestComposeDatabaseReachableOnLoopbackOnly(t *testing.T) {
+	for _, dbType := range []string{"clickhouse", "timescaledb"} {
+		cfg := config.Default("db-net-test")
+		cfg.QPotID = "qp_dbnettest000000000000001"
+		cfg.Database.Type = dbType
+		if dbType == "timescaledb" {
+			cfg.Database.Port = 5432
+		}
+		hp := cfg.Honeypots["cowrie"]
+		hp.Enabled = true
+		cfg.Honeypots["cowrie"] = hp
+		out := renderComposeCfg(t, cfg)
+
+		db := serviceBlock(out, "database")
+		want := fmt.Sprintf(`"127.0.0.1:%d:`, cfg.DatabaseClient().Port)
+		if !strings.Contains(db, want) {
+			t.Errorf("%s: database not published on %s... (client dials port %d)", dbType, want, cfg.DatabaseClient().Port)
+		}
+		if !strings.Contains(db, "- qpot_dbhost") {
+			t.Errorf("%s: database not on the host-reachable qpot_dbhost network", dbType)
+		}
+		if strings.Contains(serviceBlock(out, "cowrie"), "qpot_dbhost") {
+			t.Errorf("%s: a honeypot joined the database's host network", dbType)
+		}
+	}
+}
+
+func TestDefaultDatabasePasswordIsRandom(t *testing.T) {
+	a, b := config.Default("pw-a"), config.Default("pw-b")
+	if a.Database.Password == "" || a.Database.Password == b.Database.Password {
+		t.Fatalf("database passwords %q / %q: want non-empty and distinct", a.Database.Password, b.Database.Password)
+	}
+}
+
+// The collector's /data is read-only; its file_backup sink needs a writable
+// /data/backup or every backup write fails.
+func TestComposeCollectorBackupWritable(t *testing.T) {
+	c := serviceBlock(renderCompose(t), "collector")
+	if !strings.Contains(c, "/backup:/data/backup\n") {
+		t.Error("collector has no writable /data/backup mount for its file_backup sink")
 	}
 }

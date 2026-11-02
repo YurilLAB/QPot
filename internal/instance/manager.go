@@ -130,7 +130,7 @@ func NewManager(cfg *config.Config) (*Manager, error) {
 // the error explicitly.
 func (m *Manager) db() (database.Database, error) {
 	m.dbOnce.Do(func() {
-		db, err := database.New(&m.config.Database)
+		db, err := database.New(m.config.DatabaseClient())
 		if err != nil {
 			m.dbErr = err
 			return

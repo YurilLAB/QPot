@@ -118,7 +118,7 @@ func New(cfg *config.Config, mgr *instance.Manager, version string) (*Agent, err
 
 	// Open the DB best-effort for the events/stats portions of the snapshot.
 	// A failure is non-fatal: the agent still reports host + honeypot state.
-	if db, err := database.New(&cfg.Database); err != nil {
+	if db, err := database.New(cfg.DatabaseClient()); err != nil {
 		a.log("database unavailable for snapshots (events/stats will be empty): %v", err)
 	} else {
 		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)

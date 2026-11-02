@@ -289,6 +289,13 @@ func (g *ComposeGenerator) Generate() (string, error) {
 networks:
   qpot_internal:
     internal: true
+
+  # Only the database joins this one. Docker cannot publish a port for a
+  # container that is attached solely to an internal network, so without it
+  # the host-side qpot process could never reach the database (and so never
+  # created its schema). The port is bound to 127.0.0.1 only.
+  qpot_dbhost:
+    driver: bridge
 {{if sshProxyEnabled .Config}}
   # HiFi backends sit here ONLY. internal:true removes the default gateway, so
   # the real-OpenSSH backends (genuine attacker code execution) have NO outbound
@@ -342,10 +349,10 @@ services:
       - {{.Config.DataPath}}/clickhouse-config:/etc/clickhouse-server/conf.d
       - {{.Config.DataPath}}/qpot.id:/run/secrets/qpot_id:ro
     ports:
-      - "{{.Config.AllocatePort 9000}}:9000"
-      - "{{.Config.AllocatePort 8123}}:8123"
+      - "127.0.0.1:{{.Config.DatabaseHostPort}}:9000"
     networks:
       - qpot_internal
+      - qpot_dbhost
     {{template "dbsecurity" dict "Config" $.Config "GlobalLimits" $.Config.Security.ResourceLimits "Name" "database"}}
     healthcheck:
       test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:8123/ping"]
@@ -365,9 +372,10 @@ services:
       - qpot_db:/var/lib/postgresql/data
       - {{.Config.DataPath}}/qpot.id:/run/secrets/qpot_id:ro
     ports:
-      - "{{.Config.AllocatePort 5432}}:5432"
+      - "127.0.0.1:{{.Config.DatabaseHostPort}}:5432"
     networks:
       - qpot_internal
+      - qpot_dbhost
     {{template "dbsecurity" dict "Config" $.Config "GlobalLimits" $.Config.Security.ResourceLimits "Name" "database"}}
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U {{.Config.Database.Username}} -d {{.Config.Database.Database}}"]
@@ -390,6 +398,9 @@ services:
     volumes:
       - {{.Config.DataPath}}/vector.yaml:/etc/vector/vector.yaml:ro
       - qpot_data:/data:ro
+      # The only writable path: the file_backup sink. Everything else under
+      # /data stays read-only (it holds attacker-influenced honeypot logs).
+      - {{.Config.DataPath}}/backup:/data/backup
       - {{.Config.DataPath}}/qpot.id:/run/secrets/qpot_id:ro
     networks:
       - qpot_internal

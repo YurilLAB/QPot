@@ -2,6 +2,7 @@
 package config
 
 import (
+	"crypto/rand"
 	"fmt"
 	"log/slog"
 	"net/url"
@@ -459,11 +460,14 @@ func Default(instanceName string) *Config {
 		DataPath:     dataPath,
 		ConfigPath:   configPath,
 		Database: DatabaseConfig{
-			Type:        "clickhouse",
-			Host:        "localhost",
-			Port:        9000,
-			Username:    "qpot",
-			Password:    "",
+			Type:     "clickhouse",
+			Host:     "localhost",
+			Port:     9000,
+			Username: "qpot",
+			// Random per instance (persisted in config.yaml on create). An empty
+			// password let anything that could reach the database log in.
+			// rand.Text is base32 ([A-Z2-7]), safe unquoted in YAML and DSNs.
+			Password:    rand.Text(),
 			Database:    "qpot",
 			SSLMode:     "disable",
 			AutoMigrate: true,
@@ -1038,6 +1042,29 @@ func (c *Config) AllocatePortFor(honeypot string, basePort int) int {
 	// Spread host ports across [base, base+HostPortSpread) so an instance's ~50
 	// ports rarely collide.
 	return base + int(h%HostPortSpread)
+}
+
+// DatabaseHostPort is the 127.0.0.1 port the instance's database container is
+// published on (the native protocol port: 9000 for ClickHouse, 5432 for
+// TimescaleDB), derived per instance so several instances don't collide.
+func (c *Config) DatabaseHostPort() int {
+	if c.Database.Type == "timescaledb" {
+		return c.AllocatePort(5432)
+	}
+	return c.AllocatePort(9000)
+}
+
+// DatabaseClient returns the settings the host-side qpot process uses to reach
+// the instance's database. For the compose-managed database (loopback host on
+// the image's default port) that is the per-instance published port, not the
+// container port; any other host/port is used as configured.
+func (c *Config) DatabaseClient() *DatabaseConfig {
+	d := c.Database
+	loopback := d.Host == "localhost" || d.Host == "127.0.0.1" || d.Host == "::1"
+	if loopback && (d.Port == 9000 || d.Port == 5432) && (d.Type == "clickhouse" || d.Type == "timescaledb") {
+		d.Port = c.DatabaseHostPort()
+	}
+	return &d
 }
 
 // GetDockerComposePath returns path to docker-compose file

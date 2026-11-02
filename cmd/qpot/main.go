@@ -1759,7 +1759,7 @@ func openMigrationManager(ctx context.Context, instanceName string) (*database.M
 		return nil, nil, nil, fmt.Errorf("failed to load config: %w", err)
 	}
 
-	db, err := database.New(&cfg.Database)
+	db, err := database.New(cfg.DatabaseClient())
 	if err != nil {
 		return nil, nil, nil, fmt.Errorf("failed to construct database driver: %w", err)
 	}
