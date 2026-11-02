@@ -232,9 +232,11 @@ qpot setup --profile hifi --service # high-interaction SSH, installed as a syste
 
 `qpot setup` checks the host (Docker, Compose, socket permission, memory, disk),
 creates the instance with a fresh QPot ID and random database password, checks
-the host ports it needs are free, starts the containers and the control plane,
-and then **waits until the database schema, collector, honeypots and web UI are
-actually healthy** before printing your QPot ID. Defaults stay locked down: the
+the host ports it needs are free (a new instance whose default web UI port is
+taken by another instance gets the next free one), starts the containers and the
+control plane, and then **waits until the database schema, collector, honeypots
+and this instance's own web UI are actually healthy** before printing your QPot
+ID. Defaults stay locked down: the
 web UI and database listen on 127.0.0.1 only, and nothing runs with sudo.
 `--service` installs a hardened systemd unit (`qpot-<instance>.service`) so the
 instance comes back after a reboot.
