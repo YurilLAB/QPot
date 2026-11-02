@@ -312,7 +312,8 @@ func (s *Server) Start(ctx context.Context) error {
 		IdleTimeout:  60 * time.Second,
 	}
 
-	slog.Info("Starting web server", "addr", addr, "qpot_id", s.config.QPotID)
+	// The QPot ID is the API credential: never write it to the log.
+	slog.Info("Starting web server", "addr", addr, "instance", s.config.InstanceName)
 
 	// Start alert polling when alerts are enabled and there is somewhere for an
 	// alert to go: a webhook URL, response hooks, or both.
