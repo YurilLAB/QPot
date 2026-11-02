@@ -513,9 +513,12 @@ func (m *Manager) pullImages(ctx context.Context) error {
 
 // generateDockerCompose generates the docker-compose.yml file
 func (m *Manager) generateDockerCompose() error {
+	ports, subnets := siblingReservations(m.config.DataPath)
 	generator := &ComposeGenerator{
-		Config:  m.config,
-		Sandbox: m.sandbox,
+		Config:          m.config,
+		Sandbox:         m.sandbox,
+		ReservedPorts:   ports,
+		ReservedSubnets: subnets,
 	}
 
 	compose, err := generator.Generate()

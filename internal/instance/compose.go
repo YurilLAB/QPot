@@ -63,6 +63,9 @@ func (g *ComposeGenerator) buildHostPortMap() map[string]int {
 	}
 
 	used := map[int]bool{}
+	for p := range g.ReservedPorts {
+		used[p] = true
+	}
 	if g.Config.Ports.AutoAllocate {
 		for _, infra := range []int{9000, 8123, 5432} {
 			used[g.Config.AllocatePort(infra)] = true
@@ -111,6 +114,10 @@ func (g *ComposeGenerator) buildHostPortMap() map[string]int {
 type ComposeGenerator struct {
 	Config  *config.Config
 	Sandbox *security.Sandbox
+	// ReservedPorts / ReservedSubnets are host ports and subnets other
+	// instances already use (see siblingReservations); allocation skips them.
+	ReservedPorts   map[int]bool
+	ReservedSubnets map[string]bool
 }
 
 // bridgeName builds the Linux bridge interface name for a honeypot network.
@@ -199,6 +206,9 @@ func (g *ComposeGenerator) buildSubnetMap() map[string]string {
 	sort.Strings(names)
 
 	used := map[string]bool{}
+	for s := range g.ReservedSubnets {
+		used[s] = true
+	}
 	assign := make(map[string]string)
 	for _, name := range names {
 		sub := subnetForNetwork(g.Config.InstanceName, name)
