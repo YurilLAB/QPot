@@ -68,29 +68,56 @@ func (w *Worker) Run(ctx context.Context) {
 	defer ticker.Stop()
 
 	// Run immediately on start.
-	w.runOnce(ctx)
+	w.drain(ctx)
 
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			w.runOnce(ctx)
+			w.drain(ctx)
+		}
+	}
+}
+
+// maxBatchesPerTick bounds one drain so a single tick cannot run forever.
+const maxBatchesPerTick = 200
+
+// drain classifies batches until the backlog is empty. One batch per tick
+// (500 events every 15 minutes by default) capped classification at ~33
+// events a minute, so under normal honeypot load the oldest-first backlog
+// grew without bound: IOCs and canary trips lagged further and further, and
+// TTP sessions were split once the lag passed their inactivity window.
+// Draining stops early when a batch could not be marked classified, since the
+// same events would otherwise come straight back and be counted again.
+func (w *Worker) drain(ctx context.Context) {
+	for i := 0; i < maxBatchesPerTick && ctx.Err() == nil; i++ {
+		n, tagged := w.runBatch(ctx)
+		if n < w.batchSize || !tagged {
+			return
 		}
 	}
 }
 
 // runOnce classifies one batch of unclassified events. Returns count classified.
 func (w *Worker) runOnce(ctx context.Context) int {
+	n, _ := w.runBatch(ctx)
+	return n
+}
+
+// runBatch classifies one batch and reports how many events it processed and
+// whether all of them were marked classified.
+func (w *Worker) runBatch(ctx context.Context) (int, bool) {
 	events, err := w.db.GetUnclassifiedEvents(ctx, w.batchSize)
 	if err != nil {
 		slog.Warn("Intelligence worker: failed to get unclassified events", "error", err)
-		return 0
+		return 0, false
 	}
 
 	if len(events) == 0 {
-		return 0
+		return 0, true
 	}
+	tagged := true
 
 	iocs := w.classifier.ClassifyBatch(ctx, events)
 
@@ -117,11 +144,13 @@ func (w *Worker) runOnce(ctx context.Context) int {
 	}
 	if bt, ok := w.db.(database.BatchTagger); ok {
 		if err := bt.TagEvents(ctx, events); err != nil {
+			tagged = false
 			slog.Warn("Intelligence worker: failed to tag events", "error", err, "count", len(events))
 		}
 	} else {
 		for _, event := range events {
 			if err := w.db.TagEvent(ctx, event); err != nil {
+				tagged = false
 				slog.Warn("Intelligence worker: failed to tag event", "error", err)
 			}
 		}
@@ -150,6 +179,6 @@ func (w *Worker) runOnce(ctx context.Context) int {
 		}
 	}
 
-	slog.Info("Intelligence worker classified events", "count", n, "next_run", w.interval)
-	return n
+	slog.Info("Intelligence worker classified events", "count", n, "interval", w.interval.String())
+	return n, tagged
 }
