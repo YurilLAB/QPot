@@ -435,8 +435,6 @@ services:
     image: {{GetHoneypotImage "ssh-backend"}}
     container_name: {{$.Config.InstanceName}}_{{$b.Service}}
     restart: unless-stopped
-    labels:
-      qpot.instance: "{{$.Config.InstanceName}}"
     # Every backend presents the SAME hostname and SAME SSH host keys (shared
     # volume below) so the pool looks like ONE server: a returning attacker routed
     # to a different backend never sees the hostname or host-key fingerprint

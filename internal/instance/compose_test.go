@@ -249,7 +249,7 @@ func TestComposeStealthEnvIsQuoted(t *testing.T) {
 	}
 	want := map[string]bool{
 		"BANNER_STRING=220 Microsoft FTP Service: ready # $$HOME": false,
-		`FAKE_OS=Windows "Server" 2019`:                          false,
+		`FAKE_OS=Windows "Server" 2019`:                           false,
 	}
 	env, ok := doc.Services["dionaea"].Environment.([]interface{})
 	if !ok {
