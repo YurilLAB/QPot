@@ -214,10 +214,26 @@ func webUICheck(ctx context.Context, cfg *config.Config) check {
 	return check{"web UI", "ok", base}
 }
 
-// freeWebPort returns the configured web UI port if it is free, else the next
-// free one within 100 ports above it.
+// freeWebPort returns the configured web UI port if it is usable, else the
+// next usable one within 100 ports above it. A port is usable when nothing is
+// listening on it and no other instance on this host has it configured (a
+// stopped instance would otherwise collide on its next start).
 func freeWebPort(cfg *config.Config) (int, bool) {
+	claimed := map[int]bool{}
+	if infos, err := instance.List(); err == nil {
+		for _, inf := range infos {
+			if inf.Name == cfg.InstanceName {
+				continue
+			}
+			if other, err := config.Load(inf.Name); err == nil && other.WebUI.Enabled {
+				claimed[other.WebUI.Port] = true
+			}
+		}
+	}
 	for p := cfg.WebUI.Port; p < cfg.WebUI.Port+100 && p <= 65535; p++ {
+		if claimed[p] {
+			continue
+		}
 		ln, err := net.Listen("tcp", net.JoinHostPort(cfg.WebUI.BindAddr, fmt.Sprint(p)))
 		if err == nil {
 			_ = ln.Close()
@@ -274,6 +290,14 @@ func createInstance(ctx context.Context, name string) (*config.Config, *instance
 	}
 	cfg := config.Default(name)
 	cfg.QPotID = qpotID.ID
+	// Several instances on one host would all default to the same web UI port;
+	// give a new one a port no other instance uses or has configured.
+	if cfg.WebUI.Enabled {
+		if port, ok := freeWebPort(cfg); ok && port != cfg.WebUI.Port {
+			fmt.Printf("[INFO] Web UI port %d is taken by another instance; %q will use %d\n", cfg.WebUI.Port, name, port)
+			cfg.WebUI.Port = port
+		}
+	}
 	if err := config.Save(cfg); err != nil {
 		return nil, nil, fmt.Errorf("failed to save config: %w", err)
 	}
@@ -336,14 +360,6 @@ nothing is run with sudo.`,
 				created = true
 				for _, hp := range hps {
 					cfg.EnableHoneypot(hp)
-				}
-				// Several instances on one host would all default to the same
-				// web UI port; give a new one the next free port instead.
-				if cfg.WebUI.Enabled {
-					if port, ok := freeWebPort(cfg); ok && port != cfg.WebUI.Port {
-						fmt.Printf("[INFO] Web UI port %d is in use; this instance will use %d\n", cfg.WebUI.Port, port)
-						cfg.WebUI.Port = port
-					}
 				}
 				if err := config.Save(cfg); err != nil {
 					return fmt.Errorf("failed to save config: %w", err)
