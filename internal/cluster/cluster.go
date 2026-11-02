@@ -324,8 +324,9 @@ func (m *Manager) schemeLocked() string {
 	if m.cluster == nil || m.cluster.Config == nil {
 		return "http"
 	}
-	cfg := m.cluster.Config
-	if cfg.EnableEncryption && cfg.TLSCertPath != "" && cfg.TLSKeyPath != "" {
+	// Encryption on = HTTPS: with an operator certificate, or with the
+	// automatic cluster-CA certificate when none is configured.
+	if m.cluster.Config.EnableEncryption {
 		return "https"
 	}
 	return "http"
@@ -338,29 +339,39 @@ func (m *Manager) schemeLocked() string {
 // using self-signed certs should always set CACertPath to avoid
 // mid-rotation verification failures.
 func (m *Manager) peerHTTPClient(timeout time.Duration) *http.Client {
-	transport := http.DefaultTransport.(*http.Transport).Clone()
-
 	m.mu.RLock()
 	defer m.mu.RUnlock()
-	if m.cluster != nil && m.cluster.Config != nil && m.cluster.Config.EnableEncryption {
-		tlsCfg := &tls.Config{MinVersion: tls.VersionTLS12}
-		if caPath := m.cluster.Config.CACertPath; caPath != "" {
-			caData, err := os.ReadFile(caPath)
-			if err != nil {
-				slog.Warn("Cluster TLS: failed to read CA cert; falling back to system roots",
-					"path", caPath, "error", err)
-			} else {
-				pool := x509.NewCertPool()
-				if pool.AppendCertsFromPEM(caData) {
-					tlsCfg.RootCAs = pool
-				} else {
-					slog.Warn("Cluster TLS: CA cert file contained no PEM blocks", "path", caPath)
-				}
+	if m.cluster == nil || m.cluster.Config == nil || !m.cluster.Config.EnableEncryption {
+		transport := http.DefaultTransport.(*http.Transport).Clone()
+		return &http.Client{Timeout: timeout, Transport: transport}
+	}
+	var pool *x509.CertPool
+	if caPath := m.cluster.Config.CACertPath; caPath != "" {
+		caData, err := os.ReadFile(caPath)
+		if err != nil {
+			slog.Warn("Cluster TLS: failed to read CA cert; falling back to system roots",
+				"path", caPath, "error", err)
+		} else {
+			pool = x509.NewCertPool()
+			if !pool.AppendCertsFromPEM(caData) {
+				slog.Warn("Cluster TLS: CA cert file contained no PEM blocks", "path", caPath)
+				pool = nil
 			}
 		}
-		transport.TLSClientConfig = tlsCfg
 	}
-	return &http.Client{Timeout: timeout, Transport: transport}
+	return clusterHTTPClient(timeout, m.cluster.ID, m.plainPassword, pool)
+}
+
+// HTTPClient returns a client for talking to this cluster's API (e.g. the
+// local node's, from the host-side approval commands), with the same peer
+// verification the members use.
+func (m *Manager) HTTPClient(timeout time.Duration) *http.Client { return m.peerHTTPClient(timeout) }
+
+// APIScheme is "https" when the cluster encrypts, else "http".
+func (m *Manager) APIScheme() string {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.schemeLocked()
 }
 
 // UpdateThreatIntel updates the local node's threat intelligence data.
@@ -490,6 +501,17 @@ func (m *Manager) JoinCluster(clusterID, password string, localNode *Node, seedN
 	for _, seed := range seedNodes {
 		cluster, err := m.attemptJoin(seed, clusterID, password, localNode)
 		if err == nil {
+			// The config came from the seed: its bind address/port and
+			// certificate paths describe THAT host. This node listens on its own
+			// node port and uses the automatic cluster-CA certificate.
+			if cluster.Config != nil {
+				cluster.Config.BindAddr = "0.0.0.0"
+				if localNode.Port > 0 {
+					cluster.Config.BindPort = localNode.Port
+				}
+				cluster.Config.AdvertiseAddr = localNode.Address
+				cluster.Config.TLSCertPath, cluster.Config.TLSKeyPath, cluster.Config.CACertPath = "", "", ""
+			}
 			m.mu.Lock()
 			m.cluster = cluster
 			m.plainPassword = password
@@ -525,27 +547,28 @@ func (m *Manager) attemptJoin(seedAddr, clusterID, password string, localNode *N
 		return nil, fmt.Errorf("failed to marshal join request: %w", err)
 	}
 
-	// At join time we don't yet have the cluster's TLS settings, so let the
-	// seed address itself say which scheme to use:
-	//   http://1.2.3.4:7946  -> plain HTTP join
-	//   https://1.2.3.4:7946 -> TLS join (verifies against system roots)
-	//   1.2.3.4:7946         -> defaults to http for backwards compatibility
-	scheme := "http"
+	// The seed address may name the scheme:
+	//   https://1.2.3.4:7946 or 1.2.3.4:7946 -> TLS (the default: new clusters
+	//     encrypt). The seed is verified against the cluster CA derived from
+	//     the cluster ID + password (automatic TLS) or the system roots
+	//     (operator certificate), so the password is never sent to an
+	//     impostor or in cleartext.
+	//   http://1.2.3.4:7946 -> plain HTTP, only for clusters that turned
+	//     encryption off.
+	scheme := "https"
 	host := seedAddr
 	switch {
 	case strings.HasPrefix(seedAddr, "https://"):
-		scheme = "https"
 		host = strings.TrimPrefix(seedAddr, "https://")
 	case strings.HasPrefix(seedAddr, "http://"):
+		scheme = "http"
 		host = strings.TrimPrefix(seedAddr, "http://")
 	}
 	url := fmt.Sprintf("%s://%s/api/v1/cluster/join", scheme, host)
 
 	joinClient := &http.Client{Timeout: 15 * time.Second}
 	if scheme == "https" {
-		joinClient.Transport = &http.Transport{
-			TLSClientConfig: &tls.Config{MinVersion: tls.VersionTLS12},
-		}
+		joinClient = clusterHTTPClient(15*time.Second, clusterID, password, nil)
 	}
 	resp, err := joinClient.Post(url, "application/json", bytes.NewReader(reqBody))
 	if err != nil {
@@ -570,7 +593,7 @@ func (m *Manager) attemptJoin(seedAddr, clusterID, password string, localNode *N
 		if joinResp.Status == "pending" && joinResp.RequestID != "" {
 			slog.Info("Join request submitted; awaiting host approval",
 				"request_id", joinResp.RequestID, "cluster_id", clusterID)
-			approved, perr := m.pollJoinApproval(scheme, host, password, joinResp.RequestID)
+			approved, perr := m.pollJoinApproval(scheme, host, clusterID, password, joinResp.RequestID)
 			if perr != nil {
 				return nil, perr
 			}
@@ -628,10 +651,10 @@ func (m *Manager) attemptJoin(seedAddr, clusterID, password string, localNode *N
 // approves it (returning the full JoinResponse the joiner needs), denies it, or
 // the overall timeout elapses. The poll is authenticated with the same cluster
 // password the join used.
-func (m *Manager) pollJoinApproval(scheme, host, password, requestID string) (*JoinResponse, error) {
+func (m *Manager) pollJoinApproval(scheme, host, clusterID, password, requestID string) (*JoinResponse, error) {
 	client := &http.Client{Timeout: 15 * time.Second}
 	if scheme == "https" {
-		client.Transport = &http.Transport{TLSClientConfig: &tls.Config{MinVersion: tls.VersionTLS12}}
+		client = clusterHTTPClient(15*time.Second, clusterID, password, nil)
 	}
 	url := fmt.Sprintf("%s://%s/api/v1/cluster/join/status?request_id=%s", scheme, host, requestID)
 
@@ -743,6 +766,9 @@ func (m *Manager) Stop() error {
 	}
 
 	m.cluster.isRunning = false
+	if err := m.saveClusterLocked(); err != nil {
+		slog.Warn("Failed to persist cluster state on stop", "error", err)
+	}
 	slog.Info("Cluster manager stopped")
 
 	return nil
@@ -812,6 +838,43 @@ func (m *Manager) UpdateNodeStats(stats NodeStats) {
 
 	m.cluster.LocalNode.Stats = stats
 	m.cluster.LocalNode.LastSeen = time.Now()
+}
+
+// secretFile holds the cluster password (0600) so the long-running QPot control
+// plane can rejoin gossip after a restart; cluster.json only keeps its bcrypt
+// hash. It has the same protection as the instance's qpot.id credential.
+const secretFile = "cluster.secret"
+
+// ClusterPasswordEnv, when set, supplies the cluster password instead of the
+// secret file (for deployments that keep secrets out of the filesystem).
+const ClusterPasswordEnv = "QPOT_CLUSTER_PASSWORD"
+
+// SaveSecret stores the in-memory cluster password in the 0600 secret file.
+func (m *Manager) SaveSecret() error {
+	m.mu.RLock()
+	pw := m.plainPassword
+	m.mu.RUnlock()
+	if pw == "" {
+		return fmt.Errorf("no cluster password to save")
+	}
+	if err := os.MkdirAll(m.dataPath, 0o700); err != nil {
+		return err
+	}
+	return os.WriteFile(filepath.Join(m.dataPath, secretFile), []byte(pw), 0o600)
+}
+
+// UnlockFromSecret unlocks a loaded cluster with the password from
+// QPOT_CLUSTER_PASSWORD or, failing that, the secret file.
+func (m *Manager) UnlockFromSecret() error {
+	pw := os.Getenv(ClusterPasswordEnv)
+	if pw == "" {
+		data, err := os.ReadFile(filepath.Join(m.dataPath, secretFile))
+		if err != nil {
+			return fmt.Errorf("cluster password unavailable (set %s or re-run 'qpot cluster init/join'): %w", ClusterPasswordEnv, err)
+		}
+		pw = strings.TrimRight(string(data), "\r\n")
+	}
+	return m.UnlockPassword(pw)
 }
 
 // UnlockPassword checks password against the stored hash and, if it matches,
@@ -914,6 +977,9 @@ func (m *Manager) admitNodeLocked(req *JoinRequest) (*JoinResponse, error) {
 	}
 
 	m.cluster.Nodes[nodeID] = node
+	if err := m.saveClusterLocked(); err != nil {
+		slog.Warn("Failed to persist cluster membership", "error", err)
+	}
 	m.cluster.UpdatedAt = now
 
 	nodes := m.snapshotNodesLocked()
@@ -978,6 +1044,7 @@ func (m *Manager) startAPIServer() error {
 	tlsEnabled := m.cluster.Config.EnableEncryption &&
 		m.cluster.Config.TLSCertPath != "" &&
 		m.cluster.Config.TLSKeyPath != ""
+	autoTLS := m.cluster.Config.EnableEncryption && !tlsEnabled
 
 	srv := &http.Server{
 		Addr:         addr,
@@ -993,10 +1060,19 @@ func (m *Manager) startAPIServer() error {
 			return fmt.Errorf("cluster TLS: failed to load cert/key pair: %w", err)
 		}
 		srv.TLSConfig = &tls.Config{MinVersion: tls.VersionTLS12}
-	} else if m.cluster.Config.EnableEncryption {
-		// User asked for encryption but didn't provide cert+key. Fail closed
-		// so they notice instead of silently downgrading.
-		return fmt.Errorf("cluster TLS enabled but tls_cert_path and tls_key_path must both be set")
+	} else if autoTLS {
+		// No operator certificate: serve a node certificate signed by the
+		// cluster CA derived from the cluster secret (see autotls.go). Never
+		// fall back to plain HTTP, which would expose the password header.
+		var nodeID string
+		if m.cluster.LocalNode != nil {
+			nodeID = m.cluster.LocalNode.ID
+		}
+		cert, err := newNodeCertificate(m.cluster.ID, m.plainPassword, nodeID)
+		if err != nil {
+			return fmt.Errorf("cluster TLS: %w", err)
+		}
+		srv.TLSConfig = &tls.Config{MinVersion: tls.VersionTLS12, Certificates: []tls.Certificate{cert}}
 	}
 
 	m.apiServer = srv
@@ -1007,6 +1083,8 @@ func (m *Manager) startAPIServer() error {
 		var err error
 		if tlsEnabled {
 			err = srv.ListenAndServeTLS(certPath, keyPath)
+		} else if autoTLS {
+			err = srv.ListenAndServeTLS("", "")
 		} else {
 			err = srv.ListenAndServe()
 		}
@@ -1290,6 +1368,7 @@ func (m *Manager) gossip() {
 			m.mu.Unlock()
 			return
 		}
+		discovered := false
 		for _, peerNode := range peerMsg.NodeDigest {
 			if peerNode == nil || peerNode.ID == localID {
 				continue
@@ -1306,6 +1385,7 @@ func (m *Manager) gossip() {
 				}
 				m.cluster.Nodes[peerNode.ID] = peerNode
 				slog.Info("Gossip: discovered new node", "node_id", peerNode.ID, "name", peerNode.Name)
+				discovered = true
 			} else if peerNode.LastSeen.After(existing.LastSeen) {
 				// Peer has fresher info about this node.
 				existing.Status = peerNode.Status
@@ -1317,6 +1397,13 @@ func (m *Manager) gossip() {
 		if node, ok := m.cluster.Nodes[peer.id]; ok {
 			node.Status = NodeStatusHealthy
 			node.LastSeen = now
+		}
+		// Persist once per message, not per node: a digest can carry
+		// thousands of entries and each save serializes the whole cluster.
+		if discovered {
+			if err := m.saveClusterLocked(); err != nil {
+				slog.Warn("Failed to persist cluster membership", "error", err)
+			}
 		}
 		m.mu.Unlock()
 	}
@@ -1500,6 +1587,7 @@ func (m *Manager) handleGossipHTTP(w http.ResponseWriter, r *http.Request) {
 		// with an empty ID / blank address / out-of-range port, which would
 		// either panic the handler or pollute the membership table with a junk
 		// entry (e.g. keyed by ""). Skip anything validPeerNode rejects.
+		discovered := false
 		for _, node := range incoming.NodeDigest {
 			if !validPeerNode(node) {
 				continue
@@ -1514,6 +1602,7 @@ func (m *Manager) handleGossipHTTP(w http.ResponseWriter, r *http.Request) {
 				}
 				m.cluster.Nodes[node.ID] = node
 				slog.Info("Gossip: discovered node via ping", "node_id", node.ID)
+				discovered = true
 			} else if node.LastSeen.After(existing.LastSeen) {
 				existing.Status = node.Status
 				existing.LastSeen = node.LastSeen
@@ -1524,6 +1613,11 @@ func (m *Manager) handleGossipHTTP(w http.ResponseWriter, r *http.Request) {
 		if existing, ok := m.cluster.Nodes[incoming.SenderID]; ok {
 			existing.Status = NodeStatusHealthy
 			existing.LastSeen = now
+		}
+		if discovered { // once per message (see gossip)
+			if err := m.saveClusterLocked(); err != nil {
+				slog.Warn("Failed to persist cluster membership", "error", err)
+			}
 		}
 	}
 
@@ -1584,8 +1678,18 @@ func (m *Manager) handleIntelHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// saveCluster saves cluster configuration to disk
+// saveCluster saves cluster configuration to disk.
 func (m *Manager) saveCluster() error {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.saveClusterLocked()
+}
+
+// saveClusterLocked writes cluster.json; the caller holds m.mu (read or
+// write), so the snapshot is consistent. Membership changes (an admitted or
+// gossip-discovered node) are persisted, so a restarted host still knows its
+// members and `qpot cluster nodes` reads current state.
+func (m *Manager) saveClusterLocked() error {
 	if m.cluster == nil {
 		return fmt.Errorf("no cluster to save")
 	}
@@ -1600,7 +1704,11 @@ func (m *Manager) saveCluster() error {
 		return err
 	}
 
-	return os.WriteFile(clusterPath, data, 0600)
+	tmp := clusterPath + ".tmp"
+	if err := os.WriteFile(tmp, data, 0600); err != nil {
+		return err
+	}
+	return os.Rename(tmp, clusterPath)
 }
 
 // LoadCluster loads cluster configuration from disk
@@ -1705,6 +1813,9 @@ func (m *Manager) LeaveCluster() error {
 	clusterPath := filepath.Join(m.dataPath, "cluster.json")
 	if err := os.Remove(clusterPath); err != nil && !os.IsNotExist(err) {
 		slog.Warn("LeaveCluster: failed to remove cluster file", "path", clusterPath, "error", err)
+	}
+	if err := os.Remove(filepath.Join(m.dataPath, secretFile)); err != nil && !os.IsNotExist(err) {
+		slog.Warn("LeaveCluster: failed to remove cluster secret", "error", err)
 	}
 
 	m.mu.Lock()

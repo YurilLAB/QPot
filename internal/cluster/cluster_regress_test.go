@@ -7,6 +7,8 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strconv"
 	"sync"
 	"testing"
@@ -163,5 +165,54 @@ func TestLoadedClusterNeedsPasswordUnlock(t *testing.T) {
 	defer mu.Unlock()
 	if got != "password123" {
 		t.Fatalf("gossip sent X-Cluster-Password=%q, want the cluster password", got)
+	}
+}
+
+// A node restarted from disk must be able to resume membership: the password
+// is stored 0600 next to cluster.json (or supplied via env), and leaving
+// removes it.
+func TestClusterSecretPersistsAndUnlocks(t *testing.T) {
+	dir := t.TempDir()
+	m := NewManager(dir)
+	cfg := DefaultClusterConfig()
+	cfg.EnableEncryption = false
+	if _, err := m.InitCluster("c", "password123", cfg); err != nil {
+		t.Fatal(err)
+	}
+	if err := m.SaveSecret(); err != nil {
+		t.Fatal(err)
+	}
+	st, err := os.Stat(filepath.Join(dir, secretFile))
+	if err != nil || st.Mode().Perm() != 0o600 {
+		t.Fatalf("secret file: %v mode=%v, want 0600", err, st.Mode().Perm())
+	}
+
+	m2 := NewManager(dir)
+	if _, err := m2.LoadCluster(); err != nil {
+		t.Fatal(err)
+	}
+	if err := m2.UnlockFromSecret(); err != nil {
+		t.Fatalf("UnlockFromSecret: %v", err)
+	}
+	if m2.plainPassword != "password123" {
+		t.Fatal("password not restored from the secret file")
+	}
+
+	// The env var overrides the file; a wrong one is rejected.
+	t.Setenv(ClusterPasswordEnv, "wrong-password")
+	m3 := NewManager(dir)
+	if _, err := m3.LoadCluster(); err != nil {
+		t.Fatal(err)
+	}
+	if err := m3.UnlockFromSecret(); err == nil {
+		t.Fatal("wrong password from env accepted")
+	}
+	t.Setenv(ClusterPasswordEnv, "")
+
+	if err := m2.LeaveCluster(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, secretFile)); !os.IsNotExist(err) {
+		t.Fatal("cluster secret left behind after leaving the cluster")
 	}
 }

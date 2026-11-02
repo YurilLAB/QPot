@@ -13,6 +13,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/qpot/qpot/internal/cluster"
 	"github.com/qpot/qpot/internal/config"
 	"github.com/qpot/qpot/internal/instance"
 	"github.com/qpot/qpot/internal/server"
@@ -50,17 +51,20 @@ func loadInstance(name string) (*config.Config, *instance.QPotID, error) {
 // mode that was at Ctrl+C, and with -d the process exited right away. Either
 // way the web UI never served and no event was ever classified.
 func runControlPlane(ctx context.Context, cfg *config.Config, mgr *instance.Manager) {
+	// server.New may wait for the database to finish starting; do that in the
+	// background so the recycler and cluster are not held up by it.
 	if cfg.WebUI.Enabled {
-		if webSrv, err := server.New(cfg); err != nil {
-			slog.Warn("Failed to create web server", "error", err)
-		} else {
-			go func() {
-				if err := webSrv.Start(ctx); err != nil && !errors.Is(err, http.ErrServerClosed) {
-					slog.Error("Web server error", "error", err)
-				}
-			}()
+		go func() {
+			webSrv, err := server.New(cfg)
+			if err != nil {
+				slog.Warn("Failed to create web server", "error", err)
+				return
+			}
 			slog.Info("Web server started", "addr", fmt.Sprintf("%s:%d", cfg.WebUI.BindAddr, cfg.WebUI.Port))
-		}
+			if err := webSrv.Start(ctx); err != nil && !errors.Is(err, http.ErrServerClosed) {
+				slog.Error("Web server error", "error", err)
+			}
+		}()
 	}
 
 	// ypanel phone-home agent: a construction failure is logged but never
@@ -73,6 +77,23 @@ func runControlPlane(ctx context.Context, cfg *config.Config, mgr *instance.Mana
 				slog.Error("ypanel agent error", "error", err)
 			}
 		}()
+	}
+
+	// Cluster membership (gossip, sync and the cluster API) when this node is
+	// paired. Only one process per host can own the cluster port; a second
+	// instance's control plane just logs that and carries on.
+	if dir, err := cluster.DefaultDataPath(); err == nil {
+		cm := cluster.NewManager(dir)
+		if c, err := cm.LoadCluster(); err == nil && c != nil {
+			if err := cm.UnlockFromSecret(); err != nil {
+				slog.Warn("Cluster not started", "error", err)
+			} else if err := cm.Start(); err != nil {
+				slog.Warn("Cluster not started", "error", err)
+			} else {
+				slog.Info("Cluster membership running", "cluster", c.Name)
+				defer func() { _ = cm.Stop() }()
+			}
+		}
 	}
 
 	// HiFi: recreate each real-OpenSSH backend after every session.

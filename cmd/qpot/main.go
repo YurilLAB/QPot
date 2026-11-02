@@ -5,7 +5,6 @@ package main
 import (
 	"bytes"
 	"context"
-	"crypto/tls"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -780,8 +779,10 @@ func newClusterInitCommand() *cobra.Command {
 			}
 
 			// Start cluster manager
-			if err := mgr.Start(); err != nil {
-				return fmt.Errorf("failed to start cluster manager: %w", err)
+			// The cluster runs inside the long-lived QPot control plane, not in
+			// this short-lived command (which used to Start it and exit at once).
+			if err := mgr.SaveSecret(); err != nil {
+				return fmt.Errorf("failed to store cluster secret: %w", err)
 			}
 
 			fmt.Printf("\n[OK] Cluster initialized successfully\n")
@@ -793,6 +794,8 @@ func newClusterInitCommand() *cobra.Command {
 			fmt.Println("            Other nodes will need both to join.")
 			fmt.Printf("\nTo join this cluster, run:\n")
 			fmt.Printf("  qpot cluster join --id %s --seed %s:%d\n", c.ID, cfg.AdvertiseAddr, cfg.BindPort)
+			fmt.Println("\nThe cluster runs with the QPot control plane: start it with 'qpot up' (or")
+			fmt.Println("restart a running 'qpot up -d' / 'qpot serve') so other nodes can join.")
 
 			return nil
 		},
@@ -894,9 +897,9 @@ func newClusterJoinCommand() *cobra.Command {
 				return fmt.Errorf("failed to join cluster: %w", err)
 			}
 
-			// Start cluster manager
-			if err := mgr.Start(); err != nil {
-				return fmt.Errorf("failed to start cluster manager: %w", err)
+			// The cluster runs inside the long-lived QPot control plane.
+			if err := mgr.SaveSecret(); err != nil {
+				return fmt.Errorf("failed to store cluster secret: %w", err)
 			}
 
 			fmt.Printf("\n[OK] Successfully joined cluster\n")
@@ -904,6 +907,8 @@ func newClusterJoinCommand() *cobra.Command {
 			fmt.Printf("     Cluster Name: %s\n", c.Name)
 			fmt.Printf("     Node ID:      %s\n", c.LocalNode.ID)
 			fmt.Printf("     Total Nodes:  %d\n", len(c.Nodes))
+			fmt.Println("\nMembership is kept up by the QPot control plane: run 'qpot up' (or restart")
+			fmt.Println("'qpot up -d' / 'qpot serve') on this node.")
 
 			return nil
 		},
@@ -1100,39 +1105,39 @@ func newClusterNodesCommand() *cobra.Command {
 	return cmd
 }
 
-// clusterAPIBase returns the base URL of the local cluster API, derived from the
-// loaded cluster config. The CLI talks to the running cluster process over HTTP
+// localClusterManager loads this node's cluster (as host) for the approval
+// commands. They talk to the running control plane over the cluster API,
 // because pending join requests live in that process's memory.
-func clusterAPIBase() (string, error) {
-	homeDir, err := os.UserHomeDir()
+func localClusterManager() (*cluster.Manager, *cluster.Cluster, error) {
+	dir, err := cluster.DefaultDataPath()
 	if err != nil {
-		return "", err
+		return nil, nil, err
 	}
-	mgr := cluster.NewManager(filepath.Join(homeDir, ".qpot", "cluster"))
+	mgr := cluster.NewManager(dir)
 	c, err := mgr.LoadCluster()
 	if err != nil || c == nil {
-		return "", fmt.Errorf("this node is not a cluster host (run 'qpot cluster init' first)")
+		return nil, nil, fmt.Errorf("this node is not a cluster host (run 'qpot cluster init' first)")
 	}
-	port := cluster.DefaultClusterPort
-	scheme := "http"
-	if c.Config != nil {
-		if c.Config.BindPort != 0 {
-			port = c.Config.BindPort
-		}
-		if c.Config.EnableEncryption && c.Config.TLSCertPath != "" && c.Config.TLSKeyPath != "" {
-			scheme = "https"
-		}
-	}
-	return fmt.Sprintf("%s://127.0.0.1:%d/api/v1/cluster", scheme, port), nil
+	return mgr, c, nil
 }
 
 // clusterAPIRequest performs an authenticated request to the local cluster API
-// and returns the response body. Used by the host-side approval commands.
+// and returns the response body. Used by the host-side approval commands. The
+// connection is verified like any cluster peer (automatic cluster CA or the
+// operator's certificate).
 func clusterAPIRequest(method, path, password string, body []byte) ([]byte, int, error) {
-	base, err := clusterAPIBase()
+	mgr, c, err := localClusterManager()
 	if err != nil {
 		return nil, 0, err
 	}
+	if err := mgr.UnlockPassword(password); err != nil {
+		return nil, 0, fmt.Errorf("wrong cluster password")
+	}
+	port := cluster.DefaultClusterPort
+	if c.Config != nil && c.Config.BindPort != 0 {
+		port = c.Config.BindPort
+	}
+	base := fmt.Sprintf("%s://127.0.0.1:%d/api/v1/cluster", mgr.APIScheme(), port)
 	var rdr io.Reader
 	if body != nil {
 		rdr = bytes.NewReader(body)
@@ -1143,13 +1148,9 @@ func clusterAPIRequest(method, path, password string, body []byte) ([]byte, int,
 	}
 	req.Header.Set("X-Cluster-Password", password)
 	req.Header.Set("Content-Type", "application/json")
-	client := &http.Client{Timeout: 10 * time.Second}
-	if strings.HasPrefix(base, "https") {
-		client.Transport = &http.Transport{TLSClientConfig: &tls.Config{MinVersion: tls.VersionTLS12}}
-	}
-	resp, err := client.Do(req)
+	resp, err := mgr.HTTPClient(10 * time.Second).Do(req)
 	if err != nil {
-		return nil, 0, fmt.Errorf("cannot reach the local cluster API (is the cluster running?): %w", err)
+		return nil, 0, fmt.Errorf("cannot reach the local cluster API (is 'qpot up' / 'qpot serve' running?): %w", err)
 	}
 	defer resp.Body.Close()
 	out, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))

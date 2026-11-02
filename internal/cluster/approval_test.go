@@ -36,7 +36,8 @@ func startSeedServer(t *testing.T, seed *Manager) string {
 // the joiner's poll then completes with full membership.
 func TestJoinApprovalFlow(t *testing.T) {
 	const password = "correct-horse-battery"
-	seed := NewManager(t.TempDir())
+	seedDir := t.TempDir()
+	seed := NewManager(seedDir)
 	cl, err := seed.InitCluster("prod", password, DefaultClusterConfig()) // RequireApproval defaults true
 	if err != nil {
 		t.Fatalf("InitCluster: %v", err)
@@ -103,11 +104,21 @@ func TestJoinApprovalFlow(t *testing.T) {
 	if joined == nil || joined.ID != cl.ID {
 		t.Fatalf("joiner did not receive cluster membership")
 	}
+	// The joiner listens on ITS node port/address, not the seed's.
+	if c := joined.Config; c.BindPort != 7947 || c.BindAddr != "0.0.0.0" || c.AdvertiseAddr != "10.9.9.9" {
+		t.Errorf("joiner config bind=%s:%d advertise=%s, want 0.0.0.0:7947 advertise 10.9.9.9",
+			c.BindAddr, c.BindPort, c.AdvertiseAddr)
+	}
 	seed.mu.RLock()
 	n = len(seed.cluster.Nodes)
 	seed.mu.RUnlock()
 	if n != 2 {
 		t.Errorf("cluster has %d nodes after approval, want 2", n)
+	}
+	// The host persisted the new member (a restart must not forget it).
+	reloaded, err := NewManager(seedDir).LoadCluster()
+	if err != nil || reloaded == nil || len(reloaded.Nodes) != 2 {
+		t.Errorf("cluster.json after approval: err=%v nodes=%v, want 2 nodes", err, reloaded)
 	}
 }
 
