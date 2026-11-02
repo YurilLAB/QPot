@@ -9,7 +9,7 @@
 #   docker build -f docker/ssh-proxy/Dockerfile -t ghcr.io/yurillab/qpot-ssh-proxy:latest .
 
 # ---- build stage ----
-FROM golang:1.26-alpine AS build
+FROM public.ecr.aws/docker/library/golang:1.26-alpine AS build
 WORKDIR /src
 # Cache modules first.
 COPY go.mod go.sum ./

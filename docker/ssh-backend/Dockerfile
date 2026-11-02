@@ -15,7 +15,7 @@
 #
 # Build context is the repository root:
 #   docker build -f docker/ssh-backend/Dockerfile -t ghcr.io/yurillab/qpot-ssh-backend:latest .
-FROM debian:12-slim
+FROM public.ecr.aws/docker/library/debian:12-slim
 
 # Real openssh-server + `script` (util-linux/bsdextrautils) for PTY session
 # recording. A small set of ordinary tools makes the box look lived-in without
