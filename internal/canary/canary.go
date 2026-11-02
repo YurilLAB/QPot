@@ -105,6 +105,9 @@ type Trip struct {
 	SourceIP  string    `json:"source_ip,omitempty"`
 	UserAgent string    `json:"user_agent,omitempty"`
 	Detail    string    `json:"detail,omitempty"` // e.g. "matched in cowrie session"
+	// Repeats counts further hits of the same canary from the same source on
+	// the same channel within TripDedupeWindow, folded into this trip.
+	Repeats int `json:"repeats,omitempty"`
 }
 
 // b32 is RawStdEncoding lowercased at use; tokens are URL-path-safe.

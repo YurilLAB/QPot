@@ -192,8 +192,37 @@ func (s *Store) Trips(limit int) []*Trip {
 
 // recordTripLocked appends a trip, updates the canary counters, caps history,
 // and persists. Caller holds the write lock.
+// TripDedupeWindow folds repeat hits of one canary from one source (same
+// channel) into the first trip. Without it, anyone holding a single token could
+// replay it in a loop and turn every request into a new critical event, IOC
+// insert, Yuril forward and full rewrite of the store file.
+var TripDedupeWindow = time.Minute
+
+// recentTripLocked returns a trip of c from srcIP on channel within the dedupe
+// window, if any.
+func (s *Store) recentTripLocked(c *Canary, channel, srcIP string, now time.Time) *Trip {
+	for i := len(s.trips) - 1; i >= 0; i-- {
+		t := s.trips[i]
+		if now.Sub(t.Time) > TripDedupeWindow {
+			break // trips are appended in time order
+		}
+		if t.CanaryID == c.ID && t.SourceIP == srcIP && t.Channel == channel {
+			return t
+		}
+	}
+	return nil
+}
+
+// recordTripLocked records a trip, or returns nil when it repeats a recent one
+// (counted in that trip's Repeats; persisted with the next save).
 func (s *Store) recordTripLocked(c *Canary, channel, srcIP, ua, detail string) (*Trip, error) {
 	now := time.Now().UTC()
+	if prev := s.recentTripLocked(c, channel, srcIP, now); prev != nil {
+		prev.Repeats++
+		c.Trips++ // the lifetime counter still counts every hit
+		c.LastTrip = now
+		return nil, nil
+	}
 	t := &Trip{
 		ID:        "trip_" + randHex(10),
 		CanaryID:  c.ID,
@@ -232,6 +261,9 @@ func (s *Store) TripByToken(token, srcIP, ua, detail string) (*Trip, bool, error
 		return nil, false, nil
 	}
 	t, err := s.recordTripLocked(c, "http", srcIP, ua, detail)
+	if t == nil {
+		return nil, false, nil // a repeat within the dedupe window: no new alert
+	}
 	return t, true, err
 }
 
@@ -256,6 +288,9 @@ func (s *Store) Match(text, srcIP, detail string) (*Trip, bool, error) {
 			continue
 		}
 		t, err := s.recordTripLocked(c, "honeypot", srcIP, "", detail)
+		if t == nil {
+			return nil, false, nil // repeat within the dedupe window
+		}
 		return t, true, err
 	}
 	return nil, false, nil

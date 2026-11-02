@@ -1,6 +1,7 @@
 package canary
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -194,7 +195,7 @@ func TestTripHistoryCap(t *testing.T) {
 	s, _ := NewStore(t.TempDir(), 5)
 	c, _ := s.Create(KindWeb, "x", "")
 	for i := 0; i < 20; i++ {
-		if _, _, err := s.TripByToken(c.Token, "1.1.1.1", "", ""); err != nil {
+		if _, _, err := s.TripByToken(c.Token, fmt.Sprintf("10.0.0.%d", i), "", ""); err != nil {
 			t.Fatalf("trip %d: %v", i, err)
 		}
 	}
@@ -215,5 +216,39 @@ func TestCorruptStoreReported(t *testing.T) {
 	}
 	if _, err := NewStore(dir, 0); err == nil {
 		t.Fatal("expected error opening corrupt store")
+	}
+}
+
+// Replaying one token from one source must alert once, not on every request.
+func TestRepeatTripsAreFolded(t *testing.T) {
+	s, _ := NewStore(t.TempDir(), 100)
+	c, _ := s.Create(KindWeb, "x", "")
+	alerts := 0
+	for i := 0; i < 500; i++ {
+		if _, ok, err := s.TripByToken(c.Token, "203.0.113.9", "curl", ""); err != nil {
+			t.Fatal(err)
+		} else if ok {
+			alerts++
+		}
+	}
+	if alerts != 1 {
+		t.Fatalf("500 replays from one source raised %d alerts, want 1", alerts)
+	}
+	trips := s.Trips(0)
+	if len(trips) != 1 || trips[0].Repeats != 499 {
+		t.Fatalf("trips=%d repeats=%d, want 1 trip with 499 repeats", len(trips), trips[0].Repeats)
+	}
+	if got, _ := s.Get(c.ID); got.Trips != 500 {
+		t.Fatalf("lifetime trips = %d, want 500", got.Trips)
+	}
+	// A different source is a new trip; so is the same source after the window.
+	if _, ok, _ := s.TripByToken(c.Token, "198.51.100.7", "", ""); !ok {
+		t.Fatal("hit from a new source was folded")
+	}
+	old := TripDedupeWindow
+	TripDedupeWindow = 0
+	defer func() { TripDedupeWindow = old }()
+	if _, ok, _ := s.TripByToken(c.Token, "203.0.113.9", "", ""); !ok {
+		t.Fatal("hit after the dedupe window was folded")
 	}
 }
