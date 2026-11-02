@@ -346,6 +346,8 @@ services:
     image: clickhouse/clickhouse-server:latest
     container_name: {{.Config.InstanceName}}_db
     restart: unless-stopped
+    labels:
+      qpot.instance: "{{.Config.InstanceName}}"
     environment:
       CLICKHOUSE_DB: {{.Config.Database.Database}}
       CLICKHOUSE_USER: {{.Config.Database.Username}}
@@ -371,6 +373,8 @@ services:
     image: timescale/timescaledb:latest-pg15
     container_name: {{.Config.InstanceName}}_db
     restart: unless-stopped
+    labels:
+      qpot.instance: "{{.Config.InstanceName}}"
     environment:
       POSTGRES_DB: {{.Config.Database.Database}}
       POSTGRES_USER: {{.Config.Database.Username}}
@@ -397,6 +401,8 @@ services:
     image: timberio/vector:latest-alpine
     container_name: {{.Config.InstanceName}}_collector
     restart: unless-stopped
+    labels:
+      qpot.instance: "{{.Config.InstanceName}}"
     # Point Vector explicitly at the YAML config so parser selection never
     # depends on the image's default config path/extension.
     command: ["--config", "/etc/vector/vector.yaml"]
@@ -429,6 +435,8 @@ services:
     image: {{GetHoneypotImage "ssh-backend"}}
     container_name: {{$.Config.InstanceName}}_{{$b.Service}}
     restart: unless-stopped
+    labels:
+      qpot.instance: "{{$.Config.InstanceName}}"
     # Every backend presents the SAME hostname and SAME SSH host keys (shared
     # volume below) so the pool looks like ONE server: a returning attacker routed
     # to a different backend never sees the hostname or host-key fingerprint

@@ -1377,13 +1377,13 @@ type dockerContainerInfo struct {
 }
 
 // runDockerPS executes docker ps and returns QPot-related containers.
-// QPot containers are identified by names containing "qpot" or by the
-// com.docker.compose.project label prefix.
+// QPot containers are identified by the qpot.instance label that the generated
+// compose file sets on every service. (Container names are "<instance>_<svc>",
+// which need not contain "qpot", so a name check found nothing.)
 func runDockerPS(ctx context.Context) ([]dockerContainerInfo, error) {
-	// Use JSON format output to reliably parse each field.
-	// We run two passes: one for running containers, one with -a for all.
 	args := []string{
 		"ps", "-a",
+		"--filter", "label=" + qpotInstanceLabel,
 		"--format", "{{.ID}}\t{{.Image}}\t{{.Status}}\t{{.Ports}}\t{{.Names}}",
 	}
 	cmd := exec.CommandContext(ctx, "docker", args...)
@@ -1415,10 +1415,6 @@ func runDockerPS(ctx context.Context) ([]dockerContainerInfo, error) {
 			continue
 		}
 		name := parts[4]
-		// Filter to QPot containers only: name must contain "qpot" (case-insensitive).
-		if !strings.Contains(strings.ToLower(name), "qpot") {
-			continue
-		}
 		info := dockerContainerInfo{
 			ID:     parts[0],
 			Image:  parts[1],
@@ -1433,6 +1429,27 @@ func runDockerPS(ctx context.Context) ([]dockerContainerInfo, error) {
 		containers = append(containers, info)
 	}
 	return containers, nil
+}
+
+// qpotInstanceLabel is set by the generated compose file on every QPot service.
+const qpotInstanceLabel = "qpot.instance"
+
+// requireQPotContainer returns an error unless the named container carries the
+// qpot.instance label, so `qpot docker logs/restart` never touch other
+// containers on the host.
+func requireQPotContainer(ctx context.Context, name string) error {
+	out, err := exec.CommandContext(ctx, "docker", "inspect", "--type", "container",
+		"--format", "{{index .Config.Labels \""+qpotInstanceLabel+"\"}}", name).Output()
+	if err != nil {
+		if isDockerNotFound(err) {
+			return fmt.Errorf("docker not found: install Docker to use this command")
+		}
+		return fmt.Errorf("container '%s' not found", name)
+	}
+	if strings.TrimSpace(string(out)) == "" {
+		return fmt.Errorf("container '%s' is not a QPot container (no %s label)", name, qpotInstanceLabel)
+	}
+	return nil
 }
 
 // isDockerNotFound returns true when the error indicates the docker binary
@@ -1558,9 +1575,9 @@ func newDockerLogsCommand() *cobra.Command {
 			ctx := cmd.Context()
 			containerName := args[0]
 
-			// Verify the container name contains "qpot" as a safety check.
-			if !strings.Contains(strings.ToLower(containerName), "qpot") {
-				return fmt.Errorf("container '%s' does not appear to be a QPot container (name must contain 'qpot')", containerName)
+			// Safety check: only act on containers QPot created.
+			if err := requireQPotContainer(ctx, containerName); err != nil {
+				return err
 			}
 
 			dockerArgs := []string{"logs", "--tail", fmt.Sprintf("%d", tail), containerName}
@@ -1592,9 +1609,9 @@ func newDockerRestartCommand() *cobra.Command {
 			ctx := cmd.Context()
 			containerName := args[0]
 
-			// Verify the container name contains "qpot" as a safety check.
-			if !strings.Contains(strings.ToLower(containerName), "qpot") {
-				return fmt.Errorf("container '%s' does not appear to be a QPot container (name must contain 'qpot')", containerName)
+			// Safety check: only act on containers QPot created.
+			if err := requireQPotContainer(ctx, containerName); err != nil {
+				return err
 			}
 
 			dockerCmd := exec.CommandContext(ctx, "docker", "restart", containerName)
