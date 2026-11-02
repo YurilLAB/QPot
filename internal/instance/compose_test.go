@@ -173,6 +173,9 @@ func TestComposeDatabaseCanBoot(t *testing.T) {
 		if !strings.Contains(blk, "- CHOWN") {
 			t.Errorf("%s: database cap_add lacks CHOWN; the entrypoint cannot chown its data dir", dbType)
 		}
+		if !strings.Contains(blk, "- DAC_OVERRIDE") {
+			t.Errorf("%s: database cap_add lacks DAC_OVERRIDE; the entrypoint cannot use the private data dir", dbType)
+		}
 		if strings.Contains(blk, "pids: 100\n") {
 			t.Errorf("%s: database inherits the 100-pid honeypot limit", dbType)
 		}
@@ -287,5 +290,32 @@ func TestComposeCustomLimitsFallBackToGlobal(t *testing.T) {
 	}
 	if !strings.Contains(blk, "pids: 64") {
 		t.Error("explicit custom pids limit not applied")
+	}
+}
+
+// Data and database directories must be direct bind mounts of THIS instance's
+// paths, never named volumes (which keep the path they were first created
+// with and so can point at another instance's data).
+func TestComposeUsesDirectBindMounts(t *testing.T) {
+	for _, dbType := range []string{"clickhouse", "timescaledb"} {
+		cfg := config.Default("bind-test")
+		cfg.QPotID = "qp_bindtest000000000000001"
+		cfg.Database.Type = dbType
+		out := renderComposeCfg(t, cfg)
+		var doc struct {
+			Volumes map[string]interface{} `yaml:"volumes"`
+		}
+		if err := yaml.Unmarshal([]byte(out), &doc); err != nil {
+			t.Fatal(err)
+		}
+		if len(doc.Volumes) != 0 {
+			t.Errorf("%s: compose declares named volumes %v", dbType, doc.Volumes)
+		}
+		if !strings.Contains(serviceBlock(out, "database"), "- "+cfg.GetDatabasePath()+":/var/lib/") {
+			t.Errorf("%s: database does not bind-mount %s", dbType, cfg.GetDatabasePath())
+		}
+		if !strings.Contains(serviceBlock(out, "collector"), "- "+cfg.DataPath+":/data:ro\n") {
+			t.Errorf("%s: collector does not bind-mount %s read-only", dbType, cfg.DataPath)
+		}
 	}
 }

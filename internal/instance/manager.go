@@ -519,6 +519,7 @@ func (m *Manager) generateDockerCompose() error {
 		Sandbox:         m.sandbox,
 		ReservedPorts:   ports,
 		ReservedSubnets: subnets,
+		ReservedNets:    hostDockerSubnets(context.Background(), composeProjectName(m.config)),
 	}
 
 	compose, err := generator.Generate()
@@ -818,4 +819,10 @@ func PublishedHostPorts(cfg *config.Config) map[string]int {
 	ports, subnets := siblingReservations(cfg.DataPath)
 	g := &ComposeGenerator{Config: cfg, ReservedPorts: ports, ReservedSubnets: subnets}
 	return g.buildHostPortMap()
+}
+
+// composeProjectName is the compose project docker derives for the instance:
+// the compose file's directory name, lowercased.
+func composeProjectName(cfg *config.Config) string {
+	return strings.ToLower(filepath.Base(cfg.DataPath))
 }

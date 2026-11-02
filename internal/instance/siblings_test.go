@@ -1,8 +1,10 @@
 package instance
 
 import (
+	"net"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/qpot/qpot/internal/config"
@@ -77,5 +79,72 @@ func TestSiblingInstancesDoNotCollide(t *testing.T) {
 	again := &ComposeGenerator{Config: prod.Config, ReservedPorts: p2, ReservedSubnets: s2}
 	if again.buildSubnetMap()["cowrie"] != "172.26.31.0/24" {
 		t.Error("prod's allocation changed after x was added")
+	}
+}
+
+func TestParseNetworkInspect(t *testing.T) {
+	data := []byte(`[
+	 {"Name":"bridge","Labels":{},"IPAM":{"Config":[{"Subnet":"172.17.0.0/16"}]}},
+	 {"Name":"other_net","Labels":{"com.docker.compose.project":"other"},"IPAM":{"Config":[{"Subnet":"172.22.0.0/16"},{"Subnet":"fd00::/64"}]}},
+	 {"Name":"mine_qpot_internal","Labels":{"com.docker.compose.project":"mine"},"IPAM":{"Config":[{"Subnet":"172.23.0.0/16"}]}},
+	 {"Name":"host","Labels":{},"IPAM":{"Config":[]}}]`)
+	got := parseNetworkInspect(data, "mine")
+	var s []string
+	for _, n := range got {
+		s = append(s, n.String())
+	}
+	if strings.Join(s, ",") != "172.17.0.0/16,172.22.0.0/16,fd00::/64" {
+		t.Fatalf("got %v", s)
+	}
+}
+
+// Every QPot network gets an explicit /24, none overlaps a network already on
+// the host (even a /16 that contains it), and all are distinct.
+func TestSubnetsAvoidHostNetworks(t *testing.T) {
+	cfg := config.Default("subnet-host")
+	cfg.QPotID = "qp_subnethost00000000000001"
+	for _, hp := range []string{"cowrie", "endlessh", "dionaea", "heralding", "conpot", "adbhoney", "ssh-proxy"} {
+		h := cfg.Honeypots[hp]
+		h.Enabled = true
+		cfg.Honeypots[hp] = h
+	}
+	var reserved []*net.IPNet
+	for _, c := range []string{"172.17.0.0/16", "172.18.0.0/16", "172.20.0.0/16", "172.22.0.0/16", "172.25.0.0/16", "172.31.0.0/16"} {
+		_, n, _ := net.ParseCIDR(c)
+		reserved = append(reserved, n)
+	}
+	g := &ComposeGenerator{Config: cfg, ReservedNets: reserved}
+	m := g.buildSubnetMap()
+	for _, want := range []string{"qpot_internal", "qpot_dbhost", "ssh-proxy_backend", "cowrie"} {
+		if m[want] == "" {
+			t.Errorf("no subnet allocated for %s", want)
+		}
+	}
+	seen := map[string]string{}
+	for name, sub := range m {
+		_, cand, err := net.ParseCIDR(sub)
+		if err != nil {
+			t.Fatalf("%s: bad subnet %q", name, sub)
+		}
+		for _, r := range reserved {
+			if r.Contains(cand.IP) {
+				t.Errorf("%s got %s inside host network %s", name, sub, r)
+			}
+		}
+		if other, dup := seen[sub]; dup {
+			t.Errorf("%s and %s share %s", name, other, sub)
+		}
+		seen[sub] = name
+	}
+	sb, _ := security.NewSandbox(&cfg.Security)
+	g.Sandbox = sb
+	out, err := g.Generate()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"qpot_internal", "qpot_dbhost", "ssh-proxy_backend", "cowrie"} {
+		if !strings.Contains(out, "- subnet: "+m[name]) {
+			t.Errorf("compose does not render the subnet for %s", name)
+		}
 	}
 }

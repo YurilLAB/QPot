@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"fmt"
 	"hash/fnv"
+	"net"
 	"sort"
 	"strconv"
 	"strings"
@@ -119,6 +120,9 @@ type ComposeGenerator struct {
 	// instances already use (see siblingReservations); allocation skips them.
 	ReservedPorts   map[int]bool
 	ReservedSubnets map[string]bool
+	// ReservedNets are subnets of other docker networks on the host (any
+	// size); no allocated subnet may overlap them.
+	ReservedNets []*net.IPNet
 }
 
 // bridgeName builds the Linux bridge interface name for a honeypot network.
@@ -198,22 +202,43 @@ func nextSubnet(s string) string {
 // overlaps with other one". Resolve deterministically: process honeypots in
 // sorted order, start at the hashed subnet, and probe to the next free /24.
 func (g *ComposeGenerator) buildSubnetMap() map[string]string {
-	names := make([]string, 0, len(g.Config.Honeypots))
+	names := make([]string, 0, len(g.Config.Honeypots)+3)
 	for name, hp := range g.Config.Honeypots {
 		if hp.Enabled {
 			names = append(names, name)
 		}
 	}
 	sort.Strings(names)
+	// QPot's own networks are allocated too (after the honeypots, so adding
+	// them did not move any existing honeypot subnet).
+	names = append(names, "qpot_internal", "qpot_dbhost")
+	if sshProxyEnabled(g.Config) {
+		names = append(names, "ssh-proxy_backend")
+	}
 
 	used := map[string]bool{}
 	for s := range g.ReservedSubnets {
 		used[s] = true
 	}
+	taken := func(sub string) bool {
+		if used[sub] {
+			return true
+		}
+		_, cand, err := net.ParseCIDR(sub)
+		if err != nil {
+			return true
+		}
+		for _, n := range g.ReservedNets {
+			if n.Contains(cand.IP) || cand.Contains(n.IP) {
+				return true
+			}
+		}
+		return false
+	}
 	assign := make(map[string]string)
 	for _, name := range names {
 		sub := subnetForNetwork(g.Config.InstanceName, name)
-		for used[sub] {
+		for tries := 0; taken(sub) && tries < 12*256; tries++ {
 			sub = nextSubnet(sub)
 		}
 		used[sub] = true
@@ -306,8 +331,15 @@ func (g *ComposeGenerator) Generate() (string, error) {
 # Auto-generated - Do not edit manually
 
 networks:
+  # Every network gets an explicit subnet from QPot's allocator (which avoids
+  # subnets already in use on the docker host). Left to docker, a network takes
+  # a whole /16 from its default pool, which overlapped QPot's own per-honeypot
+  # /24s ("Pool overlaps") as soon as a few networks existed.
   qpot_internal:
     internal: true
+    ipam:
+      config:
+        - subnet: {{netSubnet "qpot_internal"}}
 
   # Only the database joins this one. Docker cannot publish a port for a
   # container that is attached solely to an internal network, so without it
@@ -315,6 +347,9 @@ networks:
   # created its schema). The port is bound to 127.0.0.1 only.
   qpot_dbhost:
     driver: bridge
+    ipam:
+      config:
+        - subnet: {{netSubnet "qpot_dbhost"}}
 {{if sshProxyEnabled .Config}}
   # HiFi backends sit here ONLY. internal:true removes the default gateway, so
   # the real-OpenSSH backends (genuine attacker code execution) have NO outbound
@@ -322,30 +357,24 @@ networks:
   # lock is the single most important control for high-interaction mode.
   ssh-proxy_backend:
     internal: true
+    ipam:
+      config:
+        - subnet: {{netSubnet "ssh-proxy_backend"}}
 {{end}}{{range $name, $hp := .Config.Honeypots}}{{if $hp.Enabled}}
   {{$name}}_net:
     driver: bridge
     driver_opts:
       com.docker.network.bridge.name: {{bridgeName $.Config.InstanceName $name}}
-{{if $.Config.Security.NetworkIsolation.RandomizeMAC}}
     ipam:
       config:
         - subnet: {{netSubnet $name}}
-{{end}}{{end}}{{end}}
+{{end}}{{end}}
 
-volumes:
-  qpot_data:
-    driver: local
-    driver_opts:
-      type: none
-      o: bind
-      device: {{.Config.DataPath}}
-  qpot_db:
-    driver: local
-    driver_opts:
-      type: none
-      o: bind
-      device: {{.Config.GetDatabasePath}}
+# The data and database directories are plain bind mounts, NOT named volumes:
+# a named volume records its host path when first created and keeps it, so a
+# re-created instance (or another user's instance with the same name on this
+# docker host) silently got the OLD directory - its collector read the wrong
+# logs and its database mounted someone else's data.
 
 secrets:
   qpot_id:
@@ -366,7 +395,7 @@ services:
       CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: 1
       QPOT_ID: {{.Config.QPotID}}
     volumes:
-      - qpot_db:/var/lib/clickhouse
+      - {{.Config.GetDatabasePath}}:/var/lib/clickhouse
       - {{.Config.DataPath}}/clickhouse-config:/etc/clickhouse-server/conf.d
       - {{.Config.DataPath}}/qpot.id:/run/secrets/qpot_id:ro
     ports:
@@ -392,7 +421,7 @@ services:
       POSTGRES_PASSWORD: {{.Config.Database.Password}}
       QPOT_ID: {{.Config.QPotID}}
     volumes:
-      - qpot_db:/var/lib/postgresql/data
+      - {{.Config.GetDatabasePath}}:/var/lib/postgresql/data
       - {{.Config.DataPath}}/qpot.id:/run/secrets/qpot_id:ro
     ports:
       - "127.0.0.1:{{.Config.DatabaseHostPort}}:5432"
@@ -422,7 +451,7 @@ services:
       QPOT_INSTANCE: {{.Config.InstanceName}}
     volumes:
       - {{.Config.DataPath}}/vector.yaml:/etc/vector/vector.yaml:ro
-      - qpot_data:/data:ro
+      - {{.Config.DataPath}}:/data:ro
       # The only writable path: the file_backup sink. Everything else under
       # /data stays read-only (it holds attacker-influenced honeypot logs).
       - {{.Config.DataPath}}/backup:/data/backup
@@ -641,13 +670,17 @@ services:
       - ALL
     cap_add:
       - CHOWN
+      - DAC_OVERRIDE
       - SETUID
       - SETGID{{end}}
 
     # No user override: the database image runs as its own user; forcing a
     # different uid breaks its data-directory ownership. CHOWN is required:
     # both the ClickHouse and TimescaleDB entrypoints chown their data dir on
-    # first start and exit immediately without it.
+    # first start and exit immediately without it. DAC_OVERRIDE lets the
+    # entrypoint work inside the instance's private (0750) data dir, which the
+    # host user owns, instead of that dir having to be world-writable. The
+    # database is not attacker-facing (internal network + 127.0.0.1 only).
 
     # Hostname isolation
     hostname: "{{.Name}}-host"

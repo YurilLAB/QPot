@@ -1,10 +1,15 @@
 package instance
 
 import (
+	"context"
+	"encoding/json"
+	"net"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 
 	"gopkg.in/yaml.v3"
 )
@@ -88,4 +93,49 @@ func publishedHostPort(spec string) int {
 		return 0
 	}
 	return n
+}
+
+// hostDockerSubnets returns the subnets of the docker networks on this host
+// that do not belong to the given compose project (whose own networks are
+// re-rendered with the same subnets). Errors (no docker) yield nothing.
+func hostDockerSubnets(ctx context.Context, project string) []*net.IPNet {
+	ctx, cancel := context.WithTimeout(ctx, 15*time.Second)
+	defer cancel()
+	ids, err := exec.CommandContext(ctx, "docker", "network", "ls", "-q").Output()
+	if err != nil || len(strings.Fields(string(ids))) == 0 {
+		return nil
+	}
+	out, err := exec.CommandContext(ctx, "docker", append([]string{"network", "inspect"}, strings.Fields(string(ids))...)...).Output()
+	if err != nil {
+		return nil
+	}
+	return parseNetworkInspect(out, project)
+}
+
+// parseNetworkInspect extracts the IPv4/IPv6 subnets from `docker network
+// inspect` JSON, skipping networks of the given compose project.
+func parseNetworkInspect(data []byte, project string) []*net.IPNet {
+	var nets []struct {
+		Labels map[string]string `json:"Labels"`
+		IPAM   struct {
+			Config []struct {
+				Subnet string `json:"Subnet"`
+			} `json:"Config"`
+		} `json:"IPAM"`
+	}
+	if json.Unmarshal(data, &nets) != nil {
+		return nil
+	}
+	var out []*net.IPNet
+	for _, n := range nets {
+		if project != "" && n.Labels["com.docker.compose.project"] == project {
+			continue
+		}
+		for _, c := range n.IPAM.Config {
+			if _, ipn, err := net.ParseCIDR(c.Subnet); err == nil {
+				out = append(out, ipn)
+			}
+		}
+	}
+	return out
 }
