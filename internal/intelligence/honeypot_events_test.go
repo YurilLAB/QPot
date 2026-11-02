@@ -120,3 +120,23 @@ func hasIOC(iocs []*database.IOC, typ, value string) bool {
 	}
 	return false
 }
+
+func TestExtractDownloadedFileHash(t *testing.T) {
+	x := NewExtractor()
+	h := "eaba35b63f3a21c43bc4d579fa4ae0cd388ec8633c08e0a54859d07d33a0c487"
+	dl := &database.Event{Honeypot: "cowrie", EventType: "cowrie.session.file_download", SourceIP: "203.0.113.9",
+		Metadata: map[string]string{"shasum": h}}
+	if !hasIOC(x.Extract(dl), IOCTypeHash, h) {
+		t.Error("downloaded file hash not extracted")
+	}
+	tty := &database.Event{Honeypot: "cowrie", EventType: "cowrie.log.closed", SourceIP: "203.0.113.9",
+		Metadata: map[string]string{"shasum": h}}
+	if countType(x.Extract(tty), IOCTypeHash) != 0 {
+		t.Error("TTY log hash extracted as a malware hash")
+	}
+	bad := &database.Event{Honeypot: "cowrie", EventType: "cowrie.session.file_download", SourceIP: "203.0.113.9",
+		Metadata: map[string]string{"shasum": "zz" + h[2:] + "00"}}
+	if countType(x.Extract(bad), IOCTypeHash) != 0 {
+		t.Error("malformed shasum extracted")
+	}
+}

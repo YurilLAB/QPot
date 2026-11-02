@@ -329,6 +329,16 @@ func (e *Extractor) Extract(event *database.Event) []*database.IOC {
 		addURLs(refang(p))
 	}
 
+	// Files an attacker downloaded or uploaded (cowrie/adbhoney
+	// session.file_download / file_upload) carry the payload's SHA-256 in
+	// metadata. Other events with a shasum (cowrie.log.closed: the TTY
+	// recording) are not malware and are skipped.
+	if event.Metadata != nil && (strings.Contains(event.EventType, "file_download") || strings.Contains(event.EventType, "file_upload")) {
+		if h := strings.ToLower(event.Metadata["shasum"]); reSHA256.MatchString(h) && len(h) == 64 {
+			iocs = append(iocs, makeIOC(IOCTypeHash, h))
+		}
+	}
+
 	// User agent from metadata
 	if event.Metadata != nil {
 		if ua, ok := event.Metadata["user_agent"]; ok && ua != "" {
