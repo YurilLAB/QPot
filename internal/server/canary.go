@@ -58,10 +58,15 @@ func (s *Server) handleCanaryBeacon(w http.ResponseWriter, r *http.Request) {
 			detail += " xff=" + firstForwarded(xff)
 		}
 		ua := r.Header.Get("User-Agent")
-		if trip, ok, err := s.canaries.TripByToken(token, clientIP(r), ua, detail); err != nil {
+		// A persistence error does not undo the in-memory trip, so still alert.
+		// Detach from the request context: a client that hangs up right away
+		// must not cancel the alert's DB insert.
+		trip, ok, err := s.canaries.TripByToken(token, clientIP(r), ua, detail)
+		if err != nil {
 			slog.Error("canary: failed to persist trip to store", "error", err)
-		} else if ok {
-			s.onCanaryTrip(r.Context(), trip)
+		}
+		if ok {
+			s.onCanaryTrip(context.WithoutCancel(r.Context()), trip)
 		}
 	}
 	s.serveCanaryDecoy(w)
