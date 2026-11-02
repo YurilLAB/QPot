@@ -298,3 +298,21 @@ func TestProcVersionToolchainPerRelease(t *testing.T) {
 		}
 	}
 }
+
+// /etc/issue and os-release VERSION must match the real distro formats.
+func TestIssueAndOSReleaseVersionFormat(t *testing.T) {
+	for _, p := range distroProfiles {
+		is := issue(p)
+		osr := osRelease(p, "host")
+		if strings.HasPrefix(p.OSPretty, "Debian") {
+			if strings.Contains(is, "(") {
+				t.Errorf("%s: Debian /etc/issue must not carry the codename: %q", p.OSPretty, is)
+			}
+		} else if !strings.Contains(osr, "VERSION=\""+strings.TrimPrefix(p.OSPretty, "Ubuntu ")+" (") {
+			t.Errorf("%s: Ubuntu os-release VERSION lacks the release name:\n%s", p.OSPretty, osr)
+		}
+		if !strings.HasSuffix(is, " \\n \\l\n\n") {
+			t.Errorf("%s: /etc/issue format: %q", p.OSPretty, is)
+		}
+	}
+}

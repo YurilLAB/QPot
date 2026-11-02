@@ -438,6 +438,12 @@ messagebus:x:106:
 // osRelease builds a plausible /etc/os-release consistent with the distro
 // profile (so `cat /etc/os-release` agrees with the SSH banner's distro). Stock
 // Cowrie ships no os-release at all, which is itself a tell on a modern box.
+// ubuntuReleaseNames maps an Ubuntu codename to the release name shown in
+// /etc/os-release VERSION.
+var ubuntuReleaseNames = map[string]string{
+	"focal": "Focal Fossa", "jammy": "Jammy Jellyfish", "noble": "Noble Numbat",
+}
+
 func osRelease(p distroProfile, hostname string) string {
 	pretty := p.OSPretty
 	id, name, versionID := "linux", "Linux", ""
@@ -455,7 +461,12 @@ func osRelease(p distroProfile, hostname string) string {
 	fmt.Fprintf(&b, "NAME=\"%s\"\n", name)
 	if versionID != "" {
 		fmt.Fprintf(&b, "VERSION_ID=\"%s\"\n", versionID)
-		fmt.Fprintf(&b, "VERSION=\"%s\"\n", strings.TrimPrefix(pretty, name+" "))
+		version := strings.TrimPrefix(pretty, name+" ")
+		// Ubuntu's VERSION carries the release name: "22.04.3 LTS (Jammy Jellyfish)".
+		if rel, ok := ubuntuReleaseNames[p.Codename]; ok && id == "ubuntu" {
+			version += " (" + rel + ")"
+		}
+		fmt.Fprintf(&b, "VERSION=\"%s\"\n", version)
 	}
 	// VERSION_CODENAME / UBUNTU_CODENAME: real os-release files carry the release
 	// codename, and Ubuntu repeats it in UBUNTU_CODENAME. A missing codename on a
@@ -491,7 +502,15 @@ func osRelease(p distroProfile, hostname string) string {
 
 // issue builds /etc/issue referencing the distro (login banner realism).
 func issue(p distroProfile) string {
-	return p.OSPretty + " \\n \\l\n\n"
+	// Debian's /etc/issue omits the codename ("Debian GNU/Linux 12 \n \l"),
+	// unlike its PRETTY_NAME; Ubuntu's matches PRETTY_NAME.
+	name := p.OSPretty
+	if strings.HasPrefix(name, "Debian") {
+		if i := strings.Index(name, " ("); i > 0 {
+			name = name[:i]
+		}
+	}
+	return name + " \\n \\l\n\n"
 }
 
 // extractVersion pulls the first dotted/numeric version token out of an OS
