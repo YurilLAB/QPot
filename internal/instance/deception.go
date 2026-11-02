@@ -24,9 +24,13 @@
 package instance
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"hash/fnv"
 	"strings"
+
+	"github.com/qpot/qpot/internal/config"
 )
 
 // distroProfile bundles a self-consistent Linux identity: the advertised SSH
@@ -192,6 +196,23 @@ func seededIndex(seed string, n int) int {
 	h := fnv.New32a()
 	_, _ = h.Write([]byte(seed))
 	return int(h.Sum32() % uint32(n))
+}
+
+// deceptionSeed is the per-instance seed for every attacker-visible generated
+// artifact (persona, hostname, distro, CPU, network identity, UUIDs, ...).
+//
+// It must NOT be the QPot ID itself: that ID is the web UI/API credential, and
+// the artifacts are derived with fast non-cryptographic hashes (FNV-1a) whose
+// outputs an attacker can read inside the honeypot (fstab UUIDs, MACs, /proc
+// values), giving them material to reconstruct the credential. A SHA-256
+// derivation is one-way yet stays stable and unique per instance.
+func deceptionSeed(cfg *config.Config) string {
+	id := cfg.QPotID
+	if id == "" {
+		id = cfg.InstanceName
+	}
+	sum := sha256.Sum256([]byte("qpot-deception-seed-v1\x00" + id))
+	return "ds_" + hex.EncodeToString(sum[:16])
 }
 
 // profileForSeed returns the internally-consistent distro identity for a seed.

@@ -105,10 +105,7 @@ func sshBackendHostname(cfg *config.Config) string {
 			return h
 		}
 	}
-	seed := cfg.QPotID
-	if seed == "" {
-		seed = cfg.InstanceName
-	}
+	seed := deceptionSeed(cfg)
 	// Coherent with the same credential persona the backends enforce
 	// (sshBackendUsersCSV), so the hostname an attacker sees matches the accounts
 	// that work - the pool tells one consistent story instead of pairing, say, a
@@ -159,10 +156,7 @@ func sshBackendCSV(cfg *config.Config) string {
 // (an injection-safety as well as a correctness measure); if the persona yields
 // no safe pair, a sensible default is used so the backend is never credential-less.
 func sshBackendUsersCSV(cfg *config.Config) string {
-	seed := cfg.QPotID
-	if seed == "" {
-		seed = cfg.InstanceName
-	}
+	seed := deceptionSeed(cfg)
 	explicit := ""
 	if hp, ok := cfg.GetHoneypotConfig(sshProxyHoneypot); ok {
 		explicit = hp.Stealth.CredentialTemplate

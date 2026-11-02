@@ -239,7 +239,7 @@ func TestConpotSensorIDNonIdentifying(t *testing.T) {
 	if strings.Contains(c, "qpot-conpot") {
 		t.Error("conpot.cfg still contains the self-identifying sensor_id 'qpot-conpot'")
 	}
-	if !strings.Contains(c, conpotSensorIDForSeed("qp_conpotseed00000000001")) {
+	if !strings.Contains(c, conpotSensorIDForSeed(deceptionSeed(cfg))) {
 		t.Error("conpot.cfg does not contain the per-instance sensor_id")
 	}
 }
@@ -376,7 +376,7 @@ func TestHostnamePersonaCoherence(t *testing.T) {
 		g := &ComposeGenerator{Config: cfg}
 		c := g.generateCowrieConfig(cfg.Honeypots["cowrie"])
 		host := lineValue(c, "hostname = ")
-		persona := selectCredentialTemplate("", id)
+		persona := selectCredentialTemplate("", deceptionSeed(cfg))
 		pool := personaHostnames[persona.Name]
 		if len(pool) == 0 {
 			continue
@@ -556,6 +556,35 @@ func TestAutoPersonaMatchesServerHardware(t *testing.T) {
 	for name := range embeddedHardwarePersonas {
 		if _, ok := credentialTemplateByName(name); !ok {
 			t.Errorf("embeddedHardwarePersonas lists unknown persona %q", name)
+		}
+	}
+}
+
+// The QPot ID is the web UI credential; the attacker-visible deception seed must
+// be a one-way derivation of it, never the ID itself.
+func TestDeceptionSeedDoesNotExposeQPotID(t *testing.T) {
+	cfg := config.Default("seed-test")
+	cfg.QPotID = "qp_secretcredential0000001"
+	s := deceptionSeed(cfg)
+	if strings.Contains(s, "secretcredential") || s == cfg.QPotID {
+		t.Fatalf("deception seed %q exposes the QPot ID", s)
+	}
+	if s != deceptionSeed(cfg) {
+		t.Fatal("deception seed is not stable")
+	}
+	other := config.Default("seed-test")
+	other.QPotID = "qp_othercredential00000002"
+	if deceptionSeed(other) == s {
+		t.Fatal("different QPot IDs share a deception seed")
+	}
+	g := &ComposeGenerator{Config: cfg}
+	for name, out := range map[string]string{
+		"cowrie.cfg": g.generateCowrieConfig(cfg.Honeypots["cowrie"]),
+		"userdb":     g.generateCowrieUserDB(),
+		"fs patch":   g.generateCowrieFsPatch(),
+	} {
+		if strings.Contains(out, cfg.QPotID) {
+			t.Errorf("%s contains the QPot ID", name)
 		}
 	}
 }

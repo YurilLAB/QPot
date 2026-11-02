@@ -1285,10 +1285,7 @@ func (g *ComposeGenerator) GenerateTPOTConfig(honeypot string) (map[string]strin
 // auto-selected per instance from the seed — and only that persona's exact
 // credentials succeed. Cowrie reads this from etc/userdb.txt.
 func (g *ComposeGenerator) generateCowrieUserDB() string {
-	seed := g.Config.QPotID
-	if seed == "" {
-		seed = g.Config.InstanceName
-	}
+	seed := deceptionSeed(g.Config)
 	explicit := ""
 	if hp, ok := g.Config.Honeypots["cowrie"]; ok {
 		explicit = hp.Stealth.CredentialTemplate
@@ -1301,10 +1298,7 @@ func (g *ComposeGenerator) generateCowrieUserDB() string {
 // consistent with this instance's credential persona, distro profile, and
 // hostname. See honeyfs.go for the research basis.
 func (g *ComposeGenerator) generateCowrieHoneyfs() map[string]string {
-	seed := g.Config.QPotID
-	if seed == "" {
-		seed = g.Config.InstanceName
-	}
+	seed := deceptionSeed(g.Config)
 	hp := g.Config.Honeypots["cowrie"]
 	persona := selectCredentialTemplate(hp.Stealth.CredentialTemplate, seed)
 	hostname := hp.Stealth.FakeHostname
@@ -1337,10 +1331,7 @@ func cowrieProfile(hp config.HoneypotConfig, seed string) distroProfile {
 // mirror generateCowrieHoneyfs/generateCowrieConfig so every artifact stays
 // consistent.
 func (g *ComposeGenerator) generateCowrieFsPatch() string {
-	seed := g.Config.QPotID
-	if seed == "" {
-		seed = g.Config.InstanceName
-	}
+	seed := deceptionSeed(g.Config)
 	hp := g.Config.Honeypots["cowrie"]
 	persona := selectCredentialTemplate(hp.Stealth.CredentialTemplate, seed)
 	profile := cowrieProfile(hp, seed)
@@ -1362,10 +1353,7 @@ func (g *ComposeGenerator) generateCowrieFsPatch() string {
 // every T-Pot Cowrie shares (which are themselves a fingerprint). Explicit
 // stealth overrides take precedence. See deception.go for the research basis.
 func (g *ComposeGenerator) generateCowrieConfig(hp config.HoneypotConfig) string {
-	seed := g.Config.QPotID
-	if seed == "" {
-		seed = g.Config.InstanceName
-	}
+	seed := deceptionSeed(g.Config)
 	profile := cowrieProfile(hp, seed)
 
 	hostname := hp.Stealth.FakeHostname
@@ -1500,10 +1488,7 @@ logfile = log/cowrie.json
 
 // generateConpotConfig generates TPOT-compatible Conpot config
 func (g *ComposeGenerator) generateConpotConfig(hp config.HoneypotConfig) string {
-	seed := g.Config.QPotID
-	if seed == "" {
-		seed = g.Config.InstanceName
-	}
+	seed := deceptionSeed(g.Config)
 	// A per-instance, non-self-identifying sensor_id. The stock "qpot-conpot"
 	// both announced the platform and flagged the box as a honeypot; this looks
 	// like an ordinary industrial asset tag and is unique per deployment.
