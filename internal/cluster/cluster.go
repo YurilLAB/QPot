@@ -155,6 +155,29 @@ type Node struct {
 	Stats NodeStats `json:"stats" yaml:"stats"`
 }
 
+// clone returns a deep copy of n, so it can be read or encoded after the
+// manager lock is released without racing concurrent updates.
+func (n *Node) clone() *Node {
+	c := *n
+	if n.Metadata != nil {
+		c.Metadata = make(map[string]string, len(n.Metadata))
+		for k, v := range n.Metadata {
+			c.Metadata[k] = v
+		}
+	}
+	c.Capabilities = append([]string(nil), n.Capabilities...)
+	return &c
+}
+
+// snapshotNodesLocked returns deep copies of every member. Caller holds m.mu.
+func (m *Manager) snapshotNodesLocked() []*Node {
+	nodes := make([]*Node, 0, len(m.cluster.Nodes))
+	for _, n := range m.cluster.Nodes {
+		nodes = append(nodes, n.clone())
+	}
+	return nodes
+}
+
 // NodeStatus represents the state of a node
 type NodeStatus string
 
@@ -654,6 +677,13 @@ func (m *Manager) Start() error {
 		return nil
 	}
 
+	// Only the bcrypt hash is persisted, so a manager restored by LoadCluster
+	// has no plaintext password. Gossiping without it sends an empty
+	// X-Cluster-Password, every peer answers 401 and gets marked failed.
+	if m.plainPassword == "" {
+		return fmt.Errorf("cluster password not set (call UnlockPassword after LoadCluster)")
+	}
+
 	// Re-create stopCh so Start() works correctly after a previous Stop()
 	m.stopCh = make(chan struct{})
 	m.stopOnce = sync.Once{}
@@ -750,12 +780,7 @@ func (m *Manager) GetNodes() []*Node {
 		return nil
 	}
 
-	nodes := make([]*Node, 0, len(m.cluster.Nodes))
-	for _, node := range m.cluster.Nodes {
-		nodes = append(nodes, node)
-	}
-
-	return nodes
+	return m.snapshotNodesLocked()
 }
 
 // GetCluster returns the cluster
@@ -776,6 +801,22 @@ func (m *Manager) UpdateNodeStats(stats NodeStats) {
 
 	m.cluster.LocalNode.Stats = stats
 	m.cluster.LocalNode.LastSeen = time.Now()
+}
+
+// UnlockPassword checks password against the stored hash and, if it matches,
+// keeps it in memory so a cluster restored by LoadCluster can authenticate to
+// its peers.
+func (m *Manager) UnlockPassword(password string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.cluster == nil {
+		return fmt.Errorf("cluster not initialized")
+	}
+	if !checkPassword(password, m.cluster.PasswordHash) {
+		return fmt.Errorf("invalid cluster password")
+	}
+	m.plainPassword = password
+	return nil
 }
 
 // VerifyPassword verifies the cluster password against the stored bcrypt hash.
@@ -864,10 +905,7 @@ func (m *Manager) admitNodeLocked(req *JoinRequest) (*JoinResponse, error) {
 	m.cluster.Nodes[nodeID] = node
 	m.cluster.UpdatedAt = now
 
-	nodes := make([]*Node, 0, len(m.cluster.Nodes))
-	for _, n := range m.cluster.Nodes {
-		nodes = append(nodes, n)
-	}
+	nodes := m.snapshotNodesLocked()
 
 	slog.Info("Node joined cluster",
 		"node_id", nodeID,
@@ -1162,10 +1200,7 @@ func (m *Manager) gossip() {
 
 	localID := m.cluster.LocalNode.ID
 	// Build a snapshot of current node states to share.
-	digest := make([]*Node, 0, len(m.cluster.Nodes))
-	for _, n := range m.cluster.Nodes {
-		digest = append(digest, n)
-	}
+	digest := m.snapshotNodesLocked()
 
 	// Collect peer addresses to contact (all nodes except ourselves).
 	type peerInfo struct {
@@ -1398,7 +1433,7 @@ func (m *Manager) sync() {
 					for _, ip := range peerIntel.TopSourceIPs {
 						total += ip.Count
 					}
-					node.Stats.TotalEvents += total
+					node.Stats.TotalEvents = total
 					node.Stats.LastSync = time.Now()
 				}
 				m.mu.Unlock()
@@ -1463,6 +1498,9 @@ func (m *Manager) handleGossipHTTP(w http.ResponseWriter, r *http.Request) {
 			}
 			existing, ok := m.cluster.Nodes[node.ID]
 			if !ok {
+				if len(m.cluster.Nodes) >= maxClusterNodes {
+					continue
+				}
 				m.cluster.Nodes[node.ID] = node
 				slog.Info("Gossip: discovered node via ping", "node_id", node.ID)
 			} else if node.LastSeen.After(existing.LastSeen) {
@@ -1481,9 +1519,7 @@ func (m *Manager) handleGossipHTTP(w http.ResponseWriter, r *http.Request) {
 	// Build response with our own digest.
 	digest := make([]*Node, 0)
 	if m.cluster != nil {
-		for _, n := range m.cluster.Nodes {
-			digest = append(digest, n)
-		}
+		digest = m.snapshotNodesLocked()
 	}
 	var localID string
 	if m.cluster != nil && m.cluster.LocalNode != nil {
