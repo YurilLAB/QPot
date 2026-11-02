@@ -1,6 +1,7 @@
 package cluster
 
 import (
+	"context"
 	"crypto/ecdsa"
 	"crypto/ed25519"
 	"crypto/elliptic"
@@ -93,8 +94,12 @@ func newNodeCertificate(clusterID, password, nodeID string) (tls.Certificate, er
 
 // clusterTLSClientConfig verifies a peer either against the derived cluster CA
 // (automatic TLS) or, for a peer serving an operator certificate, against
-// caPool (nil = system roots) with the normal hostname check.
-func clusterTLSClientConfig(clusterID, password string, caPool *x509.CertPool) *tls.Config {
+// caPool (nil = system roots) with the normal hostname check against
+// dialHost - the host (name or IP) actually dialled. dialHost must be passed
+// explicitly: for an IP-literal peer (seeds and gossip peers usually are) Go
+// leaves ConnectionState.ServerName empty, and verifying against "" skips the
+// name check entirely, so any CA-signed certificate for any name would pass.
+func clusterTLSClientConfig(clusterID, password string, caPool *x509.CertPool, dialHost string) *tls.Config {
 	var derived *x509.CertPool
 	if _, ca, err := deriveClusterCA(clusterID, password); err == nil {
 		derived = x509.NewCertPool()
@@ -121,7 +126,14 @@ func clusterTLSClientConfig(clusterID, password string, caPool *x509.CertPool) *
 					return nil
 				}
 			}
-			if _, err := certs[0].Verify(x509.VerifyOptions{Roots: caPool, Intermediates: inter, DNSName: cs.ServerName}); err != nil {
+			name := dialHost
+			if name == "" {
+				name = cs.ServerName
+			}
+			if name == "" {
+				return errors.New("cluster TLS: no peer name to verify the certificate against")
+			}
+			if _, err := certs[0].Verify(x509.VerifyOptions{Roots: caPool, Intermediates: inter, DNSName: name}); err != nil {
 				return fmt.Errorf("cluster TLS: peer certificate not trusted: %w", err)
 			}
 			return nil
@@ -133,6 +145,16 @@ func clusterTLSClientConfig(clusterID, password string, caPool *x509.CertPool) *
 // described for clusterTLSClientConfig.
 func clusterHTTPClient(timeout time.Duration, clusterID, password string, caPool *x509.CertPool) *http.Client {
 	transport := http.DefaultTransport.(*http.Transport).Clone()
-	transport.TLSClientConfig = clusterTLSClientConfig(clusterID, password, caPool)
+	// Dial TLS ourselves so each connection verifies against the host it was
+	// actually opened to (see clusterTLSClientConfig).
+	transport.DialTLSContext = func(ctx context.Context, network, addr string) (net.Conn, error) {
+		host, _, err := net.SplitHostPort(addr)
+		if err != nil {
+			return nil, err
+		}
+		d := &tls.Dialer{NetDialer: &net.Dialer{Timeout: 10 * time.Second},
+			Config: clusterTLSClientConfig(clusterID, password, caPool, host)}
+		return d.DialContext(ctx, network, addr)
+	}
 	return &http.Client{Timeout: timeout, Transport: transport}
 }

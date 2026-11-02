@@ -1037,8 +1037,25 @@ func (m *Manager) withClusterAuth(next http.HandlerFunc) http.HandlerFunc {
 	}
 }
 
-// startAPIServer starts the cluster API server
-func (m *Manager) startAPIServer() error {
+// withHostOnly restricts a handler to callers on this host. Approving or
+// denying joiners is the host operator's decision, but every joiner holds the
+// cluster password too (it must send it to /join), so the password alone
+// cannot gate these endpoints: a pending joiner could approve itself. The CLI
+// (`qpot cluster requests/approve/deny`) always connects over loopback.
+func withHostOnly(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		host, _, err := net.SplitHostPort(r.RemoteAddr)
+		ip := net.ParseIP(host)
+		if err != nil || ip == nil || !ip.IsLoopback() {
+			http.Error(w, "Forbidden: host operation", http.StatusForbidden)
+			return
+		}
+		next(w, r)
+	}
+}
+
+// apiHandler builds the cluster API routes.
+func (m *Manager) apiHandler() http.Handler {
 	mux := http.NewServeMux()
 	// join verifies the password internally via HandleJoinRequest.
 	mux.HandleFunc("/api/v1/cluster/join", m.handleJoinHTTP)
@@ -1058,10 +1075,19 @@ func (m *Manager) startAPIServer() error {
 	// (require the password). /join/status lets a queued joiner - which already
 	// proved the password on /join - poll its request; it is also password-gated
 	// so an unauthenticated scanner cannot enumerate request IDs/outcomes.
-	mux.HandleFunc("/api/v1/cluster/pending", m.withClusterAuth(m.handlePendingHTTP))
-	mux.HandleFunc("/api/v1/cluster/approve", m.withClusterAuth(m.handleApproveHTTP))
-	mux.HandleFunc("/api/v1/cluster/deny", m.withClusterAuth(m.handleDenyHTTP))
+	mux.HandleFunc("/api/v1/cluster/pending", withHostOnly(m.withClusterAuth(m.handlePendingHTTP)))
+	mux.HandleFunc("/api/v1/cluster/approve", withHostOnly(m.withClusterAuth(m.handleApproveHTTP)))
+	mux.HandleFunc("/api/v1/cluster/deny", withHostOnly(m.withClusterAuth(m.handleDenyHTTP)))
 	mux.HandleFunc("/api/v1/cluster/join/status", m.withClusterAuth(m.handleJoinStatusHTTP))
+	return mux
+}
+
+// startAPIServer starts the cluster API server. The listener is opened here,
+// synchronously, so a port that is already taken (another instance's control
+// plane, or anything else) is reported to Start's caller instead of only being
+// logged from a goroutine while the node carries on gossiping as if it served.
+func (m *Manager) startAPIServer() error {
+	mux := m.apiHandler()
 
 	addr := fmt.Sprintf("%s:%d", m.cluster.Config.BindAddr, m.cluster.Config.BindPort)
 	tlsEnabled := m.cluster.Config.EnableEncryption &&
@@ -1098,6 +1124,10 @@ func (m *Manager) startAPIServer() error {
 		srv.TLSConfig = &tls.Config{MinVersion: tls.VersionTLS12, Certificates: []tls.Certificate{cert}}
 	}
 
+	ln, err := net.Listen("tcp", addr)
+	if err != nil {
+		return fmt.Errorf("cluster API: %w", err)
+	}
 	m.apiServer = srv
 
 	certPath := m.cluster.Config.TLSCertPath
@@ -1105,11 +1135,11 @@ func (m *Manager) startAPIServer() error {
 	go func() {
 		var err error
 		if tlsEnabled {
-			err = srv.ListenAndServeTLS(certPath, keyPath)
+			err = srv.ServeTLS(ln, certPath, keyPath)
 		} else if autoTLS {
-			err = srv.ListenAndServeTLS("", "")
+			err = srv.ServeTLS(ln, "", "")
 		} else {
-			err = srv.ListenAndServe()
+			err = srv.Serve(ln)
 		}
 		if err != nil && !errors.Is(err, http.ErrServerClosed) {
 			slog.Error("Cluster API server error", "tls", tlsEnabled, "error", err)
@@ -1350,6 +1380,9 @@ func (m *Manager) gossip() {
 	m.mu.RUnlock()
 
 	gossipClient := m.peerHTTPClient(5 * time.Second)
+	// Each round builds its own transport; close its pooled connections when
+	// the round ends or every round leaves one idle TLS connection per peer.
+	defer gossipClient.CloseIdleConnections()
 	for _, peer := range peers {
 		peerURL := fmt.Sprintf("%s://%s:%d/api/v1/cluster/gossip", scheme, peer.address, peer.port)
 		req, err := http.NewRequest(http.MethodPost, peerURL, bytes.NewReader(body))
@@ -1516,6 +1549,7 @@ func (m *Manager) sync() {
 	m.mu.RUnlock()
 
 	syncClient := m.peerHTTPClient(10 * time.Second)
+	defer syncClient.CloseIdleConnections()
 
 	// Share local intel with peers and collect theirs.
 	if localIntel != nil {
@@ -1779,6 +1813,18 @@ func (m *Manager) LoadCluster() (*Cluster, error) {
 // Take a snapshot of the data we need under the lock, release it, do the
 // network I/O, then take the lock again to mutate state.
 func (m *Manager) LeaveCluster() error {
+	// A manager restored by LoadCluster (the CLI) only has the bcrypt hash; the
+	// peers need the plaintext password, and automatic TLS derives its CA
+	// from it, so unlock from the stored secret first.
+	m.mu.RLock()
+	locked := m.cluster != nil && m.plainPassword == ""
+	m.mu.RUnlock()
+	if locked {
+		if err := m.UnlockFromSecret(); err != nil {
+			return fmt.Errorf("cannot notify peers: %w", err)
+		}
+	}
+
 	m.mu.RLock()
 	if m.cluster == nil {
 		m.mu.RUnlock()
@@ -1807,6 +1853,8 @@ func (m *Manager) LeaveCluster() error {
 
 	// Notify other nodes with a short timeout so a dead peer doesn't block.
 	leaveClient := m.peerHTTPClient(3 * time.Second)
+	defer leaveClient.CloseIdleConnections()
+	var unreached []string
 	leaveBody, err := json.Marshal(map[string]string{"node_id": localNodeID})
 	if err != nil {
 		return fmt.Errorf("marshal leave body: %w", err)
@@ -1828,9 +1876,13 @@ func (m *Manager) LeaveCluster() error {
 		resp, err := leaveClient.Do(req)
 		if err != nil {
 			slog.Debug("LeaveCluster: failed to notify peer", "node_id", peer.id, "error", err)
+			unreached = append(unreached, fmt.Sprintf("%s:%d (%v)", peer.address, peer.port, err))
 			continue
 		}
 		resp.Body.Close()
+		if resp.StatusCode < 200 || resp.StatusCode > 299 {
+			unreached = append(unreached, fmt.Sprintf("%s:%d (%s)", peer.address, peer.port, resp.Status))
+		}
 	}
 
 	clusterPath := filepath.Join(m.dataPath, "cluster.json")
@@ -1846,6 +1898,10 @@ func (m *Manager) LeaveCluster() error {
 	m.plainPassword = ""
 	m.mu.Unlock()
 	slog.Info("Left cluster")
+	if len(unreached) > 0 {
+		return fmt.Errorf("left the cluster locally, but %d of %d peers were not notified and will mark this node failed: %s",
+			len(unreached), len(peers), strings.Join(unreached, "; "))
+	}
 	return nil
 }
 
