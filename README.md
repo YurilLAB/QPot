@@ -16,7 +16,7 @@
 
 <p align="center">
   <a href="https://github.com/YurilLAB/QPot/releases"><img src="https://img.shields.io/github/v/release/YurilLAB/QPot?style=flat-square&color=blue" alt="Release"></a>
-  <a href="https://golang.org"><img src="https://img.shields.io/badge/Go-1.23+-00ADD8.svg?style=flat-square" alt="Go Version"></a>
+  <a href="https://golang.org"><img src="https://img.shields.io/badge/Go-1.26+-00ADD8.svg?style=flat-square" alt="Go Version"></a>
   <a href="https://docker.com"><img src="https://img.shields.io/badge/Docker-Required-2496ED.svg?style=flat-square" alt="Docker"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-green.svg?style=flat-square" alt="License"></a>
 </p>
@@ -202,7 +202,7 @@ Both installers check for Docker / Docker Compose, install the `qpot` binary
 add it to your `PATH`, and create a default instance. The Linux script also
 prints distro-specific Docker hints (Arch/Debian/Fedora/Rocky/openSUSE).
 
-**From source (any platform with Go 1.25+):**
+**From source (any platform with Go 1.26+):**
 
 ```bash
 # Clone the repository
