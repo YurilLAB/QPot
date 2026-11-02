@@ -242,6 +242,16 @@
             color: #e74c3c;
         }
 
+        .risk-critical {
+            background: rgba(192, 57, 43, 0.25);
+            color: #ff6b5b;
+        }
+
+        .gauge-bar { height: 8px; border-radius: 4px; background: var(--border); overflow: hidden; margin-top: 10px; }
+        .gauge-fill { height: 100%; background: var(--accent); }
+        .gauge-fill.warn { background: #f39c12; }
+        .gauge-fill.crit { background: #e74c3c; }
+
         .toggle {
             position: relative;
             width: 48px;
@@ -355,6 +365,7 @@
         .tab-btn.active { color: var(--accent); border-bottom-color: var(--accent); font-weight: 600; }
 
         .intel-summary { font-size: 12px; font-weight: normal; color: var(--text-secondary); margin-left: 10px; }
+        .stats-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 16px; margin-bottom: 16px; }
         .intel-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 16px; }
         .intel-panel h3 { font-size: 13px; margin: 0 0 8px 0; color: var(--text-secondary); text-transform: uppercase; letter-spacing: 0.5px; }
         .intel-list { max-height: 280px; overflow-y: auto; font-size: 12px; }
@@ -523,6 +534,7 @@
 
         <nav class="tabs">
             <button class="tab-btn active" data-tab="dashboard" onclick="switchTab('dashboard')">Dashboard</button>
+            <button class="tab-btn" data-tab="overview" onclick="switchTab('overview')">Overview</button>
             <button class="tab-btn" data-tab="pairing" onclick="switchTab('pairing')">Pairing / Networking</button>
             <button class="tab-btn" data-tab="security" onclick="switchTab('security')">Security</button>
         </nav>
@@ -547,7 +559,7 @@
             <div class="card">
                 <h2>Active Honeypots</h2>
                 <div class="stat-value" id="active-honeypots">0</div>
-                <div class="stat-label">Of 8 available</div>
+                <div class="stat-label" id="active-honeypots-sub">running</div>
             </div>
 
             <div class="card">
@@ -565,7 +577,7 @@
                 <span>View Logs</span>
             </button>
             <button class="btn btn-secondary" onclick="exportData()">
-                <span>Export Data</span>
+                <span>Export IOCs (MISP)</span>
             </button>
         </div>
 
@@ -606,6 +618,29 @@
             </div>
         </div>
         </div><!-- /tab-dashboard -->
+
+        <div id="tab-overview" class="hidden">
+            <div class="stats-grid">
+                <div class="card"><h2>CPU</h2><div class="stat-value" id="ov-cpu">-</div><div class="stat-label" id="ov-cpu-cap"></div><div class="gauge-bar"><div class="gauge-fill" id="ov-cpu-bar" style="width:0"></div></div></div>
+                <div class="card"><h2>Memory</h2><div class="stat-value" id="ov-mem">-</div><div class="stat-label" id="ov-mem-cap"></div><div class="gauge-bar"><div class="gauge-fill" id="ov-mem-bar" style="width:0"></div></div></div>
+                <div class="card"><h2>Disk</h2><div class="stat-value" id="ov-disk">-</div><div class="stat-label" id="ov-disk-cap"></div><div class="gauge-bar"><div class="gauge-fill" id="ov-disk-bar" style="width:0"></div></div></div>
+                <div class="card"><h2>Processes</h2><div class="stat-value" id="ov-procs">-</div><div class="stat-label" id="ov-procs-cap"></div><div class="gauge-bar"><div class="gauge-fill" id="ov-procs-bar" style="width:0"></div></div></div>
+            </div>
+            <div class="stats-grid">
+                <div class="card"><h2>Host</h2><div class="stat-value" id="ov-host">-</div><div class="stat-label" id="ov-host-sub"></div></div>
+                <div class="card"><h2>Events (24h)</h2><div class="stat-value" id="ov-events">0</div><div class="stat-label" id="ov-rate"></div></div>
+                <div class="card"><h2>Attackers (24h)</h2><div class="stat-value" id="ov-ips">0</div><div class="stat-label">unique source IPs</div></div>
+                <div class="card"><h2>Database</h2><div class="stat-value" id="ov-db">-</div><div class="stat-label" id="ov-cluster">standalone</div></div>
+            </div>
+            <div class="card">
+                <h2>Honeypot Activity (24h)</h2>
+                <ul class="honeypot-list" id="ov-honeypots"><li class="empty-state"><p>Loading...</p></li></ul>
+            </div>
+            <div class="card">
+                <h2>Recent Events</h2>
+                <ul class="honeypot-list" id="ov-events-list"><li class="empty-state"><p>Loading...</p></li></ul>
+            </div>
+        </div><!-- /tab-overview -->
 
         <div id="tab-pairing" class="hidden">
             <div class="stats-grid">
@@ -756,12 +791,13 @@
 
         // Tab switching (Dashboard / Pairing / Security). Lazy-loads tab data.
         function switchTab(name) {
-            ['dashboard', 'pairing', 'security'].forEach(t => {
+            ['dashboard', 'overview', 'pairing', 'security'].forEach(t => {
                 document.getElementById('tab-' + t).classList.toggle('hidden', t !== name);
             });
             document.querySelectorAll('.tab-btn').forEach(b => {
                 b.classList.toggle('active', b.dataset.tab === name);
             });
+            if (name === 'overview') { loadOverview(); }
             if (name === 'pairing') { loadPairing(); }
             if (name === 'security') { loadSecurity(); }
         }
@@ -772,6 +808,55 @@
             if (d) return `${d}d ${h}h`;
             if (h) return `${h}h ${m}m`;
             return `${m}m`;
+        }
+
+        // Overview: host resources, 24h activity and recent events, served by
+        // this instance (GET /api/overview). Nothing leaves the host.
+        function setGauge(key, g) {
+            g = g || {};
+            const pct = Math.max(0, Math.min(100, Number(g.pct) || 0));
+            document.getElementById('ov-' + key).textContent = pct + '%';
+            document.getElementById('ov-' + key + '-cap').textContent = g.caption || '';
+            const bar = document.getElementById('ov-' + key + '-bar');
+            bar.style.width = pct + '%';
+            bar.className = 'gauge-fill' + (pct >= 90 ? ' crit' : pct >= 70 ? ' warn' : '');
+        }
+
+        async function loadOverview() {
+            let ov;
+            try {
+                const r = await fetch(`${API_BASE}/overview`, { headers: { 'X-QPot-ID': currentQPotID } });
+                ov = r.ok ? await r.json() : null;
+            } catch (e) { return; }
+            if (!ov) { return; }
+            setGauge('cpu', ov.cpu); setGauge('mem', ov.memory); setGauge('disk', ov.disk); setGauge('procs', ov.processes);
+            document.getElementById('ov-host').textContent = ov.hostname || '-';
+            const up = ov.started_at ? (Date.now() - new Date(ov.started_at).getTime()) / 1000 : 0;
+            document.getElementById('ov-host-sub').textContent = `${ov.os}/${ov.arch} · qpot ${ov.version} · up ${fmtUptime(up)}`;
+            document.getElementById('ov-events').textContent = ov.events_24h || 0;
+            document.getElementById('ov-rate').textContent = `${(Number(ov.events_per_sec) || 0).toFixed(2)} per second`;
+            document.getElementById('ov-ips').textContent = ov.unique_ips_24h || 0;
+            document.getElementById('ov-db').textContent = `${ov.database || '-'} ${ov.database_ok ? 'ok' : 'down'}`;
+            document.getElementById('ov-cluster').textContent = ov.cluster
+                ? `cluster ${ov.cluster.name}: ${ov.cluster.healthy}/${ov.cluster.nodes} healthy` : 'standalone';
+
+            const hps = (ov.honeypots || []).filter(h => h.enabled || h.hits_24h);
+            document.getElementById('ov-honeypots').innerHTML = hps.length ? hps.map(h => `<li class="honeypot-item">
+                <div class="honeypot-info"><div class="honeypot-details">
+                    <h3>${esc(h.name)}</h3><p>port ${esc(h.port)} · ${esc(h.hits_24h)} hits in 24h</p>
+                </div></div>
+                <span class="risk-badge ${h.enabled ? 'risk-low' : 'risk-medium'}">${h.enabled ? 'on' : 'off'}</span>
+            </li>`).join('') : '<li class="empty-state"><p>No honeypots enabled</p></li>';
+
+            const sevClass = { critical: 'risk-critical', warn: 'risk-medium', info: 'risk-low' };
+            const evs = ov.recent_events || [];
+            document.getElementById('ov-events-list').innerHTML = evs.length ? evs.map(e => `<li class="honeypot-item">
+                <div class="honeypot-info"><div class="honeypot-details">
+                    <h3>${esc(e.honeypot)} · ${esc(e.source_ip)}${e.country ? ' (' + esc(e.country) + ')' : ''}</h3>
+                    <p>${esc(e.time ? new Date(e.time).toLocaleString() : '')} · ${esc(e.summary)}${e.technique ? ' · ' + esc(e.technique) : ''}</p>
+                </div></div>
+                <span class="risk-badge ${sevClass[e.severity] || 'risk-low'}">${esc(e.severity)}</span>
+            </li>`).join('') : '<li class="empty-state"><p>No events yet</p></li>';
         }
 
         // Pairing / Networking: the honeypot group (paired QPot nodes).
@@ -880,8 +965,10 @@
                 statusText.textContent = 'Stopped';
             }
             
-            document.getElementById('active-honeypots').textContent = 
+            document.getElementById('active-honeypots').textContent =
                 status.honeypots.filter(h => h.running).length;
+            document.getElementById('active-honeypots-sub').textContent =
+                `running of ${status.honeypots.filter(h => h.status !== 'disabled').length} enabled`;
         }
 
         async function loadStats() {
@@ -985,12 +1072,27 @@
         function startAutoRefresh() {
             if (autoRefreshTimer) { return; }
             autoRefreshTimer = setInterval(() => {
-                if (currentQPotID) { loadData(); }
+                if (currentQPotID) {
+                    loadData();
+                    if (!document.getElementById('tab-overview').classList.contains('hidden')) { loadOverview(); }
+                }
             }, 10000);
         }
 
-        function exportData() {
-            showToast('Export feature - coming soon');
+        // Download the extracted IOCs as a MISP event (GET /api/iocs/export).
+        async function exportData() {
+            try {
+                const r = await fetch(`${API_BASE}/iocs/export?format=misp`, { headers: { 'X-QPot-ID': currentQPotID } });
+                if (!r.ok) { showToast('Export failed'); return; }
+                const url = URL.createObjectURL(await r.blob());
+                const a = document.createElement('a');
+                a.href = url;
+                a.download = 'qpot-iocs-misp.json';
+                document.body.appendChild(a);
+                a.click();
+                a.remove();
+                URL.revokeObjectURL(url);
+            } catch (e) { showToast('Export failed'); }
         }
 
         function capitalize(str) {

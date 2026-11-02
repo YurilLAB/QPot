@@ -24,7 +24,7 @@
 //
 // Every trip is mapped to a database.Event tagged honeypot="canary" so it flows
 // through the existing pipeline (events feed, IOC extraction,
-// the ypanel snapshot) with no special-casing downstream.
+// the overview) with no special-casing downstream.
 package canary
 
 import (
@@ -302,7 +302,7 @@ func attckFor(k Kind) (techID, techName, tacticID, tacticName string) {
 // ToEvent maps a trip onto a database.Event tagged honeypot="canary". The event
 // is pre-classified (Classified=true, Confidence=1.0) — a canary trip needs no
 // heuristic; it is ground truth — and carries the canary context in Metadata so
-// downstream consumers (events feed, ypanel) can render an actionable alert.
+// downstream consumers (events feed, overview) can render an actionable alert.
 func (t *Trip) ToEvent() *database.Event {
 	techID, techName, tacticID, tacticName := attckFor(t.Kind)
 	proto := "http"

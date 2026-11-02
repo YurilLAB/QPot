@@ -24,6 +24,7 @@ import (
 	"github.com/qpot/qpot/internal/database"
 	"github.com/qpot/qpot/internal/instance"
 	"github.com/qpot/qpot/internal/intelligence"
+	"github.com/qpot/qpot/internal/overview"
 )
 
 //go:embed static/*
@@ -204,6 +205,10 @@ func (s *Server) setupRoutes() {
 
 	// Pairing / Networking: the honeypot "group" (paired QPot nodes).
 	s.mux.HandleFunc("/api/cluster", s.withQPotAuth(s.handleCluster))
+
+	// Local overview: host resources, per-honeypot 24h activity and recent
+	// events. Replaces the former ypanel phone-home agent; nothing leaves the host.
+	s.mux.HandleFunc("/api/overview", s.withQPotAuth(s.handleOverview))
 
 }
 
@@ -1125,6 +1130,26 @@ func (s *Server) handleIntelligenceSummary(w http.ResponseWriter, r *http.Reques
 // Pairing/Networking dashboard tab: the group summary plus per-node name,
 // online status, uptime, and total requests. When this node is standalone
 // (no cluster.json), it reports clustered=false.
+// Version is the QPot build version reported by /api/overview; the CLI sets it.
+var Version = "dev"
+
+// handleOverview serves the local instance overview (see internal/overview).
+func (s *Server) handleOverview(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	var cl *overview.Cluster
+	if s.cluster != nil {
+		if st := s.cluster.GetStatus(); st != nil {
+			cl = &overview.Cluster{ID: st.ID, Name: st.Name, Nodes: st.NodeCount, Healthy: st.HealthyNodes}
+		}
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
+	defer cancel()
+	s.sendJSON(w, overview.Build(ctx, s.config, s.database, cl, Version))
+}
+
 func (s *Server) handleCluster(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)

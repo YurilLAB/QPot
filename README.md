@@ -83,8 +83,16 @@ chose), authenticated with the instance's **QPot ID** (`qpot id` shows it). From
 another machine use an SSH tunnel: `ssh -L 8080:127.0.0.1:8080 <host>`.
 
 The dashboard shows live stats, per-honeypot controls, the attacker activity
-feed, ATT&CK techniques / IOCs / campaigns, cluster members and the security
-posture.
+feed, ATT&CK techniques / IOCs / campaigns (with a MISP export), cluster members
+and the security posture. Its **Overview** tab adds host CPU / memory / disk /
+process load, 24-hour activity per honeypot and the latest events with a
+severity. The same view is available from the terminal, for one instance or all
+of them on the host, and nothing is sent off the machine:
+
+```bash
+qpot overview          # this instance
+qpot overview --all    # every instance on the host
+```
 
 ---
 
@@ -304,7 +312,7 @@ qpot instance create|list|remove <name>
 qpot honeypot list|enable|disable <name>
 qpot logs [honeypot] [-f]          qpot id          qpot config [--print]
 qpot docker ps|logs|restart        qpot db migrate status|up|down
-qpot cluster ...                   qpot canary ...  qpot ypanel ...
+qpot cluster ...                   qpot canary ...  qpot overview [--all]
 ```
 
 Every command has `--help`; the full reference is
@@ -314,8 +322,6 @@ Every command has `--help`; the full reference is
 **Dedicated sensor hosts:** `sudo ./install.sh` runs the T-Pot-style Ansible
 installer (AlmaLinux, Arch, Debian, Fedora, openSUSE, RHEL, Rocky, Ubuntu, …).
 
-**ypanel:** QPot can optionally report to the ypanel operator console; see
-[docs/ypanel.md](docs/ypanel.md).
 
 ---
 
@@ -336,7 +342,8 @@ internal/
   intelligence/      ATT&CK classifier, IOC extractor, TTP sessions, worker
   database/          ClickHouse, TimescaleDB (and Elasticsearch client)
   server/            web UI and API
-  cluster/ canary/ proxy/ security/ config/ ypanel/
+  overview/          local host + activity overview (dashboard, API, CLI)
+  cluster/ canary/ proxy/ security/ config/
 docker/              honeypot images, ssh-proxy/ssh-backend, Kibana connector
 ```
 

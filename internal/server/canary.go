@@ -94,7 +94,7 @@ func (s *Server) serveCanaryDecoy(w http.ResponseWriter) {
 
 // onCanaryTrip is invoked once per recorded trip (from either channel). It logs
 // a high-visibility alert and emits the trip as a classified canary event into
-// the events pipeline so it shows up in the feed, IOC store and ypanel.
+// the events pipeline so it shows up in the feed, IOC store and overview.
 func (s *Server) onCanaryTrip(ctx context.Context, trip *canary.Trip) {
 	slog.Warn("CANARY TRIPPED",
 		"canary_id", trip.CanaryID, "name", trip.Name, "kind", trip.Kind,

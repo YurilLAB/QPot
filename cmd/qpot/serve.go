@@ -18,7 +18,6 @@ import (
 	"github.com/qpot/qpot/internal/config"
 	"github.com/qpot/qpot/internal/instance"
 	"github.com/qpot/qpot/internal/server"
-	"github.com/qpot/qpot/internal/ypanel"
 	"github.com/spf13/cobra"
 )
 
@@ -46,12 +45,13 @@ func loadInstance(name string) (*config.Config, *instance.QPotID, error) {
 
 // runControlPlane runs everything QPot does besides the containers - the web
 // UI/API, the intelligence worker and alerting (both started by the web
-// server), the ypanel agent and the HiFi backend recycler - until ctx ends.
+// server), cluster membership and the HiFi backend recycler - until ctx ends.
 //
 // These previously only started AFTER Manager.Start returned: in foreground
 // mode that was at Ctrl+C, and with -d the process exited right away. Either
 // way the web UI never served and no event was ever classified.
 func runControlPlane(ctx context.Context, cfg *config.Config, mgr *instance.Manager) error {
+	server.Version = version
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	fatal := make(chan error, 1)
@@ -74,18 +74,6 @@ func runControlPlane(ctx context.Context, cfg *config.Config, mgr *instance.Mana
 			slog.Info("Web server started", "addr", fmt.Sprintf("%s:%d", cfg.WebUI.BindAddr, cfg.WebUI.Port))
 			if err := webSrv.Start(ctx); err != nil && !errors.Is(err, http.ErrServerClosed) {
 				fatal <- fmt.Errorf("web server: %w", err)
-			}
-		}()
-	}
-
-	// ypanel phone-home agent: a construction failure is logged but never
-	// blocks QPot.
-	if ag, err := ypanel.New(cfg, mgr, version); err != nil {
-		slog.Warn("ypanel agent disabled due to error", "error", err)
-	} else if ag != nil {
-		go func() {
-			if err := ag.Run(ctx); err != nil {
-				slog.Error("ypanel agent error", "error", err)
 			}
 		}()
 	}
@@ -139,7 +127,7 @@ func newServeCommand() *cobra.Command {
 		Use:   "serve",
 		Short: "Run the QPot control plane (web UI, intelligence, HiFi recycler) for a running instance",
 		Long: "Run the QPot control plane for an instance whose containers are already up: the web UI/API, " +
-			"the intelligence worker, alerting, the ypanel agent and the HiFi backend recycler. " +
+			"the intelligence worker, alerting, cluster membership and the HiFi backend recycler. " +
 			"'qpot up -d' starts this in the background; run it directly under a service manager such as systemd.",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			cfg, _, err := loadInstance(instanceName)

@@ -1,6 +1,6 @@
 //go:build linux
 
-package ypanel
+package overview
 
 import (
 	"bufio"

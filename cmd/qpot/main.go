@@ -92,6 +92,7 @@ Each QPot instance has a unique ID (qp_*) for tracking and authentication.`,
 	rootCmd.AddCommand(newServeCommand())
 	rootCmd.AddCommand(newSetupCommand())
 	rootCmd.AddCommand(newDoctorCommand())
+	rootCmd.AddCommand(newOverviewCommand())
 	rootCmd.AddCommand(newStatusCommand())
 	rootCmd.AddCommand(newInstanceCommand())
 	rootCmd.AddCommand(newHoneypotCommand())
@@ -102,7 +103,6 @@ Each QPot instance has a unique ID (qp_*) for tracking and authentication.`,
 	rootCmd.AddCommand(newConfigCommand())
 	rootCmd.AddCommand(newDBCommand())
 	rootCmd.AddCommand(newCanaryCommand())
-	rootCmd.AddCommand(newYpanelCommand())
 
 	return rootCmd.ExecuteContext(ctx)
 }
@@ -299,38 +299,15 @@ func newInstanceCommand() *cobra.Command {
 
 			// Refuse to clobber an existing instance. Re-running create would
 			// otherwise overwrite its config and mint a NEW QPot ID, silently
-			// wiping the enabled honeypots, cluster membership, ypanel settings and
+			// wiping the enabled honeypots, cluster membership and
 			// the identity used for attack tracking - a data-loss footgun.
 			if _, statErr := os.Stat(config.Default(name).ConfigPath); statErr == nil {
 				return fmt.Errorf("instance %q already exists; remove it first with 'qpot instance remove %s' or choose another name", name, name)
 			}
 
-			// Generate QPot ID
-			qpotID, err := instance.GenerateID(name)
+			cfg, qpotID, err := createInstance(ctx, name)
 			if err != nil {
-				return fmt.Errorf("failed to generate QPot ID: %w", err)
-			}
-
-			cfg := config.Default(name)
-			cfg.QPotID = qpotID.ID
-
-			if err := config.Save(cfg); err != nil {
-				return fmt.Errorf("failed to save config: %w", err)
-			}
-
-			// Save QPot ID
-			qpotID.DataPath = cfg.DataPath
-			if err := qpotID.Save(); err != nil {
-				return fmt.Errorf("failed to save QPot ID: %w", err)
-			}
-
-			mgr, err := instance.NewManager(cfg)
-			if err != nil {
-				return fmt.Errorf("failed to create instance manager: %w", err)
-			}
-
-			if err := mgr.Initialize(ctx); err != nil {
-				return fmt.Errorf("failed to initialize instance: %w", err)
+				return err
 			}
 
 			fmt.Printf("[OK] Created QPot instance '%s'\n", name)
@@ -1908,39 +1885,6 @@ func newDBMigrateDownCommand() *cobra.Command {
 	cmd.Flags().StringVarP(&instanceName, "instance", "i", "default", "instance name")
 	cmd.Flags().BoolVar(&yes, "yes", false, "skip confirmation prompt")
 	return cmd
-}
-
-// readLineWithDefault prompts the user, returning their input or, on
-// empty input, the supplied default. Trims trailing whitespace.
-func readLineWithDefault(prompt, def string) string {
-	if def != "" {
-		fmt.Printf("%s [%s]: ", prompt, def)
-	} else {
-		fmt.Printf("%s: ", prompt)
-	}
-	var line string
-	fmt.Scanln(&line)
-	line = strings.TrimSpace(line)
-	if line == "" {
-		return def
-	}
-	return line
-}
-
-func firstNonEmpty(values ...string) string {
-	for _, v := range values {
-		if strings.TrimSpace(v) != "" {
-			return v
-		}
-	}
-	return ""
-}
-
-func maskIfEmpty(s string) string {
-	if strings.TrimSpace(s) == "" {
-		return "(unset)"
-	}
-	return s
 }
 
 // localBaseURL builds the URL of this instance's local API. A wildcard or empty

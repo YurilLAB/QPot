@@ -31,6 +31,8 @@ this document stays in lock-step with the code.
 - [Docker management — `qpot docker`](#docker-management--qpot-docker)
 - [Database migrations — `qpot db`](#database-migrations--qpot-db)
 - [Cluster / pairing — `qpot cluster`](#cluster--pairing--qpot-cluster)
+- [Canaries — `qpot canary`](#canaries--qpot-canary)
+- [Overview — `qpot overview`](#overview--qpot-overview)
 - [Configuration — `qpot config`](#configuration--qpot-config)
 - [Utilities](#utilities)
   - [`qpot id`](#qpot-id)
@@ -73,7 +75,10 @@ qpot --version
 
 | Command | What it does |
 |---------|--------------|
+| `qpot setup` | Check the host, create and start an instance, and verify it is healthy. |
+| `qpot doctor` | Re-run the health checks for an instance (non-zero exit on failure). |
 | `qpot up` | Start an instance and all of its enabled honeypots. |
+| `qpot serve` | Run only the control plane (what `qpot up -d` starts in the background). |
 | `qpot down` | Stop a running instance and its honeypots. |
 | `qpot status` | Show the live status of an instance's honeypots and services. |
 | `qpot instance` | Create, list, and remove instances. |
@@ -83,6 +88,7 @@ qpot --version
 | `qpot db` | Inspect schema versions and run/roll back migrations. |
 | `qpot cluster` | Pair multiple nodes into a managed group (aliases: `group`, `pair`, `networking`). |
 | `qpot canary` | Mint and manage canaries (honeytokens) — decoy artifacts that alert on any interaction. |
+| `qpot overview` | Host resources, 24h honeypot activity and recent events, for one or all local instances. |
 | `qpot config` | Open or print the instance config file. |
 | `qpot id` | Show the QPot ID for an instance. |
 | `qpot completion` | Generate a shell autocompletion script. |
@@ -462,6 +468,32 @@ qpot canary artifact cnry_abc123 --out Q4-Salaries.html
 ```bash
 qpot canary rm cnry_abc123   # aliases: remove, delete
 ```
+
+---
+
+## Overview — `qpot overview`
+
+An at-a-glance, entirely local view of an instance: host CPU / memory / disk /
+process load, events and unique attackers over the last 24 hours, per-honeypot
+activity, cluster membership and the latest events with a severity
+(`info` / `warn` / `critical`). The same data is on the dashboard's **Overview**
+tab and at `GET /api/overview` (QPot-ID authenticated). Nothing is sent off the
+host.
+
+| Flag | Description |
+|------|-------------|
+| `-i, --instance` | Instance to show (default `default`). |
+| `--all` | One summary line per instance on this host: containers, control plane, honeypots enabled, 24h events and attackers, last event, web UI address. |
+| `--json` | Print JSON instead of text. |
+
+```bash
+qpot overview
+qpot overview --all
+qpot overview -i sensor1 --json
+```
+
+When the instance's control plane is running the data comes from its API;
+otherwise `qpot overview` reads the instance database directly.
 
 ---
 
