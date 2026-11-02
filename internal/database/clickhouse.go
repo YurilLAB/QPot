@@ -936,8 +936,11 @@ func (ch *ClickHouse) TagEvent(ctx context.Context, event *Event) error {
 			kill_chain_stage = ?,
 			confidence      = ?,
 			classified      = 1
-		WHERE source_ip = ? AND timestamp = ?
+		WHERE source_ip = ? AND timestamp = fromUnixTimestamp64Milli(?)
 	`
+	// The timestamp is bound as exact epoch milliseconds: a time.Time argument
+	// is sent at second precision, so "timestamp = ?" never matched a real
+	// (sub-second) event and nothing was ever marked classified.
 	return ch.conn.Exec(ctx, query,
 		event.TechniqueID,
 		event.TechniqueName,
@@ -946,32 +949,16 @@ func (ch *ClickHouse) TagEvent(ctx context.Context, event *Event) error {
 		event.KillChainStage,
 		event.Confidence,
 		event.SourceIP,
-		event.Timestamp,
+		event.Timestamp.UnixMilli(),
 	)
 }
 
 // InsertIOC inserts or updates an IOC record using ClickHouse REPLACE semantics.
 func (ch *ClickHouse) InsertIOC(ctx context.Context, ioc *IOC) error {
-	if ch.conn == nil {
-		return fmt.Errorf("not connected")
-	}
-	query := `
-		INSERT INTO iocs (id, type, value, honeypot, source_ip, technique_id,
-		                  first_seen, last_seen, count, metadata)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-	`
-	return ch.conn.Exec(ctx, query,
-		ioc.ID,
-		ioc.Type,
-		ioc.Value,
-		ioc.Honeypot,
-		ioc.SourceIP,
-		ioc.TechniqueID,
-		ioc.FirstSeen,
-		ioc.LastSeen,
-		ioc.Count,
-		ioc.Metadata,
-	)
+	// Go through the batch path: a plain Exec binds time.Time at second
+	// precision, truncating the DateTime64(3) first/last_seen columns (and
+	// with them the ReplacingMergeTree version ordering).
+	return ch.InsertIOCs(ctx, []*IOC{ioc})
 }
 
 // InsertIOCs persists a batch of IOCs in a single prepared batch. ClickHouse
@@ -1014,7 +1001,7 @@ func (ch *ClickHouse) GetIOCs(ctx context.Context, filter IOCFilter) ([]*IOC, er
 		return nil, fmt.Errorf("not connected")
 	}
 
-	query := "SELECT id, type, value, honeypot, source_ip, technique_id, first_seen, last_seen, count, metadata FROM iocs WHERE 1=1"
+	query := "SELECT id, type, value, honeypot, source_ip, technique_id, first_seen, last_seen, count, metadata FROM iocs FINAL WHERE 1=1"
 	var args []interface{}
 
 	if len(filter.Types) > 0 {

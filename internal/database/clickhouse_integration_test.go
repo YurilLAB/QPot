@@ -198,3 +198,71 @@ func TestClickHouseMigrateUpAndDown(t *testing.T) {
 		}
 	}
 }
+
+// Re-sighting an IOC appends another row to the ReplacingMergeTree; reads must
+// still return it once (until a background merge, both rows are visible).
+func TestClickHouseGetIOCsDeduplicates(t *testing.T) {
+	db := connectCH(t)
+	ch := db.(*ClickHouse)
+	ctx := context.Background()
+	if err := ch.conn.Exec(ctx, `TRUNCATE TABLE iocs`); err != nil {
+		t.Fatal(err)
+	}
+	base := time.Now().UTC().Truncate(time.Millisecond)
+	for i := 0; i < 3; i++ {
+		ioc := &IOC{ID: "ip:198.51.100.77:cowrie", Type: "ip", Value: "198.51.100.77", Honeypot: "cowrie",
+			FirstSeen: base, LastSeen: base.Add(time.Duration(i) * time.Second), Count: int64(i + 1)}
+		if err := db.InsertIOC(ctx, ioc); err != nil {
+			t.Fatal(err)
+		}
+	}
+	got, err := db.GetIOCs(ctx, IOCFilter{Types: []string{"ip"}, Limit: 100})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("GetIOCs returned %d rows for one IOC, want 1", len(got))
+	}
+	if !got[0].LastSeen.Equal(base.Add(2 * time.Second)) {
+		t.Fatalf("GetIOCs returned a stale version (last_seen %v)", got[0].LastSeen)
+	}
+}
+
+// TagEvent must actually mark the event (with a sub-second timestamp, as real
+// honeypot events have) so the worker stops re-fetching it.
+func TestClickHouseTagEventMarksClassified(t *testing.T) {
+	db := connectCH(t)
+	ch := db.(*ClickHouse)
+	ctx := context.Background()
+	if err := ch.conn.Exec(ctx, `TRUNCATE TABLE events`); err != nil {
+		t.Fatal(err)
+	}
+	ev := &Event{Timestamp: time.Now().UTC().Truncate(time.Millisecond).Add(123 * time.Millisecond),
+		Honeypot: "cowrie", SourceIP: "203.0.113.44", EventType: "command", Command: "id"}
+	if err := db.InsertEvent(ctx, ev); err != nil {
+		t.Fatal(err)
+	}
+	un, err := db.GetUnclassifiedEvents(ctx, 10)
+	if err != nil || len(un) != 1 {
+		t.Fatalf("GetUnclassifiedEvents = %d, %v", len(un), err)
+	}
+	un[0].TechniqueID = "T1033"
+	un[0].Classified = true
+	if err := db.TagEvent(ctx, un[0]); err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(15 * time.Second)
+	for {
+		left, err := db.GetUnclassifiedEvents(ctx, 10)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(left) == 0 {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("event still unclassified after TagEvent (timestamp %v)", left[0].Timestamp)
+		}
+		time.Sleep(250 * time.Millisecond)
+	}
+}
