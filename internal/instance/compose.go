@@ -1349,10 +1349,13 @@ func (g *ComposeGenerator) generateCowrieConfig(hp config.HoneypotConfig) string
 	kernel = sanitizeConfigValue(kernel)
 	sshVersion = sanitizeConfigValue(sshVersion)
 
+	// logtype must be "plain" (or "rotating"): Cowrie's jsonlog output raises
+	// ValueError on any other value, so with "json" Cowrie never wrote
+	// log/cowrie.json and no Cowrie event ever reached the collector.
 	return fmt.Sprintf(`[honeypot]
 hostname = %s
 log_path = log
-logtype = json
+logtype = plain
 download_path = dl
 share_path = share/cowrie
 state_path = /tmp/cowrie/data

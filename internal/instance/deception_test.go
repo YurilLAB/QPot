@@ -425,3 +425,19 @@ func TestCredentialTemplates(t *testing.T) {
 		t.Error("unknown template name should fall back to a valid persona")
 	}
 }
+
+// Cowrie's jsonlog output only accepts logtype "plain" or "rotating" and raises
+// ValueError otherwise, which silently disables the JSON log the collector
+// ingests. The generated config must use a value Cowrie accepts and keep the
+// JSON log at the path the collector watches.
+func TestCowrieConfigLogtypeAccepted(t *testing.T) {
+	cfg := config.Default("logtype-test")
+	cfg.QPotID = "qp_logtypetest000000000001"
+	c := (&ComposeGenerator{Config: cfg}).generateCowrieConfig(cfg.Honeypots["cowrie"])
+	if !strings.Contains(c, "\nlogtype = plain\n") && !strings.Contains(c, "\nlogtype = rotating\n") {
+		t.Errorf("cowrie.cfg logtype is not one Cowrie accepts (plain|rotating)")
+	}
+	if !strings.Contains(c, "[output_jsonlog]\nenabled = true\nlogfile = log/cowrie.json") {
+		t.Errorf("cowrie.cfg does not write the JSON log to log/cowrie.json")
+	}
+}
