@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"strings"
 	"text/template"
+	"time"
 
 	"github.com/qpot/qpot/internal/config"
 	"github.com/qpot/qpot/internal/security"
@@ -1342,6 +1343,7 @@ func (g *ComposeGenerator) generateCowrieFsPatch() string {
 	files := append(cowrieHomeFiles(persona, seed),
 		embeddedSystemFiles(persona, profile, hostname, seed)...)
 	files = append(files, embeddedNetworkFiles(persona, profile, seed)...)
+	stampFileTimes(files, profile, seed, time.Now())
 	return cowrieFsPatchScript(files, personaHomeNames(persona, seed))
 }
 

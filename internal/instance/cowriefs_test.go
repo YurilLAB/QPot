@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"strings"
 	"testing"
+	"time"
 )
 
 // TestCowrieHomeUsersMatchPasswd is the consistency guard for the persona home
@@ -90,7 +91,7 @@ func TestCowrieFsPatchScriptValid(t *testing.T) {
 	}
 	// The realfile mechanism is what makes content served: the node must point at
 	// a real file, never rely on inline node content.
-	if !strings.Contains(s, "rf = REALDIR") || !strings.Contains(s, "T_FILE, uid, gid, size, mode, NOW, [], None, rf") {
+	if !strings.Contains(s, "rf = REALDIR") || !strings.Contains(s, "T_FILE, uid, gid, size, mode, mtime, [], None, rf") {
 		t.Error("patch script must set the node realfile to a written tmpfs path (Cowrie serves A_REALFILE, not inline content)")
 	}
 	// The first base64 blob is the FILES payload; confirm it decodes and carries
@@ -152,5 +153,48 @@ func TestCowrieFsPatchMountedAndWired(t *testing.T) {
 	}
 	if !mounted {
 		t.Error("cowrie deploy profile must mount qpot_patch_fs.py into the container")
+	}
+}
+
+// Generated files must not all share one mtime (the container start time),
+// must be stable across regenerations, never predate the OS release or lie in
+// the future, and /proc files keep boot time (0).
+func TestStampFileTimesRealistic(t *testing.T) {
+	now := time.Date(2026, 11, 2, 12, 0, 0, 0, time.UTC)
+	p := profileForSeed("ds_mtime")
+	mk := func() []embeddedFile {
+		return []embeddedFile{
+			{Path: "/etc/machine-id"}, {Path: "/etc/shadow"},
+			{Path: "/home/alice/.bashrc"}, {Path: "/home/alice/.bash_history"},
+			{Path: "/home/bob/.bashrc"}, {Path: "/root/.ssh/known_hosts"},
+			{Path: "/proc/loadavg"},
+		}
+	}
+	a, b := mk(), mk()
+	stampFileTimes(a, p, "ds_mtime", now)
+	stampFileTimes(b, p, "ds_mtime", now)
+	seen := map[int64]bool{}
+	for i, f := range a {
+		if f.MTime != b[i].MTime {
+			t.Errorf("%s: mtime not stable across regenerations", f.Path)
+		}
+		if strings.HasPrefix(f.Path, "/proc/") {
+			if f.MTime != 0 {
+				t.Errorf("%s: /proc file should keep boot time", f.Path)
+			}
+			continue
+		}
+		mt := time.Unix(f.MTime, 0)
+		if mt.Before(releaseDates[p.Codename]) || !mt.Before(now) {
+			t.Errorf("%s: mtime %v outside [release, now)", f.Path, mt)
+		}
+		seen[f.MTime] = true
+	}
+	if len(seen) < 5 {
+		t.Errorf("only %d distinct mtimes across 6 files", len(seen))
+	}
+	hist := time.Unix(a[3].MTime, 0)
+	if !hist.After(time.Unix(a[2].MTime, 0)) {
+		t.Error("shell history should be newer than the account's dotfiles")
 	}
 }

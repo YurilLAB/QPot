@@ -51,6 +51,9 @@ type embeddedFile struct {
 	GID     int
 	Mode    int
 	Content string
+	// MTime is the file's modification time (unix seconds). 0 means "boot
+	// time" (container start), which is right only for /proc files.
+	MTime int64
 }
 
 // homeUser is a persona login account that gets a real /home/<name> in the fake
@@ -379,6 +382,7 @@ func cowrieFsPatchScript(files []embeddedFile, keepHomes []string) string {
 		GID     int    `json:"gid"`
 		Mode    int    `json:"mode"`
 		Content string `json:"content"`
+		MTime   int64  `json:"mtime"`
 	}
 	arr := make([]jf, 0, len(files))
 	for _, f := range files {
@@ -422,21 +426,25 @@ def find_child(node, name):
     return None
 
 
-def ensure_dir(fs, parts, uid, gid):
+def ensure_dir(fs, parts, uid, gid, mtime):
     cur = fs
     for p in parts:
         nxt = find_child(cur, p)
         if nxt is None:
-            nxt = [p, T_DIR, uid, gid, 4096, 0o40755, NOW, [], None, None]
+            nxt = [p, T_DIR, uid, gid, 4096, 0o40755, mtime, [], None, None]
             cur[CONT].append(nxt)
         cur = nxt
     return cur
 
 
-def put_file(fs, path, uid, gid, mode, content):
+def put_file(fs, path, uid, gid, mode, content, mtime):
+    # Generated, per-file timestamps (0 = boot time, used for /proc): stamping
+    # every file with the container start time made them all identical and
+    # made them change on every restart.
+    mtime = mtime or NOW
     parts = [x for x in path.split("/") if x]
     dirparts, fname = parts[:-1], parts[-1]
-    parent = ensure_dir(fs, dirparts, uid, gid)
+    parent = ensure_dir(fs, dirparts, uid, gid, mtime)
     # a real ~/.ssh is 0700 and owned by the user
     if dirparts and dirparts[-1] == ".ssh":
         parent[M] = 0o40700
@@ -450,7 +458,7 @@ def put_file(fs, path, uid, gid, mode, content):
     # reports its real length. file_contents checks A_REALFILE before A_SIZE, so
     # size 0 does not suppress the served content.
     size = 0 if path.startswith("/proc/") else len(content)
-    node = [fname, T_FILE, uid, gid, size, mode, NOW, [], None, rf]
+    node = [fname, T_FILE, uid, gid, size, mode, mtime, [], None, rf]
     existing = find_child(parent, fname)
     if existing is not None:
         parent[CONT][parent[CONT].index(existing)] = node
@@ -466,7 +474,7 @@ def patch():
         home[CONT][:] = [c for c in home[CONT] if c[N] in KEEP_HOMES]
     for f in FILES:
         put_file(fs, f["path"], int(f["uid"]), int(f["gid"]), int(f["mode"]),
-                 f["content"].encode("utf-8", "replace"))
+                 f["content"].encode("utf-8", "replace"), int(f.get("mtime", 0)))
     data = pickle.dumps(fs, protocol=2)
     pickle.loads(data)  # validate the patched tree round-trips before committing
     os.makedirs(os.path.dirname(OUT), exist_ok=True)
