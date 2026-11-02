@@ -62,6 +62,59 @@ type Server struct {
 // The database connection is attempted but a failure is non-fatal; API
 // endpoints that require the database will return appropriate errors when
 // it is unavailable.
+// dbStartupWait bounds how long New waits for the database to accept
+// connections and take the schema. `qpot up` starts the database container
+// moments before the web server, and a fresh ClickHouse refuses connections and
+// then reports "Database qpot does not exist" while its entrypoint initialises;
+// a single attempt lost that race, the schema was never created and the
+// collector dropped every event.
+var dbStartupWait = 90 * time.Second
+
+// connectDatabase connects to the instance database and ensures its schema,
+// retrying until dbStartupWait elapses. It returns nil when the database never
+// became reachable (the API then reports it as unavailable).
+func connectDatabase(cfg *config.Config) database.Database {
+	deadline := time.Now().Add(dbStartupWait)
+	var lastErr error
+	for attempt := 0; ; attempt++ {
+		rawDB, err := database.New(cfg.DatabaseClient())
+		if err != nil {
+			slog.Warn("Database not available at server start, some API endpoints will be unavailable", "error", err)
+			return nil
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		err = rawDB.Connect(ctx)
+		if err == nil {
+			// Ensure the schema exists. This is idempotent (CREATE ... IF NOT
+			// EXISTS) and makes `qpot up` work on a fresh database without a
+			// separate `qpot db migrate` step — otherwise the events table is
+			// never created and the whole collection pipeline silently drops
+			// everything.
+			err = rawDB.InitializeSchema(ctx)
+			cancel()
+			if err == nil {
+				return rawDB
+			}
+			if time.Now().After(deadline) {
+				slog.Warn("Database schema initialization failed; collection may not work", "error", err)
+				return rawDB
+			}
+			rawDB.Close()
+		} else {
+			cancel()
+		}
+		lastErr = err
+		if time.Now().After(deadline) {
+			slog.Warn("Database connection failed, some API endpoints will be unavailable", "error", lastErr)
+			return nil
+		}
+		if attempt == 0 {
+			slog.Info("Waiting for the database to finish starting", "error", err)
+		}
+		time.Sleep(2 * time.Second)
+	}
+}
+
 func New(cfg *config.Config) (*Server, error) {
 	mgr, err := instance.NewManager(cfg)
 	if err != nil {
@@ -69,27 +122,7 @@ func New(cfg *config.Config) (*Server, error) {
 	}
 
 	// Attempt DB connection; log a warning but do not abort server creation.
-	var db database.Database
-	if rawDB, err := database.New(cfg.DatabaseClient()); err != nil {
-		slog.Warn("Database not available at server start, some API endpoints will be unavailable", "error", err)
-	} else {
-		connectCtx, connectCancel := context.WithTimeout(context.Background(), 15*time.Second)
-		if err := rawDB.Connect(connectCtx); err != nil {
-			connectCancel()
-			slog.Warn("Database connection failed, some API endpoints will be unavailable", "error", err)
-		} else {
-			// Ensure the schema exists. This is idempotent (CREATE ... IF NOT
-			// EXISTS) and makes `qpot up` work on a fresh database without a
-			// separate `qpot db migrate` step — otherwise the events table is
-			// never created and the whole collection pipeline silently drops
-			// everything.
-			if err := rawDB.InitializeSchema(connectCtx); err != nil {
-				slog.Warn("Database schema initialization failed; collection may not work", "error", err)
-			}
-			connectCancel()
-			db = rawDB
-		}
-	}
+	db := connectDatabase(cfg)
 
 	s := &Server{
 		config:   cfg,

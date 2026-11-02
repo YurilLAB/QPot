@@ -545,6 +545,14 @@ func (m *Manager) generateServiceConfigs() error {
 		Sandbox: m.sandbox,
 	}
 
+	// The collector's writable /data/backup is a bind mount nested inside its
+	// read-only /data mount, so the mount point must already exist on the host:
+	// runc cannot create it inside the read-only mount and the collector would
+	// fail to start ("make mountpoint ... read-only file system").
+	if err := os.MkdirAll(filepath.Join(m.config.DataPath, "backup"), 0750); err != nil {
+		return fmt.Errorf("failed to create collector backup dir: %w", err)
+	}
+
 	// Vector collector pipeline config.
 	vectorCfg, err := generator.GenerateVectorConfig()
 	if err != nil {
