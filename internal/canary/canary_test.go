@@ -1,6 +1,7 @@
 package canary
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -250,5 +251,40 @@ func TestRepeatTripsAreFolded(t *testing.T) {
 	defer func() { TripDedupeWindow = old }()
 	if _, ok, _ := s.TripByToken(c.Token, "203.0.113.9", "", ""); !ok {
 		t.Fatal("hit after the dedupe window was folded")
+	}
+}
+
+// Trips handed to callers must not alias the stored ones: a repeat hit bumps
+// the stored trip's Repeats under the lock while an API handler encodes its
+// result without it (found with -race).
+func TestTripsAreCopies(t *testing.T) {
+	s, err := NewStore(t.TempDir(), 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	c, err := s.Create(KindWeb, "w", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok, err := s.TripByToken(c.Token, "203.0.113.9", "ua", ""); !ok || err != nil {
+		t.Fatalf("first trip: %v %v", ok, err)
+	}
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for i := 0; i < 200; i++ {
+			_, _, _ = s.TripByToken(c.Token, "203.0.113.9", "ua", "") // repeats
+		}
+	}()
+	for i := 0; i < 200; i++ {
+		if _, err := json.Marshal(s.Trips(10)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	<-done
+	got := s.Trips(1)
+	got[0].Repeats = -1
+	if s.Trips(1)[0].Repeats == -1 {
+		t.Fatal("Trips returned the stored trip, not a copy")
 	}
 }

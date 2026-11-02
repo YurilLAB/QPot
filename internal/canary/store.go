@@ -174,15 +174,18 @@ func (s *Store) SetEnabled(id string, enabled bool) (bool, error) {
 	return true, nil
 }
 
-// Trips returns up to limit of the most recent trips, newest first. A non-
-// positive limit returns all retained trips.
+// Trips returns copies of up to limit of the most recent trips, newest first.
+// A non-positive limit returns all retained trips. Copies, because a repeat hit
+// increments a stored trip's Repeats under the lock while the caller encodes
+// what it got back without it.
 func (s *Store) Trips(limit int) []*Trip {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	n := len(s.trips)
 	out := make([]*Trip, 0, n)
 	for i := n - 1; i >= 0; i-- { // newest first
-		out = append(out, s.trips[i])
+		cp := *s.trips[i]
+		out = append(out, &cp)
 		if limit > 0 && len(out) >= limit {
 			break
 		}
@@ -264,7 +267,8 @@ func (s *Store) TripByToken(token, srcIP, ua, detail string) (*Trip, bool, error
 	if t == nil {
 		return nil, false, nil // a repeat within the dedupe window: no new alert
 	}
-	return t, true, err
+	cp := *t // the stored trip keeps changing (Repeats) after we unlock
+	return &cp, true, err
 }
 
 // Match scans text for any watched credential value and, on the first hit,
@@ -291,7 +295,8 @@ func (s *Store) Match(text, srcIP, detail string) (*Trip, bool, error) {
 		if t == nil {
 			return nil, false, nil // repeat within the dedupe window
 		}
-		return t, true, err
+		cp := *t
+		return &cp, true, err
 	}
 	return nil, false, nil
 }
