@@ -348,7 +348,27 @@ func selectCredentialTemplate(explicit, seed string) credentialTemplate {
 			return t
 		}
 	}
-	return credentialTemplates[seededIndex("cred:"+seed, len(credentialTemplates))]
+	t := credentialTemplates[seededIndex("cred:"+seed, len(credentialTemplates))]
+	if !embeddedHardwarePersonas[t.Name] {
+		return t // unchanged for every seed that already drew a server persona
+	}
+	// Every distro profile and CPU model is an x86_64 server, so an embedded
+	// device persona (hostname "rpi-home" on a Xeon) contradicts uname and
+	// /proc/cpuinfo. Re-draw among the server personas.
+	var servers []credentialTemplate
+	for _, c := range credentialTemplates {
+		if !embeddedHardwarePersonas[c.Name] {
+			servers = append(servers, c)
+		}
+	}
+	return servers[seededIndex("cred-server:"+seed, len(servers))]
+}
+
+// embeddedHardwarePersonas are personas of ARM/MIPS appliances. They are never
+// auto-selected (see selectCredentialTemplate) but stay explicitly selectable.
+var embeddedHardwarePersonas = map[string]bool{
+	"raspberry-pi": true, "iot-camera": true, "cctv-nvr": true,
+	"soho-router": true, "edge-router": true,
 }
 
 // renderCowrieUserDB renders a credential template into Cowrie userdb.txt

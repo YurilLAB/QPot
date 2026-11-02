@@ -3,6 +3,7 @@ package instance
 import (
 	"encoding/base64"
 	"encoding/json"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -537,5 +538,24 @@ func TestFakeKernelAppliedEverywhere(t *testing.T) {
 	}
 	if !found {
 		t.Error("fs patch does not write /proc/sys/kernel/osrelease")
+	}
+}
+
+// Auto-selected personas must fit the x86_64 server hardware every profile
+// presents; ARM/MIPS appliance personas are only used when chosen explicitly.
+func TestAutoPersonaMatchesServerHardware(t *testing.T) {
+	for i := 0; i < 2000; i++ {
+		seed := fmt.Sprintf("qp_seed_%d", i)
+		if p := selectCredentialTemplate("", seed); embeddedHardwarePersonas[p.Name] {
+			t.Fatalf("seed %q auto-selected appliance persona %q on x86_64 server hardware", seed, p.Name)
+		}
+	}
+	if p := selectCredentialTemplate("raspberry-pi", "x"); p.Name != "raspberry-pi" {
+		t.Errorf("explicit persona not honoured: got %q", p.Name)
+	}
+	for name := range embeddedHardwarePersonas {
+		if _, ok := credentialTemplateByName(name); !ok {
+			t.Errorf("embeddedHardwarePersonas lists unknown persona %q", name)
+		}
 	}
 }
