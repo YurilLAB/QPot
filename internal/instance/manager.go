@@ -672,9 +672,14 @@ func (m *Manager) generateServiceConfigs() error {
 				return nil
 			}
 			// One SHARED host-key dir for the whole pool (so all backends present
-			// the same fingerprint), plus a per-backend log dir.
-			if err := mkBackendDir("shared-hostkeys"); err != nil {
-				return err
+			// the same fingerprint), plus a per-backend log dir. The keys are
+			// generated here and the dir is mounted read-only into the backends.
+			keyDir := filepath.Join(m.config.DataPath, "honeypots", sshBackendDataDir, "shared-hostkeys")
+			if err := os.MkdirAll(keyDir, 0o755); err != nil {
+				return fmt.Errorf("failed to create ssh-backend host-key dir: %w", err)
+			}
+			if err := ensureSSHHostKeys(keyDir); err != nil {
+				return fmt.Errorf("failed to create ssh-backend host keys: %w", err)
 			}
 			for _, svc := range sshBackendServiceNames(m.config) {
 				if err := mkBackendDir(filepath.Join(svc, "logs")); err != nil {
