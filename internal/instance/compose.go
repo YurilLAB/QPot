@@ -1141,8 +1141,8 @@ transforms:
       }
       .event_type = downcase(et)
 
-      # Credentials: cowrie/adbhoney username/password; heralding records a
-      # list of attempts per session (keep the latest).
+      # Login attempts: cowrie and adbhoney log the username and password;
+      # heralding records a list of attempts per session (keep the latest).
       user = ""
       pass = ""
       if is_string(.username) {

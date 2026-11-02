@@ -1,0 +1,6 @@
+# Reviewed false positives (gitleaks fingerprints). Each entry is a single
+# finding in one historical commit; nothing here is a real secret.
+#
+# generic-api-key matched a collector comment about honeypot login fields;
+# the comment has since been reworded.
+a61bcc50343c2198a8ba8d35c121218877c6e94a:internal/instance/compose.go:generic-api-key:1144
