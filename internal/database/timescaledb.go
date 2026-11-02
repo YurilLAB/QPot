@@ -654,7 +654,7 @@ func (ts *TimescaleDB) ImportData(ctx context.Context, r io.Reader) error {
 		return fmt.Errorf("failed to read data: %w", err)
 	}
 
-	lines := strings.Split(string(data), "\n")
+	lines := splitCSVRecords(string(data))
 	if len(lines) < 2 {
 		return nil // empty or header-only
 	}

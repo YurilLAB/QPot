@@ -717,7 +717,7 @@ func (ch *ClickHouse) ImportData(ctx context.Context, r io.Reader) error {
 		return fmt.Errorf("failed to read data: %w", err)
 	}
 
-	lines := splitLines(string(data))
+	lines := splitCSVRecords(string(data))
 	if len(lines) < 2 {
 		return nil
 	}
@@ -769,12 +769,19 @@ func (ch *ClickHouse) ImportData(ctx context.Context, r io.Reader) error {
 	return nil
 }
 
-// splitLines splits a string into lines, handling \r\n and \n.
-func splitLines(s string) []string {
+// splitCSVRecords splits CSV text into records on \n or \r\n, but only
+// outside double quotes: ExportData quotes fields with embedded newlines (an
+// attacker command often has one), and a plain line split cut such a row in
+// two so it was silently dropped on import.
+func splitCSVRecords(s string) []string {
 	var lines []string
 	start := 0
+	inQuote := false
 	for i := 0; i < len(s); i++ {
-		if s[i] == '\n' {
+		if s[i] == '"' {
+			inQuote = !inQuote // a doubled "" toggles twice: net unchanged
+		}
+		if s[i] == '\n' && !inQuote {
 			end := i
 			if end > start && s[end-1] == '\r' {
 				end--

