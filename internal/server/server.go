@@ -1339,8 +1339,12 @@ func (s *Server) handleYurilIntel(w http.ResponseWriter, r *http.Request) {
 		source = "yuril"
 	}
 
-	accepted := 0
 	skipped := 0
+	// One batch insert for the whole request (deduplicated): a 1 MiB body can
+	// carry tens of thousands of items, and inserting them one by one meant as
+	// many round trips (and, on ClickHouse, as many data parts).
+	batch := make([]*database.IOC, 0, len(req.Items))
+	seen := make(map[string]bool, len(req.Items))
 	for i, item := range req.Items {
 		t := strings.ToLower(strings.TrimSpace(item.Type))
 		v := strings.TrimSpace(item.Value)
@@ -1361,23 +1365,27 @@ func (s *Server) handleYurilIntel(w http.ResponseWriter, r *http.Request) {
 		}
 
 		// Tag every inbound item with its origin so operators can audit which
-		// indicators came from QPot's own honeypots vs. pushed by Yuril.
-		meta := map[string]string{
-			"origin":       "yuril_inbound",
-			"yuril_source": source,
+		// indicators came from QPot's own honeypots vs. pushed by Yuril. Inbound
+		// context may add keys but never overwrite these provenance fields.
+		meta := map[string]string{}
+		for k, val := range item.Context {
+			meta[k] = val
 		}
+		meta["origin"] = "yuril_inbound"
+		meta["yuril_source"] = source
+		delete(meta, "severity")
 		if item.Severity != "" {
 			meta["severity"] = item.Severity
 		}
-		for k, val := range item.Context {
-			// Don't let inbound metadata clobber our origin tag.
-			if k == "origin" {
-				continue
-			}
-			meta[k] = val
-		}
 
-		ioc := &database.IOC{
+		id := fmt.Sprintf("%s:%s:%s", t, v, "_yuril")
+		if seen[id] {
+			skipped++
+			continue
+		}
+		seen[id] = true
+		batch = append(batch, &database.IOC{
+			ID:        id,
 			Type:      t,
 			Value:     v,
 			Honeypot:  "_yuril",
@@ -1385,14 +1393,15 @@ func (s *Server) handleYurilIntel(w http.ResponseWriter, r *http.Request) {
 			LastSeen:  now,
 			Count:     1,
 			Metadata:  meta,
-		}
-		if err := s.database.InsertIOC(r.Context(), ioc); err != nil {
-			slog.Warn("yuril intel: InsertIOC failed", "type", t, "value", v, "error", err)
-			skipped++
-			continue
-		}
-		accepted++
+		})
 	}
+	if len(batch) > 0 {
+		if err := s.database.InsertIOCs(r.Context(), batch); err != nil {
+			s.sendInternalError(w, "yuril intel: insert failed", err)
+			return
+		}
+	}
+	accepted := len(batch)
 
 	s.sendJSON(w, map[string]interface{}{
 		"qpot_id":  s.config.QPotID,

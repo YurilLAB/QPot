@@ -160,3 +160,58 @@ func TestAPIDoesNotLeakDatabaseErrors(t *testing.T) {
 		}
 	}
 }
+
+// countingDB counts IOC insert calls.
+type countingDB struct {
+	fakeDB
+	single, batches int
+}
+
+func (c *countingDB) InsertIOC(ctx context.Context, ioc *database.IOC) error {
+	c.single++
+	return c.fakeDB.InsertIOC(ctx, ioc)
+}
+func (c *countingDB) InsertIOCs(ctx context.Context, iocs []*database.IOC) error {
+	c.batches++
+	return c.fakeDB.InsertIOCs(ctx, iocs)
+}
+
+// Inbound Yuril intel is stored in one batch, deduplicated, with IDs, and the
+// provenance fields cannot be overwritten by the sender's context.
+func TestYurilIntelBatchedAndProvenanceProtected(t *testing.T) {
+	db := &countingDB{}
+	s := &Server{config: &config.Config{QPotID: validTestID}, mux: http.NewServeMux(), database: db}
+	s.setupRoutes()
+	body := `{"source":"edr","items":[
+		{"type":"ip","value":"198.51.100.4","severity":"high",
+		 "context":{"origin":"forged","yuril_source":"forged","severity":"forged","host":"pc-7"}},
+		{"type":"ip","value":"198.51.100.4"},
+		{"type":"domain","value":"evil.example.org"},
+		{"type":"bogus","value":"x"}]}`
+	req := httptest.NewRequest(http.MethodPost, "/api/yuril/intel", strings.NewReader(body))
+	req.Header.Set("X-QPot-ID", validTestID)
+	rec := httptest.NewRecorder()
+	s.mux.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status %d: %s", rec.Code, rec.Body.String())
+	}
+	if db.single != 0 || db.batches != 1 {
+		t.Fatalf("InsertIOC calls=%d InsertIOCs calls=%d, want 0 and 1", db.single, db.batches)
+	}
+	db.mu.Lock()
+	defer db.mu.Unlock()
+	if len(db.iocs) != 2 {
+		t.Fatalf("stored %d IOCs, want 2 (duplicate and unsupported type dropped)", len(db.iocs))
+	}
+	ip := db.iocs[0]
+	if ip.ID != "ip:198.51.100.4:_yuril" {
+		t.Errorf("IOC ID = %q", ip.ID)
+	}
+	m := ip.Metadata
+	if m["origin"] != "yuril_inbound" || m["yuril_source"] != "edr" || m["severity"] != "high" || m["host"] != "pc-7" {
+		t.Errorf("provenance not protected / context lost: %v", m)
+	}
+	if !strings.Contains(rec.Body.String(), `"accepted":2`) {
+		t.Errorf("response: %s", rec.Body.String())
+	}
+}
