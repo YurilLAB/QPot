@@ -88,6 +88,8 @@ Each QPot instance has a unique ID (qp_*) for tracking and authentication.`,
 	rootCmd.AddCommand(newUpCommand())
 	rootCmd.AddCommand(newDownCommand())
 	rootCmd.AddCommand(newServeCommand())
+	rootCmd.AddCommand(newSetupCommand())
+	rootCmd.AddCommand(newDoctorCommand())
 	rootCmd.AddCommand(newStatusCommand())
 	rootCmd.AddCommand(newInstanceCommand())
 	rootCmd.AddCommand(newHoneypotCommand())
@@ -139,8 +141,13 @@ func newUpCommand() *cobra.Command {
 			showQPotIDPopup(qpotID.ID, cfg.WebUI.Port)
 
 			// The containers always run detached; this process (or, with -d, a
-			// background `qpot serve`) then runs the control plane.
-			if err := mgr.Start(ctx, true); err != nil {
+			// background `qpot serve`) then runs the control plane. If they are
+			// already up (e.g. docker restarted them after a reboot), just attach
+			// the control plane instead of failing - that is what a systemd
+			// service running `qpot up` needs.
+			if mgr.IsRunning(ctx) {
+				fmt.Println("[INFO] Containers are already running; attaching the control plane")
+			} else if err := mgr.Start(ctx, true); err != nil {
 				return fmt.Errorf("failed to start instance: %w", err)
 			}
 

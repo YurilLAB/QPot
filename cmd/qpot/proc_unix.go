@@ -52,3 +52,27 @@ func itoa(n int) string {
 }
 
 func fileExists(p string) bool { _, err := os.Stat(p); return err == nil }
+
+// totalMemoryBytes returns physical memory from /proc/meminfo (Linux), or 0.
+func totalMemoryBytes() int64 {
+	data, err := os.ReadFile("/proc/meminfo")
+	if err != nil {
+		return 0
+	}
+	for _, line := range strings.Split(string(data), "\n") {
+		if f := strings.Fields(line); len(f) >= 2 && f[0] == "MemTotal:" {
+			kb, _ := strconv.ParseInt(f[1], 10, 64)
+			return kb * 1024
+		}
+	}
+	return 0
+}
+
+// freeDiskBytes returns the free space available to unprivileged users at path.
+func freeDiskBytes(path string) int64 {
+	var st syscall.Statfs_t
+	if err := syscall.Statfs(path, &st); err != nil {
+		return 0
+	}
+	return int64(st.Bavail) * int64(st.Bsize) // #nosec G115 -- sizes fit int64
+}

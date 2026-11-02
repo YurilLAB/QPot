@@ -786,3 +786,36 @@ func Remove(ctx context.Context, name string) error {
 	slog.Info("Instance removed", "name", name)
 	return nil
 }
+
+// ServiceState is one compose service's container state, e.g. State "running"
+// and Health "healthy" ("" when the service has no healthcheck).
+type ServiceState struct {
+	State  string
+	Health string
+}
+
+// ServiceStates reports the state of every service in the instance's compose
+// project (honeypots, database, collector, HiFi backends), keyed by service.
+func (m *Manager) ServiceStates(ctx context.Context) (map[string]ServiceState, error) {
+	composeFile := m.config.GetDockerComposePath()
+	cmd := exec.CommandContext(ctx, "docker", "compose", "-f", composeFile, "ps", "--all", "--format", "json")
+	cmd.Dir = m.config.DataPath
+	out, err := cmd.Output()
+	if err != nil {
+		return nil, fmt.Errorf("docker compose ps: %w", err)
+	}
+	states := map[string]ServiceState{}
+	for svc, e := range parseComposePS(out) {
+		states[svc] = ServiceState{State: e.State, Health: e.Health}
+	}
+	return states, nil
+}
+
+// PublishedHostPorts returns the host ports this instance will publish for its
+// enabled honeypots (as the compose generator assigns them, avoiding other
+// instances' ports), so setup can check they are free before starting.
+func PublishedHostPorts(cfg *config.Config) map[string]int {
+	ports, subnets := siblingReservations(cfg.DataPath)
+	g := &ComposeGenerator{Config: cfg, ReservedPorts: ports, ReservedSubnets: subnets}
+	return g.buildHostPortMap()
+}
