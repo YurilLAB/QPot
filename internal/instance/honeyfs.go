@@ -184,14 +184,30 @@ func bogomipsFor(mhz string) string {
 // procVersion builds a realistic /proc/version consistent with the distro
 // profile's kernel release (uname -r) and build string (uname -v).
 func procVersion(p distroProfile) string {
-	// All distro profiles are Debian-family (see deception.go), so only the
-	// Ubuntu default and the Debian branch can ever apply here.
-	builder, gcc := "buildd@lcy02-amd64-079", "gcc (Ubuntu 11.4.0-1ubuntu1~22.04) 11.4.0"
+	// Each release's stock kernel is built by its own toolchain, and the
+	// compiler string differs per release (a 22.04 gcc on a 20.04 or 24.04
+	// kernel is a tell). 5.4-era kernels print the old "gcc version X (...)"
+	// form with no linker; newer ones add the full "GNU ld (GNU Binutils ...)".
+	builder := "buildd@lcy02-amd64-079"
 	if strings.Contains(strings.ToLower(p.OSPretty), "debian") {
-		builder, gcc = "debian-kernel@lists.debian.org", "gcc-12 (Debian 12.2.0-14) 12.2.0"
+		builder = "debian-kernel@lists.debian.org"
 	}
-	return fmt.Sprintf("Linux version %s (%s) (%s, GNU ld) %s\n",
-		p.KernelVersion, builder, gcc, p.KernelBuildString)
+	toolchain, ok := kernelToolchains[p.Codename]
+	if !ok {
+		toolchain = kernelToolchains["jammy"]
+	}
+	return fmt.Sprintf("Linux version %s (%s) (%s) %s\n",
+		p.KernelVersion, builder, toolchain, p.KernelBuildString)
+}
+
+// kernelToolchains is the compiler/linker banner of each release's stock
+// kernel, as printed in /proc/version.
+var kernelToolchains = map[string]string{
+	"focal":    "gcc version 9.4.0 (Ubuntu 9.4.0-1ubuntu1~20.04.2)",
+	"jammy":    "gcc (Ubuntu 11.4.0-1ubuntu1~22.04) 11.4.0, GNU ld (GNU Binutils for Ubuntu) 2.38",
+	"noble":    "x86_64-linux-gnu-gcc-13 (Ubuntu 13.2.0-23ubuntu4) 13.2.0, GNU ld (GNU Binutils for Ubuntu) 2.42",
+	"bullseye": "gcc-10 (Debian 10.2.1-6) 10.2.1 20210110, GNU ld (GNU Binutils for Debian) 2.35.2",
+	"bookworm": "gcc-12 (Debian 12.2.0-14) 12.2.0, GNU ld (GNU Binutils for Debian) 2.40",
 }
 
 // etcHosts builds a standard Debian/Ubuntu /etc/hosts. The 127.0.1.1 line must

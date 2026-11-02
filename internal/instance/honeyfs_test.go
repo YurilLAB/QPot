@@ -279,3 +279,22 @@ func TestAcceptedLoginsHaveShell(t *testing.T) {
 		}
 	}
 }
+
+// Every distro profile must have its own kernel toolchain banner, with the
+// linker spelled the way real kernels print it.
+func TestProcVersionToolchainPerRelease(t *testing.T) {
+	for _, p := range distroProfiles {
+		tc, ok := kernelToolchains[p.Codename]
+		if !ok {
+			t.Errorf("%s: no kernel toolchain for codename %q", p.OSPretty, p.Codename)
+			continue
+		}
+		pv := procVersion(p)
+		if !strings.Contains(pv, "("+tc+")") {
+			t.Errorf("%s: /proc/version lacks its toolchain: %q", p.OSPretty, pv)
+		}
+		if strings.Contains(pv, "GNU ld)") {
+			t.Errorf("%s: truncated linker banner: %q", p.OSPretty, pv)
+		}
+	}
+}
