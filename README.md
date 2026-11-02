@@ -27,7 +27,8 @@ driven by a single `qpot` binary. On top of T-Pot it adds:
 - **Built-in analysis** – Vector → ClickHouse (or TimescaleDB), automatic
   MITRE ATT&CK tagging, IOC extraction, campaign (TTP) tracking and MISP export.
 - **Canaries, alerts and response hooks**, multi-node **clusters**, and a
-  built-in **web dashboard / API**.
+  built-in **web UI**: T-Pot's landing page and live attack map, restyled for
+  QPot and served from QPot's own API, plus a dashboard.
 - **One-command setup** that checks the host, starts everything and verifies it
   is actually healthy.
 
@@ -62,7 +63,11 @@ instance with a fresh QPot ID and random database password; makes sure the host
 ports are free (a new instance whose web UI port is taken gets the next free
 one); starts the containers and the control plane; and waits until the
 database, collector, honeypots and this instance's web UI are healthy. The web
-UI and database listen on `127.0.0.1` only, and nothing needs sudo.
+UI and database listen on `127.0.0.1` only, and nothing needs sudo. It also
+downloads the free [DB-IP](https://db-ip.com) Lite country database so events
+get a country and show on the attack map (`--no-geoip` skips it;
+`qpot geoip update` refreshes it monthly). The map places the sensor from the
+host's time zone; set it with `--country DE` if that is wrong or UTC.
 
 The manual equivalent:
 
@@ -76,11 +81,20 @@ The **control plane** (web UI/API, intelligence worker, alerts, cluster
 membership, HiFi backend recycler) runs inside `qpot up`, or in the background
 as `qpot serve` with `-d` (log: `<instance>/logs/qpot-serve.log`).
 
-### Dashboard and API
+### Web UI and API
 
 Served by the `qpot` process on `http://127.0.0.1:8080` (or the port `setup`
 chose), authenticated with the instance's **QPot ID** (`qpot id` shows it). From
 another machine use an SSH tunnel: `ssh -L 8080:127.0.0.1:8080 <host>`.
+
+| Page | What it is |
+|------|------------|
+| `/` | T-Pot's landing page in QPot's colours: status, 24h counts, links, MISP export |
+| `/map/` | T-Pot's live attack map, fed by QPot's own database over an authenticated stream (`/api/map/stream`). The world is drawn locally (Natural Earth outlines), so the browser contacts no tile server. |
+| `/dashboard` | Honeypot controls, intelligence and the overview |
+
+The QPot ID is entered once per browser, checked with the server, kept in that
+browser only and shown masked.
 
 The dashboard shows live stats, per-honeypot controls, the attacker activity
 feed, ATT&CK techniques / IOCs / campaigns (with a MISP export), cluster members
@@ -98,8 +112,9 @@ qpot overview --all    # every instance on the host
 
 ## Honeypots
 
-27 honeypots, using T-Pot's upstream images (`qpot honeypot list` shows ports
-and risk levels):
+27 honeypots, using T-Pot's newest upstream images, `24.04.2` (there is no
+T-Pot 25 release; tanner, snare and phpox stay on `24.04.1`, the newest
+published for them). `qpot honeypot list` shows ports and risk levels:
 
 `adbhoney`, `beelzebub`, `ciscoasa`, `citrixhoneypot`, `conpot`, `cowrie`,
 `ddospot`, `dicompot`, `dionaea`, `elasticpot`, `endlessh`, `galah`, `go-pot`,
@@ -112,6 +127,16 @@ and risk levels):
 
 ```bash
 qpot honeypot enable dionaea   # starts it right away if the instance is running
+```
+
+`tanner` runs as T-Pot does: the snare web front end plus the tanner, API, PHP
+sandbox and Redis containers on an internal network. `beelzebub` and `galah`
+answer attackers with an LLM and need one before they are enabled:
+
+```bash
+qpot honeypot set galah llm_provider=ollama llm_server_url=http://10.0.0.5:11434 llm_model=llama3.1
+qpot honeypot set beelzebub llm_provider=ollama llm_model=llama3.1 llm_host=http://10.0.0.5:11434/api/chat
+qpot honeypot enable galah
 ```
 
 ---
@@ -163,8 +188,11 @@ honeypots:
 ## Data and threat intelligence
 
 Vector collects every honeypot's JSON log, normalises it (source IP/ports,
-protocol, event type, credentials, commands, download URLs) and writes it to
-the instance database. Non-JSON log noise is dropped. Data is kept for 90 days.
+protocol, event type, credentials, commands, download URLs; each honeypot's own
+field names are mapped as T-Pot's Logstash pipeline does), adds the attacker's
+country from the GeoIP database and writes it to the instance database. Lines
+without an attacker address (startup banners, errors) are dropped. Data is kept
+for 90 days.
 
 | Backend | Notes |
 |---------|-------|
@@ -193,9 +221,9 @@ The intelligence worker (every 15 minutes by default,
 | `GET /api/ttps` | Campaign sessions |
 | `GET /api/intelligence` | Summary |
 
-Optional extras: Suricata/p0f/fatt sensor ingest (`collector.ingest_*`), MaxMind
-GeoIP (`collector.geoip_db_path`), and Kibana / the attack map on top of
-ClickHouse via the bundled connector in
+Optional extras: Suricata/p0f/fatt sensor ingest (`collector.ingest_*`), a
+MaxMind database instead of DB-IP (`collector.geoip_db_path`, any MaxMind-format
+file), and Kibana on top of ClickHouse via the bundled connector in
 [docker/clickhouse-kibana](docker/clickhouse-kibana/README.md).
 
 ---
@@ -309,7 +337,8 @@ intelligence:
 ```bash
 qpot setup | doctor | up [-d] | serve | down | status   [-i <instance>]
 qpot instance create|list|remove <name>
-qpot honeypot list|enable|disable <name>
+qpot honeypot list|enable|disable <name>   qpot honeypot set <name> key=value
+qpot geoip update [--country CC]
 qpot logs [honeypot] [-f]          qpot id          qpot config [--print]
 qpot docker ps|logs|restart        qpot db migrate status|up|down
 qpot cluster ...                   qpot canary ...  qpot overview [--all]

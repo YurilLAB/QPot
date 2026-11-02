@@ -22,6 +22,7 @@ this document stays in lock-step with the code.
 - [Global flags](#global-flags)
 - [Command overview](#command-overview)
 - [Instance lifecycle](#instance-lifecycle)
+  - [`qpot setup`](#qpot-setup)
   - [`qpot up`](#qpot-up)
   - [`qpot down`](#qpot-down)
   - [`qpot status`](#qpot-status)
@@ -33,6 +34,7 @@ this document stays in lock-step with the code.
 - [Cluster / pairing — `qpot cluster`](#cluster--pairing--qpot-cluster)
 - [Canaries — `qpot canary`](#canaries--qpot-canary)
 - [Overview — `qpot overview`](#overview--qpot-overview)
+- [GeoIP — `qpot geoip`](#geoip--qpot-geoip)
 - [Configuration — `qpot config`](#configuration--qpot-config)
 - [Utilities](#utilities)
   - [`qpot id`](#qpot-id)
@@ -82,13 +84,14 @@ qpot --version
 | `qpot down` | Stop a running instance and its honeypots. |
 | `qpot status` | Show the live status of an instance's honeypots and services. |
 | `qpot instance` | Create, list, and remove instances. |
-| `qpot honeypot` | Enable, disable, and list honeypots within an instance. |
+| `qpot honeypot` | Enable, disable, list and configure honeypots within an instance. |
 | `qpot logs` | View logs from one honeypot or all honeypots. |
 | `qpot docker` | Inspect and manage the underlying Docker containers. |
 | `qpot db` | Inspect schema versions and run/roll back migrations. |
 | `qpot cluster` | Pair multiple nodes into a managed group (aliases: `group`, `pair`, `networking`). |
 | `qpot canary` | Mint and manage canaries (honeytokens) — decoy artifacts that alert on any interaction. |
 | `qpot overview` | Host resources, 24h honeypot activity and recent events, for one or all local instances. |
+| `qpot geoip` | Install or refresh the GeoIP database used for countries and the attack map. |
 | `qpot config` | Open or print the instance config file. |
 | `qpot id` | Show the QPot ID for an instance. |
 | `qpot completion` | Generate a shell autocompletion script. |
@@ -97,8 +100,28 @@ qpot --version
 
 ## Instance lifecycle
 
-The three commands you will use most. Each one targets a single instance via
+The commands you will use most. Each one targets a single instance via
 `-i, --instance` (default `default`).
+
+### `qpot setup`
+
+One command from a fresh host to a verified, running instance: host checks,
+instance creation, port checks, GeoIP download, start, and a health wait.
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--profile string` | `minimal` | Honeypots for a new instance: `minimal`, `standard` or `hifi`. |
+| `--country string` | time zone | Two-letter country of this sensor, where the attack map draws it. |
+| `--no-geoip` | `false` | Do not download the DB-IP Lite country database. |
+| `--service` | `false` | Install and start a systemd service (Linux). |
+| `--no-start` | `false` | Only check the host and create the instance. |
+| `--timeout duration` | `4m` | How long to wait for everything to become healthy. |
+
+```bash
+qpot setup --profile standard --country NL
+```
+
+A failed GeoIP download is only a warning; `qpot geoip update` retries it.
 
 ### `qpot up`
 
@@ -204,10 +227,11 @@ qpot honeypot [command]
 | Subcommand | Flags | Description |
 |------------|-------|-------------|
 | `list` | `-i, --instance` | List available honeypots with port, risk, and on/off state. |
-| `enable [honeypot]` | `-i, --instance` | Enable a honeypot in the instance config. |
-| `disable [honeypot]` | `-i, --instance` | Disable a honeypot in the instance config. |
+| `enable [honeypot]` | `-i, --instance` | Enable a honeypot; starts it (and its companions) if the instance is running. |
+| `disable [honeypot]` | `-i, --instance` | Disable a honeypot; stops it if the instance is running. |
+| `set [honeypot] key=value...` | `-i, --instance` | Set a honeypot's settings (`key=` removes one); an enabled honeypot on a running instance is recreated with them. |
 
-`-i, --instance string` selects the instance (default `default`) for all three.
+`-i, --instance string` selects the instance (default `default`).
 
 ```bash
 qpot honeypot list
@@ -222,8 +246,21 @@ qpot honeypot disable endlessh -i production
 
 `qpot honeypot list` shows every selectable service — **26 classic honeypots**
 (low-interaction tarpits through high-interaction and LLM-backed services) plus
-the **HiFi `ssh-proxy`**, for 27 entries in total. `enable`/`disable` only edit
-the config — run `qpot up` afterward to apply the change.
+the **HiFi `ssh-proxy`**, for 27 entries in total.
+
+`set` accepts only the keys a honeypot uses. The LLM-backed honeypots refuse to
+start without a provider, so `enable` asks for these first:
+
+| Honeypot | Keys | Required |
+|----------|------|----------|
+| `beelzebub` | `llm_provider` (`ollama` or `openai`), `llm_model`, `llm_host` | `llm_provider`, `llm_model` |
+| `galah` | `llm_provider`, `llm_server_url`, `llm_model`, `llm_temperature`, `llm_api_key`, `llm_cloud_location`, `llm_cloud_project` | `llm_provider`, `llm_model` |
+| `ssh-proxy` | `backends` | – |
+
+```bash
+qpot honeypot set beelzebub llm_provider=ollama llm_model=llama3.1 llm_host=http://10.0.0.5:11434/api/chat
+qpot honeypot enable beelzebub
+```
 
 ---
 
@@ -494,6 +531,24 @@ qpot overview -i sensor1 --json
 
 When the instance's control plane is running the data comes from its API;
 otherwise `qpot overview` reads the instance database directly.
+
+---
+
+## GeoIP — `qpot geoip`
+
+```text
+qpot geoip update [-i instance] [--country CC]
+```
+
+Downloads the current [DB-IP](https://db-ip.com) Lite country database
+(monthly, about 4 MB compressed, CC BY 4.0) into `<instance>/geoip/`, checks it
+is a MaxMind-format file, points the collector at it and restarts the collector
+if the instance is running. New events then carry the attacker's country, which
+the attack map and dashboards use. Run it monthly for fresh data.
+`--country` also sets where the map draws this sensor (`attack_map.country`).
+
+`qpot doctor` reports a configured database file that has gone missing, since
+the collector cannot start without it.
 
 ---
 
