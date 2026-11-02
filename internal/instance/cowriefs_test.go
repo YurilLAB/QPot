@@ -3,6 +3,7 @@ package instance
 import (
 	"encoding/base64"
 	"encoding/json"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -196,5 +197,53 @@ func TestStampFileTimesRealistic(t *testing.T) {
 	hist := time.Unix(a[3].MTime, 0)
 	if !hist.After(time.Unix(a[2].MTime, 0)) {
 		t.Error("shell history should be newer than the account's dotfiles")
+	}
+}
+
+// The planted admin breadcrumbs must agree with each other and with the box's
+// own network, and differ between deployments (no shared 10.0.0.5/db01).
+func TestBreadcrumbsCoherentAndPerInstance(t *testing.T) {
+	seen := map[string]bool{}
+	for _, seed := range []string{"ds_a", "ds_b", "ds_c", "ds_d", "ds_e"} {
+		id := netIdentityForSeed(seed)
+		peers := internalPeers(seed)
+		if peers[0].IP == peers[1].IP || peers[0].Host == peers[1].Host {
+			t.Errorf("%s: duplicate peers %+v", seed, peers)
+		}
+		for _, p := range peers {
+			if p.IP[0] != id.IP[0] || p.IP[1] != id.IP[1] || p.IP[2] != id.IP[2] {
+				t.Errorf("%s: peer %s not on the box's /24 (%v)", seed, p.IPString(), id.IP)
+			}
+			if p.IP == id.IP || p.IP == id.Gateway {
+				t.Errorf("%s: peer reuses the box or gateway address", seed)
+			}
+		}
+		cfg := sshClientConfig(seed)
+		kh := knownHostsFor(seed)
+		if !strings.Contains(cfg, "HostName "+peers[0].IPString()) || !strings.HasPrefix(kh, peers[0].IPString()+" ") {
+			t.Errorf("%s: ssh config / known_hosts disagree on the first peer", seed)
+		}
+		if !strings.Contains(kh, peers[1].Host+","+peers[1].IPString()+" ") {
+			t.Errorf("%s: known_hosts lacks the second peer", seed)
+		}
+		tcp := procNetTCP(id, nil, seed)
+		if !strings.Contains(tcp, fmt.Sprintf("%02X%02X%02X%02X:0016", peers[0].IP[3], peers[0].IP[2], peers[0].IP[1], peers[0].IP[0])) {
+			t.Errorf("%s: no ESTABLISHED session to %s in /proc/net/tcp", seed, peers[0].IPString())
+		}
+		for i := 0; i < 40; i++ {
+			h := bashHistoryFor(fmt.Sprintf("u%d", i), seed)
+			if strings.Contains(h, "example.") || strings.Contains(h, "{") {
+				t.Fatalf("%s: history has a placeholder or reserved domain:\n%s", seed, h)
+			}
+			for _, l := range strings.Split(h, "\n") {
+				if strings.HasPrefix(l, "ssh ") && l != "ssh "+peers[0].User+"@"+peers[0].IPString() {
+					t.Errorf("%s: history ssh hop %q does not match ~/.ssh/config", seed, l)
+				}
+			}
+		}
+		seen[peers[0].IPString()] = true
+	}
+	if len(seen) < 4 {
+		t.Errorf("breadcrumb hosts barely vary across deployments: %v", seen)
 	}
 }

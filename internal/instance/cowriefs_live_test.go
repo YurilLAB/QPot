@@ -108,7 +108,7 @@ func TestCowrieFsPatchServesContentLive(t *testing.T) {
 	if !strings.Contains(served["/home/admin/.ssh/authorized_keys"], "ssh-ed25519 ") {
 		t.Errorf("~/.ssh/authorized_keys not served: %q", served["/home/admin/.ssh/authorized_keys"])
 	}
-	if !strings.Contains(served["/home/admin/.ssh/config"], "Host deploy") {
+	if !strings.Contains(served["/home/admin/.ssh/config"], "Host "+internalPeers(seed)[0].Alias+"\n") {
 		t.Errorf("~/.ssh/config not served: %q", served["/home/admin/.ssh/config"])
 	}
 	// root got a home too (root is an accepted login for this persona).

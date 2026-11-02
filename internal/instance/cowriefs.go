@@ -38,6 +38,7 @@ import (
 	"encoding/binary"
 	"encoding/json"
 	"fmt"
+	"strings"
 )
 
 // embeddedFile is one file the fs-patch script materialises: it writes Content
@@ -101,9 +102,9 @@ var historyBlocks = [][]string{
 	{"ls -la", "cd /var/www", "git status", "git pull", "sudo systemctl restart nginx"},
 	{"df -h", "free -m", "sudo apt update", "sudo apt upgrade -y", "sudo reboot"},
 	{"tail -n 100 /var/log/syslog", "sudo journalctl -u ssh --no-pager", "netstat -tlnp"},
-	{"vim ~/.ssh/config", "ssh deploy@10.0.0.5", "scp backup.tar.gz db01:/srv/backups/"},
+	{"vim ~/.ssh/config", "ssh {PEER1_USER}@{PEER1_IP}", "scp backup.tar.gz {PEER2_HOST}:/srv/backups/"},
 	{"docker ps", "docker logs --tail 50 app", "docker compose up -d", "docker image prune -f"},
-	{"cd /opt", "wget https://releases.example.net/app-2.4.1.tar.gz", "tar xzf app-2.4.1.tar.gz", "./configure && make -j2"},
+	{"cd /tmp", "wget {DL_URL}", "{DL_INSTALL}"},
 	{"crontab -l", "sudo systemctl status cron", "ps aux | grep -v grep | grep python"},
 	{"htop", "iostat -x 2 3", "sudo du -sh /var/log/*", "sudo find / -name '*.log' -size +100M"},
 }
@@ -119,11 +120,87 @@ func bashHistoryFor(name, seed string) string {
 		lines = append(lines, b2...)
 	}
 	lines = append(lines, "cd ~", "ls", "exit")
+	peers := internalPeers(seed)
+	dl := downloads[seededIndex("download:"+seed, len(downloads))]
+	r := strings.NewReplacer(
+		"{PEER1_USER}", peers[0].User, "{PEER1_IP}", peers[0].IPString(),
+		"{PEER2_HOST}", peers[1].Host, "{DL_URL}", dl.URL, "{DL_INSTALL}", dl.Install)
 	out := ""
 	for _, l := range lines {
-		out += l + "\n"
+		out += r.Replace(l) + "\n"
 	}
 	return out
+}
+
+// downloads are real, commonly fetched release tarballs. The history used to
+// fetch from releases.example.net, a reserved documentation domain no real
+// admin downloads from - and the same URL on every deployment.
+var downloads = []struct{ URL, Install string }{
+	{"https://github.com/prometheus/node_exporter/releases/download/v1.7.0/node_exporter-1.7.0.linux-amd64.tar.gz",
+		"tar xzf node_exporter-1.7.0.linux-amd64.tar.gz"},
+	{"https://go.dev/dl/go1.21.5.linux-amd64.tar.gz",
+		"sudo tar -C /usr/local -xzf go1.21.5.linux-amd64.tar.gz"},
+	{"https://github.com/restic/restic/releases/download/v0.16.2/restic_0.16.2_linux_amd64.bz2",
+		"bunzip2 restic_0.16.2_linux_amd64.bz2"},
+	{"https://github.com/docker/compose/releases/download/v2.23.3/docker-compose-linux-x86_64",
+		"sudo install -m 755 docker-compose-linux-x86_64 /usr/local/bin/docker-compose"},
+	{"https://dl.grafana.com/oss/release/grafana-10.2.3.linux-amd64.tar.gz",
+		"tar xzf grafana-10.2.3.linux-amd64.tar.gz"},
+}
+
+// internalPeer is another server on this box's LAN that the planted admin
+// activity connects to.
+type internalPeer struct {
+	Alias, Host, User string
+	IP                [4]int
+}
+
+// IPString renders the peer's address.
+func (p internalPeer) IPString() string {
+	return fmt.Sprintf("%d.%d.%d.%d", p.IP[0], p.IP[1], p.IP[2], p.IP[3])
+}
+
+var (
+	peerHostnames = []string{"db01", "app01", "web02", "backup01", "ci-runner", "nas01", "mon01", "build02", "git01", "files01"}
+	peerUsers     = []string{"deploy", "admin", "ops", "ubuntu", "sysadmin"}
+)
+
+// internalPeers returns two LAN peers derived from this instance's own network
+// identity (same /24, never the box itself or its gateway), so ~/.ssh/config,
+// known_hosts, the shell history and the ESTABLISHED session in /proc/net/tcp
+// all name the same, per-deployment hosts instead of one fixed 10.0.0.5/db01
+// shared by every QPot.
+func internalPeers(seed string) [2]internalPeer {
+	id := netIdentityForSeed(seed)
+	var out [2]internalPeer
+	used := map[int]bool{id.IP[3]: true, id.Gateway[3]: true}
+	usedHost := map[string]bool{}
+	user := peerUsers[seededIndex("peeruser:"+seed, len(peerUsers))]
+	for i := range out {
+		host := peerHostnames[seededIndex(fmt.Sprintf("peerhost%d:%s", i, seed), len(peerHostnames))]
+		for usedHost[host] {
+			host = peerHostnames[(indexOf(peerHostnames, host)+1)%len(peerHostnames)]
+		}
+		usedHost[host] = true
+		last := 2 + seededIndex(fmt.Sprintf("peerip%d:%s", i, seed), 250)
+		for used[last] {
+			last = 2 + (last-2+1)%250
+		}
+		used[last] = true
+		ip := id.IP
+		ip[3] = last
+		out[i] = internalPeer{Alias: host, Host: host, User: user, IP: ip}
+	}
+	return out
+}
+
+func indexOf(xs []string, x string) int {
+	for i, v := range xs {
+		if v == x {
+			return i
+		}
+	}
+	return -1
 }
 
 // --- standard dotfile content (Debian/Ubuntu /etc/skel and root defaults). A
@@ -304,8 +381,9 @@ func authorizedKeysFor(user, seed string) string {
 // Only internal/private hosts (whose real keys an attacker cannot know) are used,
 // so there is no public host key to contradict.
 func knownHostsFor(seed string) string {
-	return "10.0.0.5 " + sshEd25519Pub("host:10.0.0.5:"+seed) + "\n" +
-		"db01,10.0.0.11 " + sshEd25519Pub("host:db01:"+seed) + "\n"
+	p := internalPeers(seed)
+	return p[0].IPString() + " " + sshEd25519Pub("host:"+p[0].IPString()+":"+seed) + "\n" +
+		p[1].Host + "," + p[1].IPString() + " " + sshEd25519Pub("host:"+p[1].Host+":"+seed) + "\n"
 }
 
 // sshClientConfig is ~/.ssh/config: host aliases corroborating the history's ssh
@@ -313,9 +391,10 @@ func knownHostsFor(seed string) string {
 // stays consistent with an ~/.ssh that has no private key (the admin's private
 // key lives on their workstation, not on this server - which is why only
 // authorized_keys is present).
-func sshClientConfig() string {
-	return "Host deploy\n    HostName 10.0.0.5\n    User deploy\n\n" +
-		"Host db01\n    HostName 10.0.0.11\n    User deploy\n"
+func sshClientConfig(seed string) string {
+	p := internalPeers(seed)
+	return "Host " + p[0].Alias + "\n    HostName " + p[0].IPString() + "\n    User " + p[0].User + "\n\n" +
+		"Host " + p[1].Alias + "\n    HostName " + p[1].IPString() + "\n    User " + p[1].User + "\n"
 }
 
 // cowrieHomeFiles returns every embedded file that makes up the persona's login
@@ -341,7 +420,7 @@ func cowrieHomeFiles(t credentialTemplate, seed string) []embeddedFile {
 			embeddedFile{Path: home + "/.bash_history", UID: uid, GID: uid, Mode: 0o100600, Content: bashHistoryFor(name, seed)},
 			embeddedFile{Path: home + "/.ssh/authorized_keys", UID: uid, GID: uid, Mode: 0o100600, Content: authorizedKeysFor(name, seed)},
 			embeddedFile{Path: home + "/.ssh/known_hosts", UID: uid, GID: uid, Mode: 0o100644, Content: knownHostsFor(seed)},
-			embeddedFile{Path: home + "/.ssh/config", UID: uid, GID: uid, Mode: 0o100600, Content: sshClientConfig()},
+			embeddedFile{Path: home + "/.ssh/config", UID: uid, GID: uid, Mode: 0o100600, Content: sshClientConfig(seed)},
 		)
 	}
 	for _, hu := range cowrieHomeUsers(t, seed) {

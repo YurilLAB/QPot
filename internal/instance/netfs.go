@@ -183,7 +183,7 @@ func procNetTCP(id netIdentity, svcs []service, seed string) string {
 	// An established outbound admin session to an internal host (10.0.0.5-style),
 	// matching the known_hosts/history breadcrumbs; and the current inbound ssh.
 	line(id.IP, 22, id.Gateway, 40000+seededIndex("rp1:"+seed, 20000), 0x01, 0)
-	line(id.IP, 51000+seededIndex("lp:"+seed, 4000), [4]int{10, 0, 0, 5}, 22, 0x01, 1000)
+	line(id.IP, 51000+seededIndex("lp:"+seed, 4000), internalPeers(seed)[0].IP, 22, 0x01, 1000)
 	return b.String()
 }
 
