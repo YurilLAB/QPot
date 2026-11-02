@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net"
 	"strings"
 	"time"
 
@@ -203,11 +204,35 @@ func (ts *TimescaleDB) InsertEvents(ctx context.Context, events []*Event) error 
 	return ts.insertBatchFallback(ctx, events)
 }
 
+// pgText makes s storable in a PostgreSQL TEXT/JSONB value: NUL bytes are
+// dropped and invalid UTF-8 is replaced with U+FFFD.
+func pgText(s string) string {
+	return strings.ToValidUTF8(strings.ReplaceAll(s, "\x00", ""), "\uFFFD")
+}
+
+// pgInet returns s for an INET column, or nil (SQL NULL) when s is not an IP.
+func pgInet(s string) any {
+	if net.ParseIP(s) == nil {
+		return nil
+	}
+	return s
+}
+
 // insertBatchFallback falls back to regular INSERT for batch
 func (ts *TimescaleDB) insertBatchFallback(ctx context.Context, events []*Event) error {
 	batch := &pgx.Batch{}
 
+	// Text fields are attacker-controlled. PostgreSQL rejects NUL bytes and
+	// invalid UTF-8 in TEXT/JSONB, and an empty or malformed address in INET;
+	// one such event used to fail and roll back the whole batch.
 	for _, event := range events {
+		var meta map[string]string
+		if event.Metadata != nil {
+			meta = make(map[string]string, len(event.Metadata))
+			for k, v := range event.Metadata {
+				meta[pgText(k)] = pgText(v)
+			}
+		}
 		batch.Queue(`
 			INSERT INTO events (
 				timestamp, honeypot, source_ip, source_port, dest_port,
@@ -216,20 +241,20 @@ func (ts *TimescaleDB) insertBatchFallback(ctx context.Context, events []*Event)
 			) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
 		`,
 			event.Timestamp,
-			event.Honeypot,
-			event.SourceIP,
+			pgText(event.Honeypot),
+			pgInet(event.SourceIP),
 			event.SourcePort,
 			event.DestPort,
-			event.Protocol,
-			event.EventType,
-			event.Username,
-			event.Password,
-			event.Command,
+			pgText(event.Protocol),
+			pgText(event.EventType),
+			pgText(event.Username),
+			pgText(event.Password),
+			pgText(event.Command),
 			event.Payload,
-			event.Metadata,
-			event.Country,
-			event.City,
-			event.ASN,
+			meta,
+			pgText(event.Country),
+			pgText(event.City),
+			pgText(event.ASN),
 		)
 	}
 

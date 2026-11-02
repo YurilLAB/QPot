@@ -204,3 +204,27 @@ func TestPGMigrateUpAndDown(t *testing.T) {
 		}
 	}
 }
+
+// One malformed attacker-supplied event must not roll back the whole batch.
+func TestPGInsertEventsSurvivesBadValues(t *testing.T) {
+	ts := connectPG(t)
+	ctx := context.Background()
+	now := time.Now().UTC()
+	events := []*Event{
+		{Timestamp: now, Honeypot: "cowrie", SourceIP: "203.0.113.5", EventType: "login_failed"},
+		{Timestamp: now, Honeypot: "cowrie", SourceIP: "", EventType: "session"},
+		{Timestamp: now, Honeypot: "cowrie", SourceIP: "203.0.113.6", Username: "root\x00", EventType: "login_failed"},
+		{Timestamp: now, Honeypot: "cowrie", SourceIP: "203.0.113.7", Command: "echo \xff\xfe",
+			Metadata: map[string]string{"k\x00": "v\xff"}, EventType: "command"},
+	}
+	if err := ts.InsertEvents(ctx, events); err != nil {
+		t.Fatalf("InsertEvents: %v", err)
+	}
+	var n int
+	if err := ts.pool.QueryRow(ctx, `SELECT count(*) FROM events`).Scan(&n); err != nil {
+		t.Fatal(err)
+	}
+	if n != len(events) {
+		t.Fatalf("persisted %d of %d events", n, len(events))
+	}
+}
