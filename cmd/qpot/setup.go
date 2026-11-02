@@ -2,8 +2,10 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"os"
@@ -181,16 +183,48 @@ func healthChecks(ctx context.Context, cfg *config.Config, mgr *instance.Manager
 		}
 	}
 	if cfg.WebUI.Enabled {
-		url := fmt.Sprintf("http://%s/", net.JoinHostPort(webHost(cfg.WebUI.BindAddr), fmt.Sprint(cfg.WebUI.Port)))
-		client := &http.Client{Timeout: 5 * time.Second}
-		if resp, err := client.Get(url); err != nil {
-			cs = append(cs, check{"web UI", "fail", "no answer on " + url})
-		} else {
-			resp.Body.Close()
-			cs = append(cs, check{"web UI", "ok", url})
-		}
+		cs = append(cs, webUICheck(ctx, cfg))
 	}
 	return cs
+}
+
+// webUICheck confirms the web UI answering on the configured port is THIS
+// instance's: a bare "something answered" passed while another instance's UI
+// held the port and this one's control plane had failed to bind.
+func webUICheck(ctx context.Context, cfg *config.Config) check {
+	base := fmt.Sprintf("http://%s/", net.JoinHostPort(webHost(cfg.WebUI.BindAddr), fmt.Sprint(cfg.WebUI.Port)))
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, base+"api/status", nil)
+	if err != nil {
+		return check{"web UI", "fail", err.Error()}
+	}
+	// Only ever sent to this host's own address for the instance's web UI.
+	req.Header.Set("X-QPot-ID", cfg.QPotID)
+	resp, err := (&http.Client{Timeout: 5 * time.Second}).Do(req)
+	if err != nil {
+		return check{"web UI", "fail", "no answer on " + base}
+	}
+	defer resp.Body.Close()
+	var st struct {
+		Instance string `json:"instance"`
+	}
+	if resp.StatusCode != http.StatusOK || json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&st) != nil ||
+		st.Instance != cfg.InstanceName {
+		return check{"web UI", "fail", fmt.Sprintf("%s answers, but not as instance %q (port taken by something else?)", base, cfg.InstanceName)}
+	}
+	return check{"web UI", "ok", base}
+}
+
+// freeWebPort returns the configured web UI port if it is free, else the next
+// free one within 100 ports above it.
+func freeWebPort(cfg *config.Config) (int, bool) {
+	for p := cfg.WebUI.Port; p < cfg.WebUI.Port+100 && p <= 65535; p++ {
+		ln, err := net.Listen("tcp", net.JoinHostPort(cfg.WebUI.BindAddr, fmt.Sprint(p)))
+		if err == nil {
+			_ = ln.Close()
+			return p, true
+		}
+	}
+	return 0, false
 }
 
 func webHost(bind string) string {
@@ -303,6 +337,14 @@ nothing is run with sudo.`,
 				for _, hp := range hps {
 					cfg.EnableHoneypot(hp)
 				}
+				// Several instances on one host would all default to the same
+				// web UI port; give a new one the next free port instead.
+				if cfg.WebUI.Enabled {
+					if port, ok := freeWebPort(cfg); ok && port != cfg.WebUI.Port {
+						fmt.Printf("[INFO] Web UI port %d is in use; this instance will use %d\n", cfg.WebUI.Port, port)
+						cfg.WebUI.Port = port
+					}
+				}
 				if err := config.Save(cfg); err != nil {
 					return fmt.Errorf("failed to save config: %w", err)
 				}
@@ -319,8 +361,19 @@ nothing is run with sudo.`,
 			if err != nil {
 				return fmt.Errorf("failed to create instance manager: %w", err)
 			}
-			if !mgr.IsRunning(ctx) && printChecks("Port checks", portChecks(cfg)) {
-				return errors.New("free the ports above (or change base_port in the config) and run 'qpot setup' again")
+			var pcs []check
+			if !mgr.IsRunning(ctx) {
+				pcs = portChecks(cfg)
+			}
+			if cfg.WebUI.Enabled && !service && runningServePID(cfg) == 0 {
+				if err := webPortFree(cfg); err != nil {
+					pcs = append(pcs, check{"web UI port", "fail", err.Error()})
+				} else {
+					pcs = append(pcs, check{"web UI port", "ok", fmt.Sprintf("%d free", cfg.WebUI.Port)})
+				}
+			}
+			if len(pcs) > 0 && printChecks("Port checks", pcs) {
+				return errors.New("free the ports above (or change base_port / web_ui.port in the config) and run 'qpot setup' again")
 			}
 			if noStart {
 				fmt.Printf("\nReady. Start it with: qpot up -d -i %s\n", instanceName)

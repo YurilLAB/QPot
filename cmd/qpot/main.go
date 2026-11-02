@@ -173,8 +173,11 @@ func newUpCommand() *cobra.Command {
 			}
 
 			fmt.Println("\nPress Ctrl+C to stop")
-			runControlPlane(ctx, cfg, mgr)
-			return mgr.Stop(context.Background())
+			cpErr := runControlPlane(ctx, cfg, mgr)
+			if err := mgr.Stop(context.Background()); err != nil {
+				return err
+			}
+			return cpErr
 		},
 	}
 

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net"
 	"net/http"
 	"os"
 	"os/exec"
@@ -50,19 +51,29 @@ func loadInstance(name string) (*config.Config, *instance.QPotID, error) {
 // These previously only started AFTER Manager.Start returned: in foreground
 // mode that was at Ctrl+C, and with -d the process exited right away. Either
 // way the web UI never served and no event was ever classified.
-func runControlPlane(ctx context.Context, cfg *config.Config, mgr *instance.Manager) {
+func runControlPlane(ctx context.Context, cfg *config.Config, mgr *instance.Manager) error {
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	fatal := make(chan error, 1)
+
 	// server.New may wait for the database to finish starting; do that in the
-	// background so the recycler and cluster are not held up by it.
+	// background so the recycler and cluster are not held up by it. The port is
+	// claimed-checked up front: a control plane whose web UI cannot bind used
+	// to keep running headless, while a health probe of the port reached
+	// whatever else held it (typically another instance's web UI).
 	if cfg.WebUI.Enabled {
+		if err := webPortFree(cfg); err != nil {
+			return err
+		}
 		go func() {
 			webSrv, err := server.New(cfg)
 			if err != nil {
-				slog.Warn("Failed to create web server", "error", err)
+				fatal <- fmt.Errorf("web server: %w", err)
 				return
 			}
 			slog.Info("Web server started", "addr", fmt.Sprintf("%s:%d", cfg.WebUI.BindAddr, cfg.WebUI.Port))
 			if err := webSrv.Start(ctx); err != nil && !errors.Is(err, http.ErrServerClosed) {
-				slog.Error("Web server error", "error", err)
+				fatal <- fmt.Errorf("web server: %w", err)
 			}
 		}()
 	}
@@ -102,7 +113,24 @@ func runControlPlane(ctx context.Context, cfg *config.Config, mgr *instance.Mana
 		slog.Info("HiFi backend recycler started")
 	}
 
-	<-ctx.Done()
+	select {
+	case <-ctx.Done():
+		return nil
+	case err := <-fatal:
+		slog.Error("Control plane stopping", "error", err)
+		return err
+	}
+}
+
+// webPortFree reports, as an actionable error, that the web UI address is
+// already taken.
+func webPortFree(cfg *config.Config) error {
+	addr := net.JoinHostPort(cfg.WebUI.BindAddr, fmt.Sprint(cfg.WebUI.Port))
+	ln, err := net.Listen("tcp", addr)
+	if err != nil {
+		return fmt.Errorf("web UI address %s is already in use (another QPot instance?): set web_ui.port in %s", addr, cfg.ConfigPath)
+	}
+	return ln.Close()
 }
 
 func newServeCommand() *cobra.Command {
@@ -128,8 +156,7 @@ func newServeCommand() *cobra.Command {
 			}
 			defer removeServePID(pidPath, os.Getpid())
 			slog.Info("QPot control plane running", "instance", cfg.InstanceName, "pid", os.Getpid())
-			runControlPlane(cmd.Context(), cfg, mgr)
-			return nil
+			return runControlPlane(cmd.Context(), cfg, mgr)
 		},
 	}
 	cmd.Flags().StringVarP(&instanceName, "instance", "i", "default", "instance name")
