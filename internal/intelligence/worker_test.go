@@ -338,3 +338,47 @@ func TestWorkerZeroIntervalDoesNotPanic(t *testing.T) {
 		t.Error("Run did not return after cancel")
 	}
 }
+
+// tagTrackingDB behaves like a real backend: once an event is tagged it is no
+// longer returned by GetUnclassifiedEvents.
+type tagTrackingDB struct {
+	fakeDB
+	tagged map[*database.Event]bool
+}
+
+func (d *tagTrackingDB) TagEvent(ctx context.Context, e *database.Event) error {
+	d.tagged[e] = true
+	return nil
+}
+
+func (d *tagTrackingDB) GetUnclassifiedEvents(ctx context.Context, limit int) ([]*database.Event, error) {
+	var out []*database.Event
+	for _, e := range d.events {
+		if !d.tagged[e] && len(out) < limit {
+			out = append(out, e)
+		}
+	}
+	return out, nil
+}
+
+// An event that matches no rule must still be marked processed; otherwise it is
+// re-fetched forever and a full batch of such events starves newer ones.
+func TestWorkerTagsUnmatchedEvents(t *testing.T) {
+	unmatched := &database.Event{Honeypot: "cowrie", EventType: "session_closed",
+		SourceIP: "203.0.113.9", Timestamp: time.Now().UTC()}
+	db := &tagTrackingDB{fakeDB: fakeDB{events: []*database.Event{unmatched}},
+		tagged: map[*database.Event]bool{}}
+	loader := NewATTCKLoader(t.TempDir())
+	loader.loadEmbedded()
+	w := NewWorker(NewClassifier(loader, nil), db, 10*time.Second, 100)
+
+	if n := w.runOnce(context.Background()); n != 1 {
+		t.Fatalf("first run processed %d events, want 1", n)
+	}
+	if unmatched.TechniqueID != "" {
+		t.Fatalf("test event unexpectedly matched rule %s", unmatched.TechniqueID)
+	}
+	if n := w.runOnce(context.Background()); n != 0 {
+		t.Fatalf("second run re-processed %d events, want 0", n)
+	}
+}

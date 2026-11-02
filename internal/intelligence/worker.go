@@ -125,10 +125,13 @@ func (w *Worker) runOnce(ctx context.Context) int {
 		}
 	}
 
+	// Mark EVERY processed event, not just rule matches. An unmatched event
+	// left at classified=0 would be re-fetched every cycle (re-extracting and
+	// re-forwarding its IOCs, re-tripping canaries) and, because the fetch is
+	// oldest-first with a LIMIT, a full batch of unmatched events would block
+	// newer events from ever being classified.
 	for _, event := range events {
-		if !event.Classified {
-			continue
-		}
+		event.Classified = true
 		if err := w.db.TagEvent(ctx, event); err != nil {
 			slog.Warn("Intelligence worker: failed to tag event", "error", err)
 		}
