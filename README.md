@@ -222,17 +222,41 @@ Arch, Debian, EndeavourOS, Fedora, Manjaro, openSUSE Tumbleweed, RHEL, Rocky,
 Raspbian, and Ubuntu, then prompts for the install type (Hive / Sensor / LLM /
 Mini / Mobile / Tarpit).
 
-### Create and Start Instance
+### Set Up and Start (one command)
 
 ```bash
-# Create a new instance (generates unique QPot ID)
-./qpot instance create production
-# Output: [OK] Created QPot instance 'production'
-#         QPot ID: qp_e2imzc43lisklwokb7vlspi7
-
-# Start the instance
-./qpot up --instance production
+qpot setup                          # minimal profile: cowrie + endlessh
+qpot setup --profile standard       # broader sensor (+ dionaea, heralding, conpot, adbhoney)
+qpot setup --profile hifi --service # high-interaction SSH, installed as a systemd service
 ```
+
+`qpot setup` checks the host (Docker, Compose, socket permission, memory, disk),
+creates the instance with a fresh QPot ID and random database password, checks
+the host ports it needs are free, starts the containers and the control plane,
+and then **waits until the database schema, collector, honeypots and web UI are
+actually healthy** before printing your QPot ID. Defaults stay locked down: the
+web UI and database listen on 127.0.0.1 only, and nothing runs with sudo.
+`--service` installs a hardened systemd unit (`qpot-<instance>.service`) so the
+instance comes back after a reboot.
+
+Check an instance end to end at any time (exits non-zero on a problem):
+
+```bash
+qpot doctor
+```
+
+Or step by step:
+
+```bash
+qpot instance create production     # generates the instance's QPot ID
+qpot up -d -i production            # containers + background control plane
+qpot down -i production             # stops both
+```
+
+`qpot up` runs the containers *and* the control plane (web UI/API,
+intelligence worker, alerting, HiFi backend recycler, cluster membership). In
+the foreground it runs until Ctrl+C; with `-d` the control plane keeps running
+in the background as `qpot serve` (log: `<instance>/logs/qpot-serve.log`).
 
 ### Access Dashboard
 
@@ -466,7 +490,7 @@ Enable it with a single command — QPot renders the whole two-service stack
 backends together with the broker:
 
 ```sh
-qpot honeypot enable ssh-proxy   # then: qpot up  (build the docker/ssh-* images first)
+qpot honeypot enable ssh-proxy   # then: qpot up -d   (or: qpot setup --profile hifi)
 ```
 
 See **[doc/ssh-hifi-proxy.md](doc/ssh-hifi-proxy.md)** for the architecture, the
@@ -766,8 +790,12 @@ qpot instance list               # List all instances
 qpot instance remove <name>      # Remove instance
 
 # Lifecycle
-qpot up [-i <name>] [-d]         # Start instance (--detach to background it)
-qpot down [-i <name>]            # Stop instance
+qpot setup [-i <name>] [--profile minimal|standard|hifi] [--service]
+                                 # Check host, create, start and verify an instance
+qpot doctor [-i <name>]          # End-to-end health check (non-zero on failure)
+qpot up [-i <name>] [-d]         # Start containers + control plane (-d: background)
+qpot serve [-i <name>]           # Control plane only (what `up -d` runs; for systemd)
+qpot down [-i <name>]            # Stop control plane and containers
 qpot status [-i <name>]          # Show status
 
 # Honeypot management
@@ -885,6 +913,22 @@ request body) and its claimed hostname/instance, then approves or denies:
 
 Set `require_approval: false` in the cluster config to restore immediate
 admission on correct password.
+
+### How the Cluster Runs
+
+Cluster membership (gossip, sync and the cluster API) runs inside the QPot
+control plane - `qpot up`, or the background `qpot serve` that `qpot up -d`
+starts - so `cluster init`/`join` only record the membership; start or restart
+the control plane afterwards. The cluster password is kept in
+`~/.qpot/cluster/cluster.secret` (mode 0600, like the QPot ID), or supplied via
+the `QPOT_CLUSTER_PASSWORD` environment variable.
+
+Traffic between nodes is TLS-encrypted by default with no certificates to
+manage: every member derives the same cluster CA from the cluster ID and
+password and only trusts peers whose certificate chains to it, so a joining
+node verifies the seed from its first connection and nobody without the
+password can impersonate a node. Set `tls_cert_path`/`tls_key_path`
+(and `ca_cert_path`) to use your own certificates instead.
 
 ### Cluster Operations
 
