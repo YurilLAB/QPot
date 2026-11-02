@@ -18,6 +18,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"runtime"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -124,6 +125,7 @@ Each QPot instance has a unique ID (qp_*) for tracking and authentication.`,
 	rootCmd.AddCommand(newSetupCommand())
 	rootCmd.AddCommand(newDoctorCommand())
 	rootCmd.AddCommand(newOverviewCommand())
+	rootCmd.AddCommand(newGeoIPCommand())
 	rootCmd.AddCommand(newStatusCommand())
 	rootCmd.AddCommand(newInstanceCommand())
 	rootCmd.AddCommand(newHoneypotCommand())
@@ -496,6 +498,13 @@ func newHoneypotCommand() *cobra.Command {
 			if err := (&instance.ComposeGenerator{Config: cfg}).ValidateHoneypot(hpName); err != nil {
 				return err
 			}
+			// LLM-backed honeypots exit at start without a provider; enabling
+			// one unconfigured only produced a crash-looping container.
+			hpCfg, _ := cfg.GetHoneypotConfig(hpName)
+			if missing := instance.MissingLLMConfig(hpName, hpCfg.CustomConfig); len(missing) > 0 {
+				return fmt.Errorf("%s needs an LLM provider; set %s first, e.g.:\n  qpot honeypot set %s -i %s %s",
+					hpName, strings.Join(missing, ", "), hpName, instanceName, llmExample(hpName))
+			}
 
 			cfg.EnableHoneypot(hpName)
 			if err := config.Save(cfg); err != nil {
@@ -558,7 +567,87 @@ func newHoneypotCommand() *cobra.Command {
 	}
 	disableCmd.Flags().StringVarP(&instanceName, "instance", "i", "default", "instance name")
 
-	cmd.AddCommand(listCmd, enableCmd, disableCmd)
+	setCmd := &cobra.Command{
+		Use:   "set [honeypot] key=value...",
+		Short: "Set honeypot settings (e.g. the LLM provider of beelzebub/galah)",
+		Long: `Set per-honeypot settings stored in the instance config (custom_config).
+
+The LLM-backed honeypots need a provider before they can be enabled:
+
+  qpot honeypot set galah llm_provider=ollama llm_server_url=http://10.0.0.5:11434 llm_model=llama3.1
+  qpot honeypot set beelzebub llm_provider=ollama llm_model=llama3.1 llm_host=http://10.0.0.5:11434/api/chat
+
+An empty value (key=) removes a setting. If the honeypot is enabled and the
+instance is running, it is recreated with the new settings.`,
+		Args: cobra.MinimumNArgs(2),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			hpName := args[0]
+			cfg, err := config.Load(instanceName)
+			if err != nil {
+				return fmt.Errorf("failed to load config: %w", err)
+			}
+			hp, ok := cfg.GetHoneypotConfig(hpName)
+			if !ok {
+				return fmt.Errorf("unknown honeypot %q (see: qpot honeypot list)", hpName)
+			}
+			allowed := instance.LLMConfigKeys(hpName)
+			if hpName == "ssh-proxy" {
+				allowed = append(allowed, "backends")
+			}
+			if len(allowed) == 0 {
+				return fmt.Errorf("%s has no settings to set", hpName)
+			}
+			custom := map[string]string{}
+			for k, v := range hp.CustomConfig {
+				custom[k] = v
+			}
+			for _, kv := range args[1:] {
+				k, v, found := strings.Cut(kv, "=")
+				if !found || !slices.Contains(allowed, k) {
+					return fmt.Errorf("invalid setting %q for %s (allowed: %s)", kv, hpName, strings.Join(allowed, ", "))
+				}
+				if strings.ContainsAny(v, "\r\n") {
+					return fmt.Errorf("%s: value must be a single line", k)
+				}
+				if err := instance.CheckLLMSetting(hpName, k, v); err != nil {
+					return err
+				}
+				if v == "" {
+					delete(custom, k)
+				} else {
+					custom[k] = v
+				}
+			}
+			hp.CustomConfig = custom
+			cfg.Honeypots[hpName] = hp
+			if err := config.Save(cfg); err != nil {
+				return fmt.Errorf("failed to save config: %w", err)
+			}
+			fmt.Printf("[OK] Updated %s settings for instance '%s'\n", hpName, instanceName)
+			if !hp.Enabled {
+				return nil
+			}
+			if missing := instance.MissingLLMConfig(hpName, custom); len(missing) > 0 {
+				fmt.Printf("     %s still needs: %s\n", hpName, strings.Join(missing, ", "))
+				return nil
+			}
+			mgr, err := instance.NewManager(cfg)
+			if err != nil {
+				return err
+			}
+			if !mgr.IsRunning(cmd.Context()) {
+				return nil
+			}
+			if err := mgr.StartHoneypot(cmd.Context(), hpName); err != nil {
+				return fmt.Errorf("settings saved, but %s did not restart: %w", hpName, err)
+			}
+			fmt.Printf("[OK] %s recreated with the new settings\n", hpName)
+			return nil
+		},
+	}
+	setCmd.Flags().StringVarP(&instanceName, "instance", "i", "default", "instance name")
+
+	cmd.AddCommand(listCmd, enableCmd, disableCmd, setCmd)
 
 	return cmd
 }
@@ -2253,4 +2342,15 @@ func truncField(v interface{}, n int) string {
 		return s[:n]
 	}
 	return s
+}
+
+// llmExample is a ready-to-edit `qpot honeypot set` example for an LLM honeypot.
+func llmExample(name string) string {
+	switch name {
+	case "beelzebub":
+		return "llm_provider=ollama llm_model=llama3.1 llm_host=http://OLLAMA_HOST:11434/api/chat"
+	case "galah":
+		return "llm_provider=ollama llm_server_url=http://OLLAMA_HOST:11434 llm_model=llama3.1"
+	}
+	return "key=value"
 }

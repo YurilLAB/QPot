@@ -13,11 +13,13 @@ import (
 	"path/filepath"
 	"runtime"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
 	"github.com/qpot/qpot/internal/config"
 	"github.com/qpot/qpot/internal/database"
+	"github.com/qpot/qpot/internal/geo"
 	"github.com/qpot/qpot/internal/instance"
 	"github.com/spf13/cobra"
 )
@@ -128,6 +130,10 @@ func portChecks(cfg *config.Config) []check {
 // control plane and web UI.
 func healthChecks(ctx context.Context, cfg *config.Config, mgr *instance.Manager, wantControlPlane bool) []check {
 	var cs []check
+	// First: a missing database file is why a collector crash-loops.
+	if c := geoIPCheck(cfg); c.Name != "" {
+		cs = append(cs, c)
+	}
 	states, err := mgr.ServiceStates(ctx)
 	if err != nil {
 		return append(cs, check{"containers", "fail", err.Error()})
@@ -155,6 +161,18 @@ func healthChecks(ctx context.Context, cfg *config.Config, mgr *instance.Manager
 	svcCheck("collector", "collector")
 	for _, hp := range cfg.GetEnabledHoneypots() {
 		svcCheck("honeypot "+hp, hp)
+		// Images without a shell carry no in-container healthcheck, so
+		// "running" says nothing about whether they serve: probe their
+		// published TCP ports from the host instead.
+		if st, ok := states[hp]; ok && st.State == "running" {
+			if ports := instance.HostProbePorts(cfg, hp); len(ports) > 0 {
+				if !anyPortAccepts(ports) {
+					cs[len(cs)-1] = check{"honeypot " + hp, "fail", fmt.Sprintf("running, but not accepting connections on port %v", ports)}
+				} else {
+					cs[len(cs)-1].Detail = "running (accepting connections)"
+				}
+			}
+		}
 	}
 
 	// The schema must exist or the collector drops every event.
@@ -321,6 +339,8 @@ func newSetupCommand() *cobra.Command {
 		profile      string
 		service      bool
 		noStart      bool
+		noGeoIP      bool
+		country      string
 		timeout      time.Duration
 	)
 	cmd := &cobra.Command{
@@ -330,7 +350,9 @@ func newSetupCommand() *cobra.Command {
 
   1. checks Docker, Compose, permissions, memory and disk
   2. creates the instance (if new) with a honeypot profile
-  3. checks the host ports it needs are free
+  3. checks the host ports it needs are free, and downloads the free DB-IP
+     Lite country database so events get countries and the attack map works
+     (--no-geoip skips it)
   4. starts the containers and the control plane (web UI, intelligence)
   5. waits until the database, collector, honeypots and web UI are healthy
   6. optionally installs a systemd service so it survives reboots (--service)
@@ -340,7 +362,8 @@ the database is only reachable on 127.0.0.1 with a random password, and
 nothing is run with sudo.`,
 		Example: `  qpot setup
   qpot setup --profile standard
-  qpot setup -i sensor1 --profile hifi --service`,
+  qpot setup -i sensor1 --profile hifi --service
+  qpot setup --country DE      # where the attack map draws this sensor`,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			ctx := cmd.Context()
 			hps, ok := setupProfiles[profile]
@@ -373,9 +396,32 @@ nothing is run with sudo.`,
 				fmt.Printf("\n[OK] Using existing instance %q (honeypots: %s)\n", instanceName, strings.Join(cfg.GetEnabledHoneypots(), ", "))
 			}
 
+			if err := setMapCountry(cfg, country); err != nil {
+				return err
+			}
+			geoAdded := false
+			if !noGeoIP && cfg.Collector.GeoIPDBPath == "" {
+				// Non-fatal: the instance works without it, only without
+				// countries (and so without attack map lines).
+				if err := provisionGeoIP(ctx, cfg); err != nil {
+					fmt.Printf("[WARN] GeoIP database not installed (%v); retry with: qpot geoip update -i %s\n", err, instanceName)
+				} else {
+					geoAdded = true
+					fmt.Printf("[OK] GeoIP database installed (%s)\n", geo.DBIPAttribution)
+				}
+			}
+			if err := config.Save(cfg); err != nil {
+				return fmt.Errorf("failed to save config: %w", err)
+			}
+
 			mgr, err := instance.NewManager(cfg)
 			if err != nil {
 				return fmt.Errorf("failed to create instance manager: %w", err)
+			}
+			if geoAdded && mgr.IsRunning(ctx) {
+				if err := mgr.ReloadCollector(ctx); err != nil {
+					fmt.Printf("[WARN] the collector did not pick up the GeoIP database: %v\n", err)
+				}
 			}
 			var pcs []check
 			if !mgr.IsRunning(ctx) {
@@ -430,6 +476,8 @@ nothing is run with sudo.`,
 	cmd.Flags().StringVar(&profile, "profile", "minimal", "honeypot set for a new instance: minimal, standard or hifi")
 	cmd.Flags().BoolVar(&service, "service", false, "install and start a systemd service (Linux) so QPot survives reboots")
 	cmd.Flags().BoolVar(&noStart, "no-start", false, "only check the host and create the instance")
+	cmd.Flags().BoolVar(&noGeoIP, "no-geoip", false, "do not download the DB-IP Lite country database")
+	cmd.Flags().StringVar(&country, "country", "", "two-letter country code of this sensor, for the attack map (default: from the host's time zone)")
 	cmd.Flags().DurationVar(&timeout, "timeout", 4*time.Minute, "how long to wait for the instance to become healthy")
 	return cmd
 }
@@ -561,4 +609,34 @@ PrivateTmp=yes
 	}
 	fmt.Fprintf(&b, "\n[Install]\nWantedBy=%s\n", target)
 	return b.String()
+}
+
+// anyPortAccepts reports whether a TCP connection to any of the host ports on
+// loopback succeeds.
+func anyPortAccepts(ports []int) bool {
+	for _, p := range ports {
+		c, err := net.DialTimeout("tcp", net.JoinHostPort("127.0.0.1", strconv.Itoa(p)), 2*time.Second)
+		if err == nil {
+			c.Close()
+			return true
+		}
+	}
+	return false
+}
+
+// geoIPCheck reports a configured GeoIP database the collector cannot open
+// (it then refuses to start). Paths under /data are the instance data dir.
+func geoIPCheck(cfg *config.Config) check {
+	p := cfg.Collector.GeoIPDBPath
+	if p == "" {
+		return check{}
+	}
+	host := p
+	if rest, ok := strings.CutPrefix(p, "/data/"); ok {
+		host = filepath.Join(cfg.DataPath, filepath.FromSlash(rest))
+	}
+	if _, err := os.Stat(host); err != nil {
+		return check{"geoip database", "fail", fmt.Sprintf("%s missing (the collector cannot start); run: qpot geoip update -i %s", host, cfg.InstanceName)}
+	}
+	return check{"geoip database", "ok", filepath.Base(host)}
 }

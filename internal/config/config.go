@@ -87,6 +87,7 @@ type Config struct {
 	Intelligence IntelligenceConfig        `yaml:"intelligence"`
 	Response     ResponseConfig            `yaml:"response"`
 	Collector    CollectorConfig           `yaml:"collector"`
+	AttackMap    AttackMapConfig           `yaml:"attack_map"`
 	Canary       CanaryConfig              `yaml:"canary"`
 
 	// hpMu guards concurrent access to the Honeypots map. The web server mutates
@@ -119,6 +120,16 @@ func (c *Config) SnapshotHoneypots() map[string]HoneypotConfig {
 		out[k] = v
 	}
 	return out
+}
+
+// AttackMapConfig places this sensor on the attack map: attacks are drawn
+// from the attacker's country to here. Country is an ISO-3166-1 alpha-2 code
+// (set by `qpot setup` from the host's time zone); Latitude/Longitude, when
+// both non-zero, override the country's centroid.
+type AttackMapConfig struct {
+	Country   string  `yaml:"country,omitempty"`
+	Latitude  float64 `yaml:"latitude,omitempty"`
+	Longitude float64 `yaml:"longitude,omitempty"`
 }
 
 // CollectorConfig configures the Vector log collector.
