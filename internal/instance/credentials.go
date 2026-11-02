@@ -274,7 +274,9 @@ var credentialTemplates = []credentialTemplate{
 		Users: []credUser{
 			{"root", []string{"hassio"}},
 			{"homeassistant", []string{"homeassistant"}},
-			{"pi", []string{"homeassistant", "raspberry"}},
+			// An x86 HA box (NUC/VM) has no "pi" user, and pi:raspberry is a
+			// well-known honeypot bait pair; use the usual HA admin login.
+			{"admin", []string{"homeassistant", "admin123"}},
 			{"hass", []string{"hass"}},
 		},
 	},
