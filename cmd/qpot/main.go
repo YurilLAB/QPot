@@ -29,8 +29,6 @@ import (
 	"github.com/qpot/qpot/internal/database"
 	"github.com/qpot/qpot/internal/instance"
 	"github.com/qpot/qpot/internal/intelligence"
-	"github.com/qpot/qpot/internal/server"
-	"github.com/qpot/qpot/internal/ypanel"
 	"github.com/qpot/qpot/internal/yuril"
 	"github.com/spf13/cobra"
 	"golang.org/x/term"
@@ -90,6 +88,7 @@ Each QPot instance has a unique ID (qp_*) for tracking and authentication.`,
 	// Add commands
 	rootCmd.AddCommand(newUpCommand())
 	rootCmd.AddCommand(newDownCommand())
+	rootCmd.AddCommand(newServeCommand())
 	rootCmd.AddCommand(newStatusCommand())
 	rootCmd.AddCommand(newInstanceCommand())
 	rootCmd.AddCommand(newHoneypotCommand())
@@ -119,25 +118,10 @@ func newUpCommand() *cobra.Command {
 		RunE: func(cmd *cobra.Command, args []string) error {
 			ctx := cmd.Context()
 
-			cfg, err := config.Load(instanceName)
+			cfg, qpotID, err := loadInstance(instanceName)
 			if err != nil {
-				return fmt.Errorf("failed to load config: %w", err)
+				return err
 			}
-
-			// Load or generate QPot ID
-			qpotID, err := instance.LoadID(instanceName)
-			if err != nil {
-				// Generate new ID
-				qpotID, err = instance.GenerateID(instanceName)
-				if err != nil {
-					return fmt.Errorf("failed to generate QPot ID: %w", err)
-				}
-				qpotID.DataPath = cfg.DataPath
-				if err := qpotID.Save(); err != nil {
-					return fmt.Errorf("failed to save QPot ID: %w", err)
-				}
-			}
-			cfg.QPotID = qpotID.ID
 
 			// Pre-load ATT&CK data in background so it's ready when events arrive.
 			if cfg.Intelligence.Enabled && cfg.Intelligence.FetchATTCK {
@@ -155,7 +139,9 @@ func newUpCommand() *cobra.Command {
 			// Show QPot ID popup before starting
 			showQPotIDPopup(qpotID.ID, cfg.WebUI.Port)
 
-			if err := mgr.Start(ctx, detach); err != nil {
+			// The containers always run detached; this process (or, with -d, a
+			// background `qpot serve`) then runs the control plane.
+			if err := mgr.Start(ctx, true); err != nil {
 				return fmt.Errorf("failed to start instance: %w", err)
 			}
 
@@ -164,44 +150,22 @@ func newUpCommand() *cobra.Command {
 			fmt.Printf("[INFO] Web UI: http://%s:%d\n", cfg.WebUI.BindAddr, cfg.WebUI.Port)
 			fmt.Println("\nUse this QPot ID to track your honeypot activity in the Web UI")
 
-			// Start the web server if the web UI is enabled.
-			if cfg.WebUI.Enabled {
-				webSrv, err := server.New(cfg)
+			if detach {
+				pid, logPath, err := startBackgroundServe(cfg)
 				if err != nil {
-					slog.Warn("Failed to create web server", "error", err)
-				} else {
-					go func() {
-						// http.ErrServerClosed is the expected sentinel on
-						// graceful shutdown; anything else is a real error.
-						if err := webSrv.Start(ctx); err != nil && !errors.Is(err, http.ErrServerClosed) {
-							slog.Error("Web server error", "error", err)
-						}
-					}()
-					slog.Info("Web server started", "addr", fmt.Sprintf("%s:%d", cfg.WebUI.BindAddr, cfg.WebUI.Port))
+					return fmt.Errorf("containers are up, but the control plane (web UI, intelligence) failed to start: %w", err)
 				}
+				fmt.Printf("[INFO] Control plane running in the background (pid %d)", pid)
+				if logPath != "" {
+					fmt.Printf(", log: %s", logPath)
+				}
+				fmt.Printf("\n[INFO] Stop everything with: qpot down -i %s\n", cfg.InstanceName)
+				return nil
 			}
 
-			// Start the ypanel phone-home agent if enabled. It reports this
-			// instance to the operator console and applies allow-listed honeypot
-			// enable/disable jobs. A construction failure is logged but never
-			// blocks `qpot up` — QPot must stay up even if the operator plane is
-			// misconfigured or unreachable.
-			if ag, err := ypanel.New(cfg, mgr, version); err != nil {
-				slog.Warn("ypanel agent disabled due to error", "error", err)
-			} else if ag != nil {
-				go func() {
-					if err := ag.Run(ctx); err != nil {
-						slog.Error("ypanel agent error", "error", err)
-					}
-				}()
-			}
-
-			if !detach {
-				fmt.Println("\nPress Ctrl+C to stop")
-				<-ctx.Done()
-				return mgr.Stop(context.Background())
-			}
-			return nil
+			fmt.Println("\nPress Ctrl+C to stop")
+			runControlPlane(ctx, cfg, mgr)
+			return mgr.Stop(context.Background())
 		},
 	}
 
@@ -230,6 +194,10 @@ func newDownCommand() *cobra.Command {
 			if err != nil {
 				return fmt.Errorf("failed to create instance manager: %w", err)
 			}
+
+			// Stop the background control plane first, so the HiFi recycler
+			// does not try to recreate backends while they are torn down.
+			stopBackgroundServe(cfg)
 
 			if err := mgr.Stop(ctx); err != nil {
 				return fmt.Errorf("failed to stop instance: %w", err)
