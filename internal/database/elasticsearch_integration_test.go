@@ -94,3 +94,52 @@ func TestESStatsCommandsAndTotals(t *testing.T) {
 		t.Errorf("GetStats TotalEvents = %d, want %d", st.TotalEvents, n)
 	}
 }
+
+// Attacker-shaped events (raw binary payload, empty or bogus source IP) must
+// still be stored.
+func TestESInsertAttackerShapedEvents(t *testing.T) {
+	es := connectES(t)
+	ctx := context.Background()
+	now := time.Now().UTC()
+	events := []*Event{
+		{Timestamp: now, Honeypot: "dionaea", SourceIP: "203.0.113.9", EventType: "connect",
+			Payload: []byte("\x00\x01SMB\xff\xferaw bytes")},
+		{Timestamp: now, Honeypot: "cowrie", SourceIP: "", EventType: "session"},
+		{Timestamp: now, Honeypot: "cowrie", SourceIP: "not-an-ip", EventType: "session"},
+	}
+	if err := es.InsertEvents(ctx, events); err != nil {
+		t.Fatalf("InsertEvents: %v", err)
+	}
+	esRefresh(t, es)
+	got, err := es.GetEvents(ctx, EventFilter{Limit: 10})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != len(events) {
+		t.Fatalf("stored %d of %d events", len(got), len(events))
+	}
+}
+
+// IOC values are attacker-controlled; IDs built from them (URLs with '/', '?',
+// '#', long commands) must still round-trip.
+func TestESInsertIOCAwkwardIDs(t *testing.T) {
+	es := connectES(t)
+	ctx := context.Background()
+	now := time.Now().UTC()
+	vals := []string{"http://198.51.100.5/a/b.sh?x=1#frag", strings.Repeat("A", 40000)}
+	for _, v := range vals {
+		ioc := &IOC{ID: "url:" + v + ":cowrie", Type: "url", Value: v, Honeypot: "cowrie",
+			FirstSeen: now, LastSeen: now, Count: 1}
+		if err := es.InsertIOC(ctx, ioc); err != nil {
+			t.Errorf("InsertIOC(%.40q): %v", v, err)
+		}
+	}
+	esRefresh(t, es)
+	got, err := es.GetIOCs(ctx, IOCFilter{Limit: 10})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != len(vals) {
+		t.Fatalf("stored %d of %d IOCs", len(got), len(vals))
+	}
+}

@@ -4,10 +4,14 @@ package database
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
+	"net/url"
 	"time"
 
 	"github.com/qpot/qpot/internal/config"
@@ -183,9 +187,11 @@ func (es *Elasticsearch) InitializeSchema(ctx context.Context) error {
 		},
 		"mappings": map[string]interface{}{
 			"properties": map[string]interface{}{
-				"id":           map[string]string{"type": "keyword"},
+				// ignore_above: a keyword term over 32 KB fails the whole
+				// document; longer ids/values are stored but not indexed.
+				"id":           map[string]interface{}{"type": "keyword", "ignore_above": 8191},
 				"type":         map[string]string{"type": "keyword"},
-				"value":        map[string]string{"type": "keyword"},
+				"value":        map[string]interface{}{"type": "keyword", "ignore_above": 8191},
 				"honeypot":     map[string]string{"type": "keyword"},
 				"source_ip":    map[string]string{"type": "ip"},
 				"technique_id": map[string]string{"type": "keyword"},
@@ -305,7 +311,7 @@ func (es *Elasticsearch) SetSchemaVersion(ctx context.Context, version int) erro
 type esEvent struct {
 	Timestamp      string            `json:"timestamp"`
 	Honeypot       string            `json:"honeypot"`
-	SourceIP       string            `json:"source_ip"`
+	SourceIP       string            `json:"source_ip,omitempty"`
 	SourcePort     int               `json:"source_port"`
 	DestPort       int               `json:"dest_port"`
 	Protocol       string            `json:"protocol"`
@@ -328,10 +334,16 @@ type esEvent struct {
 }
 
 func eventToES(event *Event) esEvent {
+	// source_ip is mapped as "ip": an empty or malformed value would make ES
+	// reject the whole document, so omit it instead.
+	sourceIP := event.SourceIP
+	if net.ParseIP(sourceIP) == nil {
+		sourceIP = ""
+	}
 	return esEvent{
 		Timestamp:      event.Timestamp.UTC().Format(time.RFC3339Nano),
 		Honeypot:       event.Honeypot,
-		SourceIP:       event.SourceIP,
+		SourceIP:       sourceIP,
 		SourcePort:     event.SourcePort,
 		DestPort:       event.DestPort,
 		Protocol:       event.Protocol,
@@ -1097,24 +1109,43 @@ ctx._source.classified = true;`,
 	return nil
 }
 
-// InsertIOC inserts or updates an IOC document.
-func (es *Elasticsearch) InsertIOC(ctx context.Context, ioc *IOC) error {
+// esDocID maps an ID (built from attacker-controlled values) to a valid ES
+// document _id. ES caps _id at 512 bytes, so longer IDs are replaced by their
+// SHA-256; the original ID is still stored in the document's "id" field.
+// Callers must URL-escape the result when it goes into a request path.
+func esDocID(id string) string {
+	if len(id) <= 512 {
+		return id
+	}
+	sum := sha256.Sum256([]byte(id))
+	return "sha256-" + hex.EncodeToString(sum[:])
+}
+
+// iocToESDoc builds the stored document for an IOC. source_ip is mapped as
+// "ip", so it is omitted when empty or invalid (ES would reject the document).
+func iocToESDoc(ioc *IOC) map[string]interface{} {
 	doc := map[string]interface{}{
 		"id":           ioc.ID,
 		"type":         ioc.Type,
 		"value":        ioc.Value,
 		"honeypot":     ioc.Honeypot,
-		"source_ip":    ioc.SourceIP,
 		"technique_id": ioc.TechniqueID,
 		"first_seen":   ioc.FirstSeen.UTC().Format(time.RFC3339Nano),
 		"last_seen":    ioc.LastSeen.UTC().Format(time.RFC3339Nano),
 		"count":        ioc.Count,
 		"metadata":     ioc.Metadata,
 	}
+	if net.ParseIP(ioc.SourceIP) != nil {
+		doc["source_ip"] = ioc.SourceIP
+	}
+	return doc
+}
 
-	body, _ := json.Marshal(doc)
+// InsertIOC inserts or updates an IOC document.
+func (es *Elasticsearch) InsertIOC(ctx context.Context, ioc *IOC) error {
+	body, _ := json.Marshal(iocToESDoc(ioc))
 	// Use PUT with the IOC ID for upsert behavior.
-	_, status, err := es.esRequest(ctx, http.MethodPut, "/qpot-iocs/_doc/"+ioc.ID, body)
+	_, status, err := es.esRequest(ctx, http.MethodPut, "/qpot-iocs/_doc/"+url.PathEscape(esDocID(ioc.ID)), body)
 	if err != nil {
 		return fmt.Errorf("insert ioc: %w", err)
 	}
@@ -1134,25 +1165,13 @@ func (es *Elasticsearch) InsertIOCs(ctx context.Context, iocs []*IOC) error {
 	var buf bytes.Buffer
 	for _, ioc := range iocs {
 		action := map[string]interface{}{
-			"index": map[string]string{"_index": "qpot-iocs", "_id": ioc.ID},
+			"index": map[string]string{"_index": "qpot-iocs", "_id": esDocID(ioc.ID)},
 		}
 		actionLine, _ := json.Marshal(action)
 		buf.Write(actionLine)
 		buf.WriteByte('\n')
 
-		doc := map[string]interface{}{
-			"id":           ioc.ID,
-			"type":         ioc.Type,
-			"value":        ioc.Value,
-			"honeypot":     ioc.Honeypot,
-			"source_ip":    ioc.SourceIP,
-			"technique_id": ioc.TechniqueID,
-			"first_seen":   ioc.FirstSeen.UTC().Format(time.RFC3339Nano),
-			"last_seen":    ioc.LastSeen.UTC().Format(time.RFC3339Nano),
-			"count":        ioc.Count,
-			"metadata":     ioc.Metadata,
-		}
-		docLine, _ := json.Marshal(doc)
+		docLine, _ := json.Marshal(iocToESDoc(ioc))
 		buf.Write(docLine)
 		buf.WriteByte('\n')
 	}
@@ -1282,7 +1301,7 @@ func (es *Elasticsearch) UpsertTTPSession(ctx context.Context, session *TTPSessi
 	}
 
 	body, _ := json.Marshal(doc)
-	_, status, err := es.esRequest(ctx, http.MethodPut, "/qpot-ttp-sessions/_doc/"+session.SessionID, body)
+	_, status, err := es.esRequest(ctx, http.MethodPut, "/qpot-ttp-sessions/_doc/"+url.PathEscape(esDocID(session.SessionID)), body)
 	if err != nil {
 		return fmt.Errorf("upsert ttp session: %w", err)
 	}
