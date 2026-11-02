@@ -721,9 +721,13 @@ func (ts *TimescaleDB) GetSchemaVersion(ctx context.Context) (int, error) {
 		return 0, nil
 	}
 
+	// The most recently SET version is current. MAX(version) would ignore a
+	// rollback, which records a lower version.
 	var version int
 	err = ts.pool.QueryRow(ctx, `
-		SELECT COALESCE(MAX(version), 0) FROM schema_migrations
+		SELECT version FROM schema_migrations
+		ORDER BY applied_at DESC, version DESC
+		LIMIT 1
 	`).Scan(&version)
 
 	if err != nil {
@@ -739,10 +743,20 @@ func (ts *TimescaleDB) SetSchemaVersion(ctx context.Context, version int) error 
 		return fmt.Errorf("not connected")
 	}
 
+	if _, err := ts.pool.Exec(ctx, `
+		CREATE TABLE IF NOT EXISTS schema_migrations (
+			version    INTEGER PRIMARY KEY,
+			applied_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+		)
+	`); err != nil {
+		return fmt.Errorf("failed to create schema_migrations: %w", err)
+	}
+	// clock_timestamp(), not NOW(): the newest write must sort first even when
+	// several versions are set in quick succession.
 	_, err := ts.pool.Exec(ctx, `
 		INSERT INTO schema_migrations (version, applied_at)
-		VALUES ($1, NOW())
-		ON CONFLICT (version) DO UPDATE SET applied_at = NOW()
+		VALUES ($1, clock_timestamp())
+		ON CONFLICT (version) DO UPDATE SET applied_at = clock_timestamp()
 	`, version)
 
 	return err

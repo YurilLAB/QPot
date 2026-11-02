@@ -859,12 +859,13 @@ func (ch *ClickHouse) GetSchemaVersion(ctx context.Context) (int, error) {
 		return 0, nil // No migrations table means version 0
 	}
 
-	var version int
+	// The most recently SET version is current (a rollback records a lower
+	// version, so ordering by version would ignore it).
+	var version uint32
 	err = ch.conn.QueryRow(ctx, `
-		SELECT version 
-		FROM schema_migrations 
-		FINAL
-		ORDER BY version DESC
+		SELECT version
+		FROM schema_migrations
+		ORDER BY applied_at DESC, version DESC
 		LIMIT 1
 	`).Scan(&version)
 
@@ -872,7 +873,7 @@ func (ch *ClickHouse) GetSchemaVersion(ctx context.Context) (int, error) {
 		return 0, nil
 	}
 
-	return version, nil
+	return int(version), nil
 }
 
 // SetSchemaVersion sets the schema version
@@ -880,13 +881,30 @@ func (ch *ClickHouse) SetSchemaVersion(ctx context.Context, version int) error {
 	if ch.conn == nil {
 		return fmt.Errorf("not connected")
 	}
+	if version < 0 {
+		return fmt.Errorf("invalid schema version %d", version)
+	}
 
+	if err := ch.conn.Exec(ctx, `
+		CREATE TABLE IF NOT EXISTS schema_migrations (
+			version           UInt32,
+			name              String,
+			applied_at        DateTime64(6),
+			execution_time_ms UInt64
+		) ENGINE = MergeTree() ORDER BY applied_at
+	`); err != nil {
+		return fmt.Errorf("failed to create schema_migrations: %w", err)
+	}
+
+	// Stamp applied_at server-side at microsecond precision: a client-bound
+	// time.Time is sent at second precision, so a rollback right after an
+	// upgrade would tie and the higher version would still win.
 	query := `
 		INSERT INTO schema_migrations (version, name, applied_at, execution_time_ms)
-		VALUES (?, ?, ?, ?)
+		VALUES (?, ?, now64(6), ?)
 	`
 
-	return ch.conn.Exec(ctx, query, version, "manual", time.Now(), 0)
+	return ch.conn.Exec(ctx, query, uint32(version), "manual", uint64(0))
 }
 
 // WithPool returns a new ClickHouse instance with connection pooling

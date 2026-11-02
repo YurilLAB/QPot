@@ -172,3 +172,29 @@ func TestCHRoundTrip(t *testing.T) {
 		t.Error("GetIOCs returned 0 after inserting one")
 	}
 }
+
+// Migrate must work on a fresh database (no schema_migrations table yet), and
+// rolling back must actually lower the reported version.
+func TestClickHouseMigrateUpAndDown(t *testing.T) {
+	db := connectCH(t)
+	ch := db.(*ClickHouse)
+	ctx := context.Background()
+	if err := ch.conn.Exec(ctx, `DROP TABLE IF EXISTS schema_migrations`); err != nil {
+		t.Fatal(err)
+	}
+	mm := NewMigrationManager(db)
+	for _, mig := range GetCoreMigrations() {
+		mm.Register(mig)
+	}
+	if err := mm.Migrate(ctx); err != nil {
+		t.Fatalf("Migrate: %v", err)
+	}
+	for _, step := range []int{2, 0, 3} {
+		if err := mm.MigrateToVersion(ctx, step); err != nil {
+			t.Fatalf("MigrateToVersion(%d): %v", step, err)
+		}
+		if v, _ := mm.GetCurrentVersion(ctx); v != step {
+			t.Fatalf("after MigrateToVersion(%d) version = %d", step, v)
+		}
+	}
+}

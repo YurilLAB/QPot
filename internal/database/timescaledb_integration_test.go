@@ -179,3 +179,28 @@ func TestPGExportImportMultilineCommand(t *testing.T) {
 		t.Fatalf("imported %d rows, multiline command %q; want 2 rows and the original command", n, cmd)
 	}
 }
+
+// Migrate must work on a fresh database (no schema_migrations table yet), and
+// rolling back must actually lower the reported version.
+func TestPGMigrateUpAndDown(t *testing.T) {
+	ts := connectPG(t)
+	ctx := context.Background()
+	if _, err := ts.pool.Exec(ctx, `DROP TABLE IF EXISTS schema_migrations`); err != nil {
+		t.Fatal(err)
+	}
+	mm := NewMigrationManager(ts)
+	for _, mig := range GetCoreMigrations() {
+		mm.Register(mig)
+	}
+	if err := mm.Migrate(ctx); err != nil {
+		t.Fatalf("Migrate: %v", err)
+	}
+	for _, step := range []int{2, 0, 3} {
+		if err := mm.MigrateToVersion(ctx, step); err != nil {
+			t.Fatalf("MigrateToVersion(%d): %v", step, err)
+		}
+		if v, _ := mm.GetCurrentVersion(ctx); v != step {
+			t.Fatalf("after MigrateToVersion(%d) version = %d", step, v)
+		}
+	}
+}
