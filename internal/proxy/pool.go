@@ -1,11 +1,13 @@
 package proxy
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"net"
 	"strings"
 	"sync"
+	"time"
 )
 
 // Backend identifies one real-OpenSSH backend the broker can splice a session
@@ -164,6 +166,55 @@ func (p *Pool) Release(b Backend) {
 	p.mu.Lock()
 	p.available = append(p.available, b)
 	p.mu.Unlock()
+}
+
+// WatchQuarantined keeps re-running the reset hook for quarantined backends
+// until ctx ends, returning each one to rotation once a reset succeeds. With
+// RecycleReset that means a backend whose recreation was missed (or happened
+// late) comes back as soon as a later recreation is observed, instead of being
+// lost for the broker's lifetime - while still never being reused dirty.
+func (p *Pool) WatchQuarantined(ctx context.Context, interval time.Duration) {
+	if p.reset == nil {
+		return
+	}
+	retrying := map[string]bool{}
+	var mu sync.Mutex
+	t := time.NewTicker(interval)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+		}
+		p.mu.Lock()
+		var todo []Backend
+		mu.Lock()
+		for id, b := range p.quarantined {
+			if !retrying[id] {
+				retrying[id] = true
+				todo = append(todo, b)
+			}
+		}
+		mu.Unlock()
+		p.mu.Unlock()
+		for _, b := range todo {
+			go func(b Backend) {
+				err := p.reset(b)
+				p.mu.Lock()
+				if err == nil {
+					if _, still := p.quarantined[b.ID]; still {
+						delete(p.quarantined, b.ID)
+						p.available = append(p.available, b)
+					}
+				}
+				p.mu.Unlock()
+				mu.Lock()
+				delete(retrying, b.ID)
+				mu.Unlock()
+			}(b)
+		}
+	}
 }
 
 // Stats reports pool occupancy (available, leased, quarantined) for health

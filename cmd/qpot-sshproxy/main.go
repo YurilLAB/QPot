@@ -22,6 +22,10 @@
 //	QPOT_SSHPROXY_BURST_IP   rate burst per IP        (default "10")
 //	QPOT_SSHPROXY_CONC_IP    max concurrent per IP    (default "3")
 //	QPOT_SSHPROXY_CONC       max concurrent global    (default "128")
+//	QPOT_SSHPROXY_RECYCLE    wait for each used backend to be recreated by the
+//	                         host before reuse: "on" (default) or "off"
+//	QPOT_SSHPROXY_RECYCLE_DOWN  how long to wait for the recreation to start (default "2m")
+//	QPOT_SSHPROXY_RECYCLE_UP    how long to wait for the backend to return  (default "3m")
 package main
 
 import (
@@ -81,12 +85,23 @@ func run() error {
 	defer logFile.Close()
 	cfg.Sink = proxy.NewJSONSink(logFile)
 
-	// NOTE: ResetFunc is deliberately nil. The broker has NO mechanism (and must
-	// have no privilege) to reset backends itself — handing a docker socket to an
-	// attacker-facing container would be catastrophic. Backend ephemerality is the
-	// orchestration layer's job (external supervisor restarts/rolls back backends
-	// between sessions). See doc/ssh-hifi-proxy.md.
-	pool := proxy.NewPool(backends, nil)
+	// Backends are reset by RECREATING their container after every session -
+	// done by the trusted host-side qpot process, never by this broker, which
+	// must have no privilege (a docker socket in an attacker-facing container
+	// would be catastrophic). The broker only waits until the recreation is
+	// visible before reusing a backend, and quarantines it otherwise, so no
+	// attacker ever inherits the previous attacker's changes. See
+	// doc/ssh-hifi-proxy.md.
+	var reset proxy.ResetFunc
+	if env("QPOT_SSHPROXY_RECYCLE", "on") != "off" {
+		reset = proxy.RecycleReset(proxy.RecycleOptions{
+			DownWithin: envDuration("QPOT_SSHPROXY_RECYCLE_DOWN", 2*time.Minute),
+			UpWithin:   envDuration("QPOT_SSHPROXY_RECYCLE_UP", 3*time.Minute),
+		})
+	} else {
+		log.Printf("warning: QPOT_SSHPROXY_RECYCLE=off - backends are reused WITHOUT being reset between attackers")
+	}
+	pool := proxy.NewPool(backends, reset)
 	broker := proxy.NewBroker(cfg, pool)
 
 	ln, err := net.Listen("tcp", listen)
@@ -96,6 +111,7 @@ func run() error {
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
+	go pool.WatchQuarantined(ctx, 10*time.Second)
 
 	log.Printf("qpot-sshproxy %q listening on %s -> %d backend(s); idle=%s maxSession=%s",
 		name, listen, pool.Size(), cfg.IdleTimeout, cfg.MaxSession)
