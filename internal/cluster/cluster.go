@@ -4,6 +4,7 @@ package cluster
 import (
 	"bytes"
 	"crypto/rand"
+	"crypto/subtle"
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/hex"
@@ -893,42 +894,57 @@ func (m *Manager) UnlockPassword(password string) error {
 	return nil
 }
 
-// VerifyPassword verifies the cluster password against the stored bcrypt hash.
+// VerifyPassword verifies the cluster password. The check runs OUTSIDE the
+// manager lock: bcrypt takes tens of milliseconds, and holding the lock for it
+// let anyone with the (non-secret) cluster ID stall membership with a flood of
+// wrong passwords.
 func (m *Manager) VerifyPassword(password string) bool {
 	m.mu.RLock()
-	defer m.mu.RUnlock()
-
 	if m.cluster == nil {
+		m.mu.RUnlock()
 		return false
 	}
+	hash, plain := m.cluster.PasswordHash, m.plainPassword
+	m.mu.RUnlock()
+	return verifyClusterPassword(password, hash, plain)
+}
 
-	return checkPassword(password, m.cluster.PasswordHash)
+// verifyClusterPassword compares against the in-memory password when this node
+// has it (constant time, cheap, so wrong-password floods cost no CPU), else
+// against the bcrypt hash.
+func verifyClusterPassword(password, hash, plain string) bool {
+	if plain != "" {
+		return subtle.ConstantTimeCompare([]byte(password), []byte(plain)) == 1
+	}
+	return checkPassword(password, hash)
 }
 
 // HandleJoinRequest handles a join request from another node. sourceIP is the
 // authoritative peer address taken from the HTTP connection (not trusted from
 // the request body), recorded so the host sees who actually connected.
 func (m *Manager) HandleJoinRequest(req *JoinRequest, sourceIP string) *JoinResponse {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-
+	// Authenticate WITHOUT holding the lock (see VerifyPassword), then take the
+	// write lock only to change membership.
+	m.mu.RLock()
 	if m.cluster == nil {
+		m.mu.RUnlock()
 		return &JoinResponse{
 			Success: false,
 			Error:   "cluster not initialized",
 		}
 	}
+	clusterID, hash, plain := m.cluster.ID, m.cluster.PasswordHash, m.plainPassword
+	m.mu.RUnlock()
 
 	// Verify cluster ID
-	if req.ClusterID != m.cluster.ID {
+	if req.ClusterID != clusterID {
 		return &JoinResponse{
 			Success: false,
 			Error:   "invalid cluster ID",
 		}
 	}
 
-	// Verify password using bcrypt comparison
-	if !checkPassword(req.Password, m.cluster.PasswordHash) {
+	if !verifyClusterPassword(req.Password, hash, plain) {
 		slog.Warn("Join attempt with invalid password",
 			"cluster_id", req.ClusterID,
 			"from", sourceIP)
@@ -936,6 +952,13 @@ func (m *Manager) HandleJoinRequest(req *JoinRequest, sourceIP string) *JoinResp
 			Success: false,
 			Error:   "invalid password",
 		}
+	}
+
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	// The cluster may have been left/replaced while we verified.
+	if m.cluster == nil || m.cluster.ID != clusterID {
+		return &JoinResponse{Success: false, Error: "cluster not initialized"}
 	}
 
 	// When the cluster requires host approval, the correct password is not

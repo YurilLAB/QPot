@@ -216,3 +216,52 @@ func TestClusterSecretPersistsAndUnlocks(t *testing.T) {
 		t.Fatal("cluster secret left behind after leaving the cluster")
 	}
 }
+
+// Wrong-password join attempts (the cluster ID is not secret) must not
+// serialize the manager behind bcrypt: membership reads stay responsive.
+func TestJoinFloodDoesNotStallManager(t *testing.T) {
+	m := NewManager(t.TempDir())
+	cfg := DefaultClusterConfig()
+	cfg.EnableEncryption = false
+	c, err := m.InitCluster("c", "password123", cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Simulate a restarted node that has only the hash (bcrypt path).
+	m.mu.Lock()
+	m.plainPassword = ""
+	m.mu.Unlock()
+
+	var wg sync.WaitGroup
+	stop := make(chan struct{})
+	for i := 0; i < 16; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for {
+				select {
+				case <-stop:
+					return
+				default:
+				}
+				m.HandleJoinRequest(&JoinRequest{ClusterID: c.ID, Password: "wrong-password"}, "198.51.100.1")
+			}
+		}()
+	}
+	time.Sleep(200 * time.Millisecond)
+	var worst time.Duration
+	for i := 0; i < 20; i++ {
+		start := time.Now()
+		m.GetNodes()
+		m.UpdateNodeStats(NodeStats{})
+		if d := time.Since(start); d > worst {
+			worst = d
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	close(stop)
+	wg.Wait()
+	if worst > 250*time.Millisecond {
+		t.Fatalf("membership calls stalled up to %v behind bcrypt in join handling", worst)
+	}
+}
