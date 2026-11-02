@@ -4,12 +4,15 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
+	"strings"
 	"time"
 
 	"github.com/qpot/qpot/internal/config"
@@ -29,6 +32,10 @@ type BackendRecycler struct {
 	LogPath     string
 	Services    map[string]bool
 	Poll        time.Duration
+	// GenerationDir holds one counter file per backend, bumped after every
+	// successful recreation; the broker reads it (read-only) to tell a real
+	// reset from a restart staged inside the backend.
+	GenerationDir string
 	// Recreate recreates one backend service; defaults to docker compose.
 	Recreate func(ctx context.Context, service string) error
 }
@@ -40,10 +47,11 @@ func NewBackendRecycler(cfg *config.Config) *BackendRecycler {
 		return nil
 	}
 	r := &BackendRecycler{
-		ComposeFile: cfg.GetDockerComposePath(),
-		LogPath:     filepath.Join(cfg.DataPath, "honeypots", sshProxyHoneypot, "logs", "sessions.json"),
-		Services:    map[string]bool{},
-		Poll:        500 * time.Millisecond,
+		ComposeFile:   cfg.GetDockerComposePath(),
+		LogPath:       filepath.Join(cfg.DataPath, "honeypots", sshProxyHoneypot, "logs", "sessions.json"),
+		GenerationDir: filepath.Join(cfg.DataPath, "honeypots", sshProxyHoneypot, "generations"),
+		Services:      map[string]bool{},
+		Poll:          500 * time.Millisecond,
 	}
 	for _, s := range sshBackendServiceNames(cfg) {
 		r.Services[s] = true
@@ -86,6 +94,10 @@ func (r *BackendRecycler) Run(ctx context.Context) {
 			case s := <-queue:
 				if err := r.Recreate(ctx, s); err != nil {
 					slog.Warn("HiFi backend recycle failed; the broker keeps it out of rotation", "backend", s, "error", err)
+				} else if err := bumpGeneration(r.GenerationDir, s); err != nil {
+					// Without the bump the broker will not accept the reset and
+					// keeps the backend quarantined: fail closed.
+					slog.Warn("HiFi backend recreated but its generation could not be recorded", "backend", s, "error", err)
 				} else {
 					slog.Info("HiFi backend recycled", "backend", s)
 				}
@@ -177,4 +189,39 @@ func recycleTarget(line []byte) string {
 		return ev.Backend
 	}
 	return ""
+}
+
+// sshProxyGenerationsPath is where the broker sees the generation counters.
+const sshProxyGenerationsPath = "/run/qpot/generations"
+
+// bumpGeneration increments the backend's recreation counter, atomically
+// (temp file + rename) so the broker never reads a partial value.
+func bumpGeneration(dir, service string) error {
+	if dir == "" {
+		return nil
+	}
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return err
+	}
+	path := filepath.Join(dir, service)
+	var n uint64
+	if b, err := os.ReadFile(path); err == nil {
+		n, _ = strconv.ParseUint(strings.TrimSpace(string(b)), 10, 64)
+	}
+	tmp, err := os.CreateTemp(dir, "."+service+".*")
+	if err != nil {
+		return err
+	}
+	_, werr := fmt.Fprintf(tmp, "%d\n", n+1)
+	cerr := tmp.Close()
+	if werr != nil || cerr != nil {
+		_ = os.Remove(tmp.Name())
+		return errors.Join(werr, cerr)
+	}
+	// Readable by the broker's non-root user; holds no secret.
+	if err := os.Chmod(tmp.Name(), 0o644); err != nil {
+		_ = os.Remove(tmp.Name())
+		return err
+	}
+	return os.Rename(tmp.Name(), path)
 }

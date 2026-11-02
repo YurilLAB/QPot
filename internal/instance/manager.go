@@ -244,17 +244,21 @@ func (m *Manager) Start(ctx context.Context, detach bool) error {
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 
-	if err := cmd.Start(); err != nil {
-		return fmt.Errorf("failed to start docker compose: %w", err)
-	}
-
 	if detach {
-		// Reap the process in the background to avoid zombies.
-		go func() { _ = cmd.Wait() }()
+		// `compose up -d` returns once the containers are created and started.
+		// Its exit status matters: a port already allocated, a missing image or
+		// an invalid compose file used to be ignored and reported as success.
+		if err := cmd.Run(); err != nil {
+			return fmt.Errorf("docker compose up failed (see the output above): %w", err)
+		}
 		// Watch the honeypots settle and log which started / which failed (and
 		// why). Non-fatal: a single honeypot failing must not abort the instance.
 		m.verifyStartup(ctx, 90*time.Second)
 		return nil
+	}
+
+	if err := cmd.Start(); err != nil {
+		return fmt.Errorf("failed to start docker compose: %w", err)
 	}
 
 	// When not detached, wait for the process in a goroutine so we can also
@@ -528,7 +532,7 @@ func (m *Manager) generateDockerCompose() error {
 	}
 
 	composePath := m.config.GetDockerComposePath()
-	if err := os.WriteFile(composePath, []byte(compose), 0640); err != nil {
+	if err := writeSecretFile(composePath, []byte(compose)); err != nil {
 		return fmt.Errorf("failed to write docker-compose.yml: %w", err)
 	}
 
@@ -563,7 +567,7 @@ func (m *Manager) generateServiceConfigs() error {
 	// matters because Vector selects its parser from it — a .toml name made
 	// Vector parse this YAML as TOML and fail to start, collecting nothing.
 	vectorPath := filepath.Join(m.config.DataPath, "vector.yaml")
-	if err := os.WriteFile(vectorPath, []byte(vectorCfg), 0640); err != nil {
+	if err := writeSecretFile(vectorPath, []byte(vectorCfg)); err != nil {
 		return fmt.Errorf("failed to write vector.yaml: %w", err)
 	}
 
@@ -601,7 +605,11 @@ func (m *Manager) generateServiceConfigs() error {
 			if err := os.MkdirAll(dir, 0750); err != nil {
 				return fmt.Errorf("failed to create %s dir for honeypot %q: %w", v.HostSubdir, name, err)
 			}
-			if err := os.Chmod(dir, 0777); err != nil {
+			mode := os.FileMode(0777)
+			if v.ReadOnly {
+				mode = 0755 // host-written; only read inside the container
+			}
+			if err := os.Chmod(dir, mode); err != nil {
 				return fmt.Errorf("failed to chmod %s dir for honeypot %q: %w", v.HostSubdir, name, err)
 			}
 		}
@@ -825,4 +833,15 @@ func PublishedHostPorts(cfg *config.Config) map[string]int {
 // the compose file's directory name, lowercased.
 func composeProjectName(cfg *config.Config) string {
 	return strings.ToLower(filepath.Base(cfg.DataPath))
+}
+
+// writeSecretFile writes a generated file that carries secrets (the database
+// password; the compose file also carries the QPot ID) owner-only, like
+// config.yaml and qpot.id. os.WriteFile keeps an existing file's mode, so the
+// mode is set explicitly to tighten files written by older versions (0640).
+func writeSecretFile(path string, data []byte) error {
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		return err
+	}
+	return os.Chmod(path, 0o600)
 }

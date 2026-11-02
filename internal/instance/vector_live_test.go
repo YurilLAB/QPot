@@ -228,3 +228,45 @@ func TestVectorConfigValidatesLive(t *testing.T) {
 		}
 	}
 }
+
+// Edge configurations that used to render a config Vector rejects (so the
+// collector crash-looped and nothing was collected): no honeypot enabled
+// (with and without sensors), and probe blocking on with an empty probe list.
+func TestVectorEdgeConfigsValidateLive(t *testing.T) {
+	dir := t.TempDir()
+	run := vectorRunner(t, dir)
+	cases := map[string]func(c *config.Config){
+		"no-honeypots-with-sensors": func(c *config.Config) {
+			for name, hp := range c.Honeypots {
+				hp.Enabled = false
+				c.Honeypots[name] = hp
+			}
+			c.Collector.IngestSuricata = true
+		},
+		"nothing-to-collect": func(c *config.Config) {
+			for name, hp := range c.Honeypots {
+				hp.Enabled = false
+				c.Honeypots[name] = hp
+			}
+			c.Collector.IngestSuricata, c.Collector.IngestP0f, c.Collector.IngestFatt = false, false, false
+		},
+		"empty-probe-list": func(c *config.Config) {
+			c.Stealth.BlockCommonProbes = true
+			c.Stealth.BlockedProbes = nil
+		},
+	}
+	for name, mut := range cases {
+		out := genVectorCfg(t, mut)
+		if strings.Contains(out, "!()") {
+			t.Errorf("%s: empty VRL expression rendered", name)
+		}
+		out = strings.Replace(out, `data_dir: "/var/lib/vector"`, `data_dir: "`+dir+`"`, 1)
+		path := filepath.Join(dir, name+".yaml")
+		if err := os.WriteFile(path, []byte(out), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if b, err := exec.Command(run[0], append(run[1:], "validate", "--no-environment", path)...).CombinedOutput(); err != nil {
+			t.Errorf("%s: vector validate failed: %v\n%s", name, err, b)
+		}
+	}
+}

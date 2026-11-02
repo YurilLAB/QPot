@@ -93,15 +93,28 @@ func run() error {
 	// attacker ever inherits the previous attacker's changes. See
 	// doc/ssh-hifi-proxy.md.
 	var reset proxy.ResetFunc
+	var gate *proxy.GenerationGate
 	if env("QPOT_SSHPROXY_RECYCLE", "on") != "off" {
+		// The host recycler records each recreation in this (read-only)
+		// directory; requiring it defeats a restart staged from inside a
+		// backend. Unset = reachability-only (older deployments).
+		if dir := env("QPOT_SSHPROXY_GENERATIONS", ""); dir != "" {
+			gate = proxy.NewGenerationGate(dir)
+		} else {
+			log.Printf("warning: QPOT_SSHPROXY_GENERATIONS unset - a backend restart staged by an attacker can pass as a reset")
+		}
 		reset = proxy.RecycleReset(proxy.RecycleOptions{
 			DownWithin: envDuration("QPOT_SSHPROXY_RECYCLE_DOWN", 2*time.Minute),
 			UpWithin:   envDuration("QPOT_SSHPROXY_RECYCLE_UP", 3*time.Minute),
+			Gate:       gate,
 		})
 	} else {
 		log.Printf("warning: QPOT_SSHPROXY_RECYCLE=off - backends are reused WITHOUT being reset between attackers")
 	}
 	pool := proxy.NewPool(backends, reset)
+	if gate != nil {
+		pool.SetLeaseHook(gate.OnLease)
+	}
 	broker := proxy.NewBroker(cfg, pool)
 
 	ln, err := net.Listen("tcp", listen)

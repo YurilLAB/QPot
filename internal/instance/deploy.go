@@ -18,6 +18,9 @@ type deployVolume struct {
 	// not a directory — so setup creates its parent dir and writes the file,
 	// rather than creating a directory at that path.
 	File bool
+	// ReadOnly mounts it read-only. The host writes it; the container must
+	// not be able to change it.
+	ReadOnly bool
 }
 
 // honeypotDeploy is the deployment profile for one honeypot image.
@@ -189,6 +192,10 @@ func deployProfileFor(name string) honeypotDeploy {
 		return honeypotDeploy{
 			Volumes: []deployVolume{
 				{HostSubdir: "logs", ContainerPath: "/var/log/ssh-proxy"},
+				// Backend recreation counters, written by the host recycler
+				// (instance.BackendRecycler) and read by the broker's
+				// proxy.GenerationGate.
+				{HostSubdir: "generations", ContainerPath: sshProxyGenerationsPath, ReadOnly: true},
 			},
 			Ports: []int{2222},
 		}

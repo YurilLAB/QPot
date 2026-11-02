@@ -13,6 +13,9 @@ import (
 var (
 	errNotRecycled = errors.New("proxy: backend was not recycled in time")
 	errNotBack     = errors.New("proxy: recycled backend did not come back in time")
+	// The backend went away and came back, but the host recycler did not
+	// record recreating it: a restart staged from inside, not a reset.
+	errNotRecreated = errors.New("proxy: backend restarted but the host did not recreate it")
 )
 
 // RecycleOptions tunes RecycleReset.
@@ -21,6 +24,9 @@ type RecycleOptions struct {
 	DownWithin time.Duration // how long to wait for the backend to go away
 	UpWithin   time.Duration // how long to wait for it to come back
 	Poll       time.Duration // probe interval
+	// Gate, when set, additionally requires the host recycler's generation
+	// counter for the backend to advance (see GenerationGate).
+	Gate *GenerationGate
 }
 
 // RecycleReset returns a ResetFunc for backends that are reset from OUTSIDE the
@@ -77,6 +83,14 @@ func RecycleReset(o RecycleOptions) ResetFunc {
 				return errNotBack
 			}
 			time.Sleep(o.Poll)
+		}
+		if o.Gate != nil {
+			for !o.Gate.Advanced(b) {
+				if time.Now().After(deadline) {
+					return errNotRecreated
+				}
+				time.Sleep(o.Poll)
+			}
 		}
 		return nil
 	}

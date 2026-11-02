@@ -235,3 +235,21 @@ func serviceBlock(compose, name string) string {
 	}
 	return b.String()
 }
+
+// The broker gets the recycler's generation counters read-only: it must see
+// recreations but never be able to forge one.
+func TestSSHProxyGenerationsMountedReadOnly(t *testing.T) {
+	cfg := enableSSHProxy(t, "gen")
+	blk := serviceBlock(renderComposeCfg(t, cfg), "ssh-proxy")
+	if !strings.Contains(blk, "/honeypots/ssh-proxy/generations:"+sshProxyGenerationsPath+":ro") {
+		t.Errorf("generations dir not mounted read-only into the broker:\n%s", blk)
+	}
+	if !strings.Contains(blk, "QPOT_SSHPROXY_GENERATIONS="+sshProxyGenerationsPath) {
+		t.Error("broker not told where the generations are")
+	}
+	for _, b := range sshBackendServiceNames(cfg) {
+		if strings.Contains(serviceBlock(renderComposeCfg(t, cfg), b), "generations") {
+			t.Errorf("backend %s can see the generation counters", b)
+		}
+	}
+}

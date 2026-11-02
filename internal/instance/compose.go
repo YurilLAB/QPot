@@ -3,9 +3,11 @@ package instance
 
 import (
 	"bytes"
+	"encoding/json"
 	"fmt"
 	"hash/fnv"
 	"net"
+	"net/url"
 	"sort"
 	"strconv"
 	"strings"
@@ -28,6 +30,34 @@ func portKey(honeypot string, port int) string {
 // break the whole Vector config (silently killing the log pipeline) or inject
 // VRL. Strip control characters (newlines would also break the block-scalar
 // line) and escape backslash and double-quote.
+// yamlInterpolatedStr renders s as a double-quoted YAML scalar (JSON string
+// syntax is valid YAML) with '$' doubled, because both docker compose and
+// Vector expand $VAR / ${VAR} in their files. Used for operator-supplied
+// values such as the database user, password and name, which may contain
+// YAML-significant characters (": ", "#", leading "!" or "&", quotes) or '$'.
+func yamlInterpolatedStr(s string) string {
+	b, _ := json.Marshal(s)
+	return strings.ReplaceAll(string(b), "$", "$$")
+}
+
+// shellQuote single-quotes s for a POSIX shell.
+func shellQuote(s string) string {
+	return "'" + strings.ReplaceAll(s, "'", `'"'"'`) + "'"
+}
+
+// pgReadyCommand is the TimescaleDB healthcheck command line.
+func pgReadyCommand(user, db string) string {
+	return yamlInterpolatedStr("pg_isready -U " + shellQuote(user) + " -d " + shellQuote(db))
+}
+
+// postgresDSN builds the collector's connection URL with the credentials and
+// database name properly escaped ('@', '/', '#', ':' etc. in a password used to
+// break the URL).
+func postgresDSN(user, password, db string) string {
+	u := url.URL{Scheme: "postgres", User: url.UserPassword(user, password), Host: "database:5432", Path: "/" + db}
+	return yamlInterpolatedStr(u.String())
+}
+
 func vrlStringLiteral(s string) string {
 	var b strings.Builder
 	b.WriteByte('"')
@@ -389,9 +419,9 @@ services:
     labels:
       qpot.instance: "{{.Config.InstanceName}}"
     environment:
-      CLICKHOUSE_DB: {{.Config.Database.Database}}
-      CLICKHOUSE_USER: {{.Config.Database.Username}}
-      CLICKHOUSE_PASSWORD: {{.Config.Database.Password}}
+      CLICKHOUSE_DB: {{yamlStr .Config.Database.Database}}
+      CLICKHOUSE_USER: {{yamlStr .Config.Database.Username}}
+      CLICKHOUSE_PASSWORD: {{yamlStr .Config.Database.Password}}
       CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: 1
       QPOT_ID: {{.Config.QPotID}}
     volumes:
@@ -409,6 +439,10 @@ services:
       interval: 10s
       timeout: 5s
       retries: 3
+      # First boot initialises the data directory and restarts the server;
+      # on a busy host that outlasts 3 x 10s. Failures during start_period do
+      # not count, so dependants (the collector) wait instead of failing.
+      start_period: 2m
 {{else if eq .Config.Database.Type "timescaledb"}}database:
     image: timescale/timescaledb:latest-pg15
     container_name: {{.Config.InstanceName}}_db
@@ -416,9 +450,9 @@ services:
     labels:
       qpot.instance: "{{.Config.InstanceName}}"
     environment:
-      POSTGRES_DB: {{.Config.Database.Database}}
-      POSTGRES_USER: {{.Config.Database.Username}}
-      POSTGRES_PASSWORD: {{.Config.Database.Password}}
+      POSTGRES_DB: {{yamlStr .Config.Database.Database}}
+      POSTGRES_USER: {{yamlStr .Config.Database.Username}}
+      POSTGRES_PASSWORD: {{yamlStr .Config.Database.Password}}
       QPOT_ID: {{.Config.QPotID}}
     volumes:
       - {{.Config.GetDatabasePath}}:/var/lib/postgresql/data
@@ -430,10 +464,14 @@ services:
       - qpot_dbhost
     {{template "dbsecurity" dict "Config" $.Config "GlobalLimits" $.Config.Security.ResourceLimits "Name" "database"}}
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U {{.Config.Database.Username}} -d {{.Config.Database.Database}}"]
+      test: ["CMD-SHELL", {{pgReadyCmd .Config.Database.Username .Config.Database.Database}}]
       interval: 10s
       timeout: 5s
       retries: 3
+      # First boot initialises the data directory and restarts the server;
+      # on a busy host that outlasts 3 x 10s. Failures during start_period do
+      # not count, so dependants (the collector) wait instead of failing.
+      start_period: 2m
 {{end}}
 
   # Log collector (Vector) with QPot ID tagging
@@ -441,6 +479,13 @@ services:
     image: timberio/vector:latest-alpine
     container_name: {{.Config.InstanceName}}_collector
     restart: unless-stopped
+{{- if or (eq .Config.Database.Type "clickhouse") (eq .Config.Database.Type "timescaledb")}}
+    # Start once the database accepts connections: before that the sink's
+    # healthcheck fails and early events are dropped.
+    depends_on:
+      database:
+        condition: service_healthy
+{{- end}}
     labels:
       qpot.instance: "{{.Config.InstanceName}}"
     # Point Vector explicitly at the YAML config so parser selection never
@@ -588,7 +633,7 @@ services:
       # deployment profile (deploy.go), derived from T-Pot's reference composes
       # and verified by running the images.
     {{- range $v := $d.Volumes}}
-      - {{$.Config.DataPath}}/honeypots/{{$.Name}}/{{$v.HostSubdir}}:{{$v.ContainerPath}}
+      - {{$.Config.DataPath}}/honeypots/{{$.Name}}/{{$v.HostSubdir}}:{{$v.ContainerPath}}{{if $v.ReadOnly}}:ro{{end}}
     {{- end}}
     networks:
       - qpot_internal
@@ -626,6 +671,7 @@ services:
       # no SSRF) and the logical name used in the broker's session events.
       - QPOT_SSHPROXY_NAME=ssh-proxy
       - QPOT_SSHPROXY_BACKENDS={{sshBackendCSV $.Config}}
+      - QPOT_SSHPROXY_GENERATIONS={{sshProxyGenerationsPath}}
       {{- end}}
       {{- range $k, $v := $d.Env}}
       - {{$k}}={{$v}}
@@ -778,6 +824,9 @@ services:
 	subnetMap := g.buildSubnetMap()
 
 	funcMap := template.FuncMap{
+		"yamlStr":                 yamlInterpolatedStr,
+		"sshProxyGenerationsPath": func() string { return sshProxyGenerationsPath },
+		"pgReadyCmd":              pgReadyCommand,
 		"dict": func(values ...interface{}) (map[string]interface{}, error) {
 			if len(values)%2 != 0 {
 				return nil, fmt.Errorf("invalid dict call")
@@ -934,8 +983,59 @@ func (g *ComposeGenerator) EnabledSensors() []string {
 	return s
 }
 
+// HoneypotsEnabled reports whether any honeypot is enabled, i.e. whether the
+// add_qpot_metadata transform has inputs.
+func (g *ComposeGenerator) HoneypotsEnabled() bool {
+	return len(g.Config.GetEnabledHoneypots()) > 0
+}
+
+// StealthInputs lists what feeds filter_stealth: enrich_geoip when GeoIP is
+// configured, else the honeypot transform (if any honeypot is enabled) plus
+// the NSM sensor transforms.
+func (g *ComposeGenerator) StealthInputs() []string {
+	if g.Config.Collector.GeoIPDBPath != "" {
+		return []string{"enrich_geoip"}
+	}
+	return g.pipelineInputs()
+}
+
+// pipelineInputs are the event transforms: honeypots (if any) and sensors.
+func (g *ComposeGenerator) pipelineInputs() []string {
+	var in []string
+	if g.HoneypotsEnabled() {
+		in = append(in, "add_qpot_metadata")
+	}
+	return append(in, g.EnabledSensors()...)
+}
+
+// GeoIPInputs lists what feeds enrich_geoip.
+func (g *ComposeGenerator) GeoIPInputs() []string { return g.pipelineInputs() }
+
+// idleVectorConfig is used when there is nothing to collect (no honeypot and
+// no sensor enabled). Vector refuses a config without sources, and a
+// transform without inputs, so this keeps the collector running idle instead
+// of crash-looping.
+const idleVectorConfig = `# Vector configuration for QPot
+# Auto-generated: no honeypot or sensor is enabled, nothing to collect.
+data_dir: "/var/lib/vector"
+api:
+  enabled: true
+  address: "127.0.0.1:8686"
+sources:
+  idle_metrics:
+    type: internal_metrics
+sinks:
+  idle_sink:
+    type: blackhole
+    inputs:
+      - idle_metrics
+`
+
 // GenerateVectorConfig generates Vector configuration for log collection
 func (g *ComposeGenerator) GenerateVectorConfig() (string, error) {
+	if len(g.pipelineInputs()) == 0 {
+		return idleVectorConfig, nil
+	}
 	config := `# Vector configuration for QPot
 # QPot ID: {{.Config.QPotID}}
 # Auto-generated
@@ -998,6 +1098,7 @@ sources:
 {{- end}}
 
 transforms:
+{{- if .HoneypotsEnabled}}
   add_qpot_metadata:
     type: remap
     inputs:
@@ -1213,6 +1314,7 @@ transforms:
       .qpot_id = "{{.Config.QPotID}}"
       .qpot_instance = "{{.Config.InstanceName}}"
       .timestamp = format_timestamp!(now(), "%Y-%m-%d %H:%M:%S%.3f")
+{{- end}}
 {{if .Config.Collector.IngestSuricata}}
   # Map Suricata EVE alerts onto the shared events schema so they appear in the
   # dashboards / attack map alongside honeypot hits. Only "alert" events are
@@ -1320,8 +1422,7 @@ transforms:
   enrich_geoip:
     type: remap
     inputs:
-      - add_qpot_metadata
-{{- range $.EnabledSensors}}
+{{- range $.GeoIPInputs}}
       - {{.}}
 {{- end}}
     source: |
@@ -1346,10 +1447,9 @@ transforms:
       # add_qpot_metadata (GeoIP is optional so Vector can start without an mmdb).
       # When GeoIP is off, the NSM sensor transforms join here directly; when it
       # is on, they arrive already enriched via enrich_geoip.
-      - {{if .Config.Collector.GeoIPDBPath}}enrich_geoip{{else}}add_qpot_metadata{{end}}
-{{- if not .Config.Collector.GeoIPDBPath}}{{range $.EnabledSensors}}
+{{- range $.StealthInputs}}
       - {{.}}
-{{- end}}{{end}}
+{{- end}}
     condition: |
       # Drop events whose message contains a known scanner signature (stealth).
       # Substring match via contains() — match_any expects regexes, and
@@ -1357,7 +1457,7 @@ transforms:
       # NSM sensor events (Suricata/p0f/fatt) are never stealth-filtered:
       # dropping an IDS alert or a fingerprint because its JSON mentions a
       # scanner signature would discard real sensor data.
-      {{- if .Config.Stealth.BlockCommonProbes}}
+      {{- if and .Config.Stealth.BlockCommonProbes .Config.Stealth.BlockedProbes}}
       sensor = to_string(.honeypot) ?? ""
       if sensor == "suricata" || sensor == "p0f" || sensor == "fatt" {
         true
@@ -1389,7 +1489,7 @@ sinks:
     inputs:
       - filter_stealth
     endpoint: "http://database:8123"
-    database: {{.Config.Database.Database}}
+    database: {{yamlStr .Config.Database.Database}}
     table: events
     # The enriched event carries fields that are not columns in the events
     # table (qpot_id, the honeypot's own eventid/session/etc.). Without this,
@@ -1398,8 +1498,8 @@ sinks:
     skip_unknown_fields: true
     auth:
       strategy: basic
-      user: {{.Config.Database.Username}}
-      password: "{{.Config.Database.Password}}"
+      user: {{yamlStr .Config.Database.Username}}
+      password: {{yamlStr .Config.Database.Password}}
     batch:
       max_bytes: 1049000
       timeout_secs: 5
@@ -1410,7 +1510,7 @@ sinks:
     type: postgres
     inputs:
       - pg_prepare
-    endpoint: "postgres://{{.Config.Database.Username}}:{{.Config.Database.Password}}@database:5432/{{.Config.Database.Database}}"
+    endpoint: {{pgDSN .Config.Database.Username .Config.Database.Password .Config.Database.Database}}
     # events_ingest is an auto-updatable view of only the collector-supplied
     # columns: the sink writes NULL for every column it does not have, which
     # on the events table itself breaks id NOT NULL and every DEFAULT.
@@ -1444,7 +1544,9 @@ sinks:
 `
 
 	t := template.Must(template.New("vector").Funcs(template.FuncMap{
-		"vrlStr": vrlStringLiteral,
+		"vrlStr":  vrlStringLiteral,
+		"yamlStr": yamlInterpolatedStr,
+		"pgDSN":   postgresDSN,
 	}).Parse(config))
 
 	var buf bytes.Buffer

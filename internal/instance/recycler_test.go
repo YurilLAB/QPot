@@ -4,6 +4,9 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"runtime"
+	"strconv"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -101,5 +104,26 @@ func TestBackendRecyclerRecreatesAfterSessions(t *testing.T) {
 	defer mu.Unlock()
 	if got["ssh-backend-1"] != 1 || len(got) != 2 {
 		t.Fatalf("unexpected recreations: %v", got)
+	}
+}
+
+func TestBumpGeneration(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "generations")
+	for want := 1; want <= 3; want++ {
+		if err := bumpGeneration(dir, "ssh-backend-1"); err != nil {
+			t.Fatal(err)
+		}
+		b, err := os.ReadFile(filepath.Join(dir, "ssh-backend-1"))
+		if err != nil || strings.TrimSpace(string(b)) != strconv.Itoa(want) {
+			t.Fatalf("after bump %d: %q, %v", want, b, err)
+		}
+	}
+	st, _ := os.Stat(filepath.Join(dir, "ssh-backend-1"))
+	if runtime.GOOS != "windows" && st.Mode().Perm() != 0o644 {
+		t.Errorf("mode %v, want 0644 (broker runs as another user)", st.Mode().Perm())
+	}
+	entries, _ := os.ReadDir(dir)
+	if len(entries) != 1 {
+		t.Errorf("temp files left behind: %v", entries)
 	}
 }

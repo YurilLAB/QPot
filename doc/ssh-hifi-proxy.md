@@ -291,11 +291,18 @@ attacker-facing broker still holds no privilege:
    backend. Only names from the instance's configured pool are acted on, and
    docker is invoked without a shell. It also recreates every backend once when
    it starts.
-3. The broker's `RecycleReset` hook keeps the backend out of rotation until it
-   has *seen* the recreation (the backend goes away, then answers with an
-   OpenSSH banner again). If that is not observed in time (no control plane
-   running, docker failing) the backend is quarantined - never reused dirty - and
-   rejoins the pool after a later recreation is observed.
+3. After each successful recreation the control plane increments that
+   backend's counter in `honeypots/ssh-proxy/generations/<backend>`, which is
+   mounted **read-only** into the broker and unreachable from any backend.
+4. The broker's `RecycleReset` hook keeps the backend out of rotation until it
+   has *seen* the recreation: the backend goes away, answers with an OpenSSH
+   banner again, **and** its generation counter has moved past the value it had
+   when the session started. The counter is what makes this trustworthy: root
+   on a backend can make sshd disappear and come back (e.g. `kill 1` with a
+   restart policy), but cannot make the host record a recreation. If a real
+   recreation is not observed in time (no control plane running, docker
+   failing) the backend is quarantined - never reused dirty - and rejoins the
+   pool after a later recreation is observed.
 
 Consequences: with the control plane stopped, each backend serves one session
 and is then held back (fail closed). A backend is unavailable for a few seconds

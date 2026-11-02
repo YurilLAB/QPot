@@ -43,6 +43,15 @@ type Pool struct {
 	leased      map[string]Backend
 	quarantined map[string]Backend
 	reset       ResetFunc
+	onLease     func(Backend)
+}
+
+// SetLeaseHook installs a function called (under the pool lock, so it must be
+// quick) each time a backend is leased to a session.
+func (p *Pool) SetLeaseHook(h func(Backend)) {
+	p.mu.Lock()
+	p.onLease = h
+	p.mu.Unlock()
 }
 
 // ParseBackends parses an operator-supplied backend list of the form
@@ -138,6 +147,9 @@ func (p *Pool) Lease() (Backend, error) {
 	b := p.available[n-1]
 	p.available = p.available[:n-1]
 	p.leased[b.ID] = b
+	if p.onLease != nil {
+		p.onLease(b)
+	}
 	return b, nil
 }
 
