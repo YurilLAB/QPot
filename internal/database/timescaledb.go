@@ -161,24 +161,8 @@ func (ts *TimescaleDB) InitializeSchema(ctx context.Context) error {
 		return fmt.Errorf("failed to create retention policy: %w", err)
 	}
 
-	// Create IOCs table
-	iocsTable := `
-		CREATE TABLE IF NOT EXISTS iocs (
-			id TEXT NOT NULL,
-			type TEXT NOT NULL,
-			value TEXT NOT NULL,
-			honeypot TEXT NOT NULL,
-			source_ip TEXT,
-			technique_id TEXT DEFAULT '',
-			first_seen TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-			last_seen TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-			count BIGINT DEFAULT 1,
-			metadata JSONB,
-			UNIQUE (type, value, honeypot)
-		)
-	`
-	if _, err := ts.pool.Exec(ctx, iocsTable); err != nil {
-		return fmt.Errorf("failed to create iocs table: %w", err)
+	if err := ts.createIOCTable(ctx); err != nil {
+		return err
 	}
 
 	// Create TTP sessions table
@@ -274,7 +258,7 @@ func (ts *TimescaleDB) GetEvents(ctx context.Context, filter EventFilter) ([]*Ev
 
 	query := `
 		SELECT
-			id, timestamp, honeypot, source_ip::text, source_port, dest_port,
+			id, timestamp, honeypot, COALESCE(host(source_ip), ''), source_port, dest_port,
 			protocol, event_type, username, password, command,
 			payload, metadata, country, city, asn,
 			technique_id, technique_name, tactic_id, tactic_name,
@@ -301,7 +285,7 @@ func (ts *TimescaleDB) GetEvents(ctx context.Context, filter EventFilter) ([]*Ev
 		argIdx++
 	}
 	if len(filter.SourceIPs) > 0 {
-		query += fmt.Sprintf(" AND source_ip::text = ANY($%d)", argIdx)
+		query += fmt.Sprintf(" AND host(source_ip) = ANY($%d)", argIdx)
 		args = append(args, filter.SourceIPs)
 		argIdx++
 	}
@@ -379,7 +363,7 @@ func (ts *TimescaleDB) GetEventByID(ctx context.Context, id string) (*Event, err
 	var dbID int64
 	err := ts.pool.QueryRow(ctx, `
 		SELECT
-			id, timestamp, honeypot, source_ip::text, source_port, dest_port,
+			id, timestamp, honeypot, COALESCE(host(source_ip), ''), source_port, dest_port,
 			protocol, event_type, username, password, command,
 			payload, metadata, country, city, asn
 		FROM events
@@ -461,7 +445,7 @@ func (ts *TimescaleDB) GetTopAttackers(ctx context.Context, limit int, since tim
 
 	query := `
 		SELECT 
-			source_ip::text,
+			COALESCE(host(source_ip), ''),
 			country,
 			MIN(timestamp) as first_seen,
 			MAX(timestamp) as last_seen,
@@ -595,7 +579,7 @@ func (ts *TimescaleDB) ExportData(ctx context.Context, start, end time.Time, w i
 	}
 
 	rows, err := ts.pool.Query(ctx, `
-		SELECT timestamp, honeypot, source_ip::text, source_port, dest_port,
+		SELECT timestamp, honeypot, COALESCE(host(source_ip), ''), source_port, dest_port,
 		       protocol, event_type, username, password, command, country, city, asn,
 		       technique_id, technique_name, confidence
 		FROM events
@@ -812,6 +796,42 @@ func (ts *TimescaleDB) TagEvent(ctx context.Context, event *Event) error {
 	return err
 }
 
+// createIOCTable creates the iocs table and its dedupe key, upgrading the
+// older schema's UNIQUE constraint on the raw value in place.
+func (ts *TimescaleDB) createIOCTable(ctx context.Context) error {
+	// Create IOCs table
+	iocsTable := `
+		CREATE TABLE IF NOT EXISTS iocs (
+			id TEXT NOT NULL,
+			type TEXT NOT NULL,
+			value TEXT NOT NULL,
+			honeypot TEXT NOT NULL,
+			source_ip TEXT,
+			technique_id TEXT DEFAULT '',
+			first_seen TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+			last_seen TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+			count BIGINT DEFAULT 1,
+			metadata JSONB
+		)
+	`
+	if _, err := ts.pool.Exec(ctx, iocsTable); err != nil {
+		return fmt.Errorf("failed to create iocs table: %w", err)
+	}
+	// Dedupe IOCs on a hash of the value: a btree entry is capped at ~2.7 KB,
+	// and attacker-controlled command IOCs exceed that, which failed (and rolled
+	// back) the whole IOC batch. Older schemas carried a UNIQUE constraint on
+	// the raw value; replace it.
+	for _, q := range []string{
+		`ALTER TABLE iocs DROP CONSTRAINT IF EXISTS iocs_type_value_honeypot_key`,
+		`CREATE UNIQUE INDEX IF NOT EXISTS idx_iocs_type_value_md5_honeypot ON iocs (type, md5(value), honeypot)`,
+	} {
+		if _, err := ts.pool.Exec(ctx, q); err != nil {
+			return fmt.Errorf("failed to migrate iocs unique key: %w", err)
+		}
+	}
+	return nil
+}
+
 // InsertIOC upserts an IOC, incrementing count and updating last_seen on conflict.
 func (ts *TimescaleDB) InsertIOC(ctx context.Context, ioc *IOC) error {
 	if ts.pool == nil {
@@ -821,10 +841,10 @@ func (ts *TimescaleDB) InsertIOC(ctx context.Context, ioc *IOC) error {
 		INSERT INTO iocs (id, type, value, honeypot, source_ip, technique_id,
 		                  first_seen, last_seen, count, metadata)
 		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
-		ON CONFLICT (type, value, honeypot) DO UPDATE SET
+		ON CONFLICT (type, md5(value), honeypot) DO UPDATE SET
 			last_seen    = EXCLUDED.last_seen,
 			count        = iocs.count + 1,
-			technique_id = COALESCE(EXCLUDED.technique_id, iocs.technique_id)
+			technique_id = COALESCE(NULLIF(EXCLUDED.technique_id, ''), iocs.technique_id)
 	`,
 		ioc.ID,
 		ioc.Type,
@@ -860,10 +880,10 @@ func (ts *TimescaleDB) InsertIOCs(ctx context.Context, iocs []*IOC) error {
 		INSERT INTO iocs (id, type, value, honeypot, source_ip, technique_id,
 		                  first_seen, last_seen, count, metadata)
 		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
-		ON CONFLICT (type, value, honeypot) DO UPDATE SET
+		ON CONFLICT (type, md5(value), honeypot) DO UPDATE SET
 			last_seen    = EXCLUDED.last_seen,
 			count        = iocs.count + 1,
-			technique_id = COALESCE(EXCLUDED.technique_id, iocs.technique_id)`
+			technique_id = COALESCE(NULLIF(EXCLUDED.technique_id, ''), iocs.technique_id)`
 	for _, ioc := range iocs {
 		if _, err := tx.Exec(ctx, q,
 			ioc.ID, ioc.Type, ioc.Value, ioc.Honeypot, ioc.SourceIP,
@@ -1026,7 +1046,7 @@ func (ts *TimescaleDB) GetUnclassifiedEvents(ctx context.Context, limit int) ([]
 	}
 
 	query := `
-		SELECT timestamp, honeypot, source_ip::text, source_port, dest_port,
+		SELECT timestamp, honeypot, COALESCE(host(source_ip), ''), source_port, dest_port,
 		       protocol, event_type, username, password, command,
 		       payload, metadata, country, city, asn,
 		       technique_id, technique_name, tactic_id, tactic_name,

@@ -1,0 +1,148 @@
+package database
+
+import (
+	"context"
+	"crypto/rand"
+	"encoding/base64"
+	"os"
+	"strconv"
+	"testing"
+	"time"
+
+	"github.com/qpot/qpot/internal/config"
+)
+
+// connectPG connects to a PostgreSQL server described by QPOT_TEST_PG_* env
+// vars, skipping unless QPOT_TEST_POSTGRES=1. Plain PostgreSQL is enough: the
+// events table is created without the TimescaleDB hypertable, and the iocs
+// table through the production createIOCTable.
+func connectPG(t *testing.T) *TimescaleDB {
+	t.Helper()
+	if os.Getenv("QPOT_TEST_POSTGRES") != "1" {
+		t.Skip("set QPOT_TEST_POSTGRES=1 to run PostgreSQL integration tests")
+	}
+	port := 5432
+	if p := os.Getenv("QPOT_TEST_PG_PORT"); p != "" {
+		port, _ = strconv.Atoi(p)
+	}
+	ts, err := NewTimescaleDB(&config.DatabaseConfig{
+		Host:     envOr("QPOT_TEST_PG_HOST", "127.0.0.1"),
+		Port:     port,
+		Username: envOr("QPOT_TEST_PG_USER", "postgres"),
+		Password: envOr("QPOT_TEST_PG_PASS", "postgres"),
+		Database: envOr("QPOT_TEST_PG_DB", "qpot_test"),
+		SSLMode:  "disable",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	if err := ts.Connect(ctx); err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	t.Cleanup(func() { ts.Close() })
+	for _, q := range []string{
+		`DROP TABLE IF EXISTS events, iocs`,
+		`CREATE TABLE events (
+			id BIGSERIAL, timestamp TIMESTAMPTZ NOT NULL DEFAULT NOW(), honeypot TEXT NOT NULL,
+			source_ip INET, source_port INTEGER, dest_port INTEGER, protocol TEXT, event_type TEXT,
+			username TEXT, password TEXT, command TEXT, payload BYTEA, metadata JSONB,
+			country TEXT, city TEXT, asn TEXT,
+			technique_id TEXT DEFAULT '', technique_name TEXT DEFAULT '', tactic_id TEXT DEFAULT '',
+			tactic_name TEXT DEFAULT '', kill_chain_stage TEXT DEFAULT '',
+			confidence DOUBLE PRECISION DEFAULT 0, classified BOOLEAN DEFAULT FALSE)`,
+		// The pre-fix iocs schema, so createIOCTable's in-place upgrade is exercised.
+		`CREATE TABLE iocs (id TEXT NOT NULL, type TEXT NOT NULL, value TEXT NOT NULL,
+			honeypot TEXT NOT NULL, source_ip TEXT, technique_id TEXT DEFAULT '',
+			first_seen TIMESTAMPTZ NOT NULL DEFAULT NOW(), last_seen TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+			count BIGINT DEFAULT 1, metadata JSONB, UNIQUE (type, value, honeypot))`,
+	} {
+		if _, err := ts.pool.Exec(ctx, q); err != nil {
+			t.Fatalf("setup: %v", err)
+		}
+	}
+	if err := ts.createIOCTable(ctx); err != nil {
+		t.Fatalf("createIOCTable: %v", err)
+	}
+	return ts
+}
+
+// INET columns must come back as plain addresses ("1.2.3.4", not
+// "1.2.3.4/32"), and filtering by a plain address must match.
+func TestPGSourceIPIsPlainAddress(t *testing.T) {
+	ts := connectPG(t)
+	ctx := context.Background()
+	ev := &Event{Timestamp: time.Now().UTC(), Honeypot: "cowrie", SourceIP: "203.0.113.5", EventType: "login_failed"}
+	if err := ts.InsertEvent(ctx, ev); err != nil {
+		t.Fatal(err)
+	}
+	got, err := ts.GetEvents(ctx, EventFilter{SourceIPs: []string{"203.0.113.5"}, Limit: 10})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 || got[0].SourceIP != "203.0.113.5" {
+		t.Fatalf("GetEvents by IP = %d rows (%v), want 1 row with plain IP", len(got), got)
+	}
+	un, err := ts.GetUnclassifiedEvents(ctx, 10)
+	if err != nil || len(un) != 1 || un[0].SourceIP != "203.0.113.5" {
+		t.Fatalf("GetUnclassifiedEvents = %v, %v", un, err)
+	}
+	top, err := ts.GetTopAttackers(ctx, 10, time.Now().Add(-time.Hour))
+	if err != nil || len(top) != 1 || top[0].SourceIP != "203.0.113.5" {
+		t.Fatalf("GetTopAttackers = %v, %v", top, err)
+	}
+}
+
+// A long attacker-controlled IOC value must not fail (and roll back) the batch.
+func TestPGLongIOCValue(t *testing.T) {
+	ts := connectPG(t)
+	ctx := context.Background()
+	raw := make([]byte, 6000)
+	if _, err := rand.Read(raw); err != nil {
+		t.Fatal(err)
+	}
+	long := "echo " + base64.StdEncoding.EncodeToString(raw) + " | base64 -d | sh"
+	now := time.Now().UTC()
+	iocs := []*IOC{
+		{ID: "a", Type: "command", Value: long, Honeypot: "cowrie", FirstSeen: now, LastSeen: now, Count: 1},
+		{ID: "b", Type: "ip", Value: "198.51.100.1", Honeypot: "cowrie", FirstSeen: now, LastSeen: now, Count: 1},
+	}
+	if err := ts.InsertIOCs(ctx, iocs); err != nil {
+		t.Fatalf("InsertIOCs: %v", err)
+	}
+	// Re-inserting the same long value must upsert, not duplicate.
+	if err := ts.InsertIOCs(ctx, iocs[:1]); err != nil {
+		t.Fatalf("InsertIOCs again: %v", err)
+	}
+	var rows, count int64
+	if err := ts.pool.QueryRow(ctx, `SELECT count(*), COALESCE(SUM(count) FILTER (WHERE type='command'),0) FROM iocs`).Scan(&rows, &count); err != nil {
+		t.Fatal(err)
+	}
+	if rows != 2 || count != 2 {
+		t.Fatalf("rows=%d command count=%d, want 2 rows and count 2", rows, count)
+	}
+}
+
+// Re-sighting an IOC without a technique must keep the stored technique.
+func TestPGIOCKeepsTechnique(t *testing.T) {
+	ts := connectPG(t)
+	ctx := context.Background()
+	now := time.Now().UTC()
+	ioc := &IOC{ID: "u", Type: "url", Value: "http://198.51.100.2/x.sh", Honeypot: "cowrie",
+		TechniqueID: "T1105", FirstSeen: now, LastSeen: now, Count: 1}
+	if err := ts.InsertIOC(ctx, ioc); err != nil {
+		t.Fatal(err)
+	}
+	again := *ioc
+	again.TechniqueID = ""
+	if err := ts.InsertIOCs(ctx, []*IOC{&again}); err != nil {
+		t.Fatal(err)
+	}
+	var tech string
+	if err := ts.pool.QueryRow(ctx, `SELECT technique_id FROM iocs WHERE value=$1`, ioc.Value).Scan(&tech); err != nil {
+		t.Fatal(err)
+	}
+	if tech != "T1105" {
+		t.Fatalf("technique_id = %q after re-sighting, want T1105", tech)
+	}
+}
