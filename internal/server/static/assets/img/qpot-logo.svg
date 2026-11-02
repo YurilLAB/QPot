@@ -1,0 +1,20 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 240 260" role="img" aria-label="QPot">
+  <defs>
+    <clipPath id="hex"><polygon points="120,12 222,71 222,189 120,248 18,189 18,71"/></clipPath>
+    <clipPath id="jar"><circle cx="120" cy="152" r="41"/></clipPath>
+    <pattern id="comb" width="30" height="52" patternUnits="userSpaceOnUse">
+      <path d="M15 0 L30 8.66 L30 26 L15 34.64 L0 26 L0 8.66 Z M15 34.64 V52 M0 26 L-15 34.64 M30 26 L45 34.64" fill="none" stroke="#3498db" stroke-opacity=".16" stroke-width="1.5"/>
+    </pattern>
+  </defs>
+  <polygon points="120,8 226,69 226,191 120,252 14,191 14,69" fill="#0a0e14"/>
+  <rect width="240" height="260" fill="url(#comb)" clip-path="url(#hex)"/>
+  <polygon points="120,8 226,69 226,191 120,252 14,191 14,69" fill="none" stroke="#3498db" stroke-width="9" stroke-linejoin="round"/>
+  <rect x="94" y="94" width="52" height="16" fill="#131920" stroke="#3498db" stroke-width="6"/>
+  <rect x="80" y="80" width="80" height="17" rx="6" fill="#3498db"/>
+  <circle cx="120" cy="152" r="46" fill="#131920"/>
+  <path d="M72 158 q12 -9 24 0 t24 0 t24 0 t24 0 V200 H72 Z" fill="#f39c12" clip-path="url(#jar)"/>
+  <circle cx="120" cy="152" r="46" fill="none" stroke="#3498db" stroke-width="10"/>
+  <line x1="147" y1="180" x2="178" y2="211" stroke="#3498db" stroke-width="13" stroke-linecap="round"/>
+  <path d="M101 96 v13 a6 6 0 0 0 12 0 v-13 Z" fill="#f39c12"/>
+  <circle cx="132" cy="102" r="4" fill="#f39c12"/>
+</svg>

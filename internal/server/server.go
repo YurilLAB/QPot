@@ -9,10 +9,12 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io/fs"
 	"log/slog"
 	"net/http"
 	"os"
 	"os/exec"
+	"path"
 	"runtime"
 	"strconv"
 	"strings"
@@ -27,7 +29,7 @@ import (
 	"github.com/qpot/qpot/internal/overview"
 )
 
-//go:embed static/*
+//go:embed static
 var staticFS embed.FS
 
 // Server represents the web server
@@ -210,6 +212,9 @@ func (s *Server) setupRoutes() {
 	// events. Replaces the former ypanel phone-home agent; nothing leaves the host.
 	s.mux.HandleFunc("/api/overview", s.withQPotAuth(s.handleOverview))
 
+	// Attack map feed (T-Pot's map frontend at /map/, fed from QPot's events).
+	s.mux.HandleFunc("/api/map/stream", s.withQPotAuth(s.handleMapStream))
+
 }
 
 // withQPotAuth middleware checks QPot ID authentication
@@ -264,21 +269,68 @@ func (s *Server) handleStatic(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-
-	if r.URL.Path == "/" || r.URL.Path == "/static/index.html" {
-		data, err := staticFS.ReadFile("static/index.html")
+	switch p := r.URL.Path; {
+	case p == "/" || p == "/index.html":
+		serveEmbeddedHTML(w, "static/index.html") // T-Pot-style landing page
+	case p == "/dashboard" || p == "/dashboard/":
+		serveEmbeddedHTML(w, "static/dashboard.html")
+	case p == "/map":
+		http.Redirect(w, r, "/map/", http.StatusMovedPermanently)
+	case strings.Contains(p, ".."):
+		// The FileServer below serves the whole static root, so
+		// "/assets/../x" would reach files outside the asset trees; the mux
+		// cleans such paths, but do not rely on that.
+		http.NotFound(w, r)
+	case strings.HasPrefix(p, "/assets/") || strings.HasPrefix(p, "/map/"):
+		// The embedded FS is read-only and rooted, and noListFS refuses
+		// directory listings.
+		sub, err := fs.Sub(staticFS, "static")
 		if err != nil {
 			http.Error(w, "File not found", http.StatusNotFound)
 			return
 		}
-		w.Header().Set("Content-Type", "text/html; charset=utf-8")
-		w.Write(data)
+		http.FileServer(http.FS(noListFS{sub})).ServeHTTP(w, r)
+	default:
+		http.NotFound(w, r)
+	}
+}
+
+func serveEmbeddedHTML(w http.ResponseWriter, name string) {
+	data, err := staticFS.ReadFile(name)
+	if err != nil {
+		http.Error(w, "File not found", http.StatusNotFound)
 		return
 	}
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	_, _ = w.Write(data)
+}
 
-	// Serve other static files normally. http.FS cleans the path and the
-	// embedded FS is read-only and rooted, so "../" traversal is not possible.
-	http.FileServer(http.FS(staticFS)).ServeHTTP(w, r)
+// noListFS serves files and directories that have an index.html, and
+// nothing else, so the static tree cannot be browsed.
+type noListFS struct{ fs.FS }
+
+func (n noListFS) Open(name string) (fs.File, error) {
+	f, err := n.FS.Open(name)
+	if err != nil {
+		// http.FileServer turns any error other than not-exist/permission
+		// into a 500 (e.g. fs.ErrInvalid for a name that is not valid
+		// UTF-8); a bad path is the client's, so report it as not found.
+		return nil, fs.ErrNotExist
+	}
+	st, err := f.Stat()
+	if err != nil {
+		f.Close()
+		return nil, err
+	}
+	if st.IsDir() {
+		idx, err := n.FS.Open(path.Join(name, "index.html"))
+		if err != nil {
+			f.Close()
+			return nil, fs.ErrNotExist
+		}
+		idx.Close()
+	}
+	return f, nil
 }
 
 // Start starts the web server and background alert polling.
@@ -560,7 +612,18 @@ func (s *Server) fireWebhook(ctx context.Context, stats *database.Stats) {
 	slog.Info("Alert webhook fired", "status", resp.StatusCode, "url", s.config.Alerts.WebhookURL)
 }
 
-// authMiddleware adds basic authentication
+// isPublicPath reports paths served without authentication: the static pages
+// and their assets (they hold no data and no credential - every API call they
+// make needs the QPot ID) and the public canary beacon (/c/<token>), which
+// must be reachable by anyone who triggers a planted token.
+func isPublicPath(p string) bool {
+	switch p {
+	case "/", "/index.html", "/dashboard", "/dashboard/", "/map":
+		return true
+	}
+	return strings.HasPrefix(p, "/assets/") || strings.HasPrefix(p, "/map/") || strings.HasPrefix(p, "/c/")
+}
+
 // securityHeaders wraps a handler with standard hardening response headers for
 // the web UI: block MIME sniffing, framing (clickjacking), referrer leakage,
 // and constrain resource loading via a Content-Security-Policy. The CSP allows
@@ -575,20 +638,23 @@ func securityHeaders(next http.Handler) http.Handler {
 		h.Set("Referrer-Policy", "no-referrer")
 		h.Set("Content-Security-Policy",
 			"default-src 'self'; script-src 'self' 'unsafe-inline'; "+
-				"style-src 'self' 'unsafe-inline'; img-src 'self' data:; "+
+				"style-src 'self' 'unsafe-inline'; "+
+				// No third-party images: the attack map draws its world locally.
+				"img-src 'self' data:; "+
 				"connect-src 'self'; base-uri 'self'; form-action 'self'; "+
 				"frame-ancestors 'none'")
 		next.ServeHTTP(w, r)
 	})
 }
 
+// authMiddleware adds basic authentication (when configured) to everything
+// but the public paths.
 func (s *Server) authMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// Skip auth for static files (they handle their own auth) and for the
 		// public canary beacon (/c/<token>), which must be reachable by anyone
 		// who triggers a planted token — that is the whole point of a canary.
-		if r.URL.Path == "/" || strings.HasPrefix(r.URL.Path, "/static/") ||
-			strings.HasPrefix(r.URL.Path, "/c/") {
+		if isPublicPath(r.URL.Path) {
 			next.ServeHTTP(w, r)
 			return
 		}

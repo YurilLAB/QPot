@@ -362,6 +362,9 @@
         .tabs { display: flex; gap: 6px; margin-bottom: 24px; border-bottom: 1px solid var(--border); }
         .tab-btn { background: none; border: none; color: var(--text-secondary); padding: 10px 18px; font-size: 14px; cursor: pointer; border-bottom: 2px solid transparent; }
         .tab-btn:hover { color: var(--text-primary); }
+        .tab-spacer { flex: 1; }
+        a.tab-link { text-decoration: none; display: inline-flex; align-items: center; }
+        @media (max-width: 640px) { .tabs { flex-wrap: wrap; } .tab-spacer { display: none; } }
         .tab-btn.active { color: var(--accent); border-bottom-color: var(--accent); font-weight: 600; }
 
         .intel-summary { font-size: 12px; font-weight: normal; color: var(--text-secondary); margin-left: 10px; }
@@ -537,6 +540,9 @@
             <button class="tab-btn" data-tab="overview" onclick="switchTab('overview')">Overview</button>
             <button class="tab-btn" data-tab="pairing" onclick="switchTab('pairing')">Pairing / Networking</button>
             <button class="tab-btn" data-tab="security" onclick="switchTab('security')">Security</button>
+            <span class="tab-spacer"></span>
+            <a class="tab-btn tab-link" href="/map/">Attack Map</a>
+            <a class="tab-btn tab-link" href="/">Home</a>
         </nav>
 
         <div id="tab-dashboard">
@@ -681,32 +687,54 @@
             const savedID = localStorage.getItem('qpot_id');
             if (savedID) {
                 currentQPotID = savedID;
-                document.getElementById('qpot-id-display').textContent = currentQPotID;
+                document.getElementById('qpot-id-display').textContent = maskID(currentQPotID);
                 document.getElementById('auth-overlay').classList.add('hidden');
                 document.getElementById('main-content').classList.remove('hidden');
                 loadData();
                 startAutoRefresh();
+                openFromHash();
+            }
+        }
+
+        // The credential is shown masked; the copy button still copies it whole.
+        function maskID(id) {
+            return id && id.length > 10 ? id.slice(0, 6) + '\u2026' + id.slice(-4) : id;
+        }
+
+        // Deep links from the home page: /dashboard#overview, #intel, #pairing, #security.
+        function openFromHash() {
+            const h = (location.hash || '').slice(1);
+            if (['overview', 'pairing', 'security'].includes(h)) { switchTab(h); }
+            if (h === 'intel') {
+                const el = document.getElementById('intel-summary');
+                if (el) { el.closest('.card').scrollIntoView({ behavior: 'smooth' }); }
             }
         }
 
         // Authenticate with QPot ID
-        function authenticate() {
+        async function authenticate() {
             const input = document.getElementById('qpot-id-input');
             const id = input.value.trim();
-            
-            if (!id || !id.startsWith('qp_') || id.length !== 27) {
+            const reject = () => {
                 input.style.borderColor = 'var(--danger)';
-                setTimeout(() => input.style.borderColor = '', 1000);
-                return;
-            }
-            
+                setTimeout(() => input.style.borderColor = '', 1500);
+            };
+            if (!id || !id.startsWith('qp_') || id.length !== 27) { reject(); return; }
+            // Check the ID with the server before storing it: a typo used to be
+            // saved and every panel then failed silently.
+            try {
+                const r = await fetch(`${API_BASE}/status`, { headers: { 'X-QPot-ID': id } });
+                if (!r.ok) { reject(); return; }
+            } catch (e) { reject(); return; }
+
             currentQPotID = id;
             localStorage.setItem('qpot_id', currentQPotID);
-            document.getElementById('qpot-id-display').textContent = currentQPotID;
+            document.getElementById('qpot-id-display').textContent = maskID(currentQPotID);
             document.getElementById('auth-overlay').classList.add('hidden');
             document.getElementById('main-content').classList.remove('hidden');
             loadData();
             startAutoRefresh();
+            openFromHash();
         }
 
         // Copy QPot ID to clipboard

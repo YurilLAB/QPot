@@ -30,7 +30,7 @@ func newTestServer(qpotIDAuth bool) *Server {
 func TestStaticIndexDoesNotLeakQPotID(t *testing.T) {
 	s := newTestServer(true)
 
-	for _, path := range []string{"/", "/static/index.html"} {
+	for _, path := range []string{"/", "/index.html", "/dashboard", "/map/"} {
 		req := httptest.NewRequest(http.MethodGet, path, nil)
 		rec := httptest.NewRecorder()
 		s.handleStatic(rec, req)
@@ -58,11 +58,11 @@ func TestStaticIndexDoesNotLeakQPotID(t *testing.T) {
 // to the real API surface. If someone reintroduces a stub, this fails.
 func TestStaticServesRealDashboard(t *testing.T) {
 	s := newTestServer(true)
-	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	req := httptest.NewRequest(http.MethodGet, "/dashboard", nil)
 	rec := httptest.NewRecorder()
 	s.handleStatic(rec, req)
 	if rec.Code != http.StatusOK {
-		t.Fatalf("GET /: status %d, want 200", rec.Code)
+		t.Fatalf("GET /dashboard: status %d, want 200", rec.Code)
 	}
 	body := rec.Body.String()
 
@@ -96,7 +96,7 @@ func TestStaticServesRealDashboard(t *testing.T) {
 // registered in setupRoutes. This catches the dashboard calling an endpoint
 // the server doesn't serve (a 404 in the live UI) without needing a browser.
 func TestEmbeddedDashboardEndpointsAreRouted(t *testing.T) {
-	data, err := staticFS.ReadFile("static/index.html")
+	data, err := staticFS.ReadFile("static/dashboard.html")
 	if err != nil {
 		t.Fatalf("read embedded dashboard: %v", err)
 	}
@@ -133,6 +133,17 @@ func TestEmbeddedDashboardEndpointsAreRouted(t *testing.T) {
 	}
 	if len(seen) == 0 {
 		t.Error("found no ${API_BASE} fetch calls in the embedded dashboard")
+	}
+
+	// The landing page and the attack map call these directly.
+	for _, ep := range []string{"/status", "/overview", "/iocs/export", "/map/stream"} {
+		req := httptest.NewRequest(http.MethodGet, "/api"+ep, nil)
+		req.Header.Set("X-QPot-ID", validTestID)
+		rec := httptest.NewRecorder()
+		srv.mux.ServeHTTP(rec, req)
+		if rec.Code == http.StatusNotFound {
+			t.Errorf("landing page / map fetch /api%s but no route is registered (404)", ep)
+		}
 	}
 }
 
@@ -365,5 +376,52 @@ func TestHandleClusterRejectsNonGET(t *testing.T) {
 	s.handleCluster(rec, req)
 	if rec.Code != http.StatusMethodNotAllowed {
 		t.Errorf("POST /api/cluster: status %d, want 405", rec.Code)
+	}
+}
+
+// The landing page, map and their assets are served; directories are not
+// listed; anything else is a 404 (not the dashboard, as "/" used to be).
+func TestStaticRoutes(t *testing.T) {
+	s := newTestServer(true)
+	cases := map[string]int{
+		"/":                         http.StatusOK,
+		"/dashboard":                http.StatusOK,
+		"/map":                      http.StatusMovedPermanently,
+		"/map/":                     http.StatusOK,
+		"/map/static/map.js":        http.StatusOK,
+		"/map/static/qpot-feed.js":  http.StatusOK,
+		"/assets/js/landing.js":     http.StatusOK,
+		"/assets/":                  http.StatusNotFound, // no listing
+		"/map/static/":              http.StatusNotFound,
+		"/map/static/flags/":        http.StatusNotFound,
+		"/static/index.html":        http.StatusNotFound,
+		"/assets/../dashboard.html": http.StatusNotFound,
+		"/map/../index.html":        http.StatusNotFound,
+		"/map/static/..%2f..%2fx":   http.StatusNotFound,
+		"/nope":                     http.StatusNotFound,
+	}
+	for path, want := range cases {
+		rec := httptest.NewRecorder()
+		s.handleStatic(rec, httptest.NewRequest(http.MethodGet, path, nil))
+		if rec.Code != want {
+			t.Errorf("GET %s: %d, want %d", path, rec.Code, want)
+		}
+	}
+	landing := httptest.NewRecorder()
+	s.handleStatic(landing, httptest.NewRequest(http.MethodGet, "/", nil))
+	for _, want := range []string{"/dashboard", "/map/", "particles-js", "landing.js"} {
+		if !strings.Contains(landing.Body.String(), want) {
+			t.Errorf("landing page missing %q", want)
+		}
+	}
+	for _, p := range []string{"/", "/dashboard", "/map/", "/assets/js/landing.js", "/c/x"} {
+		if !isPublicPath(p) {
+			t.Errorf("%s should be public", p)
+		}
+	}
+	for _, p := range []string{"/api/status", "/api/map/stream", "/api/overview"} {
+		if isPublicPath(p) {
+			t.Errorf("%s must require auth", p)
+		}
 	}
 }

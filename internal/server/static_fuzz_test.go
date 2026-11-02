@@ -27,6 +27,9 @@ func FuzzStaticHandler(f *testing.F) {
 		"//static//index.html", "/static/./index.html",
 		"/static/\x00", "/static/index.html\x00.png",
 		"/STATIC/INDEX.HTML", "/" + strings.Repeat("a/", 500),
+		"/dashboard", "/map", "/map/", "/assets/../dashboard.html",
+		"/map/static/../../server.go", "/assets/%2e%2e/%2e%2e/server.go",
+		"/map/static/flags/", "/assets/js/landing.js",
 	}
 	for _, s := range seeds {
 		f.Add(s)
