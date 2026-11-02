@@ -86,7 +86,6 @@ type Config struct {
 	Stealth      StealthConfig             `yaml:"stealth"`
 	Alerts       AlertConfig               `yaml:"alerts"`
 	Intelligence IntelligenceConfig        `yaml:"intelligence"`
-	Yuril        YurilConfig               `yaml:"yuril"`
 	Ypanel       YpanelConfig              `yaml:"ypanel"`
 	Response     ResponseConfig            `yaml:"response"`
 	Collector    CollectorConfig           `yaml:"collector"`
@@ -180,19 +179,6 @@ type CanaryConfig struct {
 
 	// MaxTrips bounds the retained trip history in canaries.json. Default 500.
 	MaxTrips int `yaml:"max_trips"`
-}
-
-// YurilConfig controls the forwarder that pushes classified IOCs into the
-// Yuril Security Suite. When Enabled is false the forwarder is never
-// constructed and QPot runs standalone.
-type YurilConfig struct {
-	Enabled   bool          `yaml:"enabled"`
-	Endpoint  string        `yaml:"endpoint"`   // e.g. https://tracking.local:8443/api/v1/ingest/intel
-	APIKey    string        `yaml:"api_key"`    // bearer token for the endpoint
-	Source    string        `yaml:"source"`     // producer label; defaults to "qpot_honeypot"
-	BatchSize int           `yaml:"batch_size"` // max indicators per POST; defaults to 200
-	Timeout   time.Duration `yaml:"timeout"`    // HTTP timeout; defaults to 10s
-	VerifyTLS bool          `yaml:"verify_tls"` // defaults to true
 }
 
 // YpanelConfig controls the phone-home agent that bridges this QPot instance to
@@ -830,8 +816,8 @@ func Load(instanceName string) (*Config, error) {
 	}
 
 	// Surface obvious misconfigurations at load time. We log instead of
-	// returning an error so a broken sub-section (e.g. unreachable Yuril
-	// endpoint) doesn't prevent QPot from starting and serving honeypots —
+	// returning an error so a broken sub-section (e.g. an unreachable ypanel
+	// worker) doesn't prevent QPot from starting and serving honeypots —
 	// it's a defence-in-depth principle: the honeypot platform itself
 	// must keep running even when integrations are misconfigured.
 	for _, msg := range cfg.Validate() {
@@ -851,21 +837,6 @@ func Load(instanceName string) (*Config, error) {
 // callers should log the warnings rather than refuse to start.
 func (c *Config) Validate() []string {
 	var warnings []string
-
-	// Yuril forwarder: if enabled, endpoint must be a parseable HTTP(S) URL.
-	if c.Yuril.Enabled {
-		ep := strings.TrimSpace(c.Yuril.Endpoint)
-		if ep == "" {
-			warnings = append(warnings, "yuril.enabled=true but yuril.endpoint is empty; forwarder will be disabled at runtime")
-		} else if u, err := url.Parse(ep); err != nil || (u.Scheme != "http" && u.Scheme != "https") {
-			warnings = append(warnings, fmt.Sprintf("yuril.endpoint %q is not a valid http(s) URL", ep))
-		} else if u.Scheme == "http" && c.Yuril.VerifyTLS {
-			warnings = append(warnings, "yuril.endpoint uses http:// (no TLS); set https:// for production")
-		}
-		if strings.TrimSpace(c.Yuril.APIKey) == "" {
-			warnings = append(warnings, "yuril.api_key is empty; the receiver may reject unauthenticated batches")
-		}
-	}
 
 	// ypanel phone-home agent: if enabled it needs a worker URL and the three
 	// credentials (instance id, enrollment token, a license JWS). Missing pieces

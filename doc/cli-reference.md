@@ -31,7 +31,6 @@ this document stays in lock-step with the code.
 - [Docker management — `qpot docker`](#docker-management--qpot-docker)
 - [Database migrations — `qpot db`](#database-migrations--qpot-db)
 - [Cluster / pairing — `qpot cluster`](#cluster--pairing--qpot-cluster)
-- [Yuril integration — `qpot yuril`](#yuril-integration--qpot-yuril)
 - [Configuration — `qpot config`](#configuration--qpot-config)
 - [Utilities](#utilities)
   - [`qpot id`](#qpot-id)
@@ -84,7 +83,6 @@ qpot --version
 | `qpot db` | Inspect schema versions and run/roll back migrations. |
 | `qpot cluster` | Pair multiple nodes into a managed group (aliases: `group`, `pair`, `networking`). |
 | `qpot canary` | Mint and manage canaries (honeytokens) — decoy artifacts that alert on any interaction. |
-| `qpot yuril` | Configure and inspect the Yuril Security Suite integration. |
 | `qpot config` | Open or print the instance config file. |
 | `qpot id` | Show the QPot ID for an instance. |
 | `qpot completion` | Generate a shell autocompletion script. |
@@ -464,38 +462,6 @@ qpot canary artifact cnry_abc123 --out Q4-Salaries.html
 ```bash
 qpot canary rm cnry_abc123   # aliases: remove, delete
 ```
-
----
-
-## Yuril integration — `qpot yuril`
-
-Manage QPot's outbound forwarder to **YurilTracking** and the inbound,
-bidirectional API used by **YurilAntivirus**.
-
-```text
-qpot yuril [command]
-```
-
-| Subcommand | Flags | Description |
-|------------|-------|-------------|
-| `setup` | `-i, --instance` | Interactively configure the forwarder and write it into the instance config. |
-| `test` | `-i, --instance` | Validate connectivity end-to-end (auth + TLS + reachability). |
-| `status` | `-i, --instance` | Show the configuration, inbound endpoint URLs, and live forwarder counters. |
-
-`-i, --instance string` selects the instance (default `default`).
-
-```bash
-qpot yuril setup     # prompts for endpoint, API key (hidden), source label, TLS
-qpot yuril test      # reports success / auth failure / TLS issue / unreachable distinctly
-qpot yuril status    # config + live counters from /api/yuril/health when the server is running
-```
-
-**How it works.** `setup` walks through the forwarder settings and persists
-them. `test` builds a real `Forwarder` and submits an empty test batch, so it
-exercises the exact auth and TLS path a live forward would use, and classifies
-failures (auth vs. TLS vs. unreachable host) so misconfigurations are easy to
-pinpoint. `status` reads live counters from the running web server's
-`/api/yuril/health` endpoint.
 
 ---
 

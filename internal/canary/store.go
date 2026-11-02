@@ -195,7 +195,7 @@ func (s *Store) Trips(limit int) []*Trip {
 // TripDedupeWindow folds repeat hits of one canary from one source (same
 // channel) into the first trip. Without it, anyone holding a single token could
 // replay it in a loop and turn every request into a new critical event, IOC
-// insert, Yuril forward and full rewrite of the store file.
+// insert and full rewrite of the store file.
 var TripDedupeWindow = time.Minute
 
 // recentTripLocked returns a trip of c from srcIP on channel within the dedupe

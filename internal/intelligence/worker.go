@@ -2,20 +2,11 @@ package intelligence
 
 import (
 	"context"
-	"fmt"
 	"log/slog"
 	"time"
 
 	"github.com/qpot/qpot/internal/database"
 )
-
-// Forwarder is the subset of the Yuril forwarder the worker needs. Defining
-// it here (rather than importing the yuril package directly) keeps the
-// intelligence package free of an outbound dependency and avoids any import
-// cycle, while *yuril.Forwarder satisfies it as-is.
-type Forwarder interface {
-	Forward(ctx context.Context, batchID string, iocs []*database.IOC) error
-}
 
 // CanaryMatcher inspects each processed event for any planted canary
 // (honeytoken) value and records a trip when one is found. It is defined here
@@ -34,7 +25,6 @@ type Worker struct {
 	db         database.Database
 	interval   time.Duration
 	batchSize  int
-	forwarder  Forwarder
 	canary     CanaryMatcher
 }
 
@@ -62,14 +52,6 @@ func NewWorker(classifier *Classifier, db database.Database, interval time.Durat
 		interval:   interval,
 		batchSize:  batchSize,
 	}
-}
-
-// WithForwarder attaches a Yuril forwarder so newly classified IOCs are
-// pushed downstream after they are persisted. Returns the worker to allow
-// fluent wiring. A nil forwarder is ignored at forward time.
-func (w *Worker) WithForwarder(f Forwarder) *Worker {
-	w.forwarder = f
-	return w
 }
 
 // WithCanaryMatcher attaches a canary matcher so captured sessions are scanned
@@ -152,17 +134,6 @@ func (w *Worker) runOnce(ctx context.Context) int {
 		if err := w.db.InsertIOCs(ctx, iocs); err != nil {
 			slog.Warn("Intelligence worker: failed to insert IOC batch", "error", err,
 				"count", len(iocs))
-		}
-	}
-
-	// Push the freshly classified IOCs downstream to Yuril when a forwarder
-	// is attached. Forwarding failures are non-fatal: the IOCs are already
-	// persisted locally, so QPot stays useful even if Yuril is unreachable.
-	if w.forwarder != nil && len(iocs) > 0 {
-		batchID := fmt.Sprintf("qpot-intel-%d", time.Now().UnixNano())
-		if err := w.forwarder.Forward(ctx, batchID, iocs); err != nil {
-			slog.Warn("Intelligence worker: failed to forward IOCs to Yuril",
-				"error", err, "count", len(iocs))
 		}
 	}
 

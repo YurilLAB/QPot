@@ -94,7 +94,7 @@ func (s *Server) serveCanaryDecoy(w http.ResponseWriter) {
 
 // onCanaryTrip is invoked once per recorded trip (from either channel). It logs
 // a high-visibility alert and emits the trip as a classified canary event into
-// the events pipeline so it shows up in the feed, IOC store, Yuril, and ypanel.
+// the events pipeline so it shows up in the feed, IOC store and ypanel.
 func (s *Server) onCanaryTrip(ctx context.Context, trip *canary.Trip) {
 	slog.Warn("CANARY TRIPPED",
 		"canary_id", trip.CanaryID, "name", trip.Name, "kind", trip.Kind,
@@ -117,12 +117,6 @@ func (s *Server) onCanaryTrip(ctx context.Context, trip *canary.Trip) {
 	if len(iocs) > 0 {
 		if err := s.database.InsertIOCs(insCtx, iocs); err != nil {
 			slog.Warn("canary: failed to insert trip IOCs", "error", err)
-		}
-		if s.forwarder != nil {
-			batchID := fmt.Sprintf("qpot-canary-%d", time.Now().UnixNano())
-			if err := s.forwarder.Forward(insCtx, batchID, iocs); err != nil {
-				slog.Warn("canary: failed to forward trip IOCs to Yuril", "error", err)
-			}
 		}
 	}
 }

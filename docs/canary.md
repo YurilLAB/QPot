@@ -18,12 +18,12 @@ your data*. Run both.
                                        │ trip
                                        ▼
                          database.Event (honeypot="canary", severity=critical)
-                         → events feed → IOC store → Yuril → ypanel
+                         → events feed → IOC store → ypanel
 ```
 
 A canary trip is just an event tagged `honeypot="canary"`, so it flows through
-the *existing* pipeline — the attacker activity feed, IOC extraction, the Yuril
-forwarder, and the ypanel snapshot — with no special-casing downstream.
+the *existing* pipeline — the attacker activity feed, IOC extraction and the
+ypanel snapshot — with no special-casing downstream.
 
 ## Canary kinds
 

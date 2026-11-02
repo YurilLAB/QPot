@@ -23,7 +23,7 @@
 //     estate. Detected by the intelligence worker as it processes events.
 //
 // Every trip is mapped to a database.Event tagged honeypot="canary" so it flows
-// through the existing pipeline (events feed, IOC extraction, Yuril forwarding,
+// through the existing pipeline (events feed, IOC extraction,
 // the ypanel snapshot) with no special-casing downstream.
 package canary
 
