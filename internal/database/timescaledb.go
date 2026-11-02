@@ -7,6 +7,8 @@ import (
 	"io"
 	"log/slog"
 	"net"
+	"net/url"
+	"strconv"
 	"strings"
 	"time"
 
@@ -30,15 +32,19 @@ func NewTimescaleDB(cfg *config.DatabaseConfig) (*TimescaleDB, error) {
 
 // Connect establishes connection to TimescaleDB
 func (ts *TimescaleDB) Connect(ctx context.Context) error {
-	connString := fmt.Sprintf(
-		"postgres://%s:%s@%s:%d/%s?sslmode=%s&pool_max_conns=10&pool_max_conn_lifetime=1h",
-		ts.config.Username,
-		ts.config.Password,
-		ts.config.Host,
-		ts.config.Port,
-		ts.config.Database,
-		ts.config.SSLMode,
-	)
+	// Built with net/url so special characters in the user, password or
+	// database name ('@', '/', '#', ':', ...) cannot break the DSN.
+	q := url.Values{}
+	q.Set("sslmode", ts.config.SSLMode)
+	q.Set("pool_max_conns", "10")
+	q.Set("pool_max_conn_lifetime", "1h")
+	connString := (&url.URL{
+		Scheme:   "postgres",
+		User:     url.UserPassword(ts.config.Username, ts.config.Password),
+		Host:     net.JoinHostPort(ts.config.Host, strconv.Itoa(ts.config.Port)),
+		Path:     "/" + ts.config.Database,
+		RawQuery: q.Encode(),
+	}).String()
 
 	config, err := pgxpool.ParseConfig(connString)
 	if err != nil {
@@ -477,6 +483,30 @@ func (ts *TimescaleDB) GetStats(ctx context.Context, since time.Time) (*Stats, e
 		}
 		stats.TopCountries = append(stats.TopCountries, cc)
 	}
+	if err := countryRows.Err(); err != nil {
+		return nil, err
+	}
+
+	// Per-honeypot counts. Alerts filtered by honeypot, the alert payload's
+	// top honeypot and the overview's per-honeypot activity all read these;
+	// without them those features silently did nothing on TimescaleDB.
+	hpRows, err := ts.pool.Query(ctx,
+		"SELECT honeypot, COUNT(*) FROM events WHERE timestamp >= $1 GROUP BY honeypot ORDER BY COUNT(*) DESC",
+		since)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get top honeypots: %w", err)
+	}
+	defer hpRows.Close()
+	for hpRows.Next() {
+		var hc HoneypotCount
+		if err := hpRows.Scan(&hc.Honeypot, &hc.Count); err != nil {
+			return nil, err
+		}
+		stats.TopHoneypots = append(stats.TopHoneypots, hc)
+	}
+	if err := hpRows.Err(); err != nil {
+		return nil, err
+	}
 
 	return stats, nil
 }
@@ -662,7 +692,7 @@ func (ts *TimescaleDB) ExportData(ctx context.Context, start, end time.Time, w i
 			return fmt.Errorf("failed to scan row: %w", err)
 		}
 		line := fmt.Sprintf("%s,%s,%s,%d,%d,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%.4f\n",
-			ts2.UTC().Format(time.RFC3339),
+			ts2.UTC().Format(time.RFC3339Nano),
 			csvEscape(honeypot), csvEscape(sourceIP),
 			sourcePort, destPort,
 			csvEscape(protocol), csvEscape(eventType),
@@ -704,7 +734,8 @@ func (ts *TimescaleDB) ImportData(ctx context.Context, r io.Reader) error {
 	}
 
 	// Skip header line
-	imported := 0
+	imported, failed := 0, 0
+	var firstErr error
 	for _, line := range lines[1:] {
 		line = strings.TrimSpace(line)
 		if line == "" {
@@ -716,11 +747,19 @@ func (ts *TimescaleDB) ImportData(ctx context.Context, r io.Reader) error {
 		// comma split would shift every subsequent column and corrupt the row.
 		fields := splitCSVLine(line)
 		if len(fields) < 16 {
+			failed++
+			if firstErr == nil {
+				firstErr = fmt.Errorf("row has %d fields, want 16", len(fields))
+			}
 			continue
 		}
 
 		ts2, err := time.Parse(time.RFC3339, fields[0])
 		if err != nil {
+			failed++
+			if firstErr == nil {
+				firstErr = err
+			}
 			continue
 		}
 
@@ -729,7 +768,7 @@ func (ts *TimescaleDB) ImportData(ctx context.Context, r io.Reader) error {
 				timestamp, honeypot, source_ip, source_port, dest_port,
 				protocol, event_type, username, password, command,
 				country, city, asn, technique_id, technique_name
-			) VALUES ($1,$2,$3::inet,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)
+			) VALUES ($1,$2,NULLIF($3, '')::inet,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)
 			ON CONFLICT DO NOTHING
 		`,
 			ts2, fields[1], fields[2], fields[3], fields[4],
@@ -738,12 +777,19 @@ func (ts *TimescaleDB) ImportData(ctx context.Context, r io.Reader) error {
 		)
 		if err != nil {
 			slog.Warn("ImportData: failed to insert row", "error", err)
+			failed++
+			if firstErr == nil {
+				firstErr = err
+			}
 			continue
 		}
 		imported++
 	}
 
-	slog.Info("ImportData complete", "imported", imported)
+	slog.Info("ImportData complete", "imported", imported, "failed", failed)
+	if failed > 0 {
+		return fmt.Errorf("import: %d of %d rows failed (first: %w)", failed, imported+failed, firstErr)
+	}
 	return nil
 }
 

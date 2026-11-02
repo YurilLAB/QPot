@@ -255,3 +255,49 @@ func ValidateConfig(cfg *config.DatabaseConfig) error {
 
 	return nil
 }
+
+// mergeIOCSightings collapses repeated sightings of the same indicator
+// (type, value, honeypot) within one batch: counts add up, first_seen is the
+// earliest and last_seen the latest, and the newest non-empty technique,
+// source IP and metadata win. Order of first appearance is kept.
+func mergeIOCSightings(iocs []*IOC) []*IOC {
+	type key struct{ t, v, h string }
+	idx := make(map[key]int, len(iocs))
+	out := make([]*IOC, 0, len(iocs))
+	for _, in := range iocs {
+		if in == nil {
+			continue
+		}
+		k := key{in.Type, in.Value, in.Honeypot}
+		cnt := in.Count
+		if cnt <= 0 {
+			cnt = 1
+		}
+		i, ok := idx[k]
+		if !ok {
+			cp := *in
+			cp.Count = cnt
+			idx[k] = len(out)
+			out = append(out, &cp)
+			continue
+		}
+		m := out[i]
+		m.Count += cnt
+		if !in.FirstSeen.IsZero() && (m.FirstSeen.IsZero() || in.FirstSeen.Before(m.FirstSeen)) {
+			m.FirstSeen = in.FirstSeen
+		}
+		if in.LastSeen.After(m.LastSeen) {
+			m.LastSeen = in.LastSeen
+		}
+		if in.TechniqueID != "" {
+			m.TechniqueID = in.TechniqueID
+		}
+		if in.SourceIP != "" {
+			m.SourceIP = in.SourceIP
+		}
+		if len(in.Metadata) > 0 {
+			m.Metadata = in.Metadata
+		}
+	}
+	return out
+}

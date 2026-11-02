@@ -47,3 +47,37 @@ func checkIOCValueAndSourceFilters(t *testing.T, db Database, refresh func()) {
 		t.Errorf("SourceIPs filter returned %v, want the 2 IOCs seen from 198.51.100.10", v)
 	}
 }
+
+// checkIOCSightingsAccumulate: every write of an indicator is one more sighting.
+// The stored count must add up (also for repeats inside one batch), first_seen
+// must stay at the earliest sighting and last_seen move to the latest. The
+// ClickHouse ReplacingMergeTree and Elasticsearch index-by-_id writes used to
+// replace the row, so count stayed at 1 and first_seen tracked the latest hit.
+func checkIOCSightingsAccumulate(t *testing.T, db Database, value string, refresh func()) {
+	t.Helper()
+	ctx := context.Background()
+	t0 := time.Now().UTC().Truncate(time.Millisecond).Add(-time.Hour)
+	mk := func(at time.Time) *IOC {
+		return &IOC{ID: "ip:" + value + ":cowrie", Type: "ip", Value: value, Honeypot: "cowrie",
+			SourceIP: value, FirstSeen: at, LastSeen: at, Count: 1}
+	}
+	if err := db.InsertIOCs(ctx, []*IOC{mk(t0)}); err != nil {
+		t.Fatal(err)
+	}
+	refresh()
+	if err := db.InsertIOCs(ctx, []*IOC{mk(t0.Add(time.Minute)), mk(t0.Add(2 * time.Minute))}); err != nil {
+		t.Fatal(err)
+	}
+	refresh()
+	got, err := db.GetIOCs(ctx, IOCFilter{Values: []string{value}, Limit: 10})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("GetIOCs = %d rows, want 1: %+v", len(got), got)
+	}
+	g := got[0]
+	if g.Count != 3 || !g.FirstSeen.Equal(t0) || !g.LastSeen.Equal(t0.Add(2*time.Minute)) {
+		t.Fatalf("count=%d first=%v last=%v; want 3, %v, %v", g.Count, g.FirstSeen, g.LastSeen, t0, t0.Add(2*time.Minute))
+	}
+}

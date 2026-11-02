@@ -156,3 +156,11 @@ func TestESTagsSameTimestampEventsSeparately(t *testing.T) {
 		_, _, _ = es.esRequest(context.Background(), http.MethodPost, "/qpot-events-*/_refresh", nil)
 	})
 }
+
+func TestESIOCSightingsAccumulate(t *testing.T) {
+	es := connectES(t)
+	ip := fmt.Sprintf("198.51.100.%d", 100+time.Now().UnixNano()%100)
+	checkIOCSightingsAccumulate(t, es, ip, func() {
+		_, _, _ = es.esRequest(context.Background(), http.MethodPost, "/qpot-iocs/_refresh", nil)
+	})
+}

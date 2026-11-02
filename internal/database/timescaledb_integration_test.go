@@ -7,6 +7,7 @@ import (
 	"encoding/base64"
 	"os"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -280,4 +281,67 @@ func TestPGCollectorIngestView(t *testing.T) {
 func TestPGTagsSameTimestampEventsSeparately(t *testing.T) {
 	ts := connectPG(t)
 	checkSameMillisecondTagging(t, ts, "198.51.100.77", func() {})
+}
+
+// GetStats must report per-honeypot counts: alert honeypot filters, the alert's
+// top honeypot and the overview all depend on them.
+func TestPGStatsTopHoneypots(t *testing.T) {
+	ts := connectPG(t)
+	ctx := context.Background()
+	now := time.Now().UTC()
+	var evs []*Event
+	for i := 0; i < 3; i++ {
+		evs = append(evs, &Event{Timestamp: now, Honeypot: "cowrie", SourceIP: "203.0.113.5", EventType: "x"})
+	}
+	evs = append(evs, &Event{Timestamp: now, Honeypot: "dionaea", SourceIP: "203.0.113.6", EventType: "x"})
+	if err := ts.InsertEvents(ctx, evs); err != nil {
+		t.Fatal(err)
+	}
+	st, err := ts.GetStats(ctx, now.Add(-time.Hour))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(st.TopHoneypots) != 2 || st.TopHoneypots[0].Honeypot != "cowrie" || st.TopHoneypots[0].Count != 3 ||
+		st.TopHoneypots[1].Count != 1 {
+		t.Fatalf("TopHoneypots = %+v", st.TopHoneypots)
+	}
+}
+
+func TestPGIOCSightingsAccumulate(t *testing.T) {
+	checkIOCSightingsAccumulate(t, connectPG(t), "198.51.100.90", func() {})
+}
+
+// An export must import back in full: events without a source IP (exported as
+// "") used to fail the ::inet cast and be dropped with only a log line, and
+// timestamps lost their sub-second part.
+func TestPGExportImportKeepsNullIPAndPrecision(t *testing.T) {
+	ts := connectPG(t)
+	ctx := context.Background()
+	at := time.Now().UTC().Truncate(time.Millisecond).Add(-time.Minute).Add(123 * time.Millisecond)
+	if _, err := ts.pool.Exec(ctx, `INSERT INTO events (timestamp, honeypot, source_ip, event_type, username, password, command,
+		protocol, country, city, asn) VALUES ($1, 'cowrie', NULL, 'x', '', '', '', '', '', '', '')`, at); err != nil {
+		t.Fatal(err)
+	}
+	var buf bytes.Buffer
+	if err := ts.ExportData(ctx, at.Add(-time.Minute), at.Add(time.Minute), &buf); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ts.pool.Exec(ctx, `DELETE FROM events`); err != nil {
+		t.Fatal(err)
+	}
+	if err := ts.ImportData(ctx, &buf); err != nil {
+		t.Fatalf("ImportData: %v", err)
+	}
+	var n int
+	var got time.Time
+	if err := ts.pool.QueryRow(ctx, `SELECT COUNT(*), MAX(timestamp) FROM events WHERE source_ip IS NULL`).Scan(&n, &got); err != nil {
+		t.Fatal(err)
+	}
+	if n != 1 || !got.Equal(at) {
+		t.Fatalf("imported %d NULL-IP rows at %v, want 1 at %v", n, got, at)
+	}
+
+	if err := ts.ImportData(ctx, strings.NewReader("header\nnot,a,valid,row\n")); err == nil {
+		t.Error("ImportData reported success for a malformed row")
+	}
 }

@@ -1129,6 +1129,16 @@ func esDocID(id string) string {
 
 // iocToESDoc builds the stored document for an IOC. source_ip is mapped as
 // "ip", so it is omitted when empty or invalid (ES would reject the document).
+// esIOCUpsertScript folds a new sighting into a stored IOC document.
+const esIOCUpsertScript = `
+def s = ctx._source;
+s.count = (s.count == null ? 0 : s.count) + params.count;
+if (s.first_seen == null || ZonedDateTime.parse(params.first_seen).isBefore(ZonedDateTime.parse(s.first_seen))) { s.first_seen = params.first_seen; }
+if (s.last_seen == null || ZonedDateTime.parse(params.last_seen).isAfter(ZonedDateTime.parse(s.last_seen))) { s.last_seen = params.last_seen; }
+if (params.technique_id != null && params.technique_id != '') { s.technique_id = params.technique_id; }
+if (params.containsKey('source_ip')) { s.source_ip = params.source_ip; }
+`
+
 func iocToESDoc(ioc *IOC) map[string]interface{} {
 	doc := map[string]interface{}{
 		"id":           ioc.ID,
@@ -1149,35 +1159,44 @@ func iocToESDoc(ioc *IOC) map[string]interface{} {
 
 // InsertIOC inserts or updates an IOC document.
 func (es *Elasticsearch) InsertIOC(ctx context.Context, ioc *IOC) error {
-	body, _ := json.Marshal(iocToESDoc(ioc))
-	// Use PUT with the IOC ID for upsert behavior.
-	_, status, err := es.esRequest(ctx, http.MethodPut, "/qpot-iocs/_doc/"+url.PathEscape(esDocID(ioc.ID)), body)
-	if err != nil {
-		return fmt.Errorf("insert ioc: %w", err)
-	}
-	if status >= 300 {
-		return fmt.Errorf("insert ioc returned status %d", status)
-	}
-	return nil
+	return es.InsertIOCs(ctx, []*IOC{ioc})
 }
 
 // InsertIOCs indexes a batch of IOCs via the Bulk API. The action carries each
 // IOC's ID as the document _id, preserving the same by-ID upsert behavior as
 // InsertIOC while collapsing the worker cycle into a single request.
 func (es *Elasticsearch) InsertIOCs(ctx context.Context, iocs []*IOC) error {
+	iocs = mergeIOCSightings(iocs)
 	if len(iocs) == 0 {
 		return nil
 	}
+	// Upsert each indicator: a new one is stored as-is, a known one gets its
+	// count incremented and its first/last_seen widened. Indexing by _id (as
+	// before) replaced the stored document, so count stayed at 1.
 	var buf bytes.Buffer
 	for _, ioc := range iocs {
 		action := map[string]interface{}{
-			"index": map[string]string{"_index": "qpot-iocs", "_id": esDocID(ioc.ID)},
+			"update": map[string]interface{}{"_index": "qpot-iocs", "_id": esDocID(ioc.ID), "retry_on_conflict": 3},
 		}
 		actionLine, _ := json.Marshal(action)
 		buf.Write(actionLine)
 		buf.WriteByte('\n')
 
-		docLine, _ := json.Marshal(iocToESDoc(ioc))
+		doc := iocToESDoc(ioc)
+		params := map[string]interface{}{
+			"count":        doc["count"],
+			"first_seen":   doc["first_seen"],
+			"last_seen":    doc["last_seen"],
+			"technique_id": ioc.TechniqueID,
+		}
+		if ip, ok := doc["source_ip"]; ok {
+			params["source_ip"] = ip
+		}
+		body := map[string]interface{}{
+			"script": map[string]interface{}{"lang": "painless", "source": esIOCUpsertScript, "params": params},
+			"upsert": doc,
+		}
+		docLine, _ := json.Marshal(body)
 		buf.Write(docLine)
 		buf.WriteByte('\n')
 	}

@@ -326,3 +326,11 @@ func TestClickHouseEventIDUpgrade(t *testing.T) {
 		t.Fatalf("event_id = %q", first)
 	}
 }
+
+func TestClickHouseIOCSightingsAccumulate(t *testing.T) {
+	db := connectCH(t)
+	if err := db.(*ClickHouse).conn.Exec(context.Background(), `TRUNCATE TABLE iocs`); err != nil {
+		t.Fatal(err)
+	}
+	checkIOCSightingsAccumulate(t, db, "198.51.100.90", func() {})
+}

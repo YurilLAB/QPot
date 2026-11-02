@@ -666,7 +666,7 @@ func (ch *ClickHouse) ExportData(ctx context.Context, start, end time.Time, w io
 			return fmt.Errorf("failed to scan row: %w", err)
 		}
 		line := fmt.Sprintf("%s,%s,%s,%d,%d,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%.4f\n",
-			ts2.UTC().Format(time.RFC3339),
+			ts2.UTC().Format(time.RFC3339Nano),
 			chCSVEscape(honeypot), chCSVEscape(sourceIP),
 			sourcePort, destPort,
 			chCSVEscape(protocol), chCSVEscape(eventType),
@@ -1068,8 +1068,15 @@ func (ch *ClickHouse) InsertIOCs(ctx context.Context, iocs []*IOC) error {
 	if ch.conn == nil {
 		return fmt.Errorf("not connected")
 	}
+	iocs = mergeIOCSightings(iocs)
 	if len(iocs) == 0 {
 		return nil
+	}
+	// The table is a ReplacingMergeTree: a new row REPLACES the stored one, so
+	// writing each sighting as-is left count at 1 and first_seen at the latest
+	// sighting. Fold the stored totals into the rows being written.
+	if err := ch.foldStoredIOCs(ctx, iocs); err != nil {
+		return err
 	}
 	batch, err := ch.conn.PrepareBatch(ctx, "INSERT INTO iocs")
 	if err != nil {
@@ -1092,6 +1099,48 @@ func (ch *ClickHouse) InsertIOCs(ctx context.Context, iocs []*IOC) error {
 		}
 	}
 	return batch.Send()
+}
+
+// foldStoredIOCs adds the stored count, earliest first_seen and latest
+// last_seen of each indicator to the rows about to be written.
+func (ch *ClickHouse) foldStoredIOCs(ctx context.Context, iocs []*IOC) error {
+	type key struct{ t, v, h string }
+	byKey := make(map[key]*IOC, len(iocs))
+	values := make([]string, 0, len(iocs))
+	for _, ioc := range iocs {
+		byKey[key{ioc.Type, ioc.Value, ioc.Honeypot}] = ioc
+		values = append(values, ioc.Value)
+	}
+	rows, err := ch.conn.Query(ctx,
+		"SELECT type, value, honeypot, first_seen, last_seen, count, technique_id FROM iocs FINAL WHERE value IN ?", values)
+	if err != nil {
+		return fmt.Errorf("read stored IOCs: %w", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var k key
+		var first, last time.Time
+		var cnt uint64
+		var tech string
+		if err := rows.Scan(&k.t, &k.v, &k.h, &first, &last, &cnt, &tech); err != nil {
+			return fmt.Errorf("read stored IOCs: %w", err)
+		}
+		ioc, ok := byKey[k]
+		if !ok {
+			continue
+		}
+		ioc.Count += int64(cnt)
+		if !first.IsZero() && (ioc.FirstSeen.IsZero() || first.Before(ioc.FirstSeen)) {
+			ioc.FirstSeen = first
+		}
+		if last.After(ioc.LastSeen) {
+			ioc.LastSeen = last
+		}
+		if ioc.TechniqueID == "" {
+			ioc.TechniqueID = tech
+		}
+	}
+	return rows.Err()
 }
 
 // GetIOCs retrieves IOCs with optional filtering.
