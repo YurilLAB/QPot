@@ -71,6 +71,10 @@ type TTPSession struct {
 type IOCFilter struct {
 	Types     []string
 	Honeypots []string
+	// Values matches IOC values exactly (any of them).
+	Values []string
+	// SourceIPs matches the attacker IP an IOC was observed from.
+	SourceIPs []string
 	StartTime time.Time
 	EndTime   time.Time
 	Limit     int

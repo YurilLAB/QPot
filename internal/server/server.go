@@ -10,10 +10,12 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net"
 	"net/http"
 	"os"
 	"os/exec"
 	"runtime"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -1449,41 +1451,81 @@ func (s *Server) handleYurilQuery(w http.ResponseWriter, r *http.Request) {
 		"queried_at": time.Now().UTC().Format(time.RFC3339),
 	}
 
-	// IP lookup: count attacker activity over the last 7 days.
-	if ip != "" {
-		attackers, err := s.database.GetTopAttackers(ctx, 1000, since)
+	// IP lookup: the indicator's own activity over the last 7 days, filtered
+	// in the database. (Scanning only the top 1000 attackers, as before, missed
+	// every IP below that.)
+	// A malformed ip simply has no activity (the contract is 200 for any
+	// selector); it is never sent to a backend whose ip column rejects it.
+	if ip != "" && net.ParseIP(ip) != nil {
+		events, err := s.database.GetEvents(ctx, database.EventFilter{
+			StartTime: since, SourceIPs: []string{ip}, Limit: 10000,
+		})
 		if err != nil {
-			slog.Warn("yuril query: GetTopAttackers failed", "error", err)
-		} else {
-			for _, a := range attackers {
-				if a.SourceIP == ip {
-					response["ip_activity"] = map[string]interface{}{
-						"attack_count": a.AttackCount,
-						"country":      a.Country,
-						"honeypots":    a.Honeypots,
-						"first_seen":   a.FirstSeen.UTC().Format(time.RFC3339),
-						"last_seen":    a.LastSeen.UTC().Format(time.RFC3339),
-					}
-					break
+			slog.Warn("yuril query: GetEvents failed", "error", err)
+		} else if len(events) > 0 {
+			first, last := events[0].Timestamp, events[0].Timestamp
+			hps := map[string]bool{}
+			country := ""
+			for _, e := range events {
+				if e.Timestamp.Before(first) {
+					first = e.Timestamp
 				}
+				if e.Timestamp.After(last) {
+					last = e.Timestamp
+				}
+				hps[e.Honeypot] = true
+				if country == "" {
+					country = e.Country
+				}
+			}
+			honeypots := make([]string, 0, len(hps))
+			for h := range hps {
+				honeypots = append(honeypots, h)
+			}
+			sort.Strings(honeypots)
+			response["ip_activity"] = map[string]interface{}{
+				"attack_count": len(events),
+				"country":      country,
+				"honeypots":    honeypots,
+				"first_seen":   first.UTC().Format(time.RFC3339),
+				"last_seen":    last.UTC().Format(time.RFC3339),
 			}
 		}
 	}
 
-	// IOC lookup across all types — a single query then in-memory filter
-	// avoids three round trips.
-	iocs, err := s.database.GetIOCs(ctx, database.IOCFilter{Limit: 5000})
+	// IOC lookup: exact value matches in the database (not the first N rows
+	// filtered in memory). Hashes and domains are matched case-insensitively.
+	var values []string
+	addValue := func(v string, foldCase bool) {
+		if v == "" {
+			return
+		}
+		values = append(values, v)
+		if foldCase {
+			values = append(values, strings.ToLower(v), strings.ToUpper(v))
+		}
+	}
+	addValue(ip, false)
+	addValue(hash, true)
+	addValue(domain, true)
+	iocs, err := s.database.GetIOCs(ctx, database.IOCFilter{Values: values, Limit: 5000})
+	if err == nil && ip != "" && net.ParseIP(ip) != nil {
+		// Also the IOCs observed FROM this IP (commands, URLs it used, ...).
+		var fromIP []*database.IOC
+		fromIP, err = s.database.GetIOCs(ctx, database.IOCFilter{SourceIPs: []string{ip}, Limit: 5000})
+		iocs = append(iocs, fromIP...)
+	}
 	if err != nil {
 		slog.Warn("yuril query: GetIOCs failed", "error", err)
 	} else {
 		var matches []*database.IOC
+		seenIOC := map[string]bool{}
 		for _, ioc := range iocs {
-			switch {
-			case ip != "" && (ioc.SourceIP == ip || (ioc.Type == "ip" && ioc.Value == ip)):
-				matches = append(matches, ioc)
-			case hash != "" && ioc.Type == "hash" && strings.EqualFold(ioc.Value, hash):
-				matches = append(matches, ioc)
-			case domain != "" && ioc.Type == "domain" && strings.EqualFold(ioc.Value, domain):
+			ok := (ip != "" && (ioc.SourceIP == ip || (ioc.Type == "ip" && ioc.Value == ip))) ||
+				(hash != "" && ioc.Type == "hash" && strings.EqualFold(ioc.Value, hash)) ||
+				(domain != "" && ioc.Type == "domain" && strings.EqualFold(ioc.Value, domain))
+			if ok && !seenIOC[ioc.ID+"\x00"+ioc.Type+"\x00"+ioc.Value+"\x00"+ioc.Honeypot] {
+				seenIOC[ioc.ID+"\x00"+ioc.Type+"\x00"+ioc.Value+"\x00"+ioc.Honeypot] = true
 				matches = append(matches, ioc)
 			}
 		}

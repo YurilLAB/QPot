@@ -228,3 +228,7 @@ func TestPGInsertEventsSurvivesBadValues(t *testing.T) {
 		t.Fatalf("persisted %d of %d events", n, len(events))
 	}
 }
+
+func TestPGIOCFilters(t *testing.T) {
+	checkIOCValueAndSourceFilters(t, connectPG(t), nil)
+}

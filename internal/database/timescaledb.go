@@ -956,6 +956,16 @@ func (ts *TimescaleDB) GetIOCs(ctx context.Context, filter IOCFilter) ([]*IOC, e
 		args = append(args, filter.Honeypots)
 		argIdx++
 	}
+	if len(filter.Values) > 0 {
+		query += fmt.Sprintf(" AND value = ANY($%d)", argIdx)
+		args = append(args, filter.Values)
+		argIdx++
+	}
+	if len(filter.SourceIPs) > 0 {
+		query += fmt.Sprintf(" AND source_ip = ANY($%d)", argIdx)
+		args = append(args, filter.SourceIPs)
+		argIdx++
+	}
 	if !filter.StartTime.IsZero() {
 		query += fmt.Sprintf(" AND first_seen >= $%d", argIdx)
 		args = append(args, filter.StartTime)

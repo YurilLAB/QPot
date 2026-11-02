@@ -1200,6 +1200,27 @@ func (es *Elasticsearch) GetIOCs(ctx context.Context, filter IOCFilter) ([]*IOC,
 			"terms": map[string]interface{}{"honeypot": filter.Honeypots},
 		})
 	}
+	if len(filter.Values) > 0 {
+		must = append(must, map[string]interface{}{
+			"terms": map[string]interface{}{"value": filter.Values},
+		})
+	}
+	if len(filter.SourceIPs) > 0 {
+		// source_ip is an "ip" field: an unparsable value would fail the
+		// whole query, so only valid addresses are searched.
+		var ips []string
+		for _, ip := range filter.SourceIPs {
+			if net.ParseIP(ip) != nil {
+				ips = append(ips, ip)
+			}
+		}
+		if len(ips) == 0 {
+			return nil, nil
+		}
+		must = append(must, map[string]interface{}{
+			"terms": map[string]interface{}{"source_ip": ips},
+		})
+	}
 
 	rangeFilter := make(map[string]interface{})
 	if !filter.StartTime.IsZero() {

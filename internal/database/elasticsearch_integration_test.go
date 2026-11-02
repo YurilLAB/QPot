@@ -143,3 +143,8 @@ func TestESInsertIOCAwkwardIDs(t *testing.T) {
 		t.Fatalf("stored %d of %d IOCs", len(got), len(vals))
 	}
 }
+
+func TestESIOCFilters(t *testing.T) {
+	es := connectES(t)
+	checkIOCValueAndSourceFilters(t, es, func() { esRefresh(t, es) })
+}

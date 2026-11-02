@@ -266,3 +266,11 @@ func TestClickHouseTagEventMarksClassified(t *testing.T) {
 		time.Sleep(250 * time.Millisecond)
 	}
 }
+
+func TestClickHouseIOCFilters(t *testing.T) {
+	db := connectCH(t)
+	if err := db.(*ClickHouse).conn.Exec(context.Background(), `TRUNCATE TABLE iocs`); err != nil {
+		t.Fatal(err)
+	}
+	checkIOCValueAndSourceFilters(t, db, nil)
+}

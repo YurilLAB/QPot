@@ -1012,6 +1012,14 @@ func (ch *ClickHouse) GetIOCs(ctx context.Context, filter IOCFilter) ([]*IOC, er
 		query += " AND honeypot IN ?"
 		args = append(args, filter.Honeypots)
 	}
+	if len(filter.Values) > 0 {
+		query += " AND value IN ?"
+		args = append(args, filter.Values)
+	}
+	if len(filter.SourceIPs) > 0 {
+		query += " AND source_ip IN ?"
+		args = append(args, filter.SourceIPs)
+	}
 	if !filter.StartTime.IsZero() {
 		query += " AND first_seen >= ?"
 		args = append(args, filter.StartTime)

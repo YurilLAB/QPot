@@ -215,3 +215,40 @@ func TestYurilIntelBatchedAndProvenanceProtected(t *testing.T) {
 		t.Errorf("response: %s", rec.Body.String())
 	}
 }
+
+// scopedDB only answers filtered queries, like a real database holding far
+// more rows than any "top N then filter in memory" scan would see.
+type scopedDB struct{ fakeDB }
+
+func (d *scopedDB) GetTopAttackers(ctx context.Context, limit int, since time.Time) ([]*database.AttackerStats, error) {
+	return nil, nil // the IP is not among the top attackers
+}
+func (d *scopedDB) GetEvents(ctx context.Context, fl database.EventFilter) ([]*database.Event, error) {
+	if len(fl.SourceIPs) == 1 && fl.SourceIPs[0] == "192.0.2.77" {
+		return []*database.Event{{Timestamp: time.Now().Add(-time.Hour), Honeypot: "cowrie", SourceIP: "192.0.2.77", Country: "NL"}}, nil
+	}
+	return nil, nil
+}
+func (d *scopedDB) GetIOCs(ctx context.Context, fl database.IOCFilter) ([]*database.IOC, error) {
+	for _, v := range fl.Values {
+		if v == "d41d8cd98f00b204e9800998ecf8427e" {
+			return []*database.IOC{{ID: "hash:d41d8cd98f00b204e9800998ecf8427e:dionaea", Type: "hash", Value: v, Honeypot: "dionaea"}}, nil
+		}
+	}
+	return nil, nil
+}
+
+// The Yuril lookup must find a quiet IP and an old IOC via database filters,
+// not only what appears in the top-1000 / first-5000 rows.
+func TestYurilQueryUsesDatabaseFilters(t *testing.T) {
+	s := &Server{config: &config.Config{QPotID: validTestID}, mux: http.NewServeMux(), database: &scopedDB{}}
+	s.setupRoutes()
+	req := httptest.NewRequest(http.MethodGet, "/api/yuril/query?ip=192.0.2.77&hash=D41D8CD98F00B204E9800998ECF8427E", nil)
+	req.Header.Set("X-QPot-ID", validTestID)
+	rec := httptest.NewRecorder()
+	s.mux.ServeHTTP(rec, req)
+	body := rec.Body.String()
+	if rec.Code != http.StatusOK || !strings.Contains(body, `"ip_activity"`) || !strings.Contains(body, `"matching_iocs_count":1`) {
+		t.Fatalf("status %d body %s", rec.Code, body)
+	}
+}
