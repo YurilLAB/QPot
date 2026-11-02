@@ -26,6 +26,7 @@ package instance
 import (
 	"fmt"
 	"hash/fnv"
+	"strings"
 )
 
 // distroProfile bundles a self-consistent Linux identity: the advertised SSH
@@ -323,6 +324,32 @@ const intelKVMFlags = "fpu vme de pse tsc msr pae mce cx8 apic sep mtrr pge mca 
 
 const amdKVMFlags = "fpu vme de pse tsc msr pae mce cx8 apic sep mtrr pge mca cmov pat pse36 clflush mmx fxsr sse sse2 ht syscall nx mmxext fxsr_opt pdpe1gb rdtscp lm constant_tsc rep_good nopl tsc_reliable nonstop_tsc cpuid extd_apicid pni pclmulqdq ssse3 fma cx16 sse4_1 sse4_2 movbe popcnt aes xsave avx f16c rdrand hypervisor lahf_lm cmp_legacy svm cr8_legacy abm sse4a misalignsse 3dnowprefetch osvw topoext perfctr_core ssbd ibrs ibpb stibp vmmcall fsgsbase tsc_adjust bmi1 avx2 smep bmi2 rdseed adx smap clflushopt clwb sha_ni xsaveopt xsavec xgetbv1 xsaves clzero xsaveerptr arat npt nrip_save umip rdpid"
 
+// Older microarchitectures expose fewer flags: advertising AVX-512, CLWB or
+// XSAVEC on a Haswell/Broadwell Xeon, or CLWB/UMIP/RDPID on a Zen 1 EPYC, is
+// a /proc/cpuinfo contradiction anyone who knows the parts can spot.
+var (
+	intelBroadwellFlags = withoutFlags(intelKVMFlags,
+		"avx512f", "avx512dq", "avx512cd", "avx512bw", "avx512vl", "avx512_vnni",
+		"clflushopt", "clwb", "xsavec", "xgetbv1", "xsaves")
+	intelHaswellFlags = withoutFlags(intelBroadwellFlags, "rdseed", "adx", "smap")
+	amdZen1Flags      = withoutFlags(amdKVMFlags, "clwb", "umip", "rdpid")
+)
+
+// withoutFlags returns the space-separated flag list minus the given flags.
+func withoutFlags(flags string, drop ...string) string {
+	skip := map[string]bool{}
+	for _, d := range drop {
+		skip[d] = true
+	}
+	var out []string
+	for _, f := range strings.Fields(flags) {
+		if !skip[f] {
+			out = append(out, f)
+		}
+	}
+	return strings.Join(out, " ")
+}
+
 // cpuModels is a pool of realistic 64-bit server/cloud CPUs. The seed selects
 // one per instance so two QPot deployments do not report an identical
 // /proc/cpuinfo, while each block stays internally consistent. (The CPU *count*
@@ -330,10 +357,10 @@ const amdKVMFlags = "fpu vme de pse tsc msr pae mce cx8 apic sep mtrr pge mca cm
 // see procCPUInfo — so only the model varies, not the core count.)
 var cpuModels = []cpuModel{
 	{VendorID: "GenuineIntel", ModelName: "Intel(R) Xeon(R) Platinum 8370C CPU @ 2.80GHz", Family: 6, Model: 106, Stepping: 6, Microcode: "0xd0003d1", MHz: "2793.436", CacheKB: 49152, Flags: intelKVMFlags, Bugs: bugsIntelIceLake, CPUIDLevel: 27, AddressSizes: addrIntelServer},
-	{VendorID: "GenuineIntel", ModelName: "Intel(R) Xeon(R) CPU E5-2680 v4 @ 2.40GHz", Family: 6, Model: 79, Stepping: 1, Microcode: "0xb000040", MHz: "2399.996", CacheKB: 35840, Flags: intelKVMFlags, Bugs: bugsIntelHaswell, CPUIDLevel: 20, AddressSizes: addrIntelServer},
+	{VendorID: "GenuineIntel", ModelName: "Intel(R) Xeon(R) CPU E5-2680 v4 @ 2.40GHz", Family: 6, Model: 79, Stepping: 1, Microcode: "0xb000040", MHz: "2399.996", CacheKB: 35840, Flags: intelBroadwellFlags, Bugs: bugsIntelHaswell, CPUIDLevel: 20, AddressSizes: addrIntelServer},
 	{VendorID: "GenuineIntel", ModelName: "Intel(R) Xeon(R) Gold 6248R CPU @ 3.00GHz", Family: 6, Model: 85, Stepping: 7, Microcode: "0x5003604", MHz: "2999.998", CacheKB: 36608, Flags: intelKVMFlags, Bugs: bugsIntelCascade, CPUIDLevel: 22, AddressSizes: addrIntelServer},
-	{VendorID: "GenuineIntel", ModelName: "Intel(R) Xeon(R) CPU E5-2650 v3 @ 2.30GHz", Family: 6, Model: 63, Stepping: 2, Microcode: "0x43", MHz: "2299.998", CacheKB: 25600, Flags: intelKVMFlags, Bugs: bugsIntelHaswell, CPUIDLevel: 15, AddressSizes: addrIntelServer},
-	{VendorID: "AuthenticAMD", ModelName: "AMD EPYC 7401P 24-Core Processor", Family: 23, Model: 1, Stepping: 2, Microcode: "0x8001250", MHz: "1996.250", CacheKB: 512, Flags: amdKVMFlags, Bugs: bugsAMDZen1, CPUIDLevel: 13, AddressSizes: addrAMDServer},
+	{VendorID: "GenuineIntel", ModelName: "Intel(R) Xeon(R) CPU E5-2650 v3 @ 2.30GHz", Family: 6, Model: 63, Stepping: 2, Microcode: "0x43", MHz: "2299.998", CacheKB: 25600, Flags: intelHaswellFlags, Bugs: bugsIntelHaswell, CPUIDLevel: 15, AddressSizes: addrIntelServer},
+	{VendorID: "AuthenticAMD", ModelName: "AMD EPYC 7401P 24-Core Processor", Family: 23, Model: 1, Stepping: 2, Microcode: "0x8001250", MHz: "1996.250", CacheKB: 512, Flags: amdZen1Flags, Bugs: bugsAMDZen1, CPUIDLevel: 13, AddressSizes: addrAMDServer},
 	{VendorID: "AuthenticAMD", ModelName: "AMD EPYC 7763 64-Core Processor", Family: 25, Model: 1, Stepping: 1, Microcode: "0xa001144", MHz: "2445.406", CacheKB: 512, Flags: amdKVMFlags, Bugs: bugsAMDZen3, CPUIDLevel: 16, AddressSizes: addrAMDServer},
 	{VendorID: "AuthenticAMD", ModelName: "AMD EPYC 7302P 16-Core Processor", Family: 23, Model: 49, Stepping: 0, Microcode: "0x830104d", MHz: "2994.374", CacheKB: 512, Flags: amdKVMFlags, Bugs: bugsAMDZen2, CPUIDLevel: 16, AddressSizes: addrAMDServer},
 }

@@ -463,3 +463,31 @@ func TestKbdInteractiveConsistent(t *testing.T) {
 		}
 	}
 }
+
+// /proc/cpuinfo flags must match the advertised microarchitecture: no AVX-512,
+// CLWB or XSAVEC on Haswell/Broadwell, no CLWB/UMIP/RDPID on Zen 1.
+func TestCPUFlagsMatchMicroarchitecture(t *testing.T) {
+	forbidden := map[string][]string{
+		"E5-2650 v3":   {"avx512f", "avx512_vnni", "clwb", "clflushopt", "xsavec", "rdseed", "adx", "smap"},
+		"E5-2680 v4":   {"avx512f", "avx512_vnni", "clwb", "clflushopt", "xsavec"},
+		"EPYC 7401P":   {"clwb", "umip", "rdpid"},
+		"Gold 6248R":   {},
+		"EPYC 7763 64": {},
+	}
+	for _, m := range cpuModels {
+		for part, bad := range forbidden {
+			if !strings.Contains(m.ModelName, part) {
+				continue
+			}
+			have := " " + m.Flags + " "
+			for _, f := range bad {
+				if strings.Contains(have, " "+f+" ") {
+					t.Errorf("%s advertises %s, which that CPU does not have", m.ModelName, f)
+				}
+			}
+		}
+		if !strings.Contains(" "+m.Flags+" ", " avx2 ") {
+			t.Errorf("%s lost avx2", m.ModelName)
+		}
+	}
+}
