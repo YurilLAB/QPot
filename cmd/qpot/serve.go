@@ -215,14 +215,46 @@ func startBackgroundServe(cfg *config.Config) (int, string, error) {
 	}
 	pid := c.Process.Pid
 	_ = c.Process.Release()
-	// Wait briefly for it to register itself, so `qpot down` can find it.
-	for i := 0; i < 50; i++ {
+	// Wait for it to register itself (so `qpot down` can find it), then make
+	// sure it is still running a moment later: a control plane that cannot
+	// start (e.g. its web UI port is taken) exits straight away, and reporting
+	// it as running hid that.
+	registered := false
+	for i := 0; i < 50 && !registered; i++ {
 		if got, err := readServePID(servePIDPath(cfg)); err == nil && got == pid {
+			registered = true
 			break
 		}
 		time.Sleep(100 * time.Millisecond)
 	}
+	if registered {
+		for i := 0; i < 15 && registered; i++ {
+			time.Sleep(100 * time.Millisecond)
+			registered = runningServePID(cfg) == pid
+		}
+	}
+	if !registered {
+		return 0, logPath, fmt.Errorf("the control plane exited during startup: %s (log: %s)", lastLogLine(logPath), logPath)
+	}
 	return pid, logPath, nil
+}
+
+// lastLogLine returns the last non-empty line of a log file, for error messages.
+func lastLogLine(path string) string {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return "no log"
+	}
+	lines := strings.Split(strings.TrimSpace(string(data)), "\n")
+	for i := len(lines) - 1; i >= 0; i-- {
+		if l := strings.TrimSpace(lines[i]); l != "" && !strings.Contains(l, "gvisor sandbox not available") {
+			if len(l) > 300 {
+				l = l[:300]
+			}
+			return l
+		}
+	}
+	return "empty log"
 }
 
 // stopBackgroundServe stops this instance's background control plane, if any.

@@ -19,6 +19,7 @@ import (
 	"regexp"
 	"runtime"
 	"sort"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -37,6 +38,35 @@ var reValidName = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9_-]{0,31}$`)
 
 // validateInstanceName returns an error if name contains characters that would
 // break Docker container names, bridge names, or file system paths.
+// instanceOptional are the commands that work without the instance named by
+// -i existing: the ones that create it, and `honeypot list`, which shows the
+// catalogue with default settings. Every other command requires it to exist.
+var instanceOptional = map[string]bool{
+	"qpot setup": true, "qpot up": true, "qpot cluster join": true, "qpot honeypot list": true,
+}
+
+// checkInstanceFlag validates the -i/--instance value of every command. Only
+// `instance create` used to apply the naming rules, so e.g. `honeypot enable
+// -i "my pot"` created a config for a name compose cannot use (container names
+// with spaces) and that `instance create` then refused as existing.
+func checkInstanceFlag(cmd *cobra.Command, args []string) error {
+	f := cmd.Flags().Lookup("instance")
+	if f == nil {
+		return nil
+	}
+	name := f.Value.String()
+	if err := validateInstanceName(name); err != nil {
+		return err
+	}
+	if instanceOptional[cmd.CommandPath()] {
+		return nil
+	}
+	if _, err := os.Stat(config.Default(name).ConfigPath); errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("instance %q does not exist (create it with: qpot setup -i %s)", name, name)
+	}
+	return nil
+}
+
 func validateInstanceName(name string) error {
 	if !reValidName.MatchString(name) {
 		return fmt.Errorf("invalid instance name %q: must be 1-32 characters, start with alphanumeric, and contain only letters, digits, hyphens, or underscores", name)
@@ -60,8 +90,8 @@ func main() {
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
 
+	// cobra has already printed "Error: ..." to stderr.
 	if err := run(ctx); err != nil {
-		slog.Error("qpot failed", "error", err)
 		os.Exit(1)
 	}
 }
@@ -79,7 +109,8 @@ Each QPot instance has a unique ID (qp_*) for tracking and authentication.`,
 		Version: fmt.Sprintf("%s (commit: %s, built: %s)", version, commit, buildDate),
 		// A failing command prints its error, not the whole usage text
 		// (which buried the actual message); --help still shows usage.
-		SilenceUsage: true,
+		SilenceUsage:      true,
+		PersistentPreRunE: checkInstanceFlag,
 	}
 
 	// Global flags
@@ -146,10 +177,21 @@ func newUpCommand() *cobra.Command {
 			// already up (e.g. docker restarted them after a reboot), just attach
 			// the control plane instead of failing - that is what a systemd
 			// service running `qpot up` needs.
+			// An instance that is fully up already (containers + control plane)
+			// is left alone: starting a second control plane fails on the web UI
+			// port, and stopping afterwards would tear the running stack down.
+			if pid := runningServePID(cfg); pid != 0 && mgr.IsRunning(ctx) {
+				fmt.Printf("[OK] QPot instance '%s' is already running (control plane pid %d)\n", cfg.InstanceName, pid)
+				fmt.Printf("[INFO] Web UI: %s   Stop it with: qpot down -i %s\n", localBaseURL(cfg), cfg.InstanceName)
+				return nil
+			}
+			startedContainers := false
 			if mgr.IsRunning(ctx) {
 				fmt.Println("[INFO] Containers are already running; attaching the control plane")
 			} else if err := mgr.Start(ctx, true); err != nil {
 				return fmt.Errorf("failed to start instance: %w", err)
+			} else {
+				startedContainers = true
 			}
 
 			fmt.Printf("\n[OK] QPot instance '%s' started successfully\n", cfg.InstanceName)
@@ -172,8 +214,14 @@ func newUpCommand() *cobra.Command {
 
 			fmt.Println("\nPress Ctrl+C to stop")
 			cpErr := runControlPlane(ctx, cfg, mgr)
-			if err := mgr.Stop(context.Background()); err != nil {
-				return err
+			// Stop the containers when this run owned them, or when the control
+			// plane ran and was asked to stop (Ctrl+C / systemd stop). A control
+			// plane that failed to start must not take down containers that were
+			// already running before this command.
+			if startedContainers || cpErr == nil {
+				if err := mgr.Stop(context.Background()); err != nil {
+					return err
+				}
 			}
 			return cpErr
 		},
@@ -484,6 +532,11 @@ func newHoneypotCommand() *cobra.Command {
 				return fmt.Errorf("failed to load config: %w", err)
 			}
 
+			// A typo used to print "[OK] Disabled" and save the config, so the
+			// operator believed a honeypot was off when nothing had changed.
+			if _, ok := cfg.SnapshotHoneypots()[hpName]; !ok {
+				return fmt.Errorf("unknown honeypot %q (see: qpot honeypot list)", hpName)
+			}
 			cfg.DisableHoneypot(hpName)
 			if err := config.Save(cfg); err != nil {
 				return fmt.Errorf("failed to save config: %w", err)
@@ -1896,7 +1949,8 @@ func localBaseURL(cfg *config.Config) string {
 	case "", "0.0.0.0", "::", "[::]":
 		host = "127.0.0.1"
 	}
-	return fmt.Sprintf("http://%s:%d", host, cfg.WebUI.Port)
+	// JoinHostPort brackets IPv6 literals: "http://::1:8080" does not parse.
+	return "http://" + net.JoinHostPort(strings.Trim(host, "[]"), strconv.Itoa(cfg.WebUI.Port))
 }
 
 // canaryAPI performs an authenticated request against the local canary API and
