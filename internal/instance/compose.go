@@ -267,6 +267,20 @@ func listenHealthCheck(d honeypotDeploy, fallbackPort int) string {
 }
 
 // Generate generates a Docker Compose file
+// dbMinPids is the lowest pids limit the database container gets. The global
+// per-honeypot limit (100 by default) is far too small for a database server:
+// ClickHouse starts ~380 threads and exits on boot when it cannot create them.
+const dbMinPids = 1024
+
+// dbPidsLimit returns the pids limit for the database service: 0 (unlimited)
+// stays unlimited, anything else is raised to at least dbMinPids.
+func dbPidsLimit(globalMax int64) int64 {
+	if globalMax == 0 || globalMax >= dbMinPids {
+		return globalMax
+	}
+	return dbMinPids
+}
+
 func (g *ComposeGenerator) Generate() (string, error) {
 	tmpl := `# QPot Instance: {{.Config.InstanceName}}
 # QPot ID: {{.Config.QPotID}}
@@ -573,7 +587,7 @@ services:
         limits:
           cpus: '{{divf .GlobalLimits.MaxCPUPercent 100}}'
           memory: {{.GlobalLimits.MaxMemoryMB}}M
-          {{if .GlobalLimits.MaxPids}}pids: {{.GlobalLimits.MaxPids}}{{end}}
+          {{with dbPids .GlobalLimits.MaxPids}}pids: {{.}}{{end}}
         reservations:
           cpus: '0.05'
           memory: 64M
@@ -589,11 +603,14 @@ services:
     {{if .Config.Security.DropCapabilities}}cap_drop:
       - ALL
     cap_add:
+      - CHOWN
       - SETUID
       - SETGID{{end}}
 
     # No user override: the database image runs as its own user; forcing a
-    # different uid breaks its data-directory ownership.
+    # different uid breaks its data-directory ownership. CHOWN is required:
+    # both the ClickHouse and TimescaleDB entrypoints chown their data dir on
+    # first start and exit immediately without it.
 
     # Hostname isolation
     hostname: "{{.Name}}-host"
@@ -706,6 +723,7 @@ services:
 		"divf": func(a, b float64) float64 {
 			return a / b
 		},
+		"dbPids": dbPidsLimit,
 		"add": func(a, b int) int {
 			return a + b
 		},

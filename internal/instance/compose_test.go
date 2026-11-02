@@ -154,3 +154,28 @@ func TestComposeRuntimeGatedOnAvailability(t *testing.T) {
 		t.Error("compose emitted a sandbox runtime line while the runtime is unavailable; would break docker compose up")
 	}
 }
+
+// The database containers must be able to boot under the hardening: both the
+// ClickHouse and TimescaleDB entrypoints chown their data dir (CAP_CHOWN), and
+// ClickHouse needs ~380 threads, far above the per-honeypot pids limit.
+func TestComposeDatabaseCanBoot(t *testing.T) {
+	for _, dbType := range []string{"clickhouse", "timescaledb"} {
+		cfg := config.Default("db-boot-test")
+		cfg.QPotID = "qp_dbboottest00000000000001"
+		cfg.Database.Type = dbType
+		out := renderComposeCfg(t, cfg)
+		blk := serviceBlock(out, "database")
+		if blk == "" {
+			t.Fatalf("%s: no database service rendered", dbType)
+		}
+		if !strings.Contains(blk, "- CHOWN") {
+			t.Errorf("%s: database cap_add lacks CHOWN; the entrypoint cannot chown its data dir", dbType)
+		}
+		if strings.Contains(blk, "pids: 100\n") {
+			t.Errorf("%s: database inherits the 100-pid honeypot limit", dbType)
+		}
+		if !strings.Contains(blk, "pids: 1024") {
+			t.Errorf("%s: database pids limit not raised to 1024", dbType)
+		}
+	}
+}
