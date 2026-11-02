@@ -118,11 +118,10 @@ function fuSTOP_QPOT () {
 	  else
 	    echo "[ $myGREEN"OK"$myWHITE ]"
 	    echo -n "###### $myBLUE Now cleaning up containers.$myWHITE "
-	    if [ "$(docker ps -aq)" != "" ];
-	      then
-	        docker stop $(docker ps -aq)
-	        docker container prune -f && docker image prune -f && docker volume prune -f
-	    fi
+	    # Only touch QPot's own compose project: stopping every container and
+	    # pruning all volumes on the host would destroy unrelated workloads.
+	    docker compose -f "${myCOMPOSEFILE}" down --remove-orphans >/dev/null 2>&1
+	    docker image prune -f >/dev/null
 	    echo "[ $myGREEN"OK"$myWHITE ]"
 	fi
 	echo
