@@ -267,6 +267,14 @@ func listenHealthCheck(d honeypotDeploy, fallbackPort int) string {
 }
 
 // Generate generates a Docker Compose file
+// composeEnvEntry renders a KEY=value list item as a double-quoted YAML
+// string. Operator-set stealth values (banners, OS strings) routinely contain
+// ": " or "#", which unquoted turned the entry into a YAML map or truncated it;
+// "$" is doubled so Compose does not interpolate it.
+func composeEnvEntry(key, value string) string {
+	return strconv.Quote(key + "=" + strings.ReplaceAll(value, "$", "$$"))
+}
+
 // dbMinPids is the lowest pids limit the database container gets. The global
 // per-honeypot limit (100 by default) is far too small for a database server:
 // ClickHouse starts ~380 threads and exits on boot when it cannot create them.
@@ -560,12 +568,12 @@ services:
       # host-side labels above. Only innocuous, commonly-present values and the
       # per-honeypot stealth/profile knobs (set only when configured) remain.
       - LOG_LEVEL=info
-      {{if hostnameSafe .HP.Stealth.FakeHostname}}- FAKE_HOSTNAME={{hostnameSafe .HP.Stealth.FakeHostname}}{{end}}
-      {{if .HP.Stealth.FakeOS}}- FAKE_OS={{.HP.Stealth.FakeOS}}{{end}}
-      {{if .HP.Stealth.FakeKernel}}- FAKE_KERNEL={{.HP.Stealth.FakeKernel}}{{end}}
-      {{if .HP.Stealth.BannerString}}- BANNER_STRING={{.HP.Stealth.BannerString}}{{end}}
+      {{if hostnameSafe .HP.Stealth.FakeHostname}}- {{envEntry "FAKE_HOSTNAME" (hostnameSafe .HP.Stealth.FakeHostname)}}{{end}}
+      {{if .HP.Stealth.FakeOS}}- {{envEntry "FAKE_OS" .HP.Stealth.FakeOS}}{{end}}
+      {{if .HP.Stealth.FakeKernel}}- {{envEntry "FAKE_KERNEL" .HP.Stealth.FakeKernel}}{{end}}
+      {{if .HP.Stealth.BannerString}}- {{envEntry "BANNER_STRING" .HP.Stealth.BannerString}}{{end}}
       {{if .HP.Stealth.RandomizeSSHVersion}}- RANDOMIZE_SSH_VERSION=1{{end}}
-      {{if .HP.Stealth.AddArtificialDelay}}- ARTIFICIAL_DELAY={{.HP.Stealth.DelayRangeMs}}{{end}}
+      {{if .HP.Stealth.AddArtificialDelay}}- {{envEntry "ARTIFICIAL_DELAY" (printf "%v" .HP.Stealth.DelayRangeMs)}}{{end}}
       {{- if eq .Name "ssh-proxy"}}
       # HiFi broker: the operator-fixed backend pool (never attacker-derived, so
       # no SSRF) and the logical name used in the broker's session events.
@@ -645,10 +653,12 @@ services:
     {{$cpuLimit := .GlobalLimits.MaxCPUPercent}}
     {{$memLimit := .GlobalLimits.MaxMemoryMB}}
     {{$pidLimit := .GlobalLimits.MaxPids}}
+    {{/* An unset (zero) custom value keeps the global limit: rendering
+         cpus '0' / memory 0M would mean NO cap on an attacker-facing box. */}}
     {{if .HP.Resources.UseCustomLimits}}
-    {{$cpuLimit = .HP.Resources.MaxCPUPercent}}
-    {{$memLimit = .HP.Resources.MaxMemoryMB}}
-    {{$pidLimit = .HP.Resources.MaxPids}}
+    {{if .HP.Resources.MaxCPUPercent}}{{$cpuLimit = .HP.Resources.MaxCPUPercent}}{{end}}
+    {{if .HP.Resources.MaxMemoryMB}}{{$memLimit = .HP.Resources.MaxMemoryMB}}{{end}}
+    {{if .HP.Resources.MaxPids}}{{$pidLimit = .HP.Resources.MaxPids}}{{end}}
     {{end}}
     deploy:
       resources:
@@ -761,6 +771,7 @@ services:
 		// characters before it is interpolated into the YAML `hostname:` field /
 		// FAKE_HOSTNAME env, so a stray quote/newline can never break the compose.
 		"hostnameSafe": sanitizeHostname,
+		"envEntry":     composeEnvEntry,
 		// hostPort resolves the collision-free host port assigned to a
 		// (honeypot, container port) pair. Built once per Generate() so the
 		// whole stack shares one consistent, unique assignment.

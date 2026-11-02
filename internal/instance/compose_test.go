@@ -7,6 +7,7 @@ import (
 
 	"github.com/qpot/qpot/internal/config"
 	"github.com/qpot/qpot/internal/security"
+	"gopkg.in/yaml.v3"
 )
 
 func renderCompose(t *testing.T) string {
@@ -224,5 +225,67 @@ func TestComposeCollectorBackupWritable(t *testing.T) {
 	c := serviceBlock(renderCompose(t), "collector")
 	if !strings.Contains(c, "/backup:/data/backup\n") {
 		t.Error("collector has no writable /data/backup mount for its file_backup sink")
+	}
+}
+
+// Operator stealth strings often contain ": ", "#" or "$". Each environment
+// entry must still parse as one string with the exact value.
+func TestComposeStealthEnvIsQuoted(t *testing.T) {
+	cfg := config.Default("env-quote-test")
+	cfg.QPotID = "qp_envquotetest00000000001"
+	hp := cfg.Honeypots["dionaea"]
+	hp.Enabled = true
+	hp.Stealth.BannerString = "220 Microsoft FTP Service: ready # $HOME"
+	hp.Stealth.FakeOS = `Windows "Server" 2019`
+	cfg.Honeypots["dionaea"] = hp
+	out := renderComposeCfg(t, cfg)
+	var doc struct {
+		Services map[string]struct {
+			Environment interface{} `yaml:"environment"`
+		} `yaml:"services"`
+	}
+	if err := yaml.Unmarshal([]byte(out), &doc); err != nil {
+		t.Fatalf("compose does not parse: %v", err)
+	}
+	want := map[string]bool{
+		"BANNER_STRING=220 Microsoft FTP Service: ready # $$HOME": false,
+		`FAKE_OS=Windows "Server" 2019`:                          false,
+	}
+	env, ok := doc.Services["dionaea"].Environment.([]interface{})
+	if !ok {
+		t.Fatalf("dionaea environment is not a list: %#v", doc.Services["dionaea"].Environment)
+	}
+	for _, e := range env {
+		s, ok := e.(string)
+		if !ok {
+			t.Errorf("environment entry is not a string: %#v", e)
+			continue
+		}
+		if _, ok := want[s]; ok {
+			want[s] = true
+		}
+	}
+	for k, seen := range want {
+		if !seen {
+			t.Errorf("environment entry %q missing", k)
+		}
+	}
+}
+
+// use_custom_limits with fields left unset must keep the global caps, never
+// render cpus '0' / memory 0M (no cap) on an attacker-facing container.
+func TestComposeCustomLimitsFallBackToGlobal(t *testing.T) {
+	cfg := config.Default("limits-test")
+	cfg.QPotID = "qp_limitstest0000000000001"
+	hp := cfg.Honeypots["cowrie"]
+	hp.Enabled = true
+	hp.Resources = config.HoneypotResources{UseCustomLimits: true, MaxPids: 64}
+	cfg.Honeypots["cowrie"] = hp
+	blk := serviceBlock(renderComposeCfg(t, cfg), "cowrie")
+	if strings.Contains(blk, "memory: 0M") || strings.Contains(blk, "cpus: '0'") {
+		t.Fatal("custom limits with unset fields removed the CPU/memory cap")
+	}
+	if !strings.Contains(blk, "pids: 64") {
+		t.Error("explicit custom pids limit not applied")
 	}
 }
