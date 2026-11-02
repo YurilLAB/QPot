@@ -959,6 +959,9 @@ sources:
     include:
       - "/data/honeypots/{{$name}}/logs/**/*.log"
       - "/data/honeypots/{{$name}}/logs/**/*.json"
+    # cowrie's TTY recordings are binary; never tail them as log lines.
+    exclude:
+      - "/data/honeypots/{{$name}}/logs/tty/**"
     read_from: end
     multiline:
       mode: halt_before
@@ -1001,42 +1004,207 @@ transforms:
 {{- range $name, $hp := .Config.Honeypots}}{{if $hp.Enabled}}
       - {{$name}}_logs{{end}}{{end}}
     source: |
+      # Remember where the line came from BEFORE merging the honeypot's JSON:
+      # a log object carrying its own "file" key must not be able to redirect
+      # the per-event honeypot attribution below.
+      src_file = string(.file) ?? ""
+      raw = string(.message) ?? ""
+
       # Parse the honeypot's JSON payload FIRST so its fields are present;
       # our own metadata is stamped afterwards so an attacker-controlled log
       # line can never clobber qpot_id / timestamp / honeypot.
-      if is_string(.message) && starts_with(strip_whitespace(string!(.message)), "{") {
-        parsed, perr = parse_json(string!(.message))
-        if perr == null {
-          . = merge(., object(parsed) ?? {})
+      is_json = false
+      if starts_with(strip_whitespace(raw), "{") {
+        parsed, perr = parse_json(raw)
+        if perr == null && is_object(parsed) {
+          . = merge(., object!(parsed))
+          is_json = true
         }
       }
 
       # Derive the honeypot name from the source file path
       # (/data/honeypots/<name>/logs/...). This is the only place the per-event
       # honeypot can be recovered, and the DB requires it (NOT NULL).
-      .honeypot = "unknown"
-      if exists(.file) {
-        m, merr = parse_regex(string(.file) ?? "", r'/honeypots/(?P<hp>[^/]+)/')
-        if merr == null {
-          .honeypot = m.hp
+      hp = "unknown"
+      m, merr = parse_regex(src_file, r'/honeypots/(?P<hp>[^/]+)/')
+      if merr == null {
+        hp = string(m.hp) ?? "unknown"
+      }
+      .honeypot = hp
+
+      # Every honeypot QPot ships writes one JSON object per line; their
+      # plain-text .log files are operational chatter that duplicates the JSON
+      # (or, for cowrie's TTY recordings, binary). Only endlessh logs attacks
+      # as text, so parse its ACCEPT/CLOSE lines and drop all other non-JSON
+      # input instead of storing it as a placeholder 0.0.0.0 event.
+      if !is_json {
+        if hp != "endlessh" {
+          abort
+        }
+        em, eerr = parse_regex(raw, r'\b(?P<action>ACCEPT|CLOSE) host=(?P<host>\S+) port=(?P<port>\d+)')
+        if eerr != null {
+          abort
+        }
+        .src_ip = em.host
+        .src_port = em.port
+        .eventid = "endlessh.connection." + downcase(string(em.action) ?? "event")
+        .protocol = "ssh"
+      }
+
+      # Source IP from the common honeypot field names. Validated so a
+      # malformed value can never poison an insert (inet / String columns);
+      # IPv4-mapped IPv6 is unwrapped so the same attacker groups together.
+      sip = ""
+      if is_string(.src_ip) {
+        sip = string!(.src_ip)
+      } else if is_string(.source_ip) {
+        sip = string!(.source_ip)
+      }
+      sip = replace(strip_whitespace(sip), r'^::ffff:', "")
+      if !(ip_cidr_contains("0.0.0.0/0", sip) ?? false) && !(ip_cidr_contains("::/0", sip) ?? false) {
+        sip = "0.0.0.0"
+      }
+      .source_ip = sip
+
+      # Ports: cowrie/conpot/dionaea use dst_port, adbhoney dest_port (as a
+      # string), heralding source_port/destination_port.
+      sp = to_int(.src_port) ?? 0
+      if sp == 0 {
+        sp = to_int(.source_port) ?? 0
+      }
+      dp = to_int(.dst_port) ?? 0
+      if dp == 0 {
+        dp = to_int(.dest_port) ?? 0
+      }
+      if dp == 0 {
+        dp = to_int(.destination_port) ?? 0
+      }
+      if sp < 0 || sp > 65535 {
+        sp = 0
+      }
+      if dp < 0 || dp > 65535 {
+        dp = 0
+      }
+      .source_port = sp
+      .dest_port = dp
+
+      # Protocol: cowrie/heralding "protocol", dionaea "connection.protocol",
+      # conpot "data_type".
+      proto = ""
+      if is_string(.protocol) {
+        proto = string!(.protocol)
+      }
+      if proto == "" {
+        proto = to_string(.connection.protocol) ?? ""
+      }
+      if proto == "" {
+        proto = to_string(.data_type) ?? ""
+      }
+      .protocol = downcase(proto)
+
+      # Event type. cowrie/adbhoney/ssh-proxy name their events; for the
+      # honeypots that do not, derive a dotted name the ATT&CK rules can match
+      # (…connect…, …login.failed, …command, …probe).
+      et = ""
+      if is_string(.eventid) {
+        et = string!(.eventid)
+      }
+      if et == "" && hp == "dionaea" {
+        et = "dionaea.connection." + (to_string(.connection.type) ?? "event")
+      }
+      if et == "" && hp == "conpot" {
+        orig = to_string(.event_type) ?? ""
+        dt = downcase(to_string(.data_type) ?? "")
+        if dt == "" {
+          dt = "unknown"
+        }
+        if orig != "" {
+          et = "conpot." + dt + "." + orig
+        } else if includes(["modbus", "s7comm", "bacnet", "enip", "ipmi", "iec104", "guardian_ast", "kamstrup_protocol", "kamstrup_management_protocol"], dt) {
+          et = "conpot." + dt + ".command"
+        } else {
+          et = "conpot." + dt + ".probe"
         }
       }
-
-      # Normalise source IP from the common honeypot field names. to_string is
-      # fallible on an unknown-typed field, so coalesce to a default.
-      if exists(.src_ip) {
-        .source_ip = to_string(.src_ip) ?? "0.0.0.0"
-      } else if !exists(.source_ip) {
-        .source_ip = "0.0.0.0"
+      if et == "" && hp == "heralding" {
+        if (to_int(.num_auth_attempts) ?? 0) > 0 {
+          et = "heralding.login.failed"
+        } else {
+          et = "heralding.session.connect"
+        }
       }
-
-      # Normalise event type (cowrie uses "eventid"); the column is otherwise
-      # empty and all GROUP BY event_type aggregations would be blank.
-      if exists(.eventid) {
-        .event_type = to_string(.eventid) ?? "unknown"
-      } else if !exists(.event_type) {
-        .event_type = "unknown"
+      if et == "" && is_string(.event_type) {
+        et = string!(.event_type)
       }
+      if et == "" {
+        et = "unknown"
+      }
+      .event_type = downcase(et)
+
+      # Credentials: cowrie/adbhoney username/password; heralding records a
+      # list of attempts per session (keep the latest).
+      user = ""
+      pass = ""
+      if is_string(.username) {
+        user = string!(.username)
+      }
+      if is_string(.password) {
+        pass = string!(.password)
+      }
+      if user == "" && pass == "" {
+        user = to_string(.auth_attempts[-1].username) ?? ""
+        pass = to_string(.auth_attempts[-1].password) ?? ""
+      }
+      .username = user
+      .password = pass
+
+      # Attacker input: cowrie/adbhoney log commands as "input".
+      cmd = ""
+      if is_string(.input) {
+        cmd = string!(.input)
+      } else if is_string(.command) {
+        cmd = string!(.command)
+      }
+      .command = cmd
+
+      # Payload: download URL (cowrie/adbhoney), raw request (conpot).
+      pl = ""
+      if is_string(.url) {
+        pl = string!(.url)
+      } else if is_string(.request) {
+        pl = string!(.request)
+      } else if is_string(.payload) {
+        pl = string!(.payload)
+      }
+      .payload = pl
+
+      # metadata is Map(String, String) / JSONB: rebuild it from a fixed set
+      # of string-coerced keys so an odd honeypot field type can never make the
+      # whole batch fail to insert.
+      md = {}
+      for_each(["session", "session_id", "sensor", "dst_ip", "dest_ip", "destination_ip", "version", "hassh", "shasum", "outfile", "filename", "duration", "num_auth_attempts", "backend", "reason"]) -> |_i, k| {
+        v = get(., [k]) ?? null
+        if v != null {
+          sv = to_string(v) ?? ""
+          if sv != "" {
+            md = set!(md, [k], sv)
+          }
+        }
+      }
+      .metadata = md
+
+      # Classification is the intelligence worker's job; never trust a log
+      # line that already claims one.
+      del(.technique_id)
+      del(.technique_name)
+      del(.tactic_id)
+      del(.tactic_name)
+      del(.kill_chain_stage)
+      del(.confidence)
+      del(.classified)
+      del(.country)
+      del(.city)
+      del(.asn)
 
       # Stamp QPot metadata LAST. The timestamp is formatted as ClickHouse's
       # DateTime64 'basic' input format ("YYYY-MM-DD HH:MM:SS.fff"); a raw
@@ -1200,6 +1368,19 @@ transforms:
       true
       {{- end}}
 
+{{- if eq .Config.Database.Type "timescaledb"}}
+  # payload is BYTEA: hand it over hex-encoded, otherwise any backslash in
+  # attacker input is an "invalid input syntax for type bytea" that drops the
+  # whole batch. The timestamp is UTC; say so for TIMESTAMPTZ.
+  pg_prepare:
+    type: remap
+    inputs:
+      - filter_stealth
+    source: |
+      .payload = "\\x" + encode_base16(string(.payload) ?? "")
+      .timestamp = (string(.timestamp) ?? format_timestamp!(now(), "%Y-%m-%d %H:%M:%S%.3f")) + "+00"
+{{- end}}
+
 sinks:
 {{if eq .Config.Database.Type "clickhouse"}}
   clickhouse:
@@ -1227,30 +1408,14 @@ sinks:
   timescaledb:
     type: postgres
     inputs:
-      - filter_stealth
+      - pg_prepare
     endpoint: "postgres://{{.Config.Database.Username}}:{{.Config.Database.Password}}@database:5432/{{.Config.Database.Database}}"
-    table: events
-    encoding:
-      # Only columns that actually exist in the events table. qpot_id /
-      # qpot_instance are intentionally excluded — there are no such columns
-      # (the API attaches qpot_id at read time); including them broke the
-      # INSERT.
-      only_fields:
-        - timestamp
-        - honeypot
-        - source_ip
-        - source_port
-        - dest_port
-        - protocol
-        - event_type
-        - username
-        - password
-        - command
-        - payload
-        - metadata
-        - country
-        - city
-        - asn
+    # events_ingest is an auto-updatable view of only the collector-supplied
+    # columns: the sink writes NULL for every column it does not have, which
+    # on the events table itself breaks id NOT NULL and every DEFAULT.
+    # Fields that are not view columns (qpot_id, the honeypot's raw keys) are
+    # ignored by jsonb_populate_recordset.
+    table: events_ingest
     batch:
       max_bytes: 1049000
       timeout_secs: 5

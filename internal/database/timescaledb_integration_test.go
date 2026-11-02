@@ -43,7 +43,7 @@ func connectPG(t *testing.T) *TimescaleDB {
 	}
 	t.Cleanup(func() { ts.Close() })
 	for _, q := range []string{
-		`DROP TABLE IF EXISTS events, iocs`,
+		`DROP TABLE IF EXISTS events, iocs CASCADE`,
 		`CREATE TABLE events (
 			id BIGSERIAL, timestamp TIMESTAMPTZ NOT NULL DEFAULT NOW(), honeypot TEXT NOT NULL,
 			source_ip INET, source_port INTEGER, dest_port INTEGER, protocol TEXT, event_type TEXT,
@@ -231,4 +231,48 @@ func TestPGInsertEventsSurvivesBadValues(t *testing.T) {
 
 func TestPGIOCFilters(t *testing.T) {
 	checkIOCValueAndSourceFilters(t, connectPG(t), nil)
+}
+
+// TestPGCollectorIngestView replays the statement Vector's postgres sink
+// issues (jsonb_populate_recordset over the target's row type) against the
+// events_ingest view with collector-shaped rows: fields the view lacks must
+// take the table defaults (id, classified=false), unknown keys are ignored,
+// and a hex-encoded payload with a backslash round-trips.
+func TestPGCollectorIngestView(t *testing.T) {
+	ts := connectPG(t)
+	ctx := context.Background()
+	if _, err := ts.pool.Exec(ctx, eventsIngestViewSQL); err != nil {
+		t.Fatal(err)
+	}
+	rows := `[{"timestamp":"2026-11-02 05:28:03.341+00","honeypot":"cowrie","source_ip":"203.0.113.9",
+		"source_port":55632,"dest_port":22,"protocol":"ssh","event_type":"cowrie.command.input",
+		"username":"","password":"","command":"uname -a","payload":"\\x615c7a62",
+		"metadata":{"session":"s1"},"qpot_id":"qp_x","message":"raw","file":"/data/x"}]`
+	if _, err := ts.pool.Exec(ctx,
+		`INSERT INTO events_ingest SELECT * FROM jsonb_populate_recordset(NULL::events_ingest, $1)`, rows); err != nil {
+		t.Fatalf("sink-style insert: %v", err)
+	}
+	got, err := ts.GetUnclassifiedEvents(ctx, 10)
+	if err != nil || len(got) != 1 {
+		t.Fatalf("GetUnclassifiedEvents = %v, %v", got, err)
+	}
+	ev := got[0]
+	if ev.Command != "uname -a" || string(ev.Payload) != `a\zb` ||
+		ev.Metadata["session"] != "s1" || ev.Classified {
+		t.Fatalf("ingested event = %+v", ev)
+	}
+	// No GeoIP: country/city/asn are NULL. Every read path must cope.
+	if top, err := ts.GetTopAttackers(ctx, 10, time.Time{}); err != nil || len(top) != 1 || top[0].SourceIP != "203.0.113.9" {
+		t.Fatalf("GetTopAttackers = %v, %v", top, err)
+	}
+	if evs, err := ts.GetEvents(ctx, EventFilter{Limit: 10}); err != nil || len(evs) != 1 {
+		t.Fatalf("GetEvents = %v, %v", evs, err)
+	}
+	var buf bytes.Buffer
+	if err := ts.ExportData(ctx, time.Time{}, time.Now().Add(time.Hour), &buf); err != nil {
+		t.Fatalf("ExportData: %v", err)
+	}
+	if _, err := ts.GetStats(ctx, time.Time{}); err != nil {
+		t.Fatalf("GetStats: %v", err)
+	}
 }

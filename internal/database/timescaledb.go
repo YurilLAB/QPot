@@ -75,6 +75,15 @@ func (ts *TimescaleDB) Ping(ctx context.Context) error {
 }
 
 // InitializeSchema creates database tables and hypertables
+// eventsIngestViewSQL is the collector's insert target (see InitializeSchema).
+const eventsIngestViewSQL = `
+	CREATE OR REPLACE VIEW events_ingest AS
+	SELECT timestamp, honeypot, source_ip, source_port, dest_port, protocol,
+		event_type, username, password, command, payload, metadata,
+		country, city, asn
+	FROM events
+`
+
 func (ts *TimescaleDB) InitializeSchema(ctx context.Context) error {
 	if ts.pool == nil {
 		return fmt.Errorf("not connected")
@@ -121,6 +130,16 @@ func (ts *TimescaleDB) InitializeSchema(ctx context.Context) error {
 	`
 	if _, err := ts.pool.Exec(ctx, hypertableSQL); err != nil {
 		return fmt.Errorf("failed to create hypertable: %w", err)
+	}
+
+	// The collector (Vector's postgres sink) inserts via
+	// jsonb_populate_recordset over the target's full row type, so any column
+	// absent from the event is written as an explicit NULL — which violates
+	// id's NOT NULL and skips every DEFAULT. Ingest goes through this
+	// auto-updatable view of only the columns the collector supplies; Postgres
+	// fills id/classified/confidence/technique_* from their defaults.
+	if _, err := ts.pool.Exec(ctx, eventsIngestViewSQL); err != nil {
+		return fmt.Errorf("failed to create events_ingest view: %w", err)
 	}
 
 	// Create indexes
@@ -283,9 +302,9 @@ func (ts *TimescaleDB) GetEvents(ctx context.Context, filter EventFilter) ([]*Ev
 
 	query := `
 		SELECT
-			id, timestamp, honeypot, COALESCE(host(source_ip), ''), source_port, dest_port,
-			protocol, event_type, username, password, command,
-			payload, metadata, country, city, asn,
+			id, timestamp, honeypot, COALESCE(host(source_ip), ''), COALESCE(source_port, 0), COALESCE(dest_port, 0),
+			COALESCE(protocol, ''), COALESCE(event_type, ''), COALESCE(username, ''), COALESCE(password, ''), COALESCE(command, ''),
+			payload, metadata, COALESCE(country, ''), COALESCE(city, ''), COALESCE(asn, ''),
 			technique_id, technique_name, tactic_id, tactic_name,
 			kill_chain_stage, confidence, classified
 		FROM events
@@ -388,9 +407,9 @@ func (ts *TimescaleDB) GetEventByID(ctx context.Context, id string) (*Event, err
 	var dbID int64
 	err := ts.pool.QueryRow(ctx, `
 		SELECT
-			id, timestamp, honeypot, COALESCE(host(source_ip), ''), source_port, dest_port,
-			protocol, event_type, username, password, command,
-			payload, metadata, country, city, asn
+			id, timestamp, honeypot, COALESCE(host(source_ip), ''), COALESCE(source_port, 0), COALESCE(dest_port, 0),
+			COALESCE(protocol, ''), COALESCE(event_type, ''), COALESCE(username, ''), COALESCE(password, ''), COALESCE(command, ''),
+			payload, metadata, COALESCE(country, ''), COALESCE(city, ''), COALESCE(asn, '')
 		FROM events
 		WHERE id = $1
 	`, id).Scan(
@@ -471,14 +490,14 @@ func (ts *TimescaleDB) GetTopAttackers(ctx context.Context, limit int, since tim
 	query := `
 		SELECT 
 			COALESCE(host(source_ip), ''),
-			country,
+			COALESCE(country, '') AS country,
 			MIN(timestamp) as first_seen,
 			MAX(timestamp) as last_seen,
 			COUNT(*) as attack_count,
 			ARRAY_AGG(DISTINCT honeypot) as honeypots
 		FROM events 
 		WHERE timestamp >= $1
-		GROUP BY source_ip, country
+		GROUP BY source_ip, COALESCE(country, '')
 		ORDER BY attack_count DESC
 		LIMIT $2
 	`
@@ -604,8 +623,8 @@ func (ts *TimescaleDB) ExportData(ctx context.Context, start, end time.Time, w i
 	}
 
 	rows, err := ts.pool.Query(ctx, `
-		SELECT timestamp, honeypot, COALESCE(host(source_ip), ''), source_port, dest_port,
-		       protocol, event_type, username, password, command, country, city, asn,
+		SELECT timestamp, honeypot, COALESCE(host(source_ip), ''), COALESCE(source_port, 0), COALESCE(dest_port, 0),
+		       COALESCE(protocol, ''), COALESCE(event_type, ''), COALESCE(username, ''), COALESCE(password, ''), COALESCE(command, ''), COALESCE(country, ''), COALESCE(city, ''), COALESCE(asn, ''),
 		       technique_id, technique_name, confidence
 		FROM events
 		WHERE timestamp >= $1 AND timestamp <= $2
@@ -1095,9 +1114,9 @@ func (ts *TimescaleDB) GetUnclassifiedEvents(ctx context.Context, limit int) ([]
 	}
 
 	query := `
-		SELECT timestamp, honeypot, COALESCE(host(source_ip), ''), source_port, dest_port,
-		       protocol, event_type, username, password, command,
-		       payload, metadata, country, city, asn,
+		SELECT timestamp, honeypot, COALESCE(host(source_ip), ''), COALESCE(source_port, 0), COALESCE(dest_port, 0),
+		       COALESCE(protocol, ''), COALESCE(event_type, ''), COALESCE(username, ''), COALESCE(password, ''), COALESCE(command, ''),
+		       payload, metadata, COALESCE(country, ''), COALESCE(city, ''), COALESCE(asn, ''),
 		       technique_id, technique_name, tactic_id, tactic_name,
 		       kill_chain_stage, confidence, classified
 		FROM events

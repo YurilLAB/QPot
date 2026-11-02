@@ -56,28 +56,35 @@ func TestVectorClickHouseDataPathCorrectness(t *testing.T) {
 	}
 }
 
-// TestVectorTimescaleHasNoPhantomColumns guards that qpot_id/qpot_instance —
-// which are NOT columns in the events table — are not in the postgres sink's
-// only_fields (they broke the INSERT).
-func TestVectorTimescaleHasNoPhantomColumns(t *testing.T) {
+// TestVectorTimescaleSink pins the postgres sink shape that actually inserts:
+// Vector's postgres sink has no `encoding` option (an encoding block makes the
+// whole collector config invalid), and it writes NULL for every column it is
+// not given, so it must target the events_ingest view (defaults apply) and
+// receive the hex-encoded payload from pg_prepare.
+func TestVectorTimescaleSink(t *testing.T) {
 	out := genVector(t, "timescaledb")
-	// Look only at the only_fields block.
-	start := strings.Index(out, "only_fields:")
+	start := strings.Index(out, "  timescaledb:\n    type: postgres")
 	if start < 0 {
-		t.Skip("no only_fields block")
+		t.Fatal("no timescaledb sink")
 	}
 	block := out[start:]
-	end := strings.Index(block, "batch:")
-	if end > 0 {
+	if end := strings.Index(block, "batch:"); end > 0 {
 		block = block[:end]
 	}
-	for _, phantom := range []string{"- qpot_id", "- qpot_instance"} {
-		if strings.Contains(block, phantom) {
-			t.Errorf("timescale only_fields still lists phantom column %q", phantom)
-		}
+	if strings.Contains(block, "encoding:") || strings.Contains(block, "only_fields") {
+		t.Error("postgres sink carries an encoding block Vector rejects")
 	}
-	if !strings.Contains(block, "- honeypot") {
-		t.Error("timescale only_fields missing required honeypot column")
+	if !strings.Contains(block, "table: events_ingest") {
+		t.Error("postgres sink does not target the events_ingest view")
+	}
+	if !strings.Contains(block, "- pg_prepare") {
+		t.Error("postgres sink is not fed by pg_prepare")
+	}
+	if !strings.Contains(out, `encode_base16(`) {
+		t.Error("payload is not hex-encoded for BYTEA")
+	}
+	if ch := genVector(t, "clickhouse"); strings.Contains(ch, "pg_prepare") {
+		t.Error("pg_prepare emitted for the clickhouse backend")
 	}
 }
 
