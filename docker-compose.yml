@@ -85,6 +85,9 @@ services:
         condition: service_healthy
     tmpfs:
      - /tmp/ciscoasa:uid=2000,gid=2000
+     # 24.04.2 keeps its device identity and payloads here and exits on a
+     # read-only root without it (tpotinit only creates ciscoasa/log).
+     - /var/lib/ciscoasa:uid=2000,gid=2000
     networks:
      - ciscoasa_local
     ports:
@@ -528,7 +531,7 @@ services:
     tty: true
     networks:
      - tanner_local
-    image: ${TPOT_REPO}/phpox:${TPOT_VERSION}
+    image: ${TPOT_REPO}/phpox:24.04.1  # no phpox image for 24.04.2
     pull_policy: ${TPOT_PULL_POLICY}
     read_only: true
 
@@ -543,7 +546,7 @@ services:
     tty: true
     networks:
      - tanner_local
-    image: ${TPOT_REPO}/tanner:${TPOT_VERSION}
+    image: ${TPOT_REPO}/tanner:24.04.1  # no tanner image for 24.04.2
     pull_policy: ${TPOT_PULL_POLICY}
     read_only: true
     volumes:
@@ -562,7 +565,7 @@ services:
     tty: true
     networks:
      - tanner_local
-    image: ${TPOT_REPO}/tanner:${TPOT_VERSION}
+    image: ${TPOT_REPO}/tanner:24.04.1  # no tanner image for 24.04.2
     pull_policy: ${TPOT_PULL_POLICY}
     command: tanner
     read_only: true
@@ -581,7 +584,7 @@ services:
      - tanner_local
     ports:
      - "80:80"
-    image: ${TPOT_REPO}/snare:${TPOT_VERSION}
+    image: ${TPOT_REPO}/snare:24.04.1  # no snare image for 24.04.2
     pull_policy: ${TPOT_PULL_POLICY}
 
 # Wordpot service
@@ -618,7 +621,7 @@ services:
      - NET_ADMIN
      - SYS_NICE
      - NET_RAW
-    image: ${TPOT_REPO}/fatt:${TPOT_VERSION}
+    image: ${TPOT_REPO}/fatt:24.04.1  # no fatt image for 24.04.2
     pull_policy: ${TPOT_PULL_POLICY}
     volumes:
      - ${TPOT_DATA_PATH}/fatt/log:/opt/fatt/log
@@ -850,7 +853,7 @@ services:
      - nginx_local
     ports:
      - "127.0.0.1:64303:8080"
-    image: ${TPOT_REPO}/spiderfoot:${TPOT_VERSION}
+    image: ${TPOT_REPO}/spiderfoot:24.04.1  # no spiderfoot image for 24.04.2
     pull_policy: ${TPOT_PULL_POLICY}
     volumes:
      - ${TPOT_DATA_PATH}/spiderfoot:/home/spiderfoot/.spiderfoot

@@ -9,6 +9,12 @@ package instance
 // from T-Pot's reference compose files (vendored under docker/<name>/) and the
 // cowrie/endlessh profiles are verified by actually running the images.
 
+import (
+	"fmt"
+	"slices"
+	"strings"
+)
+
 // deployVolume maps a host path (under {DataPath}/honeypots/<name>) to a path
 // inside the honeypot container.
 type deployVolume struct {
@@ -67,6 +73,31 @@ type honeypotDeploy struct {
 	// when QPot must run the service from a specific CWD so its relative config
 	// paths (etc/cowrie.cfg, etc/userdb.txt, honeyfs/) resolve to QPot's mounts.
 	WorkingDir string
+	// NoShell marks images without /bin/sh (static Go binaries on scratch /
+	// distroless). The /proc/net healthcheck runs through a shell, so it can
+	// never succeed there; such honeypots get no in-container healthcheck and
+	// `qpot setup`/`doctor` probe their published TCP ports from the host.
+	NoShell bool
+	// HealthPorts are the container ports the healthcheck probes when they
+	// differ from the published ones (e.g. tanner's server, whose web front end
+	// is the snare companion).
+	HealthPorts []int
+	// Internal means the service publishes no host port itself (tanner: the
+	// attacker-facing port is published by its snare companion).
+	Internal bool
+	// RunAsUID is the image's non-root user ("uid:gid"). Mounted directories
+	// listed in OwnedSubdirs are handed to it before start, for images that
+	// chmod their own log dir (only the owner may; capabilities do not apply
+	// to a non-root process).
+	RunAsUID     string
+	OwnedSubdirs []string
+	// LLMEnv maps honeypot custom_config keys to the container environment
+	// variables of an LLM-backed honeypot; LLMRequired are the keys that must
+	// be set (the image refuses to start without a provider).
+	LLMEnv      map[string]string
+	LLMRequired []string
+	// LLMValues restricts settings to the values the image accepts.
+	LLMValues map[string][]string
 }
 
 // NeedsNetBind reports whether the honeypot binds a privileged port (<1024)
@@ -256,25 +287,34 @@ func deployProfileFor(name string) honeypotDeploy {
 			Ports:   []int{25},
 		}
 	case "ddospot":
-		// Each pot (generic/ntp/dns/ssdp/chargen) opens a SQLite DB at db/<pot>.
-		// sqlite3 and writes a per-pot log; under a read-only root those dirs MUST
-		// be writable mounts or every pot dies with "unable to open database file"
-		// at init and nothing binds (only the mgmt socket), leaving the honeypot
-		// unhealthy. Mirror T-Pot's reference compose: logs + bl + db.
+		// ddospot v2 (T-Pot 24.04.2) is a static Go rewrite: CHARGEN 19/udp,
+		// DNS 53/udp+tcp, NTP 123/udp, SSDP 1900/udp (SNMP 161 is gone, as in
+		// T-Pot). It logs JSON lines to DDOSPOT_LOG_DIR (default
+		// /var/log/ddospot); the v1 mount at /opt/ddospot/ddospot/logs - still
+		// in T-Pot's own compose - leaves it writing to the read-only root, so
+		// every log line is lost ("log write errors").
 		return honeypotDeploy{
-			Volumes: []deployVolume{
-				{HostSubdir: "logs", ContainerPath: "/opt/ddospot/ddospot/logs"},
-				{HostSubdir: "bl", ContainerPath: "/opt/ddospot/ddospot/bl"},
-				{HostSubdir: "db", ContainerPath: "/opt/ddospot/ddospot/db"},
-			},
-			UDPPorts: []int{19, 53, 123, 161, 1900},
+			Volumes:  []deployVolume{{HostSubdir: "logs", ContainerPath: "/var/log/ddospot"}},
+			Env:      map[string]string{"DDOSPOT_LOG_DIR": "/var/log/ddospot"},
+			Ports:    []int{53},
+			UDPPorts: []int{19, 53, 123, 1900},
+			NoShell:  true,
 		}
 	case "ciscoasa":
+		// 24.04.2 is a static Go rewrite (asapot) that keeps its device
+		// identity (identity.json) and captured payloads in /var/lib/ciscoasa;
+		// under a read-only root it exits with "mkdir /var/lib: read-only file
+		// system" - also with T-Pot's own compose. A persistent state dir keeps
+		// the identity stable across restarts.
 		return honeypotDeploy{
-			Tmpfs:    []string{"/tmp/ciscoasa:uid=2000,gid=2000"},
-			Volumes:  []deployVolume{{HostSubdir: "logs", ContainerPath: "/var/log/ciscoasa"}},
+			Tmpfs: []string{"/tmp/ciscoasa:uid=2000,gid=2000"},
+			Volumes: []deployVolume{
+				{HostSubdir: "logs", ContainerPath: "/var/log/ciscoasa"},
+				{HostSubdir: "state", ContainerPath: "/var/lib/ciscoasa"},
+			},
 			Ports:    []int{8443},
 			UDPPorts: []int{5000},
+			NoShell:  true,
 		}
 	case "citrixhoneypot":
 		return honeypotDeploy{
@@ -295,61 +335,104 @@ func deployProfileFor(name string) honeypotDeploy {
 		return honeypotDeploy{
 			Volumes: []deployVolume{{HostSubdir: "logs", ContainerPath: "/var/log/medpot"}},
 			Ports:   []int{2575},
+			NoShell: true,
 		}
 	case "dicompot":
 		return honeypotDeploy{
 			Volumes: []deployVolume{{HostSubdir: "logs", ContainerPath: "/var/log/dicompot"}},
 			Ports:   []int{11112},
+			NoShell: true,
 		}
 	case "honeyaml":
 		return honeypotDeploy{
 			Volumes: []deployVolume{{HostSubdir: "logs", ContainerPath: "/opt/honeyaml/log"}},
 			Ports:   []int{8080},
+			NoShell: true,
 		}
 	case "tanner":
-		// Web honeypot. NOTE: upstream Tanner is a multi-service stack
-		// (snare + tanner + redis + phpox); this single-container profile is
-		// best-effort and the full stack is not yet orchestrated by QPot.
+		// Web application honeypot, run as T-Pot runs it: this service is the
+		// tanner analysis server (internal, :8090); the attacker-facing web
+		// front end is the snare companion, which publishes tanner's port, and
+		// tanner_api / tanner_phpox / tanner_redis complete the stack on the
+		// egress-blocked tanner_backend network (see tannerStack in compose.go).
+		// T-Pot did not rebuild these images for 24.04.2 (tpotPinned).
 		return honeypotDeploy{
-			Tmpfs:   []string{"/tmp/tanner:uid=2000,gid=2000"},
-			Volumes: []deployVolume{{HostSubdir: "logs", ContainerPath: "/var/log/tanner"}},
-			Ports:   []int{80},
+			Tmpfs: []string{"/tmp/tanner:uid=2000,gid=2000"},
+			Volumes: []deployVolume{
+				{HostSubdir: "logs", ContainerPath: "/var/log/tanner"},
+				{HostSubdir: "files", ContainerPath: "/opt/tanner/files"},
+			},
+			Ports:       []int{80}, // allocated for tanner, published by snare
+			Internal:    true,
+			HealthPorts: []int{8090},
 		}
-
-	// Newer / 2024-2026 honeypots (vendored under docker/). Derived from their
-	// reference composes.
 	case "beelzebub":
-		// LLM-backed SSH/HTTP/TCP. Runs without an LLM provider (static replies)
-		// but is most convincing with Ollama configured.
+		// LLM-backed SSH/HTTP/TCP. Its SSH, HTTP and PostgreSQL services fail
+		// validation without an LLM, so custom_config must set llm_provider
+		// (ollama or openai), llm_model and, for Ollama or an
+		// OpenAI-compatible server, llm_host; `qpot honeypot enable` checks.
 		return honeypotDeploy{
-			Volumes: []deployVolume{{HostSubdir: "logs", ContainerPath: "/opt/beelzebub/configurations/log"}},
+			Volumes: []deployVolume{
+				{HostSubdir: "logs", ContainerPath: "/opt/beelzebub/configurations/log"},
+				{HostSubdir: "key", ContainerPath: "/opt/beelzebub/configurations/key"},
+			},
 			Ports:   []int{22, 80, 2222, 3306, 8080},
+			NoShell: true,
+			LLMEnv: map[string]string{
+				"llm_provider": "LLM_PROVIDER",
+				"llm_model":    "LLM_MODEL",
+				"llm_host":     "LLM_HOST",
+			},
+			LLMRequired: []string{"llm_provider", "llm_model"},
+			LLMValues:   map[string][]string{"llm_provider": {"ollama", "openai"}},
 		}
 	case "galah":
-		// LLM-backed dynamic web honeypot.
+		// LLM-backed dynamic web honeypot; exits without a provider, so
+		// custom_config must set llm_provider (and llm_server_url + llm_model
+		// for Ollama, or llm_api_key for a hosted model).
 		return honeypotDeploy{
-			Volumes: []deployVolume{{HostSubdir: "logs", ContainerPath: "/opt/galah/log"}},
-			Ports:   []int{80, 443, 8080, 8443},
+			Volumes: []deployVolume{
+				{HostSubdir: "logs", ContainerPath: "/opt/galah/log"},
+				{HostSubdir: "cache", ContainerPath: "/opt/galah/config/cache"},
+			},
+			Ports: []int{80, 443, 8080, 8443},
+			LLMEnv: map[string]string{
+				"llm_provider":       "LLM_PROVIDER",
+				"llm_server_url":     "LLM_SERVER_URL",
+				"llm_model":          "LLM_MODEL",
+				"llm_temperature":    "LLM_TEMPERATURE",
+				"llm_api_key":        "LLM_API_KEY",
+				"llm_cloud_location": "LLM_CLOUD_LOCATION",
+				"llm_cloud_project":  "LLM_CLOUD_PROJECT",
+			},
+			LLMRequired: []string{"llm_provider", "llm_model"},
 		}
 	case "go-pot":
 		return honeypotDeploy{
 			Volumes: []deployVolume{{HostSubdir: "logs", ContainerPath: "/opt/go-pot/log"}},
 			Ports:   []int{8080},
+			NoShell: true,
 		}
 	case "h0neytr4p":
 		// Needs a writable payloads dir; the read-only root otherwise blocks
-		// its `mkdir /data`.
+		// its `mkdir /data`. It runs as 2000:2000 and chmods its log dir at
+		// start, which only the owner may do, so QPot hands that dir to it
+		// (T-Pot's tpotinit does the same for its data dirs).
 		return honeypotDeploy{
 			Volumes: []deployVolume{
 				{HostSubdir: "logs", ContainerPath: "/opt/h0neytr4p/log"},
 				{HostSubdir: "payloads", ContainerPath: "/data/h0neytr4p/payloads"},
 			},
-			Ports: []int{80, 443},
+			Ports:        []int{80, 443},
+			NoShell:      true,
+			RunAsUID:     "2000:2000",
+			OwnedSubdirs: []string{"logs", "payloads"},
 		}
 	case "hellpot":
 		return honeypotDeploy{
 			Volumes: []deployVolume{{HostSubdir: "logs", ContainerPath: "/var/log/hellpot"}},
 			Ports:   []int{8080},
+			NoShell: true,
 		}
 	case "log4pot":
 		// log4pot writes captured payloads to /var/log/log4pot/payloads via
@@ -393,4 +476,26 @@ func deployProfileFor(name string) honeypotDeploy {
 			},
 		}
 	}
+}
+
+// MissingLLMConfig returns the custom_config keys an LLM-backed honeypot
+// still needs (nil when it needs none or all are set).
+func MissingLLMConfig(name string, custom map[string]string) []string {
+	var missing []string
+	for _, k := range deployProfileFor(name).LLMRequired {
+		if strings.TrimSpace(custom[k]) == "" {
+			missing = append(missing, k)
+		}
+	}
+	return missing
+}
+
+// CheckLLMSetting reports whether value is accepted for the honeypot's LLM
+// setting key (an empty value, which removes the setting, always is).
+func CheckLLMSetting(name, key, value string) error {
+	allowed := deployProfileFor(name).LLMValues[key]
+	if value == "" || len(allowed) == 0 || slices.Contains(allowed, value) {
+		return nil
+	}
+	return fmt.Errorf("%s: %s must be one of: %s", name, key, strings.Join(allowed, ", "))
 }

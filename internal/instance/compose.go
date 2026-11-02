@@ -245,6 +245,9 @@ func (g *ComposeGenerator) buildSubnetMap() map[string]string {
 	if sshProxyEnabled(g.Config) {
 		names = append(names, "ssh-proxy_backend")
 	}
+	if tannerEnabled(g.Config) {
+		names = append(names, "tanner_backend")
+	}
 
 	used := map[string]bool{}
 	for s := range g.ReservedSubnets {
@@ -301,7 +304,13 @@ func (g *ComposeGenerator) buildSubnetMap() map[string]string {
 // /proc/net encoding); any one expected port listening is enough to call the
 // service up. Returns "" only when no port is known (caller omits healthcheck).
 func listenHealthCheck(d honeypotDeploy, fallbackPort int) string {
+	if d.NoShell {
+		return "" // no shell to run it; the host probes the published ports
+	}
 	ports := d.Ports
+	if len(d.HealthPorts) > 0 {
+		ports = d.HealthPorts
+	}
 	files := "/proc/net/tcp /proc/net/tcp6"
 	if len(ports) == 0 && len(d.UDPPorts) > 0 {
 		ports = d.UDPPorts
@@ -390,6 +399,15 @@ networks:
     ipam:
       config:
         - subnet: {{netSubnet "ssh-proxy_backend"}}
+{{end}}{{if tannerEnabled .Config}}
+  # tanner's server, API, PHP sandbox (phpox executes attacker-supplied PHP)
+  # and redis sit here with no default gateway: nothing in the stack can make
+  # outbound connections. Only snare also joins tanner_net to serve attackers.
+  tanner_backend:
+    internal: true
+    ipam:
+      config:
+        - subnet: {{netSubnet "tanner_backend"}}
 {{end}}{{range $name, $hp := .Config.Honeypots}}{{if $hp.Enabled}}
   {{$name}}_net:
     driver: bridge
@@ -583,6 +601,60 @@ services:
         max-file: "3"
         labels: "qpot.instance,qpot.honeypot"
 {{end}}{{end}}
+{{if tannerEnabled .Config}}{{range $c := tannerCompanions}}
+  # tanner stack companion ({{$c.Role}}); see the tanner deploy profile.
+  {{$c.Service}}:
+    image: {{$c.Image}}
+    container_name: {{$.Config.InstanceName}}_{{$c.Service}}
+    restart: on-failure:{{$.Config.Security.ResourceLimits.RestartAttempts}}
+    tty: true
+    {{- if $c.Command}}
+    command: {{$c.Command}}
+    {{- end}}
+    {{- if $.Sandbox.ContainerRuntime}}
+    runtime: {{$.Sandbox.ContainerRuntime}}
+    {{- end}}
+    {{- if $c.Public}}
+    ports:
+      - "{{hostPort "tanner" 80}}:80"
+    {{- end}}
+    networks:
+      - tanner_backend
+    {{- if $c.Public}}
+      - tanner_net
+    {{- end}}
+    {{- if $c.Logs}}
+    volumes:
+      - {{$.Config.DataPath}}/honeypots/tanner/logs:/var/log/tanner
+    {{- end}}
+    {{- if $c.Tmpfs}}
+    tmpfs:
+      - {{$c.Tmpfs}}
+    {{- end}}
+    {{- if $c.ReadOnly}}
+    read_only: true
+    {{- end}}
+    labels:
+      qpot.instance: "{{$.Config.InstanceName}}"
+      qpot.honeypot: "tanner"
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    deploy:
+      resources:
+        limits:
+          cpus: '{{divf $.Config.Security.ResourceLimits.MaxCPUPercent 100}}'
+          memory: {{$.Config.Security.ResourceLimits.MaxMemoryMB}}M
+          {{if $.Config.Security.ResourceLimits.MaxPids}}pids: {{$.Config.Security.ResourceLimits.MaxPids}}{{end}}
+    mem_swappiness: 0
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+        labels: "qpot.instance,qpot.honeypot"
+{{end}}{{end}}
 
   # Note: the Web UI is served in-process by the qpot binary itself ("qpot up"
   # starts an HTTP server on Config.WebUI.Port). There is no separate web UI
@@ -614,6 +686,7 @@ services:
     {{- if $d.WorkingDir}}
     working_dir: {{$d.WorkingDir}}
     {{- end}}
+    {{- if not $d.Internal}}
     ports:
     {{- if or $d.Ports $d.UDPPorts}}
     {{- range $p := $d.Ports}}
@@ -624,6 +697,7 @@ services:
     {{- end}}
     {{- else}}
       - "{{hostPort $hpName .HP.Port}}:{{.HP.Port}}"
+    {{- end}}
     {{- end}}
     volumes:
       # The QPot ID (the API credential) is deliberately NOT mounted or passed
@@ -642,6 +716,10 @@ services:
       # The broker also joins the egress-locked backend network so it can reach
       # the real-OpenSSH backends (and nothing else can).
       - ssh-proxy_backend
+    {{- end}}
+    {{- if eq .Name "tanner"}}
+      # The tanner server talks to its api/phpox/redis companions only there.
+      - tanner_backend
     {{- end}}
     labels:
       # Host-side identification for QPot's tooling and the docker log driver.
@@ -676,8 +754,17 @@ services:
       {{- range $k, $v := $d.Env}}
       - {{$k}}={{$v}}
       {{- end}}
+      {{- range $k, $env := $d.LLMEnv}}{{with index $.HP.CustomConfig $k}}
+      - {{envEntry $env .}}
+      {{- end}}{{end}}
     {{template "security" dict "Config" $.Config "HP" .HP "GlobalLimits" $.Config.Security.ResourceLimits "Name" .Name "FakeHostname" .HP.Stealth.FakeHostname}}
-    {{- if ne .Name "ssh-proxy"}}
+    {{- if $d.NoShell}}
+    # The image has no shell, so no in-container check can run (an image
+    # HEALTHCHECK would fail forever); qpot setup/doctor probe the published
+    # ports from the host instead.
+    healthcheck:
+      disable: true
+    {{- else if ne .Name "ssh-proxy"}}
     {{- $hc := listenCheck $d .HP.Port}}
     {{- if $hc}}
     healthcheck:
@@ -718,7 +805,12 @@ services:
       - CHOWN
       - DAC_OVERRIDE
       - SETUID
-      - SETGID{{end}}
+      - SETGID
+      # The ClickHouse entrypoint starts a temporary server as the clickhouse
+      # user to initialise a fresh data dir and then stops it from root; with
+      # every capability dropped that kill is refused, init fails and the
+      # container restarts (and is reported unhealthy) on first boot.
+      - KILL{{end}}
 
     # No user override: the database image runs as its own user; forcing a
     # different uid breaks its data-directory ownership. CHOWN is required:
@@ -864,6 +956,8 @@ services:
 		// is enabled, the real-OpenSSH backend companion services to render, and
 		// the broker's QPOT_SSHPROXY_BACKENDS value.
 		"sshProxyEnabled":    sshProxyEnabled,
+		"tannerEnabled":      tannerEnabled,
+		"tannerCompanions":   tannerCompanions,
 		"sshProxyBackends":   sshProxyBackends,
 		"sshBackendCSV":      sshBackendCSV,
 		"sshBackendHostname": sshBackendHostname,
@@ -1047,8 +1141,11 @@ api:
   address: "127.0.0.1:8686"
 {{if .Config.Collector.GeoIPDBPath}}
 enrichment_tables:
+  # "mmdb" reads any MaxMind-format database (GeoLite2 City/Country,
+  # DB-IP Lite) and returns its raw record; Vector's "geoip" type rejects
+  # DB-IP files and flattens the record into different field names.
   qpot_geoip:
-    type: "geoip"
+    type: "mmdb"
     path: "{{.Config.Collector.GeoIPDBPath}}"
 {{end}}
 sources:
@@ -1152,6 +1249,88 @@ transforms:
         .protocol = "ssh"
       }
 
+      # Honeypots that name the attacker's address differently (field names
+      # as in T-Pot's own Logstash pipeline) are mapped onto src_ip/src_port.
+      if hp == "tanner" {
+        .src_ip = .peer.ip
+        .src_port = .peer.port
+        .protocol = "http"
+        .url = .path
+        if is_string(.method) {
+          .eventid = "tanner.http." + downcase(string!(.method))
+        }
+      } else if hp == "dicompot" {
+        .src_ip = .IP
+        .src_port = .Port
+        .input = .Command
+      } else if hp == "ddospot" {
+        # A reflection attack's "target" is the (spoofed) source of the
+        # requests, i.e. the address the packets came from.
+        .src_ip = .target_ip
+        .src_port = .target_port
+        .protocol = .proto
+        pot = to_string(.pot) ?? ""
+        dev = to_string(.event) ?? ""
+        if pot == "" {
+          pot = "udp"
+        }
+        if dev == "" {
+          dev = "request"
+        }
+        .eventid = "ddospot." + pot + "." + dev
+        .payload = .dns_name
+      } else if hp == "hellpot" {
+        .src_ip = .REMOTE_ADDR
+        .url = .URL
+        .protocol = "http"
+      } else if hp == "log4pot" {
+        .src_ip = .client
+        .src_port = .port
+        .dest_port = .server_port
+        .protocol = "http"
+      } else if hp == "citrixhoneypot" {
+        cm, cerr = parse_regex(to_string(.message) ?? "", r'^\((?P<ip>[0-9a-fA-F:.]+):(?P<port>\d+)\): (?P<rest>.*)$')
+        if cerr == null {
+          .src_ip = cm.ip
+          .src_port = cm.port
+          .payload = cm.rest
+          .protocol = "https"
+          .eventid = "citrixhoneypot.http.request"
+        }
+      } else if hp == "galah" {
+        .url = get(., ["request.requestURI"]) ?? null
+        .protocol = "http"
+      } else if hp == "mailoney" {
+        mev = to_string(get(., ["event.type"]) ?? null) ?? ""
+        if mev == "" {
+          mev = "session"
+        }
+        .eventid = "mailoney." + mev
+        .input = .smtp_input
+        .protocol = "smtp"
+      } else if hp == "redishoneypot" && is_string(.command) {
+        .input = strip_whitespace(string!(.command) + " " + (to_string(.args_text) ?? ""))
+      } else if hp == "sentrypeer" {
+        .protocol = "sip"
+        if is_string(.sip_method) {
+          .eventid = "sentrypeer.sip." + downcase(string!(.sip_method))
+        }
+      } else if hp == "go-pot" || hp == "honeyaml" || hp == "wordpot" {
+        if is_string(.method) {
+          .eventid = hp + ".http." + downcase(string!(.method))
+        }
+        q = to_string(.qs) ?? to_string(.query_string) ?? to_string(.query) ?? ""
+        if is_string(.path) {
+          .url = string!(.path)
+          if q != "" {
+            .url = string!(.path) + "?" + q
+          }
+        }
+        .protocol = "http"
+      } else if hp == "beelzebub" || hp == "h0neytr4p" {
+        .url = .request_uri
+      }
+
       # Source IP from the common honeypot field names. Validated so a
       # malformed value can never poison an insert (inet / String columns);
       # IPv4-mapped IPv6 is unwrapped so the same attacker groups together.
@@ -1162,6 +1341,22 @@ transforms:
         sip = string!(.source_ip)
       }
       sip = replace(strip_whitespace(sip), r'^::ffff:', "")
+      # A line with no attacker address at all is a startup banner, error or
+      # state record (log4pot "start", hellpot "Listening", wordpot's profile
+      # state, dicompot's connection-finished line), not an attack.
+      if sip == "" {
+        abort
+      }
+      # "ip:port" in one field (sentrypeer, older redishoneypot).
+      if !(ip_cidr_contains("0.0.0.0/0", sip) ?? false) && !(ip_cidr_contains("::/0", sip) ?? false) {
+        am, aerr = parse_regex(sip, r'^\[?(?P<ip>[0-9a-fA-F:.]+?)\]?:(?P<port>\d{1,5})$')
+        if aerr == null {
+          sip = replace(string!(am.ip), r'^::ffff:', "")
+          if (to_int(.src_port) ?? 0) == 0 {
+            .src_port = am.port
+          }
+        }
+      }
       if !(ip_cidr_contains("0.0.0.0/0", sip) ?? false) && !(ip_cidr_contains("::/0", sip) ?? false) {
         sip = "0.0.0.0"
       }
@@ -1179,6 +1374,10 @@ transforms:
       }
       if dp == 0 {
         dp = to_int(.destination_port) ?? 0
+      }
+      # Honeypots that do not log the port they listen on (as T-Pot adds it).
+      if dp == 0 {
+        dp = to_int(get({"tanner": 80, "hellpot": 80, "endlessh": 22, "citrixhoneypot": 443, "medpot": 2575, "dicompot": 11112, "sentrypeer": 5060, "redishoneypot": 6379, "mailoney": 25}, [hp]) ?? 0) ?? 0
       }
       if sp < 0 || sp > 65535 {
         sp = 0
@@ -1234,8 +1433,21 @@ transforms:
           et = "heralding.session.connect"
         }
       }
-      if et == "" && is_string(.event_type) {
-        et = string!(.event_type)
+      # Otherwise name it after the honeypot's own event/message field,
+      # prefixed with the honeypot (ciscoasa "error" -> ciscoasa.error,
+      # beelzebub "New TCP attempt" -> beelzebub.new_tcp_attempt).
+      if et == "" {
+        for_each(["event_type", "event", "action", "reason", "msg", "message"]) -> |_i, k| {
+          v = get(., [k]) ?? null
+          # .message is the raw line when the honeypot has no such key.
+          if et == "" && is_string(v) && strip_whitespace(string!(v)) != "" && string!(v) != raw {
+            slug = replace(downcase(string!(v)), r'[^a-z0-9_.]+', "_")
+            slug = replace(slug, r'^_+|_+$', "")
+            if slug != "" {
+              et = hp + "." + truncate(slug, 64)
+            }
+          }
+        }
       }
       if et == "" {
         et = "unknown"
@@ -1426,13 +1638,14 @@ transforms:
       - {{.}}
 {{- end}}
     source: |
-      # GeoIP enrichment using the MaxMind GeoLite2 enrichment table
+      # GeoIP enrichment from the configured MaxMind-format database
       if exists(.source_ip) && .source_ip != "0.0.0.0" && .source_ip != "127.0.0.1" {
         enriched, err = get_enrichment_table_record("qpot_geoip", {"ip": .source_ip})
         if err == null {
-          .country = enriched.country.iso_code
-          .city = enriched.city.names.en
-          .asn = to_string(enriched.autonomous_system.autonomous_system_number)
+          # A country database has no city; keep the columns strings.
+          .country = to_string(enriched.country.iso_code) ?? ""
+          .city = to_string(enriched.city.names.en) ?? ""
+          .asn = to_string(enriched.autonomous_system_number) ?? ""
         } else {
           .country = "unknown"
           .city = "unknown"
@@ -1834,37 +2047,58 @@ func (g *ComposeGenerator) generateConpotConfig(hp config.HoneypotConfig) string
 `
 }
 
+// TPotVersion is the T-Pot CE release whose honeypot images QPot runs. It is
+// the newest T-Pot build published on ghcr.io/telekom-security (there is no
+// T-Pot 25 yet); bump it here when T-Pot publishes a new release.
+const TPotVersion = "24.04.2"
+
+// tpotPinned lists honeypots whose image T-Pot did not rebuild for
+// TPotVersion; they stay on the newest tag that exists.
+var tpotPinned = map[string]string{
+	// No 24.04.2 images for the tanner stack.
+	"tanner": "24.04.1",
+	"snare":  "24.04.1",
+	"phpox":  "24.04.1",
+}
+
+// tpotImage returns T-Pot's image for name at TPotVersion (or its pin).
+func tpotImage(name string) string {
+	tag := TPotVersion
+	if v, ok := tpotPinned[name]; ok {
+		tag = v
+	}
+	return "ghcr.io/telekom-security/" + name + ":" + tag
+}
+
 // GetHoneypotImage returns the Docker image for a honeypot
 func GetHoneypotImage(name string) string {
-	// Map of honeypot names to their images (reuse TPOT images)
 	images := map[string]string{
-		"cowrie":         "ghcr.io/telekom-security/cowrie:24.04.1",
-		"dionaea":        "ghcr.io/telekom-security/dionaea:24.04.1",
-		"conpot":         "ghcr.io/telekom-security/conpot:24.04.1",
-		"tanner":         "ghcr.io/telekom-security/tanner:24.04.1",
-		"adbhoney":       "ghcr.io/telekom-security/adbhoney:24.04.1",
-		"endlessh":       "ghcr.io/telekom-security/endlessh:24.04.1",
-		"heralding":      "ghcr.io/telekom-security/heralding:24.04.1",
-		"honeyaml":       "ghcr.io/telekom-security/honeyaml:24.04.1",
-		"elasticpot":     "ghcr.io/telekom-security/elasticpot:24.04.1",
-		"ciscoasa":       "ghcr.io/telekom-security/ciscoasa:24.04.1",
-		"citrixhoneypot": "ghcr.io/telekom-security/citrixhoneypot:24.04.1",
-		"ddospot":        "ghcr.io/telekom-security/ddospot:24.04.1",
-		"ipphoney":       "ghcr.io/telekom-security/ipphoney:24.04.1",
-		"mailoney":       "ghcr.io/telekom-security/mailoney:24.04.1",
-		"medpot":         "ghcr.io/telekom-security/medpot:24.04.1",
-		"dicompot":       "ghcr.io/telekom-security/dicompot:24.04.1",
-		"redishoneypot":  "ghcr.io/telekom-security/redishoneypot:24.04.1",
-		// Newer / 2024-2026 honeypots vendored under docker/.
-		"beelzebub":  "ghcr.io/telekom-security/beelzebub:24.04.1",  // LLM SSH/HTTP/TCP
-		"galah":      "ghcr.io/telekom-security/galah:24.04.1",      // LLM web
-		"go-pot":     "ghcr.io/telekom-security/go-pot:24.04.1",     // HTTP tarpit
-		"h0neytr4p":  "ghcr.io/telekom-security/h0neytr4p:24.04.1",  // web
-		"hellpot":    "ghcr.io/telekom-security/hellpot:24.04.1",    // HTTP tarpit
-		"log4pot":    "ghcr.io/telekom-security/log4pot:24.04.1",    // Log4Shell
-		"miniprint":  "ghcr.io/telekom-security/miniprint:24.04.1",  // printer (JetDirect)
-		"sentrypeer": "ghcr.io/telekom-security/sentrypeer:24.04.1", // SIP/VoIP
-		"wordpot":    "ghcr.io/telekom-security/wordpot:24.04.1",    // WordPress
+		"cowrie":         tpotImage("cowrie"),
+		"dionaea":        tpotImage("dionaea"),
+		"conpot":         tpotImage("conpot"),
+		"tanner":         tpotImage("tanner"),
+		"adbhoney":       tpotImage("adbhoney"),
+		"endlessh":       tpotImage("endlessh"),
+		"heralding":      tpotImage("heralding"),
+		"honeyaml":       tpotImage("honeyaml"),
+		"elasticpot":     tpotImage("elasticpot"),
+		"ciscoasa":       tpotImage("ciscoasa"),
+		"citrixhoneypot": tpotImage("citrixhoneypot"),
+		"ddospot":        tpotImage("ddospot"),
+		"ipphoney":       tpotImage("ipphoney"),
+		"mailoney":       tpotImage("mailoney"),
+		"medpot":         tpotImage("medpot"),
+		"dicompot":       tpotImage("dicompot"),
+		"redishoneypot":  tpotImage("redishoneypot"),
+		"beelzebub":      tpotImage("beelzebub"),
+		"galah":          tpotImage("galah"),
+		"go-pot":         tpotImage("go-pot"),
+		"h0neytr4p":      tpotImage("h0neytr4p"),
+		"hellpot":        tpotImage("hellpot"),
+		"log4pot":        tpotImage("log4pot"),
+		"miniprint":      tpotImage("miniprint"),
+		"sentrypeer":     tpotImage("sentrypeer"),
+		"wordpot":        tpotImage("wordpot"),
 		// High-interaction SSH proxy (HiFi): the QPot-built L4 broker and the
 		// real-OpenSSH backend. See docker/ssh-proxy and docker/ssh-backend.
 		"ssh-proxy":   "ghcr.io/yurillab/qpot-ssh-proxy:latest",
@@ -1898,4 +2132,43 @@ func (g *ComposeGenerator) ValidateHoneypot(name string) error {
 
 	return fmt.Errorf("unsupported honeypot: %s (supported: %s)",
 		name, strings.Join(supported, ", "))
+}
+
+// tannerCompanion is one service of tanner's stack besides the tanner server.
+type tannerCompanion struct {
+	Service  string // compose service name = the hostname tanner's config uses
+	Role     string
+	Image    string
+	Command  string
+	Public   bool // publishes tanner's port (snare, the attacker-facing front end)
+	Logs     bool
+	Tmpfs    string
+	ReadOnly bool
+}
+
+// tannerEnabled reports whether the tanner honeypot (and so its stack) runs.
+func tannerEnabled(cfg *config.Config) bool {
+	hp, ok := cfg.GetHoneypotConfig("tanner")
+	return ok && hp.Enabled
+}
+
+// tannerCompanions are the services T-Pot runs next to tanner. The names are
+// the hostnames baked into the tanner image's config (tanner_api,
+// tanner_phpox, tanner_redis) and snare's --tanner argument (tanner).
+func tannerCompanions() []tannerCompanion {
+	return []tannerCompanion{
+		{Service: "snare", Role: "attacker-facing web front end", Image: tpotImage("snare"), Public: true, Tmpfs: "/tmp:size=50m,mode=1777"},
+		{Service: "tanner_api", Role: "tanner API", Image: tpotImage("tanner"), Command: "tannerapi", Logs: true, Tmpfs: "/tmp/tanner:uid=2000,gid=2000", ReadOnly: true},
+		{Service: "tanner_phpox", Role: "PHP sandbox", Image: tpotImage("phpox"), ReadOnly: true},
+		{Service: "tanner_redis", Role: "session store", Image: tpotImage("redis"), ReadOnly: true},
+	}
+}
+
+// tannerCompanionServices are the companion service names, for start/stop.
+func tannerCompanionServices() []string {
+	var out []string
+	for _, c := range tannerCompanions() {
+		out = append(out, c.Service)
+	}
+	return out
 }

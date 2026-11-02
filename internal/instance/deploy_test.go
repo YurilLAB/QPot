@@ -374,10 +374,19 @@ func TestListenHealthCheckProbesInternalPort(t *testing.T) {
 		t.Errorf("endlessh healthcheck should probe internal 2222 (08AE), not config 2223 (08AF): %q", end)
 	}
 
-	// UDP-only honeypot (ddospot) must probe /proc/net/udp, not tcp.
-	udp := listenHealthCheck(deployProfileFor("ddospot"), 53)
+	// A UDP-only profile must probe /proc/net/udp, not tcp.
+	udp := listenHealthCheck(honeypotDeploy{UDPPorts: []int{53}}, 53)
 	if !strings.Contains(udp, "/proc/net/udp") || strings.Contains(udp, "/proc/net/tcp") {
-		t.Errorf("ddospot (UDP-only) healthcheck should read /proc/net/udp: %q", udp)
+		t.Errorf("UDP-only healthcheck should read /proc/net/udp: %q", udp)
+	}
+
+	// Images without a shell get no in-container check (it could never pass).
+	if hc := listenHealthCheck(deployProfileFor("ddospot"), 53); hc != "" {
+		t.Errorf("shell-less ddospot got a CMD-SHELL healthcheck: %q", hc)
+	}
+	// tanner's server is probed on its own port, not the snare-published one.
+	if hc := listenHealthCheck(deployProfileFor("tanner"), 80); !strings.Contains(hc, "1F9A") || strings.Contains(hc, "0050") {
+		t.Errorf("tanner healthcheck should probe 8090 (1F9A): %q", hc)
 	}
 
 	// Generic profile (no ports in profile) falls back to the supplied config port.
@@ -529,20 +538,21 @@ func TestLog4potHasNetBindCap(t *testing.T) {
 // with "sqlite3 unable to open database file": each pot opens a SQLite DB under
 // db/ and writes a log, so under a read-only root the db/ and logs/ dirs must be
 // writable mounts. Without db/ no pot binds and the honeypot is unhealthy.
-func TestDdospotHasWritableDBMounts(t *testing.T) {
+// ddospot v2 writes its JSON logs to DDOSPOT_LOG_DIR; the mounted logs dir
+// must be that directory or every line is lost on the read-only root.
+func TestDdospotLogsWhereItWrites(t *testing.T) {
 	d := deployProfileFor("ddospot")
-	want := map[string]string{
-		"logs": "/opt/ddospot/ddospot/logs",
-		"db":   "/opt/ddospot/ddospot/db",
-		"bl":   "/opt/ddospot/ddospot/bl",
+	dir := d.Env["DDOSPOT_LOG_DIR"]
+	if dir == "" {
+		t.Fatal("DDOSPOT_LOG_DIR not set")
 	}
-	got := map[string]string{}
+	found := false
 	for _, v := range d.Volumes {
-		got[v.HostSubdir] = v.ContainerPath
-	}
-	for sub, path := range want {
-		if got[sub] != path {
-			t.Errorf("ddospot must mount %q at %q (writable), got %q", sub, path, got[sub])
+		if v.HostSubdir == "logs" && v.ContainerPath == dir {
+			found = true
 		}
+	}
+	if !found {
+		t.Errorf("logs not mounted at DDOSPOT_LOG_DIR %q: %+v", dir, d.Volumes)
 	}
 }

@@ -173,6 +173,9 @@ func TestComposeDatabaseCanBoot(t *testing.T) {
 		if !strings.Contains(blk, "- CHOWN") {
 			t.Errorf("%s: database cap_add lacks CHOWN; the entrypoint cannot chown its data dir", dbType)
 		}
+		if !strings.Contains(blk, "- KILL") {
+			t.Errorf("%s: database cap_add lacks KILL; ClickHouse's first-boot init cannot stop its temporary server", dbType)
+		}
 		if !strings.Contains(blk, "- DAC_OVERRIDE") {
 			t.Errorf("%s: database cap_add lacks DAC_OVERRIDE; the entrypoint cannot use the private data dir", dbType)
 		}

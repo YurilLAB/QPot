@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -233,6 +234,11 @@ func (m *Manager) Start(ctx context.Context, detach bool) error {
 	if err := m.pullImages(ctx); err != nil {
 		slog.Warn("Failed to pull some images", "error", err)
 	}
+	for _, name := range m.config.GetEnabledHoneypots() {
+		if err := m.prepareOwnership(ctx, name); err != nil {
+			slog.Warn("Could not hand data dirs to the honeypot's user; it may fail to write its logs", "honeypot", name, "error", err)
+		}
+	}
 
 	// Start services
 	composeFile := m.config.GetDockerComposePath()
@@ -397,6 +403,17 @@ func (m *Manager) StartHoneypot(ctx context.Context, name string) error {
 	}
 	slog.Info("Starting honeypot", "name", name, "instance", m.config.InstanceName)
 
+	// Regenerate the compose file and collector config first: a honeypot
+	// enabled on a running instance is not in the existing compose file
+	// (`compose up -d <name>` failed with "no such service") and the
+	// collector would not tail its logs.
+	if err := m.Initialize(ctx); err != nil {
+		return fmt.Errorf("failed to regenerate the instance config: %w", err)
+	}
+	if err := m.prepareOwnership(ctx, name); err != nil {
+		slog.Warn("Could not hand data dirs to the honeypot's user", "honeypot", name, "error", err)
+	}
+
 	composeFile := m.config.GetDockerComposePath()
 	// Enabling ssh-proxy must bring up its real-OpenSSH backend companions too,
 	// or the broker has nothing to forward to. The service names are generated
@@ -411,6 +428,13 @@ func (m *Manager) StartHoneypot(ctx context.Context, name string) error {
 		return fmt.Errorf("failed to start honeypot: %w\nOutput: %s", err, output)
 	}
 
+	// Pick up the regenerated collector config (it now reads this honeypot's
+	// logs); Vector reads its config only at start.
+	restart := exec.CommandContext(ctx, "docker", "compose", "-f", composeFile, "restart", "collector")
+	restart.Dir = m.config.DataPath
+	if out, err := restart.CombinedOutput(); err != nil {
+		return fmt.Errorf("honeypot started, but the collector did not restart (its logs are not collected yet): %w\nOutput: %s", err, out)
+	}
 	return nil
 }
 
@@ -419,8 +443,13 @@ func (m *Manager) StartHoneypot(ctx context.Context, name string) error {
 // HiFi backends); every other honeypot returns nil. The names are derived
 // deterministically (sshproxy.go), so they are safe to pass to docker.
 func (m *Manager) companionServices(name string) []string {
-	if name == sshProxyHoneypot && sshProxyEnabled(m.config) {
+	// Not gated on the enabled flag: `honeypot disable` saves the config
+	// before stopping, and the companions must be stopped with it.
+	switch name {
+	case sshProxyHoneypot:
 		return sshBackendServiceNames(m.config)
+	case "tanner":
+		return tannerCompanionServices()
 	}
 	return nil
 }
@@ -608,6 +637,9 @@ func (m *Manager) generateServiceConfigs() error {
 			mode := os.FileMode(0777)
 			if v.ReadOnly {
 				mode = 0755 // host-written; only read inside the container
+			}
+			if slices.Contains(prof.OwnedSubdirs, v.HostSubdir) {
+				continue // handed to the image's user by prepareOwnership
 			}
 			if err := os.Chmod(dir, mode); err != nil {
 				return fmt.Errorf("failed to chmod %s dir for honeypot %q: %w", v.HostSubdir, name, err)
@@ -844,4 +876,88 @@ func writeSecretFile(path string, data []byte) error {
 		return err
 	}
 	return os.Chmod(path, 0o600)
+}
+
+// ownershipHelperImage is used to chown host directories for images that run
+// as a non-root user (see prepareOwnership). It is the collector image, which
+// every instance pulls anyway.
+const ownershipHelperImage = "timberio/vector:latest-alpine"
+
+// prepareOwnership hands a honeypot's OwnedSubdirs to the image's user, like
+// T-Pot's tpotinit does for its data dirs. A non-root host user cannot chown
+// to another uid, so when that fails it runs chown in a throwaway container
+// with only CAP_CHOWN, no network and only that directory mounted.
+func (m *Manager) prepareOwnership(ctx context.Context, name string) error {
+	d := deployProfileFor(name)
+	if d.RunAsUID == "" || len(d.OwnedSubdirs) == 0 {
+		return nil
+	}
+	var uid, gid int
+	if _, err := fmt.Sscanf(d.RunAsUID, "%d:%d", &uid, &gid); err != nil {
+		return fmt.Errorf("bad RunAsUID %q", d.RunAsUID)
+	}
+	for _, sub := range d.OwnedSubdirs {
+		dir := filepath.Join(m.config.DataPath, "honeypots", name, sub)
+		if err := os.MkdirAll(dir, 0o750); err != nil {
+			return err
+		}
+		if err := os.Chown(dir, uid, gid); err == nil {
+			continue
+		}
+		cctx, cancel := context.WithTimeout(ctx, 2*time.Minute)
+		out, err := exec.CommandContext(cctx, "docker", "run", "--rm", "--network", "none",
+			"--cap-drop", "ALL", "--cap-add", "CHOWN", "--security-opt", "no-new-privileges",
+			"--user", "0:0", "--entrypoint", "chown", "-v", dir+":/target",
+			ownershipHelperImage, d.RunAsUID, "/target").CombinedOutput()
+		cancel()
+		if err != nil {
+			return fmt.Errorf("chown %s: %w: %s", dir, err, out)
+		}
+	}
+	return nil
+}
+
+// HostProbePorts returns the published host TCP ports to probe for a honeypot
+// that has no in-container healthcheck (NoShell), else nil.
+func HostProbePorts(cfg *config.Config, name string) []int {
+	d := deployProfileFor(name)
+	if !d.NoShell {
+		return nil
+	}
+	all := PublishedHostPorts(cfg)
+	var out []int
+	for _, p := range d.Ports {
+		if hp, ok := all[portKey(name, p)]; ok {
+			out = append(out, hp)
+		}
+	}
+	return out
+}
+
+// LLMConfigKeys returns the custom_config keys an LLM-backed honeypot accepts.
+func LLMConfigKeys(name string) []string {
+	var keys []string
+	for k := range deployProfileFor(name).LLMEnv {
+		keys = append(keys, k)
+	}
+	slices.Sort(keys)
+	return keys
+}
+
+// ReloadCollector regenerates the instance's configs and, when the stack is
+// running, restarts the collector so it uses them (Vector reads its config
+// only at start).
+func (m *Manager) ReloadCollector(ctx context.Context) error {
+	if err := m.Initialize(ctx); err != nil {
+		return err
+	}
+	if !m.IsRunning(ctx) {
+		return nil
+	}
+	cmd := exec.CommandContext(ctx, "docker", "compose", "-f", m.config.GetDockerComposePath(), "restart", "collector")
+	cmd.Dir = m.config.DataPath
+	if out, err := cmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("restart collector: %w: %s", err, out)
+	}
+	return nil
 }

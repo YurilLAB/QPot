@@ -44,7 +44,9 @@ func TestVectorRemapLive(t *testing.T) {
 
 	cfg := config.Default("vec-live")
 	cfg.QPotID = "qp_vectorvectorvectorvecto"
-	for _, n := range []string{"cowrie", "endlessh", "dionaea", "conpot", "heralding", "adbhoney"} {
+	for _, n := range []string{"cowrie", "endlessh", "dionaea", "conpot", "heralding", "adbhoney",
+		"tanner", "dicompot", "ddospot", "hellpot", "log4pot", "citrixhoneypot", "galah", "mailoney",
+		"redishoneypot", "go-pot", "beelzebub", "ciscoasa", "sentrypeer", "wordpot", "medpot"} {
 		hp := cfg.Honeypots[n]
 		hp.Enabled = true
 		cfg.Honeypots[n] = hp
@@ -109,6 +111,25 @@ func TestVectorRemapLive(t *testing.T) {
 		"/data/honeypots/conpot/logs/conpot.json\t" + `{"data_type":"modbus","src_ip":"203.0.113.12","dst_port":502,"event_type":"NEW_CONNECTION"}`,
 		"/data/honeypots/heralding/logs/log_session.json\t" + `{"source_ip":"203.0.113.13","source_port":43128,"destination_port":21,"protocol":"ftp","num_auth_attempts":1,"auth_attempts":[{"username":"admin","password":"hunter2"}]}`,
 		"/data/honeypots/adbhoney/logs/adbhoney.json\t" + `{"eventid":"adbhoney.session.connect","src_ip":"203.0.113.14","src_port":34434,"dest_port":"5555"}`,
+		// Honeypots with their own field names (T-Pot 24.04.2 formats).
+		"/data/honeypots/tanner/logs/tanner_report.json\t" + `{"method":"GET","path":"/wp-login.php","peer":{"ip":"203.0.113.20","port":40112},"status":200,"uuid":"u1"}`,
+		"/data/honeypots/dicompot/logs/dicompot.log\t" + `{"ID":"1","IP":"203.0.113.21","Port":"52800","level":"warning","msg":"Connection from","time":"2026-11-02 08:46:24"}`,
+		"/data/honeypots/dicompot/logs/dicompot.log\t" + `{"ID":"1","Status":"Finished","level":"warning","msg":"Connection","time":"2026-11-02 08:46:34"}`,
+		"/data/honeypots/ddospot/logs/targets.log\t" + `{"dest_port":53,"dns_name":"example.com.","event":"attack_start","pot":"dns","proto":"udp","target_ip":"203.0.113.22","target_port":52840}`,
+		"/data/honeypots/hellpot/logs/hellpot.log\t" + `{"level":"info","USERAGENT":"x","REMOTE_ADDR":"203.0.113.23","URL":"/.env","time":"2026-11-02T08:47:50Z","message":"NEW"}`,
+		"/data/honeypots/hellpot/logs/hellpot.log\t" + `{"level":"info","caller":"0.0.0.0:8080","message":"Listening and serving HTTP..."}`,
+		"/data/honeypots/log4pot/logs/log4pot.log\t" + `{"reason": "request", "server_port": 8080, "client": "203.0.113.24", "port": 42458, "request": "GET /?x=${jndi:ldap://a/b} HTTP/1.1"}`,
+		"/data/honeypots/log4pot/logs/log4pot.log\t" + `{"reason": "start", "timestamp": "2026-11-02T08:15:14.894487"}`,
+		"/data/honeypots/citrixhoneypot/logs/server.log\t" + `{"asctime": "2026-11-02 08:15:24,516", "levelname": "INFO", "message": "(203.0.113.25:51234): GET /vpn/../vpns/cfg/smb.conf"}`,
+		"/data/honeypots/galah/logs/galah.json\t" + `{"dest_port":"8080","msg":"successfulResponse","request.method":"GET","request.requestURI":"/admin","src_ip":"203.0.113.26","src_port":"39202"}`,
+		"/data/honeypots/mailoney/logs/log.json\t" + `{"dest_port":25,"event.type":"session","smtp_input":"HELO x\nAUTH LOGIN","src_ip":"203.0.113.27","src_port":34714}`,
+		"/data/honeypots/redishoneypot/logs/redishoneypot.log\t" + `{"message":"command","event":"command","protocol":"redis","src_ip":"203.0.113.28","src_port":37198,"dest_port":6379,"command":"CONFIG","args_text":"SET dir /tmp"}`,
+		"/data/honeypots/go-pot/logs/go-pot.json\t" + `{"msg":"","status":"200","src_ip":"203.0.113.29","method":"GET","path":"/admin/login.php","qs":"user=root","dest_port":"80"}`,
+		"/data/honeypots/beelzebub/logs/beelzebub.json\t" + `{"command":"uname -a","dest_port":"22","msg":"New SSH Session","protocol":"SSH","src_ip":"203.0.113.30","src_port":"55688"}`,
+		"/data/honeypots/ciscoasa/logs/ciscoasa.json\t" + `{"event_type":"error","src_ip":"203.0.113.31","src_port":40596,"dest_port":8443,"protocol":"tcp","payload":""}`,
+		"/data/honeypots/sentrypeer/logs/sentrypeer.json\t" + `{"source_ip":"203.0.113.32:5061","transport_type":"UDP","sip_method":"OPTIONS"}`,
+		"/data/honeypots/wordpot/logs/profile-state.json\t" + `{"pid": 1, "profile_count": 4, "profile_id": "maintenance-lag"}`,
+		"/data/honeypots/medpot/logs/medpot.log\t" + `{"level":"info","message":"Connection found","src_port":"44462","src_ip":"203.0.113.33","data":"TVNIfA=="}`,
 	}, "\n") + "\n"
 
 	cmd := exec.Command(run[0], append(run[1:], "--quiet", "--config", cfgPath)...)
@@ -151,10 +172,12 @@ func TestVectorRemapLive(t *testing.T) {
 		}
 		rows = append(rows, r)
 	}
-	// 14 input lines: broken JSON, cowrie.log chatter and endlessh's banner
-	// line must be dropped.
-	if len(rows) != 11 {
-		t.Fatalf("got %d events, want 11: %+v", len(rows), rows)
+	// 32 input lines: broken JSON, cowrie.log chatter, endlessh's banner line
+	// and the lines without an attacker address (dicompot's finished line,
+	// hellpot's/log4pot's startup lines, wordpot's profile state) must be
+	// dropped.
+	if len(rows) != 25 {
+		t.Fatalf("got %d events, want 25: %+v", len(rows), rows)
 	}
 
 	r := rows[0]
@@ -193,6 +216,36 @@ func TestVectorRemapLive(t *testing.T) {
 	}
 	if r := rows[10]; r.DestPort != 5555 || r.SourcePort != 34434 {
 		t.Errorf("adbhoney: %+v", r)
+	}
+
+	want := []struct {
+		hp, ip   string
+		sp, dp   int
+		et       string
+		proto    string
+		cmd, pay string
+	}{
+		{"tanner", "203.0.113.20", 40112, 80, "tanner.http.get", "http", "", "/wp-login.php"},
+		{"dicompot", "203.0.113.21", 52800, 11112, "dicompot.connection_from", "", "", ""},
+		{"ddospot", "203.0.113.22", 52840, 53, "ddospot.dns.attack_start", "udp", "", "example.com."},
+		{"hellpot", "203.0.113.23", 0, 80, "hellpot.new", "http", "", "/.env"},
+		{"log4pot", "203.0.113.24", 42458, 8080, "log4pot.request", "http", "", "GET /?x=${jndi:ldap://a/b} HTTP/1.1"},
+		{"citrixhoneypot", "203.0.113.25", 51234, 443, "citrixhoneypot.http.request", "https", "", "GET /vpn/../vpns/cfg/smb.conf"},
+		{"galah", "203.0.113.26", 39202, 8080, "galah.successfulresponse", "http", "", "/admin"},
+		{"mailoney", "203.0.113.27", 34714, 25, "mailoney.session", "smtp", "HELO x\nAUTH LOGIN", ""},
+		{"redishoneypot", "203.0.113.28", 37198, 6379, "redishoneypot.command", "redis", "CONFIG SET dir /tmp", ""},
+		{"go-pot", "203.0.113.29", 0, 80, "go-pot.http.get", "http", "", "/admin/login.php?user=root"},
+		{"beelzebub", "203.0.113.30", 55688, 22, "beelzebub.new_ssh_session", "ssh", "uname -a", ""},
+		{"ciscoasa", "203.0.113.31", 40596, 8443, "ciscoasa.error", "tcp", "", ""},
+		{"sentrypeer", "203.0.113.32", 5061, 5060, "sentrypeer.sip.options", "sip", "", ""},
+		{"medpot", "203.0.113.33", 44462, 2575, "medpot.connection_found", "", "", ""},
+	}
+	for i, w := range want {
+		r := rows[11+i]
+		if r.Honeypot != w.hp || r.SourceIP != w.ip || r.SourcePort != w.sp || r.DestPort != w.dp ||
+			r.EventType != w.et || r.Protocol != w.proto || r.Command != w.cmd || r.Payload != w.pay {
+			t.Errorf("%s:\n got %+v\nwant %+v", w.hp, r, w)
+		}
 	}
 }
 
