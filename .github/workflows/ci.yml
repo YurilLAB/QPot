@@ -109,7 +109,7 @@ jobs:
           CLICKHOUSE_USER: qpot
           CLICKHOUSE_PASSWORD: qpotpass
         ports:
-          - 9000:9000
+          - 19000:9000
         options: >-
           --health-cmd "clickhouse-client --user qpot --password qpotpass --query 'SELECT 1'"
           --health-interval 5s
@@ -118,7 +118,7 @@ jobs:
     env:
       QPOT_TEST_CLICKHOUSE: "1"
       QPOT_TEST_CH_HOST: 127.0.0.1
-      QPOT_TEST_CH_PORT: "9000"
+      QPOT_TEST_CH_PORT: "19000"
       QPOT_TEST_CH_USER: qpot
       QPOT_TEST_CH_PASS: qpotpass
       QPOT_TEST_CH_DB: qpot_test
