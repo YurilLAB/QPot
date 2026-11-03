@@ -30,6 +30,9 @@ const (
 	NodeIDPrefix       = "qn_"
 	NodeIDLength       = 16
 	DefaultClusterPort = 7946
+	// bcrypt rejects passwords longer than 72 bytes. Validate this before a
+	// join sends credentials, so the seed cannot admit an unusable membership.
+	maxClusterPasswordBytes = 72
 )
 
 // Cluster represents a QPot cluster
@@ -429,7 +432,10 @@ func (m *Manager) InitCluster(name, password string, cfg *ClusterConfig) (*Clust
 	}
 
 	// Hash the password
-	passwordHash := hashPassword(password)
+	passwordHash, err := hashPassword(password)
+	if err != nil {
+		return nil, fmt.Errorf("hash cluster password: %w", err)
+	}
 
 	now := time.Now()
 	cluster := &Cluster{
@@ -531,6 +537,9 @@ func (m *Manager) JoinCluster(clusterID, password string, localNode *Node, seedN
 
 // attemptJoin tries to join a cluster via a specific seed node
 func (m *Manager) attemptJoin(seedAddr, clusterID, password string, localNode *Node) (*Cluster, error) {
+	if len(password) > maxClusterPasswordBytes {
+		return nil, fmt.Errorf("cluster password must be at most %d bytes", maxClusterPasswordBytes)
+	}
 	joinReq := JoinRequest{
 		ClusterID:    clusterID,
 		Password:     password,
@@ -604,6 +613,11 @@ func (m *Manager) attemptJoin(seedAddr, clusterID, password string, localNode *N
 		}
 	}
 
+	passwordHash, err := hashPassword(password)
+	if err != nil {
+		return nil, fmt.Errorf("hash cluster password: %w", err)
+	}
+
 	// Create local cluster state
 	now := time.Now()
 	localNode.ID = joinResp.NodeID
@@ -614,7 +628,7 @@ func (m *Manager) attemptJoin(seedAddr, clusterID, password string, localNode *N
 	cluster := &Cluster{
 		ID:           clusterID,
 		Name:         joinResp.ClusterName,
-		PasswordHash: hashPassword(password), // bcrypt hash for local verification
+		PasswordHash: passwordHash,
 		CreatedAt:    now,
 		UpdatedAt:    now,
 		LocalNode:    localNode,
@@ -1925,19 +1939,13 @@ func generateID(prefix string, length int) (string, error) {
 }
 
 // hashPassword hashes a password using bcrypt with a random salt.
-// On a bcrypt failure (only realistically possible if the password is
-// longer than 72 bytes — bcrypt's hard limit) we log the error and return
-// the literal "invalid", which is not a valid bcrypt hash and will
-// therefore reject every subsequent password check. Without the log line
-// these failures were impossible to diagnose.
-func hashPassword(password string) string {
+// Callers must propagate errors rather than persist an unusable hash.
+func hashPassword(password string) (string, error) {
 	hash, err := bcrypt.GenerateFromPassword([]byte(password), bcrypt.DefaultCost)
 	if err != nil {
-		slog.Error("Failed to bcrypt cluster password (length limit exceeded?)",
-			"password_len", len(password), "error", err)
-		return "invalid"
+		return "", err
 	}
-	return string(hash)
+	return string(hash), nil
 }
 
 // checkPassword verifies a plain-text password against a bcrypt hash.

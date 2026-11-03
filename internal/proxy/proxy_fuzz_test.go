@@ -6,6 +6,8 @@ import (
 	"encoding/json"
 	"io"
 	"net"
+	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"testing"
@@ -154,6 +156,52 @@ type fakeAddr string
 
 func (a fakeAddr) Network() string { return "tcp" }
 func (a fakeAddr) String() string  { return string(a) }
+
+// FuzzRecycleGenerationGate models a continuously reachable backend whose
+// downtime was missed. Reuse requires both a host-recorded generation newer
+// than this lease and a live SSH greeting; missing/stale evidence must fail.
+func FuzzRecycleGenerationGate(f *testing.F) {
+	f.Add(uint64(3), uint64(4), true, true)
+	f.Add(uint64(3), uint64(3), true, true)
+	f.Add(uint64(3), uint64(4), false, true)
+	f.Add(uint64(3), uint64(4), true, false)
+	f.Fuzz(func(t *testing.T, baseline, current uint64, leased, ssh bool) {
+		dir := t.TempDir()
+		path := filepath.Join(dir, "b")
+		write := func(n uint64) {
+			if err := os.WriteFile(path, []byte(strconv.FormatUint(n, 10)), 0o600); err != nil {
+				t.Fatal(err)
+			}
+		}
+		write(baseline)
+		g := NewGenerationGate(dir)
+		b := Backend{ID: "b", Addr: "backend:22"}
+		if leased {
+			g.OnLease(b)
+		}
+		write(current)
+		banner := "HTTP/1.1 200 OK\r\n"
+		if ssh {
+			banner = "SSH-2.0-OpenSSH_9.2p1\r\n"
+		}
+		dial := func(context.Context, string, string) (net.Conn, error) {
+			client, server := net.Pipe()
+			go func() {
+				defer server.Close()
+				_, _ = io.WriteString(server, banner)
+			}()
+			return client, nil
+		}
+		// Zero windows give one immediate probe per phase, with no sleeps.
+		reset := RecycleReset(RecycleOptions{Dial: dial, Gate: g})
+		err := reset(b)
+		want := leased && current > baseline && ssh
+		if (err == nil) != want {
+			t.Fatalf("baseline=%d current=%d leased=%v ssh=%v: reset=%v, want success=%v",
+				baseline, current, leased, ssh, err, want)
+		}
+	})
+}
 
 // FuzzEventJSON asserts that an Event with arbitrary field values always
 // marshals to a single valid JSON line (no panic, parses back, no embedded

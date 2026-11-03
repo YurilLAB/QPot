@@ -38,3 +38,17 @@ func FuzzWorkerRunOnce(f *testing.F) {
 		_ = w.runOnce(context.Background())
 	})
 }
+
+// FuzzWorkerIOCRetry checks the persistence invariant under transient storage
+// failures, in addition to the existing no-panic event-input target.
+func FuzzWorkerIOCRetry(f *testing.F) {
+	f.Add(false, uint8(1), "id")
+	f.Add(true, uint8(3), "wget http://example.test/payload")
+	f.Add(false, uint8(0), "\x00\xff")
+	f.Fuzz(func(t *testing.T, batch bool, failures uint8, command string) {
+		if len(command) > 4096 {
+			t.Skip()
+		}
+		testWorkerIOCRetry(t, batch, int(failures%4), command)
+	})
+}

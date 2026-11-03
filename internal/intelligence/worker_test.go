@@ -2,6 +2,7 @@ package intelligence
 
 import (
 	"context"
+	"errors"
 	"io"
 	"sync/atomic"
 	"testing"
@@ -295,5 +296,222 @@ func TestWorkerTagsUnmatchedEvents(t *testing.T) {
 	}
 	if n := w.runOnce(context.Background()); n != 0 {
 		t.Fatalf("second run re-processed %d events, want 0", n)
+	}
+}
+
+// iocRetryDB models a failed write before any IOC is stored. Tagged events no
+// longer appear in reads, so acknowledging a failed write loses them forever.
+type iocRetryDB struct {
+	tagTrackingDB
+	failures int
+	writes   int
+}
+
+func (d *iocRetryDB) InsertIOCs(ctx context.Context, iocs []*database.IOC) error {
+	d.writes++
+	if d.failures > 0 {
+		d.failures--
+		return errors.New("IOC store temporarily unavailable")
+	}
+	return d.fakeDB.InsertIOCs(ctx, iocs)
+}
+
+type batchIOCRetryDB struct{ *iocRetryDB }
+
+func (d *batchIOCRetryDB) TagEvents(ctx context.Context, events []*database.Event) error {
+	for _, event := range events {
+		if err := d.TagEvent(ctx, event); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func TestWorkerRetriesFailedIOCWrite(t *testing.T) {
+	for _, batch := range []bool{false, true} {
+		t.Run(map[bool]string{false: "single tags", true: "batch tags"}[batch], func(t *testing.T) {
+			testWorkerIOCRetry(t, batch, 1, "id")
+		})
+	}
+}
+
+func testWorkerIOCRetry(t *testing.T, batch bool, failures int, command string) {
+	t.Helper()
+	event := &database.Event{Timestamp: time.Now().UTC(), Honeypot: "cowrie",
+		EventType: "command", Command: command, SourceIP: "8.8.4.4"}
+	db := &iocRetryDB{tagTrackingDB: tagTrackingDB{
+		fakeDB: fakeDB{events: []*database.Event{event}}, tagged: map[*database.Event]bool{},
+	}, failures: failures}
+	w := newTestWorker(t, &db.fakeDB)
+	w.db = db
+	if batch {
+		w.db = &batchIOCRetryDB{db}
+	}
+	for i := 0; i < failures; i++ {
+		_, complete := w.runBatch(context.Background())
+		if complete || len(db.tagged) != 0 {
+			t.Fatalf("failed IOC write acknowledged: complete=%v tagged=%d", complete, len(db.tagged))
+		}
+		if sessions := w.classifier.ttpBuilder.GetActiveSessions(); len(sessions) != 0 {
+			t.Fatal("failed IOC write updated campaign counts before the event could be retried")
+		}
+	}
+	if n, complete := w.runBatch(context.Background()); n != 1 || !complete {
+		t.Fatalf("recovered write processed=%d complete=%v", n, complete)
+	}
+	if db.iocCount.Load() == 0 || len(db.tagged) != 1 {
+		t.Fatalf("recovered write failed to persist and tag: iocs=%d tagged=%d", db.iocCount.Load(), len(db.tagged))
+	}
+	if sessions := w.classifier.ttpBuilder.GetActiveSessions(); len(sessions) != 1 || sessions[0].EventCount != 1 {
+		t.Fatalf("retries must count the event once, sessions=%v", sessions)
+	}
+	if n := w.runOnce(context.Background()); n != 0 {
+		t.Fatalf("acknowledged event replayed: %d", n)
+	}
+	if db.writes != failures+1 {
+		t.Fatalf("IOC writes=%d, want %d", db.writes, failures+1)
+	}
+}
+
+func TestWorkerFlushesExpiredSessionsWithoutNewEvents(t *testing.T) {
+	db := &fakeDB{}
+	w := newTestWorker(t, db)
+	event := makeTTPEvent("203.0.113.1", "id")
+	event.Timestamp = time.Now().UTC().Add(-time.Hour)
+	w.classifier.ttpBuilder.Update(event)
+	w.runOnce(context.Background())
+	if db.ttpCount.Load() != 1 {
+		t.Fatalf("idle worker persisted %d expired sessions, want 1", db.ttpCount.Load())
+	}
+	if got := w.classifier.ttpBuilder.GetActiveSessions(); len(got) != 0 {
+		t.Fatalf("idle worker retained %d expired sessions", len(got))
+	}
+}
+
+type ttpRetryDB struct {
+	tagTrackingDB
+	attempts int
+}
+
+func (d *ttpRetryDB) UpsertTTPSession(ctx context.Context, session *database.TTPSession) error {
+	d.attempts++
+	if d.attempts == 1 {
+		return errors.New("session store temporarily unavailable")
+	}
+	return d.fakeDB.UpsertTTPSession(ctx, session)
+}
+
+func TestWorkerRetriesFailedExpiredSessionWrite(t *testing.T) {
+	event := makeTTPEvent("203.0.113.1", "id")
+	event.Timestamp = time.Now().UTC().Add(-time.Hour)
+	db := &ttpRetryDB{tagTrackingDB: tagTrackingDB{
+		fakeDB: fakeDB{events: []*database.Event{event}}, tagged: map[*database.Event]bool{},
+	}}
+	w := newTestWorker(t, &db.fakeDB)
+	w.db = db
+	w.runOnce(context.Background())
+	if db.attempts != 1 || db.ttpCount.Load() != 0 {
+		t.Fatalf("failure setup: attempts=%d stored=%d", db.attempts, db.ttpCount.Load())
+	}
+	w.runOnce(context.Background())
+	if db.attempts != 2 || db.ttpCount.Load() != 1 {
+		t.Fatalf("expired session lost after transient error: attempts=%d stored=%d", db.attempts, db.ttpCount.Load())
+	}
+	w.runOnce(context.Background())
+	if db.attempts != 2 {
+		t.Fatalf("persisted session replayed: attempts=%d", db.attempts)
+	}
+}
+
+// partialBatchTagDB models a chunked backend that commits the first chunk
+// before a later chunk fails. A single error does not imply that no rows changed.
+type partialBatchTagDB struct {
+	tagTrackingDB
+	calls int
+}
+
+func (d *partialBatchTagDB) TagEvents(ctx context.Context, events []*database.Event) error {
+	d.calls++
+	for i, event := range events {
+		if d.calls == 1 && i == 1 {
+			return errors.New("later tagging chunk failed after the first committed")
+		}
+		if err := d.TagEvent(ctx, event); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func TestWorkerRetainsCampaignEventsAfterPartialBatchTag(t *testing.T) {
+	first := makeTTPEvent("203.0.113.5", "id")
+	first.Timestamp = time.Now().UTC()
+	second := makeTTPEvent("203.0.113.6", "id")
+	second.Timestamp = first.Timestamp.Add(time.Millisecond)
+	db := &partialBatchTagDB{tagTrackingDB: tagTrackingDB{
+		fakeDB: fakeDB{events: []*database.Event{first, second}}, tagged: map[*database.Event]bool{},
+	}}
+	w := newTestWorker(t, &db.fakeDB)
+	w.db = db
+	if n, complete := w.runBatch(context.Background()); n != 2 || complete {
+		t.Fatalf("partial failure processed=%d complete=%v", n, complete)
+	}
+	if len(db.tagged) != 1 {
+		t.Fatalf("partial-failure fixture tagged %d events, want 1", len(db.tagged))
+	}
+	if sessions := w.classifier.ttpBuilder.GetActiveSessions(); len(sessions) != 1 || sessions[0].EventCount != 2 {
+		t.Fatalf("partially acknowledged batch lost campaign events: %+v", sessions)
+	}
+	if n, complete := w.runBatch(context.Background()); n != 1 || !complete {
+		t.Fatalf("remaining event retry processed=%d complete=%v", n, complete)
+	}
+	// Tagging is not transactional across all backends, so retrying can count
+	// an event again. At least-once processing must not lose acknowledged rows.
+	var accounted int64
+	for _, session := range w.classifier.ttpBuilder.GetActiveSessions() {
+		accounted += session.EventCount
+	}
+	if len(db.tagged) != 2 || accounted < 2 {
+		t.Fatalf("tagged=%d accounted=%d, want both original events retained", len(db.tagged), accounted)
+	}
+}
+
+type countingCanaryMatcher struct{ calls int }
+
+func (m *countingCanaryMatcher) MatchEvent(ctx context.Context, event *database.Event) bool {
+	m.calls++
+	return true
+}
+
+func TestWorkerCanaryMatchingSurvivesIOCWriteFailure(t *testing.T) {
+	event := makeTTPEvent("8.8.4.4", "id")
+	event.Timestamp = time.Now().UTC()
+	db := &iocRetryDB{tagTrackingDB: tagTrackingDB{
+		fakeDB: fakeDB{events: []*database.Event{event}}, tagged: map[*database.Event]bool{},
+	}, failures: 1}
+	w := newTestWorker(t, &db.fakeDB)
+	w.db = db
+	matcher := &countingCanaryMatcher{}
+	w.WithCanaryMatcher(matcher)
+	w.runOnce(context.Background())
+	if matcher.calls != 1 {
+		t.Fatalf("IOC table outage suppressed canary matching: calls=%d", matcher.calls)
+	}
+}
+
+func TestWorkerCanaryMatchingSurvivesSessionWriteFailure(t *testing.T) {
+	event := makeTTPEvent("8.8.4.4", "id")
+	event.Timestamp = time.Now().UTC()
+	db := &ttpRetryDB{tagTrackingDB: tagTrackingDB{
+		fakeDB: fakeDB{events: []*database.Event{event}}, tagged: map[*database.Event]bool{},
+	}}
+	w := newTestWorker(t, &db.fakeDB)
+	w.db = db
+	w.pendingSessions = []*database.TTPSession{{SessionID: "synthetic-pending-session"}}
+	matcher := &countingCanaryMatcher{}
+	w.WithCanaryMatcher(matcher)
+	w.runOnce(context.Background())
+	if db.attempts != 1 || matcher.calls != 1 {
+		t.Fatalf("session table outage suppressed canary matching: writes=%d matcher calls=%d", db.attempts, matcher.calls)
 	}
 }

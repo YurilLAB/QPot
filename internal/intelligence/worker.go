@@ -26,6 +26,10 @@ type Worker struct {
 	interval   time.Duration
 	batchSize  int
 	canary     CanaryMatcher
+	// Expired sessions remain here until their upsert succeeds. Processing is
+	// paused while a write fails so a database outage cannot grow this queue
+	// without bound. Run and runBatch are called serially by the worker loop.
+	pendingSessions []*database.TTPSession
 }
 
 // Sane fallbacks so a Worker built from a partially-specified config never
@@ -111,26 +115,57 @@ func (w *Worker) runBatch(ctx context.Context) (int, bool) {
 	events, err := w.db.GetUnclassifiedEvents(ctx, w.batchSize)
 	if err != nil {
 		slog.Warn("Intelligence worker: failed to get unclassified events", "error", err)
+		w.flushSessions(ctx)
 		return 0, false
 	}
-
-	if len(events) == 0 {
-		return 0, true
-	}
-	tagged := true
-
-	iocs := w.classifier.ClassifyBatch(ctx, events)
 
 	// Scan captured sessions for planted canary (honeytoken) values. A hit
 	// means an attacker exfiltrated a token and replayed it against our own
 	// deception estate — a high-fidelity signal. Canary trip events
 	// (honeypot="canary") are skipped so a recorded trip can never re-trip.
+	// Scan before retrying other writes: an IOC/session-store error must not
+	// suppress an otherwise-working canary alert.
 	if w.canary != nil {
 		for _, event := range events {
 			if event.Honeypot == "canary" {
 				continue
 			}
 			w.canary.MatchEvent(ctx, event)
+		}
+	}
+
+	// Session expiry must run even when there are no new events. A failed
+	// upsert is retained and retried before more campaign state is accumulated.
+	if !w.flushSessions(ctx) {
+		return len(events), false
+	}
+	if len(events) == 0 {
+		return 0, true
+	}
+	tagged := true
+
+	var iocs []*database.IOC
+	for _, event := range events {
+		iocs = append(iocs, w.classifier.classifyEvent(event)...)
+	}
+
+	// Store extracted indicators before marking their source events complete.
+	// If this fails, leave the events eligible for the next tick. The backends
+	// do not offer a transaction spanning IOC inserts and event tags, so a tag
+	// failure after a successful insert can still replay an IOC on retry.
+	if len(iocs) > 0 {
+		if err := w.db.InsertIOCs(ctx, iocs); err != nil {
+			slog.Warn("Intelligence worker: failed to insert IOC batch", "error", err,
+				"count", len(iocs))
+			return len(events), false
+		}
+	}
+	// BatchTagger implementations may commit only part of a batch before
+	// returning an error. Update campaign state before tagging so successfully
+	// acknowledged events cannot disappear without ever contributing to it.
+	if w.classifier.ttpBuilder != nil {
+		for _, event := range events {
+			w.classifier.ttpBuilder.Update(event)
 		}
 	}
 
@@ -156,29 +191,27 @@ func (w *Worker) runBatch(ctx context.Context) (int, bool) {
 		}
 	}
 
-	// Persist all IOCs from this cycle in one batch. ClickHouse (the default
-	// backend) creates a data part per INSERT, so a per-IOC loop here caused
-	// avoidable merge pressure; InsertIOCs collapses it into a single batch.
-	if len(iocs) > 0 {
-		if err := w.db.InsertIOCs(ctx, iocs); err != nil {
-			slog.Warn("Intelligence worker: failed to insert IOC batch", "error", err,
-				"count", len(iocs))
-		}
-	}
-
 	n := len(events)
-
-	// Flush and persist expired TTP sessions.
-	if w.classifier.ttpBuilder != nil {
-		expired := w.classifier.ttpBuilder.FlushExpired()
-		for _, session := range expired {
-			if err := w.db.UpsertTTPSession(ctx, session); err != nil {
-				slog.Warn("Intelligence worker: failed to upsert TTP session", "error", err,
-					"session_id", session.SessionID)
-			}
-		}
-	}
+	sessionsFlushed := w.flushSessions(ctx)
 
 	slog.Info("Intelligence worker classified events", "count", n, "interval", w.interval.String())
-	return n, tagged
+	return n, tagged && sessionsFlushed
+}
+
+// flushSessions expires old campaigns and retries failed writes. Upserts use
+// the stable session ID, so retrying the same snapshot does not add a session.
+func (w *Worker) flushSessions(ctx context.Context) bool {
+	if w.classifier.ttpBuilder != nil {
+		w.pendingSessions = append(w.pendingSessions, w.classifier.ttpBuilder.FlushExpired()...)
+	}
+	var failed []*database.TTPSession
+	for _, session := range w.pendingSessions {
+		if err := w.db.UpsertTTPSession(ctx, session); err != nil {
+			failed = append(failed, session)
+			slog.Warn("Intelligence worker: failed to upsert TTP session", "error", err,
+				"session_id", session.SessionID)
+		}
+	}
+	w.pendingSessions = failed
+	return len(failed) == 0
 }

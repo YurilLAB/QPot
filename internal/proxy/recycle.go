@@ -32,8 +32,10 @@ type RecycleOptions struct {
 // RecycleReset returns a ResetFunc for backends that are reset from OUTSIDE the
 // broker: the trusted host-side supervisor recreates the backend container after
 // every session (discarding everything the attacker changed), and this hook only
-// waits until that has visibly happened - the backend became unreachable, then
-// came back and is speaking SSH again - before the pool may reuse it.
+// waits until that has visibly happened before the pool may reuse it. With a
+// generation gate, the host's recorded recreation plus an SSH greeting is the
+// evidence; without one, the backend must become unreachable and then speak
+// SSH again. The gate also covers downtime that finished between probes.
 //
 // The broker therefore needs no privilege at all, and it fails closed: if the
 // recreation is not observed (no supervisor running, docker failing), the reset
@@ -72,6 +74,14 @@ func RecycleReset(o RecycleOptions) ResetFunc {
 	return func(b Backend) error {
 		deadline := time.Now().Add(o.DownWithin)
 		for reachable(b.Addr) {
+			// The trusted host may have completed the recreation before this
+			// probe, especially when retrying a quarantined backend. Requiring
+			// another outage would strand a clean backend indefinitely. A newer
+			// generation is sufficient proof of recreation; the checks below
+			// still require SSH readiness and the same generation evidence.
+			if o.Gate != nil && o.Gate.Advanced(b) {
+				break
+			}
 			if time.Now().After(deadline) {
 				return errNotRecycled
 			}

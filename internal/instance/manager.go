@@ -615,9 +615,22 @@ func (m *Manager) generateServiceConfigs() error {
 		// so honor the deployment profile's ConfigSubdir.
 		prof := deployProfileFor(name)
 		hpDir := filepath.Join(m.config.DataPath, "honeypots", name)
-		cfgDir := hpDir
+		// The honeypot's root and its parent are host-owned. Containers only
+		// receive child bind mounts, whose contents must be treated as hostile:
+		// a compromised honeypot can plant symlinks there before regeneration.
+		// Resolve every generated path relative to this root so neither writes
+		// nor permission changes can follow those links into host files.
+		if err := os.MkdirAll(hpDir, 0750); err != nil {
+			return fmt.Errorf("failed to create directory for honeypot %q: %w", name, err)
+		}
+		hpRoot, err := os.OpenRoot(hpDir)
+		if err != nil {
+			return fmt.Errorf("failed to open directory for honeypot %q: %w", name, err)
+		}
+		defer hpRoot.Close()
+		cfgDir := "."
 		if prof.ConfigSubdir != "" {
-			cfgDir = filepath.Join(hpDir, prof.ConfigSubdir)
+			cfgDir = prof.ConfigSubdir
 		}
 		// Ensure all profile volume subdirs (and the config dir) exist so the
 		// bind mounts resolve to real directories. They must be writable by the
@@ -627,11 +640,11 @@ func (m *Manager) generateServiceConfigs() error {
 		for _, v := range prof.Volumes {
 			// File mounts (e.g. a generated cowrie.cfg) only need their parent
 			// directory; the file itself is written by the config loop below.
-			dir := filepath.Join(hpDir, v.HostSubdir)
+			dir := v.HostSubdir
 			if v.File {
 				dir = filepath.Dir(dir)
 			}
-			if err := os.MkdirAll(dir, 0750); err != nil {
+			if err := hpRoot.MkdirAll(dir, 0750); err != nil {
 				return fmt.Errorf("failed to create %s dir for honeypot %q: %w", v.HostSubdir, name, err)
 			}
 			mode := os.FileMode(0777)
@@ -641,11 +654,11 @@ func (m *Manager) generateServiceConfigs() error {
 			if slices.Contains(prof.OwnedSubdirs, v.HostSubdir) {
 				continue // handed to the image's user by prepareOwnership
 			}
-			if err := os.Chmod(dir, mode); err != nil {
+			if err := chmodRootDir(hpRoot, dir, mode); err != nil {
 				return fmt.Errorf("failed to chmod %s dir for honeypot %q: %w", v.HostSubdir, name, err)
 			}
 		}
-		if err := os.MkdirAll(cfgDir, 0750); err != nil {
+		if err := hpRoot.MkdirAll(cfgDir, 0750); err != nil {
 			return fmt.Errorf("failed to create config dir for honeypot %q: %w", name, err)
 		}
 		for filename, content := range cfgs {
@@ -654,7 +667,7 @@ func (m *Manager) generateServiceConfigs() error {
 			// userdb.txt) with no real secrets, and the honeypot runs as a
 			// non-root user that must be able to read them — otherwise the
 			// honeypot silently falls back to its baked-in defaults.
-			if err := os.WriteFile(dest, []byte(content), 0644); err != nil {
+			if err := hpRoot.WriteFile(dest, []byte(content), 0644); err != nil {
 				return fmt.Errorf("failed to write %s for honeypot %q: %w", filename, name, err)
 			}
 		}
@@ -669,26 +682,26 @@ func (m *Manager) generateServiceConfigs() error {
 			// dies the instant an attacker connects) - a broken honeypot that
 			// the port-only healthcheck never catches. Pre-create it, writable
 			// by cowrie's in-container uid 2000.
-			ttyDir := filepath.Join(hpDir, "logs", "tty")
-			if err := os.MkdirAll(ttyDir, 0750); err != nil {
+			ttyDir := filepath.Join("logs", "tty")
+			if err := hpRoot.MkdirAll(ttyDir, 0750); err != nil {
 				return fmt.Errorf("failed to create cowrie log/tty dir: %w", err)
 			}
-			if err := os.Chmod(ttyDir, 0777); err != nil {
+			if err := chmodRootDir(hpRoot, ttyDir, 0777); err != nil {
 				return fmt.Errorf("failed to chmod cowrie log/tty dir: %w", err)
 			}
 			for rel, content := range generator.generateCowrieHoneyfs() {
-				dest := filepath.Join(hpDir, "honeyfs", rel)
-				if err := os.MkdirAll(filepath.Dir(dest), 0755); err != nil {
+				dest := filepath.Join("honeyfs", rel)
+				if err := hpRoot.MkdirAll(filepath.Dir(dest), 0755); err != nil {
 					return fmt.Errorf("failed to create honeyfs dir for cowrie: %w", err)
 				}
-				if err := os.WriteFile(dest, []byte(content), 0644); err != nil {
+				if err := hpRoot.WriteFile(dest, []byte(content), 0644); err != nil {
 					return fmt.Errorf("failed to write honeyfs/%s for cowrie: %w", rel, err)
 				}
 			}
 			// The fake-fs patch script (cowriefs.go) runs at container start to add
 			// the persona home directories to Cowrie's filesystem. The deploy
 			// profile mounts it at /home/cowrie/cowrie/qpot_patch_fs.py.
-			if err := os.WriteFile(filepath.Join(hpDir, "qpot_patch_fs.py"),
+			if err := hpRoot.WriteFile("qpot_patch_fs.py",
 				[]byte(generator.generateCowrieFsPatch()), 0644); err != nil {
 				return fmt.Errorf("failed to write cowrie fs patch script: %w", err)
 			}
@@ -731,6 +744,23 @@ func (m *Manager) generateServiceConfigs() error {
 	}
 
 	return nil
+}
+
+// chmodRootDir pins a directory before changing its permissions. OpenRoot
+// rejects non-directories and confines symlinks to root; chmod on the opened
+// descriptor cannot be redirected by replacing a path while this call runs.
+func chmodRootDir(root *os.Root, name string, mode os.FileMode) error {
+	dir, err := root.OpenRoot(name)
+	if err != nil {
+		return err
+	}
+	defer dir.Close()
+	f, err := dir.Open(".")
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	return f.Chmod(mode)
 }
 
 // List returns all QPot instances

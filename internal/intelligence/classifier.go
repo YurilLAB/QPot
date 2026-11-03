@@ -36,6 +36,17 @@ func NewClassifier(loader *ATTCKLoader, ttpBuilder *TTPBuilder) *Classifier {
 // and TTP session update. Returns extracted IOCs; caller persists them.
 // Never returns an error — on any failure it leaves the event unmodified.
 func (c *Classifier) Classify(ctx context.Context, event *database.Event) []*database.IOC {
+	iocs := c.classifyEvent(event)
+	if c.ttpBuilder != nil {
+		c.ttpBuilder.Update(event)
+	}
+	return iocs
+}
+
+// classifyEvent enriches one event without changing campaign state. The worker
+// uses this while IOC writes can still fail, and updates sessions after those
+// indicators have been stored.
+func (c *Classifier) classifyEvent(event *database.Event) []*database.IOC {
 	// Sort applicable rules by priority descending (stable for determinism).
 	applicable := c.applicableRules(event)
 	sort.SliceStable(applicable, func(i, j int) bool {
@@ -53,11 +64,6 @@ func (c *Classifier) Classify(ctx context.Context, event *database.Event) []*dat
 	iocs := c.extractor.Extract(event)
 	for _, ioc := range iocs {
 		ioc.TechniqueID = event.TechniqueID
-	}
-
-	// Update TTP session.
-	if c.ttpBuilder != nil {
-		c.ttpBuilder.Update(event)
 	}
 
 	return iocs
