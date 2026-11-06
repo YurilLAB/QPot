@@ -5,7 +5,7 @@
 <h1 align="center">QPot</h1>
 <p align="center">
   <strong>Honeypot platform built on T-Pot, made harder to recognise</strong><br>
-  <em>Developed by Yuril Security</em>
+  <em>Developed by YurilLAB</em>
 </p>
 
 <p align="center">
