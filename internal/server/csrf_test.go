@@ -32,6 +32,58 @@ func newBasicAuthServer(t *testing.T) *Server {
 	return s
 }
 
+// FuzzWriteEndpoints throws arbitrary bodies and content types at the API's
+// state-changing endpoints through the full middleware chain. Nothing may
+// panic or fail with a server error, only a non-JSON type gets 415, and a
+// canary is only created from a JSON request.
+func FuzzWriteEndpoints(f *testing.F) {
+	for _, s := range []struct{ ct, body string }{
+		{"application/json", `{"kind":"web","name":"a","memo":"b"}`},
+		{"application/json; charset=utf-8", `{"kind":"aws"}`},
+		{"text/plain", `{"kind":"web","name":"x","memo":"="}`},
+		{"application/json", `{"name":"cowrie","enabled":true}`},
+		{"application/json", `{"kind":"file","name":"` + strings.Repeat("x", 9000) + `"}`},
+		{"", `null`}, {"application/json", `[]`}, {"application/jsonx", `{}`},
+	} {
+		f.Add(s.ct, s.body)
+	}
+	cs, err := canary.NewStore(f.TempDir(), 0)
+	if err != nil {
+		f.Fatal(err)
+	}
+	s := &Server{
+		config: &config.Config{
+			QPotID: validTestID,
+			WebUI:  config.WebUIConfig{QPotIDAuth: true},
+			Canary: config.CanaryConfig{Enabled: true, Decoy: "notfound"},
+		},
+		mux:      http.NewServeMux(),
+		canaries: cs,
+	}
+	s.setupRoutes()
+	h := securityHeaders(s.authMiddleware(s.mux))
+	f.Fuzz(func(t *testing.T, ct, body string) {
+		for _, p := range []string{"/api/canaries", "/api/honeypots"} {
+			req := httptest.NewRequest(http.MethodPost, p, strings.NewReader(body))
+			req.Header.Set("X-QPot-ID", validTestID)
+			req.Header.Set("Content-Type", ct)
+			before := len(cs.List())
+			rec := httptest.NewRecorder()
+			h.ServeHTTP(rec, req)
+			if rec.Code >= 500 {
+				t.Fatalf("POST %s (%q, %q): %d %s", p, ct, body, rec.Code, rec.Body.String())
+			}
+			created := len(cs.List()) != before
+			if (rec.Code == http.StatusUnsupportedMediaType) == jsonBodyAllowed(req) {
+				t.Fatalf("POST %s with Content-Type %q: status %d", p, ct, rec.Code)
+			}
+			if created && (rec.Code != http.StatusOK || !jsonBodyAllowed(req)) {
+				t.Fatalf("POST %s (%q) created a canary with status %d", p, ct, rec.Code)
+			}
+		}
+	})
+}
+
 // TestBasicAuthRejectsCrossSiteFormPost: browsers attach cached Basic
 // credentials to a cross-site form POST, and an HTML form can send a JSON body
 // as text/plain (<form enctype="text/plain">). Without a JSON content-type
