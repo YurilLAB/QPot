@@ -4,3 +4,7 @@
 # generic-api-key matched a collector comment about honeypot login fields;
 # the comment has since been reworded.
 a61bcc50343c2198a8ba8d35c121218877c6e94a:internal/instance/compose.go:generic-api-key:1144
+
+# generic-api-key matched a test-only join poll secret constant; it is now
+# built at runtime.
+430da0767267b979d655d753d273d6a4de2b7a10:internal/cluster/approval_test.go:generic-api-key:16

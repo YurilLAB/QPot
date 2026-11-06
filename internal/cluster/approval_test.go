@@ -13,7 +13,7 @@ import (
 
 // testPollSecret is a joiner's poll secret for tests that file join requests
 // directly.
-const testPollSecret = "test-poll-secret-0123456789abcdefghij"
+var testPollSecret = strings.Repeat("p", minPollSecret)
 
 // startSeedServer stands up the cluster API for a seed manager on a free port
 // and returns its base URL.
@@ -203,7 +203,7 @@ func TestJoinOutcomeGoesOnlyToTheJoiner(t *testing.T) {
 	if r := join(""); r.Status == "pending" || r.RequestID != "" || r.Error != errNoPollSecret {
 		t.Fatalf("a join without a poll secret: %+v", r)
 	}
-	const otherSecret = "another-poll-secret-0123456789abcdefgh"
+	otherSecret := strings.Repeat("q", minPollSecret)
 	mine := join(testPollSecret)
 	if mine.Status != "pending" || mine.RequestID == "" {
 		t.Fatalf("join: %+v", mine)
