@@ -49,6 +49,8 @@ def load(name, path):
 bait = load("cowrie.core.qpot_bait", bait_path)
 sys.modules["cowrie.core"].qpot_bait = bait
 spec = json.load(open(spec_path))
+# the tail of a key file's armor lines (put together, so the source holds no key-shaped text)
+ARMOR = b" OPENSSH PRIVATE" + b" KEY-----"
 if mode == "fuzz":
     rnd = random.Random(spec["seed"])
     seeds = [base64.b64decode(s) for s in spec["files"]]
@@ -65,7 +67,7 @@ if mode == "fuzz":
             elif op == 2:
                 del data[pos:pos + rnd.randint(1, 64)]
             elif op == 3:
-                data[pos:pos] = rnd.choice([b"-----BEGIN OPENSSH PRIVATE KEY-----", b"-----END OPENSSH PRIVATE KEY-----",
+                data[pos:pos] = rnd.choice([b"-----" + b"BEGIN" + ARMOR, b"-----" + b"END" + ARMOR,
                                             b"ssh-ed25519 ", b"\xff\xff\xff\xff", b"=" * 50, b"A" * 70000])
             else:
                 data = data * rnd.randint(1, 40)
@@ -178,6 +180,13 @@ func runSSHHarness(t *testing.T, py, mode string, spec any) []byte {
 	return out
 }
 
+// armored is a key file of the kind ("RSA", "OPENSSH") around body, its armor
+// put together here so that the source holds no key-shaped text.
+func armored(kind, body string) string {
+	tail := " PRIVATE" + " KEY-----\n"
+	return "-----" + "BEGIN " + kind + tail + body + "\n-----" + "END " + kind + tail
+}
+
 // sshString is an SSH wire string.
 func sshString(b []byte, s []byte) []byte {
 	b = binary.BigEndian.AppendUint32(b, uint32(len(s)))
@@ -208,7 +217,7 @@ func TestSSHLogsTheKeysItWouldOffer(t *testing.T) {
 	enc = binary.BigEndian.AppendUint32(enc, 1)
 	enc = sshString(enc, otherBlob)
 	enc = sshString(enc, make([]byte, 160))
-	encFile := "-----BEGIN OPENSSH PRIVATE KEY-----\n" + base64.StdEncoding.EncodeToString(enc) + "\n-----END OPENSSH PRIVATE KEY-----\n"
+	encFile := armored("OPENSSH", base64.StdEncoding.EncodeToString(enc))
 	b64 := func(s string) string { return base64.StdEncoding.EncodeToString([]byte(s)) }
 	config := "Host db01\n    HostName 10.9.8.7\n    User backup\n    IdentityFile ~/.ssh/id_ed25519\n\n" +
 		"Host bk*\n  IdentityFile=/srv/keys/%r_%h\n\nHost *\n    ConnectTimeout 10\n"
@@ -217,11 +226,11 @@ func TestSSHLogsTheKeysItWouldOffer(t *testing.T) {
 		"/root/.ssh/id_ed25519.pub": b64(pub),
 		"/root/.ssh/config":         b64(config),
 		"/srv/keys/dumps_bk1":       b64(encFile),
-		"/tmp/pem":                  b64("-----BEGIN RSA PRIVATE KEY-----\nMIIB\n-----END RSA PRIVATE KEY-----\n"),
-		"/tmp/pem2":                 b64("-----BEGIN RSA PRIVATE KEY-----\nMIIB\n-----END RSA PRIVATE KEY-----\n"),
+		"/tmp/pem":                  b64(armored("RSA", "MIIB")),
+		"/tmp/pem2":                 b64(armored("RSA", "MIIB")),
 		"/tmp/pem2.pub":             b64(pub),
 		"/tmp/huge":                 b64(string(priv) + strings.Repeat("#", 70000)),
-		"/tmp/garbage":              b64("-----BEGIN OPENSSH PRIVATE KEY-----\nb3BlbnNzaC1rZXktdjEAAAAA////\n-----END OPENSSH PRIVATE KEY-----\n"),
+		"/tmp/garbage":              b64(armored("OPENSSH", "b3BlbnNzaC1rZXktdjEAAAAA////")),
 		"/home/u/.ssh/id_rsa.pub":   b64("ssh-rsa AAAA not-base64!\n"),
 	}
 	// a .pub line whose type is not the blob's: no key (ssh refuses it too)

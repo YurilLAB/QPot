@@ -8,3 +8,18 @@ a61bcc50343c2198a8ba8d35c121218877c6e94a:internal/instance/compose.go:generic-ap
 # generic-api-key matched a test-only join poll secret constant; it is now
 # built at runtime.
 430da0767267b979d655d753d273d6a4de2b7a10:internal/cluster/approval_test.go:generic-api-key:16
+
+# private-key matched the armor lines of the OpenSSH key pattern ssh on the
+# honeypot reads identity files with, and of the key files its test feeds
+# it (no key: armor around a few bytes); both are now put together at runtime.
+7aea101e8a80fd631abfeba72a5a7292bb11ecb6:internal/instance/honeypotfiles/cowrie/qpot_bait.py:private-key:212
+7aea101e8a80fd631abfeba72a5a7292bb11ecb6:internal/instance/ssh_identity_python_test.go:private-key:67
+7aea101e8a80fd631abfeba72a5a7292bb11ecb6:internal/instance/ssh_identity_python_test.go:private-key:192
+7aea101e8a80fd631abfeba72a5a7292bb11ecb6:internal/instance/ssh_identity_python_test.go:private-key:201
+7aea101e8a80fd631abfeba72a5a7292bb11ecb6:internal/instance/ssh_identity_python_test.go:private-key:202
+7aea101e8a80fd631abfeba72a5a7292bb11ecb6:internal/instance/ssh_identity_python_test.go:private-key:205
+
+# aws-access-token matched a malformed variant of AWS's documented example key
+# id, an input the account decoding must refuse; it is now put together at
+# runtime.
+619564a54d777fd3fe28498e5e273a350ffa6719:internal/canary/derive_test.go:aws-access-token:81

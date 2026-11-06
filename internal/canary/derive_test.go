@@ -75,10 +75,10 @@ func TestAWSKeyIDsDecodeToAnAccount(t *testing.T) {
 	}
 	// the decoding itself, on the example key of AWS's documentation (scanners
 	// read it as account 581039954779) and on ids that are none
-	if acct, ok := AWSAccountOfKey("AKIAIOSFODNN7EXAMPLE"); !ok || acct != 581039954779 {
+	if acct, ok := AWSAccountOfKey("AKIA" + "IOSFODNN7" + "EXAMPLE"); !ok || acct != 581039954779 {
 		t.Errorf("example key: %d %v", acct, ok)
 	}
-	for _, bad := range []string{"", "AKIA", "AKIAIOSFODNN7EXAMPL1", "akiaiosfodnn7example", "AROAIOSFODNN7EXAMPLE"} {
+	for _, bad := range []string{"", "AKIA", "AKIA" + "IOSFODNN7" + "EXAMPL1", "akiaiosfodnn7example", "AROAIOSFODNN7EXAMPLE"} {
 		if _, ok := AWSAccountOfKey(bad); ok {
 			t.Errorf("%q decoded", bad)
 		}

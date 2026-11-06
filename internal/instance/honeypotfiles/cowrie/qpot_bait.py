@@ -209,7 +209,10 @@ def _parent(tree: list, parts: list[str], when: int) -> list | None:
 
 # an identity file ssh reads: a private key is a few KB, its .pub one line
 MAX_KEY_FILE = 1 << 16
-_OPENSSH_KEY = re.compile(r"-----BEGIN OPENSSH PRIVATE KEY-----([A-Za-z0-9+/=\s]{1,65536}?)-----END OPENSSH PRIVATE KEY-----")
+# the armor lines of an OpenSSH private key, put together here (as canary's pemArmor does) so that
+# the source holds no key-shaped text for a secret scanner to report
+_OPENSSH_KEY = re.compile("-----" + "BEGIN" + " OPENSSH PRIVATE KEY-----" + r"([A-Za-z0-9+/=\s]{1,65536}?)"
+                          + "-----" + "END" + " OPENSSH PRIVATE KEY-----")
 _KEY_TYPES = ("ssh-", "ecdsa-sha2-", "sk-")
 
 
