@@ -761,7 +761,9 @@ services:
       - {{$.Config.DataPath}}/honeypots/{{$.Name}}/{{$v.HostSubdir}}:{{$v.ContainerPath}}{{if $v.ReadOnly}}:ro{{end}}
     {{- end}}
     networks:
-      - qpot_internal
+      # Only its own network: the collector reads the honeypot's logs from the
+      # bind mounts above, so nothing on qpot_internal (the database, the
+      # collector) is reachable from a container that runs attacker input.
       - {{.Name}}_net
     {{- if eq .Name "ssh-proxy"}}
       # The broker also joins the egress-locked backend network so it can reach

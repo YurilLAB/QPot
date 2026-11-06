@@ -26,6 +26,7 @@ type composeDoc struct {
 		Volumes     []string `yaml:"volumes"`
 		Networks    any      `yaml:"networks"`
 		Environment any      `yaml:"environment"`
+		Labels      any      `yaml:"labels"`
 		DependsOn   map[string]struct {
 			Condition string `yaml:"condition"`
 		} `yaml:"depends_on"`
@@ -34,6 +35,7 @@ type composeDoc struct {
 		} `yaml:"healthcheck"`
 	} `yaml:"services"`
 	Networks map[string]struct {
+		Internal   bool              `yaml:"internal"`
 		DriverOpts map[string]string `yaml:"driver_opts"`
 	} `yaml:"networks"`
 }
@@ -204,4 +206,76 @@ func FuzzEgressGuardInstanceName(f *testing.F) {
 			t.Fatalf("instance %q: guard %+v %v", inst, eg, err)
 		}
 	})
+}
+
+// netNames reads a service's networks, written as a list or as a map.
+func netNames(v any) []string {
+	var out []string
+	switch n := v.(type) {
+	case []any:
+		for _, x := range n {
+			if s, ok := x.(string); ok {
+				out = append(out, s)
+			}
+		}
+	case map[string]any:
+		for k := range n {
+			out = append(out, k)
+		}
+	}
+	return out
+}
+
+// TestAttackerFacingNetworks: a container that runs attacker input (every
+// service labelled qpot.honeypot) joins only networks whose egress the guard
+// covers, or internal networks shared with nothing but other attacker-facing
+// containers. It never shares a network with the database or the collector.
+func TestAttackerFacingNetworks(t *testing.T) {
+	cfg := config.Default("egress-nets")
+	var all []string
+	for name := range cfg.Honeypots {
+		all = append(all, name)
+	}
+	enableOnly(cfg, all...)
+	doc := renderGuardCompose(t, cfg)
+	guarded := netguard.ParseIfaces(envMap(doc.Services["netguard"].Environment)["QPOT_NETGUARD_IFACES"])
+
+	attacker := map[string]bool{}
+	for name, svc := range doc.Services {
+		if envMap(svc.Labels)["qpot.honeypot"] != "" {
+			attacker[name] = true
+		}
+	}
+	if len(attacker) < len(all) {
+		t.Fatalf("only %d attacker-facing services for %d honeypots", len(attacker), len(all))
+	}
+	members := map[string][]string{}
+	for name, svc := range doc.Services {
+		for _, n := range netNames(svc.Networks) {
+			members[n] = append(members[n], name)
+		}
+	}
+	for name := range attacker {
+		for _, n := range netNames(doc.Services[name].Networks) {
+			def := doc.Networks[n]
+			if slices.Contains(guarded, def.DriverOpts["com.docker.network.bridge.name"]) {
+				continue
+			}
+			if !def.Internal {
+				t.Errorf("%s joins %s: not internal and its bridge is not guarded", name, n)
+				continue
+			}
+			for _, peer := range members[n] {
+				if !attacker[peer] {
+					t.Errorf("%s shares the internal network %s with %s", name, n, peer)
+				}
+			}
+		}
+	}
+	// The infrastructure still has its network.
+	for _, svc := range []string{"collector", "database"} {
+		if !slices.Contains(netNames(doc.Services[svc].Networks), "qpot_internal") {
+			t.Errorf("%s is not on qpot_internal", svc)
+		}
+	}
 }
