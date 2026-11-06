@@ -169,25 +169,66 @@ const (
 	awsSecretCharset = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
 )
 
-// randFromCharset returns an n-char string drawn uniformly from charset using
-// the CSPRNG (rejection-free: charset lengths here divide 256 closely enough
-// that modulo bias is negligible for decoy values, and these are not secrets
-// protecting anything — they are bait).
-func randFromCharset(n int, charset string) string {
-	b := make([]byte, n)
-	if _, err := rand.Read(b); err != nil {
-		panic(fmt.Sprintf("canary: CSPRNG failure: %v", err))
-	}
-	out := make([]byte, n)
-	for i := range b {
-		out[i] = charset[int(b[i])%len(charset)]
-	}
-	return string(out)
-}
-
 // mintAWSKeyID returns a realistic AKIA-prefixed 20-char access key id.
 func mintAWSKeyID() string {
-	return "AKIA" + randFromCharset(16, awsKeyCharset)
+	return awsKeyID(func() byte {
+		var b [1]byte
+		if _, err := rand.Read(b[:]); err != nil {
+			panic(fmt.Sprintf("canary: CSPRNG failure: %v", err))
+		}
+		return b[0]
+	})
+}
+
+// awsAccounts is how many AWS account IDs there are: 12 decimal digits.
+const awsAccounts = 1_000_000_000_000
+
+// awsKeyID builds an access key id from the bytes next gives, laid out as the
+// ones AWS issues: AKIA, then 16 base32 characters of 80 bits whose first 48
+// hold a set top bit (the fifth character of every key issued since 2019 is
+// one of Q-Z and 2-7), the 12 digit account the key belongs to (40 bits) and 7
+// bits of AWS's own. The account can be read back from the id without asking
+// AWS (key scanners do, to tell canary keys by their issuers' accounts); a
+// random string of the alphabet decodes to no account one time in eleven (a
+// 13 digit number) and has an older key's fifth character one time in two.
+func awsKeyID(next func() byte) string {
+	var account uint64
+	for {
+		// 40 bits, drawn again when above the last account
+		account = 0
+		for i := 0; i < 5; i++ {
+			account = account<<8 | uint64(next())
+		}
+		if account < awsAccounts {
+			break
+		}
+	}
+	u48 := 1<<47 | account<<7 | uint64(next()&0x7f)
+	var body [10]byte
+	for i := 0; i < 6; i++ {
+		body[i] = byte(u48 >> (40 - 8*i))
+	}
+	for i := 6; i < 10; i++ {
+		body[i] = next()
+	}
+	return "AKIA" + base32.StdEncoding.EncodeToString(body[:])
+}
+
+// AWSAccountOfKey returns the account an access key id names (the decoding
+// key scanners use), false for something that is no AKIA/ASIA key id.
+func AWSAccountOfKey(id string) (uint64, bool) {
+	if len(id) != 20 || (!strings.HasPrefix(id, "AKIA") && !strings.HasPrefix(id, "ASIA")) {
+		return 0, false
+	}
+	body, err := base32.StdEncoding.DecodeString(id[4:])
+	if err != nil || len(body) != 10 {
+		return 0, false
+	}
+	var u48 uint64
+	for _, b := range body[:6] {
+		u48 = u48<<8 | uint64(b)
+	}
+	return (u48 & 0x7fff_ffff_ff80) >> 7, true
 }
 
 // mintAWSSecret returns a realistic 40-char AWS secret access key.

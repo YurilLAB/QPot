@@ -154,10 +154,11 @@ const (
 	charsBase64 = charsAlnum + "+/"
 )
 
-// AWSKeyPair derives an access key id (AKIA and 16 of A-Z2-7) and a 40
-// character secret, the shapes of a long-term IAM user key.
+// AWSKeyPair derives an access key id (see awsKeyID) and a 40 character
+// secret, the shapes of a long-term IAM user key.
 func (d Deriver) AWSKeyPair(label string) (id, secret string) {
-	return "AKIA" + d.Chars(label+"/id", 16, awsKeyCharset), d.Chars(label+"/secret", 40, charsBase64)
+	r := &reader{d: d, label: label + "/id"}
+	return awsKeyID(r.byte), d.Chars(label+"/secret", 40, charsBase64)
 }
 
 // Secret derives a machine-generated password: what `openssl rand -base64 n`

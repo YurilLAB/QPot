@@ -4,6 +4,7 @@ import (
 	"crypto/ed25519"
 	"encoding/base64"
 	"encoding/binary"
+	"fmt"
 	"net"
 	"os"
 	"path/filepath"
@@ -40,6 +41,46 @@ func TestDeriverStableAndSeparate(t *testing.T) {
 	for i := 0; i < 50; i++ {
 		if st1.Intn(1000) != st2.Intn(1000) {
 			t.Fatal("stream not stable")
+		}
+	}
+}
+
+// TestAWSKeyIDsDecodeToAnAccount: an access key id, derived or minted, reads
+// back (as key scanners read it, without asking AWS) as a 12 digit account,
+// with a fifth character of the keys AWS issues now; a key that decodes to a
+// 13 digit number or starts like a pre-2019 key gives the canary away.
+func TestAWSKeyIDsDecodeToAnAccount(t *testing.T) {
+	accounts := map[uint64]bool{}
+	check := func(what, id string) {
+		t.Helper()
+		if len(id) != 20 || !strings.HasPrefix(id, "AKIA") || strings.Trim(id[4:], awsKeyCharset) != "" {
+			t.Fatalf("%s: access key id %q", what, id)
+		}
+		if !strings.ContainsRune("QRSTUVWXYZ234567", rune(id[4])) {
+			t.Errorf("%s: %q has the fifth character of an old key", what, id)
+		}
+		acct, ok := AWSAccountOfKey(id)
+		if !ok || acct >= 1_000_000_000_000 {
+			t.Errorf("%s: %q decodes to account %d, not 12 digits", what, id, acct)
+		}
+		accounts[acct] = true
+	}
+	for i := 0; i < 400; i++ {
+		id, _ := NewDeriver(fmt.Sprintf("seed-%d", i)).AWSKeyPair("aws")
+		check("derived", id)
+		check("minted", mintAWSKeyID())
+	}
+	if len(accounts) < 790 {
+		t.Errorf("only %d accounts in 800 keys", len(accounts))
+	}
+	// the decoding itself, on the example key of AWS's documentation (scanners
+	// read it as account 581039954779) and on ids that are none
+	if acct, ok := AWSAccountOfKey("AKIAIOSFODNN7EXAMPLE"); !ok || acct != 581039954779 {
+		t.Errorf("example key: %d %v", acct, ok)
+	}
+	for _, bad := range []string{"", "AKIA", "AKIAIOSFODNN7EXAMPL1", "akiaiosfodnn7example", "AROAIOSFODNN7EXAMPLE"} {
+		if _, ok := AWSAccountOfKey(bad); ok {
+			t.Errorf("%q decoded", bad)
 		}
 	}
 }
