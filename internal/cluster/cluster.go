@@ -295,6 +295,8 @@ type Manager struct {
 	// overridable in tests. Zero means use the production defaults.
 	joinPollInterval time.Duration
 	joinPollTimeout  time.Duration
+	// authLimit throttles sources that keep sending wrong passwords.
+	authLimit authLimiter
 }
 
 // NewManager creates a new cluster manager
@@ -943,8 +945,14 @@ func (m *Manager) HandleJoinRequest(req *JoinRequest, sourceIP string) *JoinResp
 	clusterID, hash, plain := m.cluster.ID, m.cluster.PasswordHash, m.plainPassword
 	m.mu.RUnlock()
 
+	src, now := authSource(sourceIP), time.Now()
+	if m.authLimit.blocked(src, now) {
+		return &JoinResponse{Success: false, Error: errTooManyAttempts}
+	}
+
 	// Verify cluster ID
 	if req.ClusterID != clusterID {
+		m.authLimit.failed(src, now)
 		return &JoinResponse{
 			Success: false,
 			Error:   "invalid cluster ID",
@@ -952,6 +960,7 @@ func (m *Manager) HandleJoinRequest(req *JoinRequest, sourceIP string) *JoinResp
 	}
 
 	if !verifyClusterPassword(req.Password, hash, plain) {
+		m.authLimit.failed(src, now)
 		slog.Warn("Join attempt with invalid password",
 			"cluster_id", req.ClusterID,
 			"from", sourceIP)
@@ -1040,8 +1049,14 @@ func (m *Manager) admitNodeLocked(req *JoinRequest) (*JoinResponse, error) {
 // unauthenticated nodes from disrupting the cluster.
 func (m *Manager) withClusterAuth(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		src, now := authSource(r.RemoteAddr), time.Now()
+		if m.authLimit.blocked(src, now) {
+			http.Error(w, "Too many failed attempts", http.StatusTooManyRequests)
+			return
+		}
 		password := r.Header.Get("X-Cluster-Password")
 		if password == "" || !m.VerifyPassword(password) {
+			m.authLimit.failed(src, now)
 			http.Error(w, "Unauthorized", http.StatusUnauthorized)
 			return
 		}
@@ -1217,6 +1232,8 @@ func (m *Manager) handleJoinHTTP(w http.ResponseWriter, r *http.Request) {
 	case resp.Status == "pending":
 		// Authenticated but awaiting host approval - not an auth failure.
 		w.WriteHeader(http.StatusAccepted)
+	case resp.Error == errTooManyAttempts:
+		w.WriteHeader(http.StatusTooManyRequests)
 	default:
 		w.WriteHeader(http.StatusUnauthorized)
 	}

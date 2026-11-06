@@ -273,6 +273,60 @@ func TestHostOnlyAcceptsOwnAddressOnly(t *testing.T) {
 	}
 }
 
+// TestPasswordGuessingIsThrottled: the peer endpoints check only
+// X-Cluster-Password (no cluster ID), the cluster port listens on 0.0.0.0, and
+// a running node compares passwords in constant time, so anyone who could
+// reach the port could try passwords as fast as the network allowed. A source
+// that keeps failing must be cut off, without locking out other sources.
+func TestPasswordGuessingIsThrottled(t *testing.T) {
+	const pw = "correct-horse-battery"
+	m := NewManager(t.TempDir())
+	cl, err := m.InitCluster("c", pw, DefaultClusterConfig())
+	if err != nil {
+		t.Fatal(err)
+	}
+	h := m.apiHandler()
+	status := func(remote, password string) int {
+		req := httptest.NewRequest(http.MethodGet, "/api/v1/cluster/status", nil)
+		req.RemoteAddr = remote
+		req.Header.Set("X-Cluster-Password", password)
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		return rec.Code
+	}
+	const attacker = "198.51.100.66:40000"
+	for i := 0; i < 500; i++ {
+		status(attacker, "guess-"+strconv.Itoa(i))
+	}
+	if code := status(attacker, pw); code == http.StatusOK {
+		t.Fatal("after 500 wrong passwords the same source can still test guesses (the right one answered 200)")
+	}
+	join := func(remote, password string) *JoinResponse {
+		return m.HandleJoinRequest(&JoinRequest{ClusterID: cl.ID, Password: password, NodeName: "n",
+			NodeAddress: "10.0.0.7", NodePort: 7946}, remote)
+	}
+	if r := join("198.51.100.66", pw); r.Status == "pending" || r.Success {
+		t.Fatal("throttled source got its join request queued")
+	}
+
+	// One IPv6 host owns a whole /64: rotating addresses in it does not reset
+	// the count.
+	for i := 0; i < authFailLimit; i++ {
+		status("[2001:db8:1:2::"+strconv.FormatInt(int64(i+1), 16)+"]:4000", "guess")
+	}
+	if code := status("[2001:db8:1:2:ffff::9]:4000", pw); code == http.StatusOK {
+		t.Fatal("rotating through one IPv6 /64 escaped the limit")
+	}
+
+	// Another source with the right password is unaffected.
+	if code := status("203.0.113.10:5000", pw); code != http.StatusOK {
+		t.Fatalf("an honest member was locked out: %d", code)
+	}
+	if r := join("203.0.113.10", pw); r.Status != "pending" {
+		t.Fatalf("an honest joiner was refused: %+v", r)
+	}
+}
+
 // TestGossipReachesIPv6Peer: peer URLs were built with "%s:%d", which gives
 // "http://::1:7946/..." for an IPv6 member, so IPv6 peers were never reached
 // and were marked failed.
