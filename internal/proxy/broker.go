@@ -306,8 +306,10 @@ const (
 )
 
 // copyDir copies from src to dst, refreshing src's read deadline before each
-// read so an idle stream is torn down after IdleTimeout. It returns the number
-// of bytes copied and why it stopped.
+// read and dst's write deadline before each write, so a stream that makes no
+// progress for IdleTimeout in either step (nothing to read, or a peer that
+// stopped reading) is torn down. It returns the number of bytes copied and why
+// it stopped.
 func (b *Broker) copyDir(dst, src net.Conn) (int64, outcome) {
 	buf := make([]byte, b.cfg.BufferSize)
 	var total int64
@@ -315,7 +317,11 @@ func (b *Broker) copyDir(dst, src net.Conn) (int64, outcome) {
 		_ = src.SetReadDeadline(time.Now().Add(b.cfg.IdleTimeout))
 		n, rerr := src.Read(buf)
 		if n > 0 {
+			_ = dst.SetWriteDeadline(time.Now().Add(b.cfg.IdleTimeout))
 			if _, werr := dst.Write(buf[:n]); werr != nil {
+				if ne, ok := werr.(net.Error); ok && ne.Timeout() {
+					return total, outcomeIdle
+				}
 				return total, outcomeError
 			}
 			total += int64(n)

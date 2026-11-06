@@ -253,6 +253,49 @@ func TestIdleTimeoutTearsDown(t *testing.T) {
 	}
 }
 
+// A client that stops reading must not hold the session, and its backend,
+// past the idle timeout. Only reads had a deadline, so a write stuck on a full
+// TCP window waited for MaxSession (2h by default); once the client had
+// half-closed, nothing else ever woke it.
+func TestIdleTimeoutCoversBlockedWrites(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	go func() { // the backend floods until the broker hangs up
+		c, err := ln.Accept()
+		if err != nil {
+			return
+		}
+		defer c.Close()
+		chunk := make([]byte, 64<<10)
+		for {
+			if _, err := c.Write(chunk); err != nil {
+				return
+			}
+		}
+	}()
+	sink := &capSink{}
+	cfg := Config{Honeypot: "ssh-proxy", Sink: sink, IdleTimeout: 300 * time.Millisecond, MaxSession: 30 * time.Second}
+	pool := NewPool([]Backend{{ID: "be", Addr: ln.Addr().String()}}, nil)
+	addr, stop := startBroker(t, cfg, pool)
+	defer stop()
+
+	c, err := net.Dial("tcp", addr)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer c.Close()
+	if err := c.(*net.TCPConn).CloseWrite(); err != nil { // done sending, never reads
+		t.Fatal(err)
+	}
+	e := sink.wait(t, EventSession, 5*time.Second)
+	if e.Reason != ReasonIdleTimeout {
+		t.Errorf("stalled-reader session reason = %q, want %q", e.Reason, ReasonIdleTimeout)
+	}
+}
+
 // TestNormalCloseReason verifies a clean client close is attributed to a normal
 // close, NOT an idle timeout (regression guard for the teardown-attribution bug
 // where forcing a deadline made the peer direction misreport a timeout).
