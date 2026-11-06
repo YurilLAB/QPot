@@ -23,6 +23,7 @@ this document stays in lock-step with the code.
 - [Command overview](#command-overview)
 - [Instance lifecycle](#instance-lifecycle)
   - [`qpot setup`](#qpot-setup)
+  - [`qpot doctor`](#qpot-doctor)
   - [`qpot up`](#qpot-up)
   - [`qpot down`](#qpot-down)
   - [`qpot status`](#qpot-status)
@@ -78,7 +79,7 @@ qpot --version
 | Command | What it does |
 |---------|--------------|
 | `qpot setup` | Check the host, create and start an instance, and verify it is healthy. |
-| `qpot doctor` | Re-run the health checks for an instance (non-zero exit on failure). |
+| `qpot doctor` | Re-run the health checks for an instance (non-zero exit on failure); `--explain <code>` explains an error code. |
 | `qpot up` | Start an instance and all of its enabled honeypots. |
 | `qpot serve` | Run only the control plane (what `qpot up -d` starts in the background). |
 | `qpot down` | Stop a running instance and its honeypots. |
@@ -105,23 +106,98 @@ The commands you will use most. Each one targets a single instance via
 
 ### `qpot setup`
 
-One command from a fresh host to a verified, running instance: host checks,
-instance creation, port checks, GeoIP download, start, and a health wait.
+Guided setup from a fresh host to a verified, running instance: host checks,
+Docker install or start (with consent), settings, instance creation, port
+checks, GeoIP download, start, a health wait and a summary of where the web UI
+is and what to do next.
+
+In a terminal it asks the questions below; Enter takes the recommended answer
+and a wrong answer is asked again. Without a terminal, or with `--yes`, it asks
+nothing and uses the flags and defaults. Every question has a flag. The
+settings flags only apply when the instance is new; an existing instance keeps
+its settings (change them with `qpot config`).
 
 | Flag | Default | Description |
 |------|---------|-------------|
+| `-i, --instance string` | `default` | Instance name. |
 | `--profile string` | `minimal` | Honeypots for a new instance: `minimal`, `standard` or `hifi`. |
+| `--honeypots string` | | Honeypots for a new instance by name, comma-separated (instead of `--profile`). |
+| `--bind string` | `127.0.0.1` | Web UI address. Anything other than loopback prints an exposure warning. |
+| `--port int` | `8080` | Web UI port (the next free one if the default is taken; a chosen port that is taken is an error). |
+| `--database string` | `clickhouse` | Event database: `clickhouse` or `timescaledb`. |
+| `--outbound string` | `allow` | Honeypot connections to the internet: `allow` or `block` (private networks are always blocked). |
 | `--country string` | time zone | Two-letter country of this sensor, where the attack map draws it. |
 | `--no-geoip` | `false` | Do not download the DB-IP Lite country database. |
 | `--service` | `false` | Install and start a systemd service (Linux). |
-| `--no-start` | `false` | Only check the host and create the instance. |
+| `-y, --yes` | `false` | Ask no questions: use flags and defaults. |
+| `--install-docker` | `false` | Allow setup to install, update and start Docker and the Compose plugin (uses sudo). |
+| `--docker-group` | `false` | Allow setup to add your user to the `docker` group (root-equivalent; uses sudo). |
+| `--docker-source string` | `auto` | Linux only: `docker` (Docker's signed repository), `distro` (the distribution's packages) or `auto`. |
+| `--dry-run` | `false` | Check the computer and print what setup would do, without changing anything. |
+| `--no-start` | `false` | Set up and create the instance, but do not start it. |
 | `--timeout duration` | `4m` | How long to wait for everything to become healthy. |
+| `--verbose` | `false` | Show the full output of the commands setup runs. |
 
 ```bash
-qpot setup --profile standard --country NL
+qpot setup                                      # guided
+qpot setup --yes --install-docker --docker-group --profile standard --country NL
+qpot setup --dry-run
 ```
 
+**Installing Docker.** When Docker Engine or the Compose plugin is missing,
+too old (Engine 20.10+ and Compose 2 are needed) or stopped, setup prints every
+command it would run and asks before running them (`--install-docker` answers
+yes without a terminal). On Linux:
+
+| Distribution | Method |
+|--------------|--------|
+| Debian, Ubuntu, Raspberry Pi OS, Linux Mint and other relatives with an Ubuntu/Debian codename | Docker's apt repository (`/etc/apt/sources.list.d/docker.sources`), key `/etc/apt/keyrings/docker.asc` with fingerprint `9DC8 5822 9FC7 DD38 854A E2D8 8D81 803C 0EBF CD88` checked |
+| Fedora, CentOS Stream, Rocky Linux, AlmaLinux, RHEL | Docker's dnf repository (`/etc/yum.repos.d/docker-ce.repo`), key `/etc/pki/rpm-gpg/docker-ce.gpg` with fingerprint `060A 61C5 1B55 8A7F 742B 77AA C52F EB6B 621E 9F35` checked |
+| Debian/Ubuntu/Fedora releases Docker does not publish (Kali, Parrot, Debian testing, a new Fedora) | The distribution's own packages (`docker.io` + `docker-compose-v2`, `moby-engine` + `docker-compose`) |
+| openSUSE, SLES | `zypper install docker docker-compose` |
+| Arch, Manjaro | `pacman -Syu docker docker-compose` (Arch only supports full upgrades) |
+
+Nothing is piped from the network into a shell: setup downloads the signing
+key itself, refuses it unless its fingerprint matches, and lets apt or dnf
+check every package against it. It waits up to two minutes for another program
+that is installing software, removes packages that conflict with Docker's own
+only as a shown step, and starts Docker with `systemctl enable --now docker`
+(or Docker's start script where systemd is not running, such as WSL without
+systemd). On macOS it uses `brew install --cask docker-desktop` and on Windows
+`winget install -e --id Docker.DockerDesktop`; Docker Desktop's licence is yours
+to accept when it first opens, and setup never accepts it for you.
+
+**Re-running.** Setup can be run again after any failure: steps already done
+(the key, the package source, an installed Docker, an existing instance) are
+skipped, and the answers you gave are offered again.
+
+**Errors.** Every problem has a code such as `QP-PKG-001` with what went wrong,
+why and what to do, and the process exits with the code's category status
+(10 settings, 11 host, 12 permissions, 13 network, 14 package manager, 15
+Docker, 16 Compose, 17 ports, 18 memory/disk, 19 services, 20 web UI, 21
+instance, 130 interrupted, 70 unexpected). See
+[setup-errors.md](setup-errors.md), or `qpot doctor --explain <code>`. A log of
+the commands setup ran is kept in `~/.qpot/logs/setup.log` (it never contains
+the QPot ID).
+
 A failed GeoIP download is only a warning; `qpot geoip update` retries it.
+
+### `qpot doctor`
+
+Re-runs the host checks (Docker, Compose, memory, disk) and inspects a running
+instance: containers, database schema, control plane and web UI. Every failed
+or warning check names its error code, and the command exits with the first
+failure's category status (0 when everything passes).
+
+| Flag | Description |
+|------|-------------|
+| `-i, --instance string` | Instance name (default `default`). |
+| `--explain string` | Explain an error code (any case; `pkg-1` works too) and exit. Needs no instance. |
+
+```bash
+qpot doctor
+qpot doctor --explain QP-PORT-001
+```
 
 ### `qpot up`
 

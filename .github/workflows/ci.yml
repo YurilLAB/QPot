@@ -107,6 +107,11 @@ jobs:
       - name: Makefile failure-path regressions
         run: bash scripts/test-makefile.sh
 
+      - name: Install script failure-path regressions
+        # Every installer failure prints its QP- code and exits with the
+        # code's category status; a good install hands over to qpot setup.
+        run: bash scripts/test-install.sh
+
   clickhouse-integration:
     name: ClickHouse database, worker & API integration
     runs-on: ubuntu-latest
@@ -382,7 +387,7 @@ jobs:
           shellcheck --version
           shellcheck -S error \
             install.sh deploy.sh update.sh uninstall.sh genuser.sh \
-            scripts/install.sh scripts/distro-smoke.sh scripts/test-makefile.sh \
+            scripts/install.sh scripts/distro-smoke.sh scripts/test-makefile.sh scripts/test-install.sh \
             docker/ssh-backend/files/entrypoint.sh \
             docker/ssh-backend/files/rec-shell.sh
           echo "shellcheck (error level) clean"

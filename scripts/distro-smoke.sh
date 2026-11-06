@@ -72,6 +72,19 @@ qpot --help >/dev/null
 qpot honeypot list >/dev/null
 qpot instance create smoke >/dev/null
 qpot instance list | grep -q smoke
+# setup recognises the distribution: a dry run prints its Docker install plan
+# (exit 0), or says the distribution needs a manual install (QP-HOST-003,
+# exit 11). Exit 13 means the container had no network for the repository
+# check, which this job does not test.
+rc=0
+qpot setup --dry-run --yes --no-geoip -i drysmoke >/tmp/setup.out 2>&1 || rc=$?
+case "$rc" in
+  0) grep -q "Dry run: nothing was changed" /tmp/setup.out || { cat /tmp/setup.out; exit 1; }
+     sed -n "s/^Install Docker Engine and the Compose plugin, using /[plan] /p" /tmp/setup.out ;;
+  11) grep -q "QP-HOST-003" /tmp/setup.out || { cat /tmp/setup.out; exit 1; }; echo "[plan] manual install (QP-HOST-003)" ;;
+  13) echo "[plan] skipped: no network in the container" ;;
+  *) cat /tmp/setup.out; echo "qpot setup --dry-run exited $rc"; exit 1 ;;
+esac
 echo "[pass] CLI smoke OK"
 '
 

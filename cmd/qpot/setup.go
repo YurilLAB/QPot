@@ -3,7 +3,6 @@ package main
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -19,7 +18,7 @@ import (
 
 	"github.com/qpot/qpot/internal/config"
 	"github.com/qpot/qpot/internal/database"
-	"github.com/qpot/qpot/internal/geo"
+	"github.com/qpot/qpot/internal/hostsetup"
 	"github.com/qpot/qpot/internal/instance"
 	"github.com/spf13/cobra"
 )
@@ -34,18 +33,26 @@ var setupProfiles = map[string][]string{
 	"hifi": {"cowrie", "endlessh", "ssh-proxy"},
 }
 
-// check is one line of a setup/doctor report.
+// check is one line of a setup/doctor report. A failed or warning check
+// carries the error code that explains it (qpot doctor --explain <code>).
 type check struct {
 	Name   string
 	Level  string // "ok", "warn", "fail"
 	Detail string
+	Code   string
 }
 
-func printChecks(title string, cs []check) (failed bool) {
-	fmt.Printf("\n%s\n", title)
+// printChecksTo prints a report; details can carry text from the system
+// (docker, ports, paths), so they go through termSafe.
+func printChecksTo(w io.Writer, title string, cs []check) (failed bool) {
+	fmt.Fprintf(w, "\n%s\n", title)
 	for _, c := range cs {
 		tag := map[string]string{"ok": "[OK]  ", "warn": "[WARN]", "fail": "[FAIL]"}[c.Level]
-		fmt.Printf("  %s %-22s %s\n", tag, c.Name, c.Detail)
+		code := ""
+		if c.Level != "ok" && c.Code != "" {
+			code = "  (" + c.Code + ")"
+		}
+		fmt.Fprintf(w, "  %s %-22s %s%s\n", tag, termSafe(c.Name), termSafe(c.Detail), code)
 		if c.Level == "fail" {
 			failed = true
 		}
@@ -53,51 +60,79 @@ func printChecks(title string, cs []check) (failed bool) {
 	return failed
 }
 
+// firstFailCode returns the code of the first failed check, or "".
+func firstFailCode(cs []check) string {
+	for _, c := range cs {
+		if c.Level == "fail" {
+			if c.Code == "" {
+				return "QP-BUG-001"
+			}
+			return c.Code
+		}
+	}
+	return ""
+}
+
 // preflightChecks verifies the host can run QPot before anything is changed.
 func preflightChecks(ctx context.Context) []check {
+	r := &hostsetup.ExecRunner{EUID: os.Geteuid()}
+	return dockerChecks(hostsetup.DetectDocker(ctx, r, exec.LookPath), totalMemoryBytes, hostsetup.FreeBytes)
+}
+
+// dockerChecks turns what DetectDocker found into report lines.
+func dockerChecks(st hostsetup.DockerState, mem func() int64, free func(string) int64) []check {
 	var cs []check
-	if _, err := exec.LookPath("docker"); err != nil {
-		return append(cs, check{"docker", "fail", "not installed - see https://docs.docker.com/engine/install/"})
-	}
-	cs = append(cs, check{"docker", "ok", "installed"})
-
-	ictx, cancel := context.WithTimeout(ctx, 20*time.Second)
-	defer cancel()
-	out, err := exec.CommandContext(ictx, "docker", "info", "--format", "{{.ServerVersion}}").CombinedOutput()
 	switch {
-	case err != nil && strings.Contains(string(out), "permission denied"):
+	case !st.CLI:
+		return append(cs, check{"docker", "fail", "not installed - run 'qpot setup' to install it", "QP-DOCKER-001"})
+	case st.Podman:
+		return append(cs, check{"docker", "fail", "the docker command is Podman, which QPot does not support", "QP-DOCKER-004"})
+	}
+	cs = append(cs, check{Name: "docker", Level: "ok", Detail: "installed"})
+	switch {
+	case st.PermissionDenied:
 		return append(cs, check{"docker daemon", "fail",
-			"permission denied on the docker socket - add your user to the 'docker' group " +
-				"(sudo usermod -aG docker $USER, then log in again)"})
-	case err != nil:
-		return append(cs, check{"docker daemon", "fail", "not reachable - is the docker service running?"})
+			"your user may not use Docker - 'qpot setup' can add you to the docker group (root-equivalent)", "QP-PERM-004"})
+	case !st.DaemonUp:
+		return append(cs, check{"docker daemon", "fail", "not running - start it (sudo systemctl start docker, or open Docker Desktop)", "QP-DOCKER-002"})
+	case st.Server.Less(hostsetup.MinEngine):
+		cs = append(cs, check{"docker daemon", "fail", fmt.Sprintf("version %s is too old (QPot needs %s+)", st.Server, hostsetup.MinEngine), "QP-DOCKER-005"})
+	default:
+		cs = append(cs, check{Name: "docker daemon", Level: "ok", Detail: "version " + st.Server.String()})
 	}
-	cs = append(cs, check{"docker daemon", "ok", "version " + strings.TrimSpace(string(out))})
-
-	cctx, ccancel := context.WithTimeout(ctx, 20*time.Second)
-	defer ccancel()
-	if out, err := exec.CommandContext(cctx, "docker", "compose", "version", "--short").Output(); err != nil {
-		cs = append(cs, check{"docker compose", "fail", "Compose v2 plugin missing (install docker-compose-plugin)"})
-	} else {
-		cs = append(cs, check{"docker compose", "ok", "version " + strings.TrimSpace(string(out))})
+	switch {
+	case !st.Compose && st.ComposeV1:
+		cs = append(cs, check{"docker compose", "fail", "only docker-compose v1 found; QPot needs the Compose v2 plugin", "QP-COMPOSE-002"})
+	case !st.Compose:
+		cs = append(cs, check{"docker compose", "fail", "Compose v2 plugin missing (install docker-compose-plugin, or run 'qpot setup')", "QP-COMPOSE-001"})
+	case st.ComposeVersion.Less(hostsetup.MinCompose):
+		cs = append(cs, check{"docker compose", "fail", "version " + st.ComposeVersion.String() + " is too old", "QP-COMPOSE-002"})
+	default:
+		cs = append(cs, check{Name: "docker compose", Level: "ok", Detail: "version " + st.ComposeVersion.String()})
 	}
 
-	if mem := totalMemoryBytes(); mem > 0 {
-		gib := float64(mem) / (1 << 30)
-		lvl := "ok"
-		if gib < 2 {
-			lvl = "warn"
+	if m := mem(); m > 0 {
+		gibs := float64(m) / (1 << 30)
+		c := check{Name: "memory", Level: "ok", Detail: fmt.Sprintf("%.1f GiB (2 GiB+ recommended)", gibs)}
+		switch {
+		case gibs < 1:
+			c.Level, c.Code = "fail", "QP-RES-001"
+		case gibs < 2:
+			c.Level, c.Code = "warn", "QP-RES-001"
 		}
-		cs = append(cs, check{"memory", lvl, fmt.Sprintf("%.1f GiB (2 GiB+ recommended)", gib)})
+		cs = append(cs, c)
 	}
 	if home, err := os.UserHomeDir(); err == nil {
-		if free := freeDiskBytes(home); free > 0 {
-			gib := float64(free) / (1 << 30)
-			lvl := "ok"
-			if gib < 5 {
-				lvl = "warn"
+		if f := free(home); f > 0 {
+			gibs := float64(f) / (1 << 30)
+			c := check{Name: "disk", Level: "ok", Detail: fmt.Sprintf("%.1f GiB free in %s (5 GiB+ recommended)", gibs, home)}
+			switch {
+			case gibs < 2:
+				c.Level, c.Code = "fail", "QP-RES-002"
+			case gibs < 5:
+				c.Level, c.Code = "warn", "QP-RES-002"
 			}
-			cs = append(cs, check{"disk", lvl, fmt.Sprintf("%.1f GiB free in %s (5 GiB+ recommended)", gib, home)})
+			cs = append(cs, c)
 		}
 	}
 	return cs
@@ -121,9 +156,9 @@ func portChecks(cfg *config.Config) []check {
 		_ = ln.Close()
 	}
 	if len(busy) > 0 {
-		return []check{{"host ports", "fail", "already in use: " + strings.Join(busy, ", ")}}
+		return []check{{"host ports", "fail", "already in use: " + strings.Join(busy, ", "), "QP-PORT-002"}}
 	}
-	return []check{{"host ports", "ok", fmt.Sprintf("%d free", len(ports))}}
+	return []check{{Name: "host ports", Level: "ok", Detail: fmt.Sprintf("%d free", len(ports))}}
 }
 
 // healthChecks inspects a started instance: containers, database schema,
@@ -136,25 +171,29 @@ func healthChecks(ctx context.Context, cfg *config.Config, mgr *instance.Manager
 	}
 	states, err := mgr.ServiceStates(ctx)
 	if err != nil {
-		return append(cs, check{"containers", "fail", err.Error()})
+		return append(cs, check{"containers", "fail", firstLine(err.Error()), "QP-INST-007"})
 	}
 	svcCheck := func(name, svc string) {
 		st, ok := states[svc]
+		code := "QP-INST-008"
+		if svc == "database" {
+			code = "QP-INST-005"
+		}
 		switch {
 		case !ok:
-			cs = append(cs, check{name, "fail", "not created"})
+			cs = append(cs, check{name, "fail", "not created", code})
 		case st.State != "running":
-			cs = append(cs, check{name, "fail", st.State})
+			cs = append(cs, check{name, "fail", st.State, code})
 		case st.Health == "unhealthy":
-			cs = append(cs, check{name, "fail", "unhealthy"})
+			cs = append(cs, check{name, "fail", "unhealthy", code})
 		case st.Health == "starting":
-			cs = append(cs, check{name, "warn", "starting"})
+			cs = append(cs, check{name, "warn", "starting", "QP-INST-004"})
 		default:
 			detail := "running"
 			if st.Health != "" {
 				detail += " (" + st.Health + ")"
 			}
-			cs = append(cs, check{name, "ok", detail})
+			cs = append(cs, check{Name: name, Level: "ok", Detail: detail})
 		}
 	}
 	svcCheck("database", "database")
@@ -167,7 +206,7 @@ func healthChecks(ctx context.Context, cfg *config.Config, mgr *instance.Manager
 		if st, ok := states[hp]; ok && st.State == "running" {
 			if ports := instance.HostProbePorts(cfg, hp); len(ports) > 0 {
 				if !anyPortAccepts(ports) {
-					cs[len(cs)-1] = check{"honeypot " + hp, "fail", fmt.Sprintf("running, but not accepting connections on port %v", ports)}
+					cs[len(cs)-1] = check{"honeypot " + hp, "fail", fmt.Sprintf("running, but not accepting connections on port %v", ports), "QP-INST-008"}
 				} else {
 					cs[len(cs)-1].Detail = "running (accepting connections)"
 				}
@@ -187,17 +226,17 @@ func healthChecks(ctx context.Context, cfg *config.Config, mgr *instance.Manager
 		cancel()
 	}
 	if err != nil {
-		cs = append(cs, check{"database schema", "fail", "not ready: " + firstLine(err.Error())})
+		cs = append(cs, check{"database schema", "fail", "not ready: " + firstLine(err.Error()), "QP-INST-005"})
 	} else {
-		cs = append(cs, check{"database schema", "ok", "events table present"})
+		cs = append(cs, check{Name: "database schema", Level: "ok", Detail: "events table present"})
 	}
 
 	if wantControlPlane {
 		if pid := runningServePID(cfg); pid != 0 {
-			cs = append(cs, check{"control plane", "ok", fmt.Sprintf("running (pid %d)", pid)})
+			cs = append(cs, check{Name: "control plane", Level: "ok", Detail: fmt.Sprintf("running (pid %d)", pid)})
 		} else {
 			cs = append(cs, check{"control plane", "fail",
-				"not running - web UI, intelligence and HiFi resets are off (qpot up -d / qpot serve)"})
+				"not running - web UI, intelligence and HiFi resets are off (qpot up -d / qpot serve)", "QP-WEB-003"})
 		}
 	}
 	if cfg.WebUI.Enabled {
@@ -213,13 +252,13 @@ func webUICheck(ctx context.Context, cfg *config.Config) check {
 	base := fmt.Sprintf("http://%s/", net.JoinHostPort(webHost(cfg.WebUI.BindAddr), fmt.Sprint(cfg.WebUI.Port)))
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, base+"api/status", nil)
 	if err != nil {
-		return check{"web UI", "fail", err.Error()}
+		return check{"web UI", "fail", err.Error(), "QP-WEB-002"}
 	}
 	// Only ever sent to this host's own address for the instance's web UI.
 	req.Header.Set("X-QPot-ID", cfg.QPotID)
 	resp, err := (&http.Client{Timeout: 5 * time.Second}).Do(req)
 	if err != nil {
-		return check{"web UI", "fail", "no answer on " + base}
+		return check{"web UI", "fail", "no answer on " + base, "QP-WEB-002"}
 	}
 	defer resp.Body.Close()
 	var st struct {
@@ -227,9 +266,9 @@ func webUICheck(ctx context.Context, cfg *config.Config) check {
 	}
 	if resp.StatusCode != http.StatusOK || json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&st) != nil ||
 		st.Instance != cfg.InstanceName {
-		return check{"web UI", "fail", fmt.Sprintf("%s answers, but not as instance %q (port taken by something else?)", base, cfg.InstanceName)}
+		return check{"web UI", "fail", fmt.Sprintf("%s answers, but not as instance %q (port taken by something else?)", base, cfg.InstanceName), "QP-WEB-002"}
 	}
-	return check{"web UI", "ok", base}
+	return check{Name: "web UI", Level: "ok", Detail: base}
 }
 
 // freeWebPort returns the configured web UI port if it is usable, else the
@@ -290,229 +329,243 @@ func waitHealthy(ctx context.Context, cfg *config.Config, mgr *instance.Manager,
 		if ok || time.Now().After(deadline) || ctx.Err() != nil {
 			return cs
 		}
-		time.Sleep(5 * time.Second)
+		select {
+		case <-ctx.Done():
+			return cs
+		case <-time.After(5 * time.Second):
+		}
 	}
 }
 
 // createInstance creates a new instance (config, QPot ID, data directories).
 func createInstance(ctx context.Context, name string) (*config.Config, *instance.QPotID, error) {
+	return createInstanceWith(ctx, name, nil, true)
+}
+
+// createInstanceWith creates a new instance. apply, when set, adjusts the
+// default config before anything is saved. autoPort moves the web UI to the
+// next free port when another instance has the default one; setup turns it
+// off because it has already checked the port the owner chose. Errors are
+// coded (see internal/hostsetup).
+func createInstanceWith(ctx context.Context, name string, apply func(*config.Config), autoPort bool) (*config.Config, *instance.QPotID, error) {
 	if err := validateInstanceName(name); err != nil {
-		return nil, nil, err
+		return nil, nil, hostsetup.E("QP-INPUT-001").Wrap(err)
 	}
 	if _, err := os.Stat(config.Default(name).ConfigPath); err == nil {
-		return nil, nil, fmt.Errorf("instance %q already exists; remove it first with 'qpot instance remove %s' or choose another name", name, name)
+		return nil, nil, hostsetup.E("QP-INST-001").WithWhy("Instance %q already exists.", name).
+			WithFix("Remove it first with 'qpot instance remove %s', or choose another name.", name)
 	}
 	qpotID, err := instance.GenerateID(name)
 	if err != nil {
-		return nil, nil, fmt.Errorf("failed to generate QPot ID: %w", err)
+		return nil, nil, hostsetup.E("QP-INST-001").WithWhy("A QPot ID could not be generated.").Wrap(err)
 	}
 	cfg := config.Default(name)
 	cfg.QPotID = qpotID.ID
+	if apply != nil {
+		apply(cfg)
+	}
 	// Several instances on one host would all default to the same web UI port;
 	// give a new one a port no other instance uses or has configured.
-	if cfg.WebUI.Enabled {
+	if autoPort && cfg.WebUI.Enabled {
 		if port, ok := freeWebPort(cfg); ok && port != cfg.WebUI.Port {
 			fmt.Printf("[INFO] Web UI port %d is taken by another instance; %q will use %d\n", cfg.WebUI.Port, name, port)
 			cfg.WebUI.Port = port
 		}
 	}
 	if err := config.Save(cfg); err != nil {
-		return nil, nil, fmt.Errorf("failed to save config: %w", err)
+		return nil, nil, hostsetup.E("QP-INST-002").Wrap(err)
 	}
 	qpotID.DataPath = cfg.DataPath
 	if err := qpotID.Save(); err != nil {
-		return nil, nil, fmt.Errorf("failed to save QPot ID: %w", err)
+		return nil, nil, hostsetup.E("QP-INST-001").WithWhy("The QPot ID file could not be written.").Wrap(err)
 	}
 	mgr, err := instance.NewManager(cfg)
 	if err != nil {
-		return nil, nil, fmt.Errorf("failed to create instance manager: %w", err)
+		return nil, nil, hostsetup.E("QP-INST-001").Wrap(err)
 	}
 	if err := mgr.Initialize(ctx); err != nil {
-		return nil, nil, fmt.Errorf("failed to initialize instance: %w", err)
+		return nil, nil, hostsetup.E("QP-INST-001").WithWhy("The instance's folders and files could not be prepared.").Wrap(err)
 	}
 	return cfg, qpotID, nil
 }
 
+// exitProcess ends the process with a status; tests replace it.
+var exitProcess = os.Exit
+
+// finishCoded prints a coded error in plain words to w and exits with its
+// category's status. It never returns for a non-nil error.
+func finishCoded(w io.Writer, err error) error {
+	if err == nil {
+		return nil
+	}
+	exitProcess(printSetupError(w, err))
+	return err
+}
+
+// printSetupError prints a coded error: what went wrong, why, what to do,
+// and the technical details indented below. It returns the exit status.
+func printSetupError(w io.Writer, err error) int {
+	e := hostsetup.AsError(err)
+	fmt.Fprintf(w, "\nERROR %s: %s\n", e.Code, termSafe(e.Entry().Title))
+	fmt.Fprintf(w, "  Why:  %s\n", termSafe(e.Cause()))
+	fmt.Fprintf(w, "  Fix:  %s\n", termSafe(e.Remedy()))
+	if d := strings.TrimSpace(e.Details); d != "" {
+		lines := strings.Split(d, "\n")
+		if len(lines) > 30 {
+			lines = append(lines[:30], "...")
+		}
+		fmt.Fprintln(w, "  Details:")
+		for _, l := range lines {
+			fmt.Fprintf(w, "    %s\n", termSafe(strings.TrimRight(l, "\r")))
+		}
+	}
+	fmt.Fprintf(w, "  More: qpot doctor --explain %s\n", e.Code)
+	return hostsetup.ExitStatus(e.Code)
+}
+
 func newSetupCommand() *cobra.Command {
-	var (
-		instanceName string
-		profile      string
-		service      bool
-		noStart      bool
-		noGeoIP      bool
-		country      string
-		timeout      time.Duration
-	)
+	var o setupOptions
 	cmd := &cobra.Command{
 		Use:   "setup",
-		Short: "Check the host, create and start a QPot instance, and verify it works",
-		Long: `One command from a fresh host to a verified, running honeypot:
+		Short: "Set up QPot: check the host, install Docker if needed, create, start and verify an instance",
+		Long: `Guided setup from a fresh host to a verified, running honeypot.
 
-  1. checks Docker, Compose, permissions, memory and disk
-  2. creates the instance (if new) with a honeypot profile
-  3. checks the host ports it needs are free, and downloads the free DB-IP
-     Lite country database so events get countries and the attack map works
+In a terminal it asks a few questions (instance name, honeypots, web UI
+address and port, and a few more); every question has a safe default you
+accept with Enter. Without a terminal, or with --yes, it asks nothing and
+uses the flags and defaults instead.
+
+  1. checks the computer (operating system, Docker, Compose)
+  2. installs, updates or starts Docker Engine and the Compose plugin when
+     needed - only after showing the exact commands and getting your yes
+     (or --install-docker); on Linux from Docker's signed repository, with
+     the signing key's fingerprint checked
+  3. checks memory, disk space and the ports QPot needs
+  4. creates the instance and downloads the free DB-IP Lite country database
      (--no-geoip skips it)
-  4. starts the containers and the control plane (web UI, intelligence)
-  5. waits until the database, collector, honeypots and web UI are healthy
-  6. optionally installs a systemd service so it survives reboots (--service)
+  5. starts the containers and the control plane (web UI, intelligence), or
+     installs a systemd service (--service)
+  6. waits until everything is healthy and prints where the web UI is, how
+     to log in and what to do next
 
-Secure defaults are kept: the web UI listens on 127.0.0.1 with QPot ID auth,
-the database is only reachable on 127.0.0.1 with a random password, and
-nothing is run with sudo.`,
-		Example: `  qpot setup
-  qpot setup --profile standard
+Setup can be run again at any time: it checks what is already done and
+continues from there. Every problem it reports has a code such as
+QP-PKG-001; 'qpot doctor --explain <code>' explains it, and the process exits
+with the code's category status (see doc/setup-errors.md).
+
+Secure defaults are kept: the web UI listens on 127.0.0.1 with QPot ID auth
+and the database only on 127.0.0.1 with a random password.`,
+		Example: `  qpot setup                                   # guided, in a terminal
+  qpot setup --yes                             # no questions, defaults
+  qpot setup --yes --install-docker --docker-group --profile standard
   qpot setup -i sensor1 --profile hifi --service
-  qpot setup --country DE      # where the attack map draws this sensor`,
+  qpot setup --honeypots cowrie,dionaea --port 8081
+  qpot setup --dry-run                         # show what it would do
+  qpot setup --country DE                      # where the attack map draws this sensor`,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			ctx := cmd.Context()
-			hps, ok := setupProfiles[profile]
-			if !ok {
-				return fmt.Errorf("unknown profile %q (minimal, standard, hifi)", profile)
-			}
-			if printChecks("Host checks", preflightChecks(ctx)) {
-				return errors.New("fix the failed checks above and run 'qpot setup' again")
-			}
-
-			cfg, _, err := loadInstance(instanceName)
-			created := false
-			if _, statErr := os.Stat(config.Default(instanceName).ConfigPath); errors.Is(statErr, os.ErrNotExist) {
-				if cfg, _, err = createInstance(ctx, instanceName); err != nil {
-					return err
-				}
-				created = true
-				for _, hp := range hps {
-					cfg.EnableHoneypot(hp)
-				}
-				if err := config.Save(cfg); err != nil {
-					return fmt.Errorf("failed to save config: %w", err)
-				}
-			} else if err != nil {
-				return err
-			}
-			if created {
-				fmt.Printf("\n[OK] Created instance %q with the %s profile: %s\n", instanceName, profile, strings.Join(hps, ", "))
-			} else {
-				fmt.Printf("\n[OK] Using existing instance %q (honeypots: %s)\n", instanceName, strings.Join(cfg.GetEnabledHoneypots(), ", "))
-			}
-
-			if err := setMapCountry(cfg, country); err != nil {
-				return err
-			}
-			geoAdded := false
-			if !noGeoIP && cfg.Collector.GeoIPDBPath == "" {
-				// Non-fatal: the instance works without it, only without
-				// countries (and so without attack map lines).
-				if err := provisionGeoIP(ctx, cfg); err != nil {
-					fmt.Printf("[WARN] GeoIP database not installed (%v); retry with: qpot geoip update -i %s\n", err, instanceName)
-				} else {
-					geoAdded = true
-					fmt.Printf("[OK] GeoIP database installed (%s)\n", geo.DBIPAttribution)
-				}
-			}
-			if err := config.Save(cfg); err != nil {
-				return fmt.Errorf("failed to save config: %w", err)
-			}
-
-			mgr, err := instance.NewManager(cfg)
-			if err != nil {
-				return fmt.Errorf("failed to create instance manager: %w", err)
-			}
-			if geoAdded && mgr.IsRunning(ctx) {
-				if err := mgr.ReloadCollector(ctx); err != nil {
-					fmt.Printf("[WARN] the collector did not pick up the GeoIP database: %v\n", err)
-				}
-			}
-			var pcs []check
-			if !mgr.IsRunning(ctx) {
-				pcs = portChecks(cfg)
-			}
-			if cfg.WebUI.Enabled && !service && runningServePID(cfg) == 0 {
-				if err := webPortFree(cfg); err != nil {
-					pcs = append(pcs, check{"web UI port", "fail", err.Error()})
-				} else {
-					pcs = append(pcs, check{"web UI port", "ok", fmt.Sprintf("%d free", cfg.WebUI.Port)})
-				}
-			}
-			if len(pcs) > 0 && printChecks("Port checks", pcs) {
-				return errors.New("free the ports above (or change base_port / web_ui.port in the config) and run 'qpot setup' again")
-			}
-			if noStart {
-				fmt.Printf("\nReady. Start it with: qpot up -d -i %s\n", instanceName)
-				return nil
-			}
-
-			if service {
-				unit, err := installService(ctx, cfg)
-				if err != nil {
-					return fmt.Errorf("install service: %w", err)
-				}
-				fmt.Printf("\n[OK] Installed and started systemd service %s\n", unit)
-			} else {
-				if !mgr.IsRunning(ctx) {
-					if err := mgr.Start(ctx, true); err != nil {
-						return fmt.Errorf("failed to start instance: %w", err)
-					}
-				}
-				if _, _, err := startBackgroundServe(cfg); err != nil {
-					return fmt.Errorf("failed to start the control plane: %w", err)
-				}
-			}
-
-			fmt.Printf("\nWaiting up to %s for everything to become healthy...\n", timeout)
-			failed := printChecks("Health", waitHealthy(ctx, cfg, mgr, !service, timeout))
-			fmt.Println()
-			fmt.Printf("QPot ID (your web UI / API credential - keep it private): %s\n", cfg.QPotID)
-			fmt.Printf("Web UI: http://%s:%d  (local only; from another machine use: ssh -L %d:127.0.0.1:%d <this-host>)\n",
-				webHost(cfg.WebUI.BindAddr), cfg.WebUI.Port, cfg.WebUI.Port, cfg.WebUI.Port)
-			fmt.Printf("Check health any time with: qpot doctor -i %s\n", instanceName)
-			if failed {
-				return errors.New("some health checks failed (see above); 'qpot doctor' re-runs them")
-			}
-			return nil
+			f := cmd.Flags()
+			o.instanceSet, o.profileSet, o.honeypotsSet = f.Changed("instance"), f.Changed("profile"), f.Changed("honeypots")
+			o.bindSet, o.portSet, o.countrySet = f.Changed("bind"), f.Changed("port"), f.Changed("country")
+			o.geoipSet, o.databaseSet, o.outboundSet = f.Changed("no-geoip"), f.Changed("database"), f.Changed("outbound")
+			o.serviceSet = f.Changed("service")
+			env, cleanup := newSetupEnv(cmd, o.verbose)
+			err := runSetup(cmd.Context(), env, o)
+			cleanup()
+			return finishCoded(cmd.ErrOrStderr(), err)
 		},
 	}
-	cmd.Flags().StringVarP(&instanceName, "instance", "i", "default", "instance name")
-	cmd.Flags().StringVar(&profile, "profile", "minimal", "honeypot set for a new instance: minimal, standard or hifi")
-	cmd.Flags().BoolVar(&service, "service", false, "install and start a systemd service (Linux) so QPot survives reboots")
-	cmd.Flags().BoolVar(&noStart, "no-start", false, "only check the host and create the instance")
-	cmd.Flags().BoolVar(&noGeoIP, "no-geoip", false, "do not download the DB-IP Lite country database")
-	cmd.Flags().StringVar(&country, "country", "", "two-letter country code of this sensor, for the attack map (default: from the host's time zone)")
-	cmd.Flags().DurationVar(&timeout, "timeout", 4*time.Minute, "how long to wait for the instance to become healthy")
+	f := cmd.Flags()
+	f.StringVarP(&o.instance, "instance", "i", "default", "instance name")
+	f.StringVar(&o.profile, "profile", "minimal", "honeypots for a new instance: minimal, standard or hifi")
+	f.StringVar(&o.honeypots, "honeypots", "", "honeypots for a new instance by name, comma-separated (instead of --profile)")
+	f.StringVar(&o.bind, "bind", "127.0.0.1", "web UI address for a new instance (127.0.0.1 = this computer only)")
+	f.IntVar(&o.port, "port", 8080, "web UI port for a new instance (the next free one if the default is taken)")
+	f.StringVar(&o.database, "database", "clickhouse", "event database for a new instance: clickhouse or timescaledb")
+	f.StringVar(&o.outbound, "outbound", "allow", "honeypot connections to the internet for a new instance: allow or block (private networks are always blocked)")
+	f.BoolVar(&o.service, "service", false, "install and start a systemd service (Linux) so QPot survives reboots")
+	f.BoolVar(&o.noStart, "no-start", false, "set up and create the instance, but do not start it")
+	f.BoolVar(&o.noGeoIP, "no-geoip", false, "do not download the DB-IP Lite country database")
+	f.StringVar(&o.country, "country", "", "two-letter country code of this sensor, for the attack map (default: from the host's time zone)")
+	f.DurationVar(&o.timeout, "timeout", 4*time.Minute, "how long to wait for the instance to become healthy")
+	f.BoolVarP(&o.yes, "yes", "y", false, "ask no questions: use flags and defaults (installing Docker still needs --install-docker)")
+	f.BoolVar(&o.installDocker, "install-docker", false, "allow setup to install, update and start Docker and the Compose plugin (uses sudo)")
+	f.BoolVar(&o.dockerGroup, "docker-group", false, "allow setup to add your user to the docker group (root-equivalent; uses sudo)")
+	f.StringVar(&o.dockerSource, "docker-source", "auto", "where Docker comes from on Linux: auto, docker (Docker's repository) or distro (the distribution's packages)")
+	f.BoolVar(&o.dryRun, "dry-run", false, "check the computer and show what setup would do, without changing anything")
+	f.BoolVar(&o.verbose, "verbose", false, "show the full output of the commands setup runs")
+	f.DurationVar(&o.lockWait, "package-lock-wait", 2*time.Minute, "how long to wait for another program that is installing software")
+	_ = f.MarkHidden("package-lock-wait")
 	return cmd
 }
 
 func newDoctorCommand() *cobra.Command {
-	var instanceName string
+	var instanceName, explain string
 	cmd := &cobra.Command{
 		Use:   "doctor",
 		Short: "Check that a QPot instance is healthy end to end",
 		Long: "Runs the host checks and inspects a running instance: containers, database schema, " +
-			"control plane and web UI. Exits non-zero if anything failed.",
+			"control plane and web UI. Every failed check shows an error code; the command exits with " +
+			"the first failure's category status. --explain <code> explains an error code " +
+			"(see doc/setup-errors.md).",
+		Example: "  qpot doctor\n  qpot doctor -i sensor1\n  qpot doctor --explain QP-PKG-001",
+		// --explain needs no instance, so the root's instance check is
+		// only applied without it.
+		PersistentPreRunE: func(cmd *cobra.Command, args []string) error {
+			if cmd.Flags().Changed("explain") {
+				return nil
+			}
+			return checkInstanceFlag(cmd, args)
+		},
 		RunE: func(cmd *cobra.Command, args []string) error {
-			ctx := cmd.Context()
-			failed := printChecks("Host checks", preflightChecks(ctx))
-			cfg, _, err := loadInstance(instanceName)
-			if err != nil {
-				return err
+			if cmd.Flags().Changed("explain") {
+				text, err := hostsetup.Explain(explain)
+				if err != nil {
+					return finishCoded(cmd.ErrOrStderr(), err)
+				}
+				w := &termSafeWriter{w: cmd.OutOrStdout()}
+				fmt.Fprint(w, text)
+				w.Flush()
+				return nil
 			}
-			mgr, err := instance.NewManager(cfg)
-			if err != nil {
-				return err
-			}
-			if !mgr.IsRunning(ctx) {
-				printChecks("Instance "+instanceName, []check{{"containers", "fail", "not running (qpot up -d -i " + instanceName + ")"}})
-				return errors.New("instance is not running")
-			}
-			if printChecks("Instance "+instanceName, healthChecks(ctx, cfg, mgr, !systemdManaged(cfg))) || failed {
-				return errors.New("some checks failed")
-			}
-			fmt.Println("\nAll checks passed.")
-			return nil
+			return finishCoded(cmd.ErrOrStderr(), runDoctor(cmd.Context(), cmd.OutOrStdout(), instanceName))
 		},
 	}
 	cmd.Flags().StringVarP(&instanceName, "instance", "i", "default", "instance name")
+	cmd.Flags().StringVar(&explain, "explain", "", "explain an error code, e.g. QP-PKG-001")
 	return cmd
+}
+
+// runDoctor runs the checks; its error carries the first failure's code.
+func runDoctor(ctx context.Context, w io.Writer, instanceName string) error {
+	host := preflightChecks(ctx)
+	hostFailed := printChecksTo(w, "Host checks", host)
+	cfg, _, err := loadInstance(instanceName)
+	if err != nil {
+		return hostsetup.E("QP-INST-002").WithWhy("The settings of instance %q could not be read.", instanceName).Wrap(err)
+	}
+	mgr, err := instance.NewManager(cfg)
+	if err != nil {
+		return hostsetup.E("QP-INST-001").Wrap(err)
+	}
+	if !mgr.IsRunning(ctx) {
+		cs := []check{{"containers", "fail", "not running (qpot up -d" + iflagFor(instanceName) + ")", "QP-INST-007"}}
+		printChecksTo(w, "Instance "+instanceName, cs)
+		code := firstFailCode(host)
+		if code == "" {
+			code = "QP-INST-007"
+		}
+		return hostsetup.E(code).WithWhy("Instance %q is not running.", instanceName)
+	}
+	cs := healthChecks(ctx, cfg, mgr, !systemdManaged(cfg))
+	if printChecksTo(w, "Instance "+instanceName, cs) || hostFailed {
+		code := firstFailCode(host)
+		if code == "" {
+			code = firstFailCode(cs)
+		}
+		return hostsetup.E(code).WithWhy("Some checks failed (see above).")
+	}
+	fmt.Fprintln(w, "\nAll checks passed.")
+	return nil
 }
 
 // serviceName is the systemd unit name for an instance.
@@ -522,7 +575,10 @@ func serviceName(cfg *config.Config) string { return "qpot-" + cfg.InstanceName 
 // control plane then lives in `qpot up`, not a background `qpot serve`).
 func systemdManaged(cfg *config.Config) bool {
 	for _, args := range [][]string{{"is-active", "--quiet"}, {"--user", "is-active", "--quiet"}} {
-		if exec.Command("systemctl", append(args, serviceName(cfg))...).Run() == nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		err := exec.CommandContext(ctx, "systemctl", append(args, serviceName(cfg))...).Run()
+		cancel()
+		if err == nil {
 			return true
 		}
 	}
@@ -530,29 +586,30 @@ func systemdManaged(cfg *config.Config) bool {
 }
 
 // installService writes and enables a systemd unit running `qpot up` for the
-// instance: a system unit when run as root, otherwise a user unit.
+// instance: a system unit when run as root, otherwise a user unit. Errors
+// are coded.
 func installService(ctx context.Context, cfg *config.Config) (string, error) {
 	if runtime.GOOS != "linux" {
-		return "", errors.New("--service is only supported on Linux (systemd)")
+		return "", hostsetup.E("QP-SVC-003")
 	}
 	if _, err := exec.LookPath("systemctl"); err != nil {
-		return "", errors.New("systemctl not found (is this a systemd system?)")
+		return "", hostsetup.E("QP-SVC-004")
 	}
 	// systemd must actually be PID 1 (not e.g. a container), checked before
 	// anything is written.
 	if _, err := os.Stat("/run/systemd/system"); err != nil {
-		return "", errors.New("systemd is not running on this host; start QPot with 'qpot up -d' instead")
+		return "", hostsetup.E("QP-SVC-001")
 	}
 	exe, err := os.Executable()
-	if err != nil {
-		return "", err
+	if err == nil {
+		exe, err = filepath.EvalSymlinks(exe)
 	}
-	if exe, err = filepath.EvalSymlinks(exe); err != nil {
-		return "", err
+	if err != nil {
+		return "", hostsetup.E("QP-SVC-002").WithWhy("Setup could not find the path of the qpot program.").Wrap(err)
 	}
 	home, err := os.UserHomeDir()
 	if err != nil {
-		return "", err
+		return "", hostsetup.E("QP-SVC-002").WithWhy("Setup could not find your home folder.").Wrap(err)
 	}
 	asRoot := os.Geteuid() == 0
 	dir, target, sysctl := "/etc/systemd/system", "multi-user.target", []string{}
@@ -560,19 +617,25 @@ func installService(ctx context.Context, cfg *config.Config) (string, error) {
 		dir, target, sysctl = filepath.Join(home, ".config", "systemd", "user"), "default.target", []string{"--user"}
 	}
 	if err := os.MkdirAll(dir, 0o755); err != nil {
-		return "", err
+		return "", hostsetup.E("QP-SVC-002").WithWhy("Setup could not create %s.", dir).Wrap(err)
 	}
 	unit := renderServiceUnit(exe, home, cfg.InstanceName, target, asRoot)
 	path := filepath.Join(dir, serviceName(cfg))
 	// #nosec G306 -- a systemd unit is meant to be world-readable; it holds no secrets.
 	if err := os.WriteFile(path, []byte(unit), 0o644); err != nil {
-		return "", err
+		return "", hostsetup.E("QP-SVC-002").WithWhy("Setup could not write %s.", path).Wrap(err)
 	}
 	for _, a := range [][]string{{"daemon-reload"}, {"enable", "--now", serviceName(cfg)}} {
-		c := exec.CommandContext(ctx, "systemctl", append(append([]string{}, sysctl...), a...)...)
-		if out, err := c.CombinedOutput(); err != nil {
+		cctx, cancel := context.WithTimeout(ctx, 3*time.Minute)
+		c := exec.CommandContext(cctx, "systemctl", append(append([]string{}, sysctl...), a...)...)
+		out, err := c.CombinedOutput()
+		cancel()
+		if err != nil {
 			_ = os.Remove(path) // don't leave a half-installed unit behind
-			return "", fmt.Errorf("systemctl %s: %w: %s", strings.Join(a, " "), err, strings.TrimSpace(string(out)))
+			if ctx.Err() != nil {
+				return "", hostsetup.E("QP-INT-001")
+			}
+			return "", hostsetup.E("QP-SVC-002").WithDetails("systemctl %s: %v\n%s", strings.Join(append(append([]string{}, sysctl...), a...), " "), err, strings.TrimSpace(string(out)))
 		}
 	}
 	if !asRoot {
@@ -636,7 +699,7 @@ func geoIPCheck(cfg *config.Config) check {
 		host = filepath.Join(cfg.DataPath, filepath.FromSlash(rest))
 	}
 	if _, err := os.Stat(host); err != nil {
-		return check{"geoip database", "fail", fmt.Sprintf("%s missing (the collector cannot start); run: qpot geoip update -i %s", host, cfg.InstanceName)}
+		return check{"geoip database", "fail", fmt.Sprintf("%s missing (the collector cannot start); run: qpot geoip update -i %s", host, cfg.InstanceName), "QP-INST-006"}
 	}
-	return check{"geoip database", "ok", filepath.Base(host)}
+	return check{Name: "geoip database", Level: "ok", Detail: filepath.Base(host)}
 }

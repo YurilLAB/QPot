@@ -49,25 +49,59 @@ irm https://raw.githubusercontent.com/YurilLAB/QPot/main/scripts/install.ps1 | i
 git clone https://github.com/YurilLAB/QPot.git && cd QPot && make build
 ```
 
+The installers offer to run `qpot setup` straight away (`QPOT_NO_SETUP=1`
+installs the program only; `QPOT_SETUP_ARGS="--yes --install-docker"` runs
+setup without questions).
+
 Set up and start an instance:
 
 ```bash
-qpot setup                          # minimal: cowrie + endlessh
-qpot setup --profile standard       # + dionaea, heralding, conpot, adbhoney
+qpot setup                          # guided: asks a few questions, every one has a safe default
+qpot setup --yes                    # no questions: flags and defaults (minimal: cowrie + endlessh)
+qpot setup --yes --install-docker --docker-group --profile standard
 qpot setup --profile hifi --service # real-OpenSSH HiFi mode, as a systemd service
+qpot setup --dry-run                # show what setup would do, change nothing
 qpot doctor                         # re-check health any time (non-zero on failure)
 ```
 
-`qpot setup` checks Docker, Compose, permissions, memory and disk; creates the
-instance with a fresh QPot ID and random database password; makes sure the host
-ports are free (a new instance whose web UI port is taken gets the next free
-one); starts the containers and the control plane; and waits until the
-database, collector, honeypots and this instance's web UI are healthy. The web
-UI and database listen on `127.0.0.1` only, and nothing needs sudo. It also
-downloads the free [DB-IP](https://db-ip.com) Lite country database so events
-get a country and show on the attack map (`--no-geoip` skips it;
-`qpot geoip update` refreshes it monthly). The map places the sensor from the
-host's time zone; set it with `--country DE` if that is wrong or UTC.
+In a terminal, `qpot setup` asks for the instance name, the honeypots
+(`minimal`, `standard`, `hifi` or a list), the web UI address and port, the
+database, whether honeypots may connect out to the internet, the attack-map
+country, the GeoIP download and whether to start at boot. Enter takes the
+recommended answer, and a wrong answer is asked again. Without a terminal (or
+with `--yes`) nothing is asked: every question has a flag (`qpot setup --help`).
+
+It then:
+
+- checks Docker Engine and the Compose plugin and, **only after showing the
+  exact commands and getting your yes** (or `--install-docker`), installs,
+  updates or starts them. On Debian, Ubuntu, Raspberry Pi OS, Fedora, CentOS
+  Stream, Rocky, AlmaLinux and RHEL it uses Docker's own signed repository and
+  checks the signing key's published fingerprint; where Docker has no packages
+  for the release (and on openSUSE and Arch) it uses the distribution's own.
+  Root commands run through `sudo`. On macOS (Homebrew) and Windows (winget) it
+  installs Docker Desktop; you accept Docker Desktop's licence yourself.
+- offers to add your user to the `docker` group (`--docker-group`); being in
+  it is the same as having root, so it asks first and defaults to no.
+- checks memory, disk space and the ports, creates the instance with a fresh
+  QPot ID and random database password, downloads the free
+  [DB-IP](https://db-ip.com) Lite country database (`--no-geoip` skips it;
+  `qpot geoip update` refreshes it monthly), starts the containers and the
+  control plane, and waits until everything is healthy.
+- prints the web UI address, how to log in (the QPot ID is shown only on your
+  own terminal, never written to a log), an `ssh -L` tunnel command for other
+  computers, the honeypots and their ports, where the files are, and the next
+  commands.
+
+Setup can be run again at any time: it checks what is already done and
+continues from there (after a failure it offers your previous answers). The web
+UI and database listen on `127.0.0.1` by default; choosing another address
+prints a warning, because the web UI uses plain HTTP.
+
+Every problem setup, `qpot doctor` and the installers report has a code such as
+`QP-PKG-001` with what went wrong, why, and what to do; the process exits with
+the code's category status. `qpot doctor --explain QP-PKG-001` explains a
+code, and [doc/setup-errors.md](doc/setup-errors.md) lists them all.
 
 The manual equivalent:
 
@@ -387,6 +421,7 @@ it starts (Docker restarts it with the honeypots after a reboot).
 
 ```bash
 qpot setup | doctor | up [-d] | serve | down | status   [-i <instance>]
+qpot doctor --explain <code>       # explain an error code such as QP-PORT-001
 qpot instance create|list|remove <name>
 qpot honeypot list|enable|disable <name>   qpot honeypot set <name> key=value
 qpot geoip update [--country CC]

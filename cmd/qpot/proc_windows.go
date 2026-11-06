@@ -47,5 +47,3 @@ func terminateProcess(pid int) {
 }
 
 func totalMemoryBytes() int64 { return 0 }
-
-func freeDiskBytes(path string) int64 { return 0 }
