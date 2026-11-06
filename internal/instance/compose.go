@@ -522,6 +522,51 @@ services:
       - qpot_internal
     cap_add:
       - DAC_READ_SEARCH
+{{- $eg := egressGuard .Config}}
+{{- if $eg.Enabled}}
+
+  # Egress guard (cmd/qpot-netguard): an nftables table in the host's network
+  # namespace that stops the honeypot bridges below from opening connections
+  # to private, loopback, link-local (cloud metadata), CGNAT and multicast
+  # addresses and to the docker host ({{$eg.Mode}} mode; "all" blocks every
+  # outbound connection). Replies to attackers and DNS to the host's resolvers
+  # still pass. It needs the host's network namespace and CAP_NET_ADMIN, and
+  # nothing else; it publishes no port and joins no QPot network. Honeypots
+  # start only once its check passes, and it re-applies the table on an
+  # interval. Turn it off with security.network_isolation.allow_private_egress.
+  netguard:
+    image: {{$eg.Image}}
+    container_name: {{.Config.InstanceName}}_netguard
+    restart: unless-stopped
+    entrypoint: ["/qpot-netguard"]
+    command: ["run"]
+    user: "0:0"
+    network_mode: host
+    read_only: true
+    cap_drop:
+      - ALL
+    cap_add:
+      - NET_ADMIN
+    security_opt:
+      - no-new-privileges:true
+    labels:
+      qpot.instance: "{{.Config.InstanceName}}"
+    environment:
+      QPOT_NETGUARD_TABLE: "{{$eg.Table}}"
+      QPOT_NETGUARD_IFACES: "{{$eg.Ifaces}}"
+      QPOT_NETGUARD_MODE: "{{$eg.Mode}}"
+    healthcheck:
+      test: ["CMD", "/qpot-netguard", "check"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "1m"
+        max-file: "2"
+{{- end}}
 
 {{range $name, $hp := .Config.Honeypots}}{{if $hp.Enabled}}
 {{template "honeypot" dict "Name" $name "HP" $hp "Config" $.Config "Sandbox" $.Sandbox}}
@@ -607,6 +652,15 @@ services:
     container_name: {{$.Config.InstanceName}}_{{$c.Service}}
     restart: on-failure:{{$.Config.Security.ResourceLimits.RestartAttempts}}
     tty: true
+    {{- if $c.Public}}
+    {{- $eg := egressGuard $.Config}}
+    {{- if $eg.Enabled}}
+    # Not before the egress guard's table is in place.
+    depends_on:
+      netguard:
+        condition: service_healthy
+    {{- end}}
+    {{- end}}
     {{- if $c.Command}}
     command: {{$c.Command}}
     {{- end}}
@@ -666,6 +720,13 @@ services:
     image: {{GetHoneypotImage .Name}}
     container_name: {{$.Config.InstanceName}}_{{.Name}}
     restart: on-failure:{{$.Config.Security.ResourceLimits.RestartAttempts}}
+    {{- $eg := egressGuard $.Config}}
+    {{- if $eg.Enabled}}
+    # Not before the egress guard's table is in place.
+    depends_on:
+      netguard:
+        condition: service_healthy
+    {{- end}}
     {{- if $.Config.Security.NetworkIsolation.RandomizeMAC}}
     # Stable, locally-administered MAC per (instance, honeypot) so containers do
     # not all share Docker's default vendor prefix / a predictable address.
@@ -940,6 +1001,7 @@ services:
 		"bridgeName":       bridgeName,
 		"macFor":           macForSeed,
 		"deployFor":        func(name string) honeypotDeploy { return deployProfile(g.Config, name) },
+		"egressGuard":      egressGuardFor,
 		// listenCheck builds the container healthcheck command, probing the actual
 		// INTERNAL listen ports from the deploy profile (not the host/config port)
 		// via /proc/net so it needs no netstat/ss. See listenHealthCheck.

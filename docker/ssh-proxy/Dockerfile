@@ -1,4 +1,9 @@
-# QPot high-interaction SSH proxy (HiFi broker).
+# QPot high-interaction SSH proxy (HiFi broker), plus the egress guard.
+#
+# The image also carries /qpot-netguard (cmd/qpot-netguard), which every
+# instance runs as its own service (entrypoint override, host network,
+# CAP_NET_ADMIN only) to keep honeypots off the networks around the host. It
+# ships here because this package is already public; the broker never runs it.
 #
 # A transparent Layer-4 TCP splice that forwards attacker connections, byte for
 # byte, to a pool of real-OpenSSH backends. It speaks no SSH (nothing to
@@ -17,13 +22,17 @@ RUN go mod download
 COPY . .
 # Static, stripped binary. CGO off so it runs in a scratch image.
 RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" \
-    -o /out/qpot-sshproxy ./cmd/qpot-sshproxy
+    -o /out/qpot-sshproxy ./cmd/qpot-sshproxy && \
+    CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" \
+    -o /out/qpot-netguard ./cmd/qpot-netguard
 
 # ---- runtime stage ----
 # Distroless static + nonroot: no shell, no package manager, minimal surface, and
-# the process never runs as root.
+# the broker never runs as root. (The compose runs /qpot-netguard as uid 0 with
+# every capability dropped except NET_ADMIN.)
 FROM gcr.io/distroless/static-debian12:nonroot
 COPY --from=build /out/qpot-sshproxy /qpot-sshproxy
+COPY --from=build /out/qpot-netguard /qpot-netguard
 
 # Listener (mapped to the public SSH port by the orchestration layer).
 EXPOSE 2222

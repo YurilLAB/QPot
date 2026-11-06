@@ -285,12 +285,17 @@ type ResourceLimits struct {
 
 // NetworkIsolation contains network security settings
 type NetworkIsolation struct {
-	SeparateNetworks     bool  `yaml:"separate_networks"`
-	BlockOutbound        bool  `yaml:"block_outbound"`
-	AllowedPorts         []int `yaml:"allowed_ports"`
-	RateLimitConnections int   `yaml:"rate_limit_connections"`
-	EnableNAT            bool  `yaml:"enable_nat"`
-	RandomizeMAC         bool  `yaml:"randomize_mac"`
+	SeparateNetworks bool `yaml:"separate_networks"`
+	// BlockOutbound stops honeypots from opening any outbound connection
+	// (DNS to the host's resolvers excepted). Honeypots that fetch what an
+	// attacker asks for (cowrie's wget/curl) then capture nothing.
+	BlockOutbound bool `yaml:"block_outbound"`
+	// AllowPrivateEgress turns the egress guard off. By default honeypots
+	// cannot open connections to private, loopback, link-local (cloud
+	// metadata), CGNAT or multicast addresses, or to the docker host itself;
+	// public destinations stay reachable (see internal/netguard).
+	AllowPrivateEgress bool `yaml:"allow_private_egress"`
+	RandomizeMAC       bool `yaml:"randomize_mac"`
 }
 
 // HoneypotConfig contains individual honeypot settings
@@ -453,12 +458,8 @@ func Default(instanceName string) *Config {
 				RestartAttempts: 3,
 			},
 			NetworkIsolation: NetworkIsolation{
-				SeparateNetworks:     true,
-				BlockOutbound:        false,
-				AllowedPorts:         []int{},
-				RateLimitConnections: 100,
-				EnableNAT:            true,
-				RandomizeMAC:         true,
+				SeparateNetworks: true,
+				RandomizeMAC:     true,
 			},
 			RuntimeSecurity: RuntimeSecurity{
 				EnableSeccompProfile: true,

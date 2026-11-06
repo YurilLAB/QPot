@@ -320,6 +320,7 @@ certificates to manage. Membership runs in the control plane, so restart
 | Area | What QPot does |
 |------|----------------|
 | Isolation | Each honeypot on its own bridge network with a non-overlapping subnet |
+| Egress | Honeypots cannot open connections to your LAN, the Docker host, cloud metadata (`169.254.169.254`) or any other private, loopback, link-local, CGNAT or multicast address. Replies to attackers, public destinations and DNS to the host's resolvers still work. An nftables guard (`netguard` service, host network, `NET_ADMIN` only) enforces it, and honeypots start only after it is in place |
 | Runtime | gVisor or Kata used for honeypots when installed |
 | Containers | `cap_drop: ALL` (minimal add-backs), read-only root with tmpfs, no privileged containers |
 | Limits | CPU, memory, PID and file-descriptor limits per honeypot |
@@ -350,7 +351,16 @@ honeypots:
       max_pids: 50
 intelligence:
   worker_interval: 15m
+security:
+  network_isolation:
+    block_outbound: false        # true: honeypots open no outbound connections at all
+    allow_private_egress: false  # true: switch the egress guard off (not recommended)
 ```
+
+The egress guard runs where Docker's bridges live: the host itself on Linux,
+Docker Desktop's VM on Windows and macOS. Its rules outlive a stopped stack
+until the next reboot, and the `netguard` service applies them again whenever
+it starts (Docker restarts it with the honeypots after a reboot).
 
 ---
 

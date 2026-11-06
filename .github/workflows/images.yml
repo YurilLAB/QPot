@@ -3,7 +3,9 @@ name: HiFi images
 # Builds the HiFi SSH broker and backend images that the generated compose file
 # references (ghcr.io/yurillab/qpot-ssh-{proxy,backend}). Nothing else published
 # them, so HiFi mode could not be deployed. Every PR/push builds and smoke-tests
-# both images; pushes to main also publish multi-arch images to GHCR.
+# both images; pushes to main also publish multi-arch images to GHCR. The
+# ssh-proxy image also carries qpot-netguard, the egress guard every instance
+# runs; its smoke test checks the guard against real docker networking.
 #
 # Note: GHCR creates a new package as private. After the first publish, set
 # both packages to public once (package settings) so users can pull them.
@@ -15,7 +17,9 @@ on:
       - "docker/ssh-proxy/**"
       - "docker/ssh-backend/**"
       - "cmd/qpot-sshproxy/**"
+      - "cmd/qpot-netguard/**"
       - "internal/proxy/**"
+      - "internal/netguard/**"
       - "go.mod"
       - "go.sum"
       - ".github/workflows/images.yml"
@@ -25,7 +29,9 @@ on:
       - "docker/ssh-proxy/**"
       - "docker/ssh-backend/**"
       - "cmd/qpot-sshproxy/**"
+      - "cmd/qpot-netguard/**"
       - "internal/proxy/**"
+      - "internal/netguard/**"
       - "go.mod"
       - "go.sum"
       - ".github/workflows/images.yml"
@@ -104,6 +110,69 @@ jobs:
           test "$(docker inspect -f '{{.State.Running}}' bk)" = "true" || { docker logs bk; exit 1; }
           docker logs bk
           docker rm -f bk >/dev/null
+
+      - name: Smoke-test the egress guard (real docker networking)
+        if: matrix.image == 'ssh-proxy'
+        run: |
+          set -euo pipefail
+          CURL=curlimages/curl:8.11.1
+          docker pull -q "$CURL" >/dev/null
+          docker pull -q python:3.13-alpine >/dev/null
+          # A honeypot-like network with a fixed bridge name, as QPot creates.
+          docker network create -o com.docker.network.bridge.name=br-qpotci0001 \
+            --subnet 172.31.250.0/24 --gateway 172.31.250.1 ngtest >/dev/null
+          # Things the guard must protect: a service on the docker host, reached
+          # through the bridge gateway and through the host's own address.
+          python3 -m http.server 18080 --bind 0.0.0.0 >/dev/null 2>&1 &
+          HOSTIP=$(hostname -I | awk '{print $1}')
+          # A honeypot answering on a published port.
+          docker run -d --name hp --network ngtest -p 18081:8080 python:3.13-alpine \
+            python -m http.server 8080 >/dev/null
+          sleep 3
+          probe() { docker run --rm --network ngtest "$CURL" -s -m 5 -o /dev/null -w '%{http_code}' "$1" || true; }
+          expect() { # expect <label> <url> open|blocked
+            code=$(probe "$2")
+            if [ "$3" = open ] && [ "$code" != 200 ]; then echo "::error::$1: want open, got '$code'"; return 1; fi
+            if [ "$3" = blocked ] && [ -n "$code" ] && [ "$code" != 000 ]; then echo "::error::$1: want blocked, got '$code'"; return 1; fi
+            echo "$1: $3 ($code)"
+          }
+          inbound() { curl -s -m 5 -o /dev/null -w '%{http_code}' http://127.0.0.1:18081/ | grep -qx 200 && echo "inbound published port: open"; }
+          echo "--- without the guard"
+          expect "docker host via gateway" http://172.31.250.1:18080/ open
+          expect "docker host via its address" "http://${HOSTIP}:18080/" open
+          inbound
+          guard() { # guard <mode>
+            docker rm -f ng >/dev/null 2>&1 || true
+            docker run -d --name ng --network host --user 0:0 --read-only \
+              --cap-drop ALL --cap-add NET_ADMIN --security-opt no-new-privileges \
+              --entrypoint /qpot-netguard -e QPOT_NETGUARD_TABLE=qpot_egress_ci \
+              -e QPOT_NETGUARD_IFACES=br-qpotci0001 -e QPOT_NETGUARD_MODE="$1" "${IMAGE}:ci" run >/dev/null
+            for _ in $(seq 1 15); do
+              if docker exec ng /qpot-netguard check >/dev/null 2>&1; then return 0; fi
+              sleep 1
+            done
+            docker logs ng; echo "::error::netguard check never passed"; return 1
+          }
+          echo "--- guard, private mode"
+          guard private
+          expect "docker host via gateway" http://172.31.250.1:18080/ blocked
+          expect "docker host via its address" "http://${HOSTIP}:18080/" blocked
+          expect "cloud metadata" http://169.254.169.254/ blocked
+          expect "public internet (DNS + HTTPS)" https://example.com/ open
+          inbound || { echo "::error::published port broken by the guard"; exit 1; }
+          echo "--- guard, all mode (block_outbound)"
+          guard all
+          expect "public internet" https://example.com/ blocked
+          inbound || { echo "::error::published port broken by the guard"; exit 1; }
+          # It refuses a bad spec instead of applying something else.
+          if docker run --rm --network host --user 0:0 --cap-drop ALL --cap-add NET_ADMIN \
+               --entrypoint /qpot-netguard -e QPOT_NETGUARD_TABLE='x;y' \
+               -e QPOT_NETGUARD_IFACES=br-qpotci0001 "${IMAGE}:ci" apply 2>/dev/null; then
+            echo "::error::netguard applied a bad table name"; exit 1
+          fi
+          docker logs ng
+          docker rm -f ng hp >/dev/null
+          docker network rm ngtest >/dev/null
 
       - name: Log in to GHCR
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
