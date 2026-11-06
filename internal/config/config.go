@@ -708,6 +708,25 @@ func Load(instanceName string) (*Config, error) {
 		return nil, fmt.Errorf("failed to read config file: %w", err)
 	}
 
+	cfg, err := Parse(data, configPath)
+	if err != nil {
+		return nil, err
+	}
+
+	configMu.Lock()
+	configs[instanceName] = cfg
+	configMu.Unlock()
+
+	return cfg, nil
+}
+
+// Parse reads the contents of an instance's config file as Load does,
+// configPath being where they were read from (its folder is the data path
+// when the file names none), but leaves Load's cache of loaded configs alone:
+// a process that keeps running while the CLI changes the file (qpot serve)
+// reads what the file says now with it.
+func Parse(data []byte, configPath string) (*Config, error) {
+	instanceName := filepath.Base(filepath.Dir(configPath))
 	var cfg Config
 	if err := yaml.Unmarshal(data, &cfg); err != nil {
 		return nil, fmt.Errorf("failed to parse config file: %w", err)
@@ -715,7 +734,7 @@ func Load(instanceName string) (*Config, error) {
 
 	// Ensure paths are set
 	if cfg.DataPath == "" {
-		cfg.DataPath = filepath.Join(homeDir, ".qpot", "instances", instanceName)
+		cfg.DataPath = filepath.Dir(configPath)
 	}
 	if cfg.ConfigPath == "" {
 		cfg.ConfigPath = configPath
@@ -778,11 +797,6 @@ func Load(instanceName string) (*Config, error) {
 	for _, msg := range cfg.Validate() {
 		slog.Warn("Config validation", "instance", instanceName, "warning", msg)
 	}
-
-	configMu.Lock()
-	configs[instanceName] = &cfg
-	configMu.Unlock()
-
 	return &cfg, nil
 }
 

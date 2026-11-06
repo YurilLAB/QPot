@@ -11,18 +11,24 @@ package server
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"net"
 	"net/http"
+	"os"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/qpot/qpot/internal/canary"
+	"github.com/qpot/qpot/internal/config"
 	"github.com/qpot/qpot/internal/database"
+	"github.com/qpot/qpot/internal/instance"
 )
 
 // clientIP returns the TCP peer IP of the request (the real, un-spoofable
@@ -44,6 +50,83 @@ func firstForwarded(xff string) string {
 	return strings.TrimSpace(xff)
 }
 
+// plantedRecheck is the least time between two looks at the instance's config
+// file for a change of what its honeypots plant (see followPlanted).
+var plantedRecheck = 5 * time.Second
+
+// maxPlantedConfig bounds the config file read for such a look.
+const maxPlantedConfig = 4 << 20
+
+// plantedFollower is the state of followPlanted: when it last looked at the
+// config file and the hash of what it read then.
+type plantedFollower struct {
+	mu      sync.Mutex
+	checked time.Time
+	read    bool
+	sum     [sha256.Size]byte
+}
+
+// followPlanted keeps the store's planted canaries those the instance plants
+// now. The CLI changes them while the server runs on: qpot honeypot enable
+// cowrie, set cowrie persona=... or bait=on|off and a canary.base_url change
+// each save the config file and recreate Cowrie with the new bait, and this
+// server read the file once, at its start. So before a store read that
+// matters (an event matched, a beacon hit, the API's list) it looks at the
+// file again, at most once per plantedRecheck, and when the file's contents
+// changed, syncs the planted canaries of what it says now, as a restarted
+// server would (with this server's QPot ID, which a start takes from the ID
+// file). A file that cannot be read or parsed changes nothing.
+func (s *Server) followPlanted() {
+	if s.canaries == nil || s.config == nil || s.config.ConfigPath == "" {
+		return
+	}
+	f := &s.planted
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	now := time.Now()
+	if f.read && now.Sub(f.checked) < plantedRecheck {
+		return
+	}
+	f.checked = now
+	path := s.config.ConfigPath
+	data, err := readConfigBounded(path)
+	if err != nil {
+		slog.Debug("canary: config file not read for the planted canaries", "path", path, "error", err)
+		return
+	}
+	sum := sha256.Sum256(data)
+	if f.read && sum == f.sum {
+		return
+	}
+	f.read, f.sum = true, sum
+	cfg, err := config.Parse(data, path)
+	if err != nil {
+		slog.Warn("canary: config file changed but does not parse; planted canaries kept", "path", path, "error", err)
+		return
+	}
+	cfg.QPotID = s.config.QPotID
+	if err := s.canaries.SyncPlanted(instance.PlantedCanaries(cfg)); err != nil {
+		slog.Warn("Canary store: could not save the planted canaries", "error", err)
+	}
+}
+
+// readConfigBounded reads a config file of at most maxPlantedConfig bytes.
+func readConfigBounded(path string) ([]byte, error) {
+	fh, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer fh.Close()
+	data, err := io.ReadAll(io.LimitReader(fh, maxPlantedConfig+1))
+	if err != nil {
+		return nil, err
+	}
+	if len(data) > maxPlantedConfig {
+		return nil, fmt.Errorf("config file larger than %d bytes", maxPlantedConfig)
+	}
+	return data, nil
+}
+
 // handleCanaryBeacon serves the public canary URL. Any GET of /c/<token>
 // records a trip and returns an innocuous decoy. The response is identical
 // whether or not the token exists, so the endpoint is not a token-enumeration
@@ -59,6 +142,7 @@ func (s *Server) handleCanaryBeacon(w http.ResponseWriter, r *http.Request) {
 			detail += " xff=" + firstForwarded(xff)
 		}
 		ua := r.Header.Get("User-Agent")
+		s.followPlanted()
 		// A persistence error does not undo the in-memory trip, so still alert.
 		// Detach from the request context: a client that hangs up right away
 		// must not cancel the alert's DB insert.
@@ -156,6 +240,7 @@ func (s *Server) canaryView(c *canary.Canary) map[string]interface{} {
 
 // handleCanaries lists and creates canaries, and deletes one by ?id=.
 func (s *Server) handleCanaries(w http.ResponseWriter, r *http.Request) {
+	s.followPlanted()
 	switch r.Method {
 	case http.MethodGet:
 		list := s.canaries.List()
@@ -267,6 +352,7 @@ type canaryMatcher struct{ s *Server }
 // whether it contains a planted value. On a hit the store records the trip and
 // this emits it into the events pipeline. Returns true when a canary tripped.
 func (m *canaryMatcher) MatchEvent(ctx context.Context, event *database.Event) bool {
+	m.s.followPlanted()
 	if m.s.canaries == nil || !m.s.canaries.HasWatchValues() {
 		return false
 	}

@@ -20,6 +20,7 @@ func FuzzConfigLoad(f *testing.F) {
 
 	home := f.TempDir()
 	os.Setenv("HOME", home)
+	os.Setenv("USERPROFILE", home) // os.UserHomeDir on Windows
 	dir := filepath.Join(home, ".qpot", "instances", "fuzzinst")
 	os.MkdirAll(dir, 0o755)
 	cfgPath := filepath.Join(dir, "config.yaml")
@@ -34,8 +35,29 @@ func FuzzConfigLoad(f *testing.F) {
 		configMu.Unlock()
 
 		cfg, err := Load("fuzzinst") // must not panic
+		// Parse (qpot serve's re-read of the file) reads it as Load does,
+		// without touching Load's cache
+		configMu.RLock()
+		cached := configs["fuzzinst"]
+		configMu.RUnlock()
+		parsed, perr := Parse([]byte(yamlBody), cfgPath)
+		configMu.RLock()
+		after := configs["fuzzinst"]
+		configMu.RUnlock()
+		if after != cached {
+			t.Error("Parse changed Load's cache")
+		}
+		if (err == nil) != (perr == nil) {
+			t.Fatalf("Load error %v, Parse error %v", err, perr)
+		}
 		if err != nil {
 			return // malformed YAML correctly rejected
+		}
+		if parsed.DataPath != cfg.DataPath || parsed.ConfigPath != cfg.ConfigPath ||
+			parsed.InstanceName != cfg.InstanceName || parsed.Intelligence != cfg.Intelligence ||
+			parsed.Security.ResourceLimits != cfg.Security.ResourceLimits ||
+			parsed.Security.SandboxMode != cfg.Security.SandboxMode {
+			t.Errorf("Parse and Load differ: %+v / %+v", parsed, cfg)
 		}
 		// A successfully-loaded config must have safe intelligence tunables.
 		if cfg.Intelligence.WorkerInterval <= 0 {

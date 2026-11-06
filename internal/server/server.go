@@ -51,6 +51,9 @@ type Server struct {
 	// canaries is the canary (honeytoken) registry. nil when the subsystem is
 	// disabled, in which case the beacon and management routes are not served.
 	canaries *canary.Store
+	// planted is followPlanted's state: the planted canaries follow the
+	// instance's config file while the server runs.
+	planted plantedFollower
 
 	// lastAlert is when the alert loop last fired (webhook/response hooks),
 	// used to debounce alerting within Alerts.Cooldown. Touched only by the

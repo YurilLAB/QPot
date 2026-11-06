@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -260,4 +262,157 @@ func TestServerSyncsPlantedCanaries(t *testing.T) {
 			t.Errorf("%s not registered", c.Name)
 		}
 	}
+}
+
+// TestServerFollowsPlantedCanaries: the CLI changes what Cowrie plants while
+// the server runs on (qpot honeypot enable cowrie, set cowrie bait=off or
+// persona=..., a canary.base_url change, each saving the config file and
+// recreating Cowrie): the server watches what is planted now, as a restarted
+// one would, not what was planted when it started.
+func TestServerFollowsPlantedCanaries(t *testing.T) {
+	old := plantedRecheck
+	plantedRecheck = 0
+	defer func() { plantedRecheck = old }()
+	want, planted := plantedCfg(t)
+	dir := t.TempDir()
+	// the CLI's copy of the instance config: its own object, saved to the file
+	cli := func(mod func(hp *config.HoneypotConfig, cfg *config.Config)) {
+		t.Helper()
+		cfg := config.Default("plantedfollow")
+		cfg.QPotID, cfg.DataPath, cfg.ConfigPath = want.QPotID, dir, filepath.Join(dir, "config.yaml")
+		cfg.Canary.Enabled = true
+		hp := cfg.Honeypots["cowrie"]
+		hp.CustomConfig = map[string]string{"persona": "ubuntu-noble"}
+		mod(&hp, cfg)
+		cfg.Honeypots["cowrie"] = hp
+		if err := config.Save(cfg); err != nil {
+			t.Fatal(err)
+		}
+	}
+	cli(func(hp *config.HoneypotConfig, _ *config.Config) { hp.Enabled = false })
+	srvCfg, err := config.Parse(mustRead(t, filepath.Join(dir, "config.yaml")), filepath.Join(dir, "config.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	srvCfg.QPotID = want.QPotID
+	srvCfg.Database.Host, srvCfg.Database.Port = "127.0.0.1", 1
+	srvCfg.Intelligence.Enabled = false
+	s, err := New(srvCfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n := len(s.canaries.List()); n != 0 {
+		t.Fatalf("cowrie off: %d canaries", n)
+	}
+	var dbPass, aws *canary.Canary
+	for _, c := range planted {
+		if strings.HasSuffix(c.Name, "database password") {
+			dbPass = c
+		}
+		if c.Kind == canary.KindAWS {
+			aws = c
+		}
+	}
+	m := &canaryMatcher{s: s}
+	use := func(ip, cmd string) bool {
+		return m.MatchEvent(context.Background(), &database.Event{Timestamp: time.Now().UTC(), Honeypot: "cowrie",
+			SourceIP: ip, EventType: "cowrie.command.input", Command: cmd})
+	}
+
+	// qpot honeypot enable cowrie
+	cli(func(hp *config.HoneypotConfig, _ *config.Config) { hp.Enabled = true })
+	if !use("203.0.113.10", "mysql -u backup -p'"+dbPass.Values[0]+"'") {
+		t.Error("cowrie enabled while the server runs: its database password does not trip")
+	}
+	if got, ok := s.canaries.Get(aws.ID); !ok || !got.Planted || !got.Enabled {
+		t.Errorf("AWS canary after enable: %+v %v", got, ok)
+	}
+	// the planted canaries are listed by the API as well
+	rec := httptest.NewRecorder()
+	s.handleCanaries(rec, httptest.NewRequest(http.MethodGet, "/api/canaries", nil))
+	if !strings.Contains(rec.Body.String(), aws.AccessKeyID) {
+		t.Error("API does not list the planted AWS key")
+	}
+
+	// a config file that does not parse keeps what is watched
+	if err := os.WriteFile(filepath.Join(dir, "config.yaml"), []byte("honeypots: [\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if !use("203.0.113.11", "aws configure set aws_access_key_id "+aws.AccessKeyID) {
+		t.Error("a broken config file dropped the planted canaries")
+	}
+
+	// qpot honeypot set cowrie bait=off: nothing planted, nothing watched
+	cli(func(hp *config.HoneypotConfig, _ *config.Config) {
+		hp.Enabled = true
+		hp.CustomConfig["bait"] = "off"
+	})
+	if use("203.0.113.12", "aws configure set aws_secret_access_key "+aws.SecretAccessKey) {
+		t.Error("bait off: the AWS secret still trips")
+	}
+	if n := len(s.canaries.List()); n != 0 {
+		t.Errorf("bait off: %d canaries left", n)
+	}
+
+	// bait on again with a canary.base_url: the healthcheck's memo follows it
+	cli(func(hp *config.HoneypotConfig, cfg *config.Config) {
+		hp.Enabled = true
+		cfg.Canary.BaseURL = "https://cdn.example.net"
+	})
+	rec = httptest.NewRecorder()
+	s.handleCanaries(rec, httptest.NewRequest(http.MethodGet, "/api/canaries", nil))
+	if !strings.Contains(rec.Body.String(), "https://cdn.example.net/c/") {
+		t.Errorf("base_url change not followed: %s", rec.Body.String())
+	}
+}
+
+// TestFollowPlantedLooksAtMostOncePerRecheck: between two looks at the config
+// file the server reads nothing (it is not read per event).
+func TestFollowPlantedLooksAtMostOncePerRecheck(t *testing.T) {
+	old := plantedRecheck
+	plantedRecheck = time.Hour
+	defer func() { plantedRecheck = old }()
+	want, _ := plantedCfg(t)
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	cfg := config.Default("plantedonce")
+	cfg.QPotID, cfg.DataPath, cfg.ConfigPath = want.QPotID, dir, path
+	cfg.Canary.Enabled = true
+	off := cfg.Honeypots["cowrie"]
+	off.Enabled = false
+	cfg.Honeypots["cowrie"] = off
+	if err := config.Save(cfg); err != nil {
+		t.Fatal(err)
+	}
+	cs, err := canary.NewStore(dir, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := &Server{config: cfg, canaries: cs}
+	s.followPlanted() // the first look reads the file
+	hp := want.Honeypots["cowrie"]
+	cli := config.Default("plantedonce")
+	cli.QPotID, cli.DataPath, cli.ConfigPath = want.QPotID, dir, path
+	cli.Honeypots["cowrie"] = hp
+	if err := config.Save(cli); err != nil {
+		t.Fatal(err)
+	}
+	s.followPlanted()
+	if n := len(cs.List()); n != 0 {
+		t.Errorf("looked again within the recheck interval: %d canaries", n)
+	}
+	s.planted.checked = time.Now().Add(-2 * time.Hour)
+	s.followPlanted()
+	if n := len(cs.List()); n == 0 {
+		t.Error("the change was not seen after the recheck interval")
+	}
+}
+
+func mustRead(t *testing.T, path string) []byte {
+	t.Helper()
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return data
 }

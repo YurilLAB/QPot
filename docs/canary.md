@@ -93,8 +93,10 @@ the http channel, and only when `canary.base_url` says where the beacon is
 reachable; without it the URL points into the persona's internal network.
 
 The server registers the planted canaries in the store when it starts
-(`planted: true` in the API). They cannot be deleted (QPot would plant them
-again); turn the bait off with `qpot honeypot set cowrie bait=off`. Trips need
+(`planted: true` in the API), and follows the instance's config file while it
+runs: enabling Cowrie, changing its persona or bait, or `canary.base_url` takes
+effect within seconds, without a restart. They cannot be deleted (QPot would
+plant them again); turn the bait off with `qpot honeypot set cowrie bait=off`. Trips need
 `canary.enabled` and, for the honeypot channel, `intelligence.enabled`.
 
 Sources: Sysdig TRT on SSH-Snake (2024) and on TeamTNT's AWS credential
