@@ -5,14 +5,49 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"runtime"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/qpot/qpot/internal/config"
 )
+
+var (
+	warnMu  sync.Mutex
+	warned  = map[string]bool{}
+	warnOut io.Writer // nil: standard output
+)
+
+// SetWarningOutput sends the sandbox fallback warnings to w (nil: standard
+// output) and returns the previous setting. qpot setup sends them to its log,
+// because its summary already says which isolation the honeypots get.
+func SetWarningOutput(w io.Writer) io.Writer {
+	warnMu.Lock()
+	defer warnMu.Unlock()
+	prev := warnOut
+	warnOut = w
+	return prev
+}
+
+// warnOnce prints a fallback warning once per process, so a command that
+// builds several managers prints it once.
+func warnOnce(msg string) {
+	warnMu.Lock()
+	defer warnMu.Unlock()
+	if warned[msg] {
+		return
+	}
+	warned[msg] = true
+	w := warnOut
+	if w == nil {
+		w = os.Stdout
+	}
+	fmt.Fprint(w, msg)
+}
 
 // SandboxType represents the type of sandbox to use
 type SandboxType string
@@ -76,14 +111,14 @@ func NewSandbox(cfg *config.SecurityConfig) (*Sandbox, error) {
 		// consistent with QPot's "keep the honeypots running even when
 		// misconfigured" principle. (config.Load already maps an empty mode to the
 		// secure default; this is belt-and-braces for any other unrecognized value.)
-		fmt.Printf("Warning: unknown sandbox mode %q; falling back to standard containers\n", sb.sandboxType)
+		warnOnce(fmt.Sprintf("Warning: unknown sandbox mode %q; falling back to standard containers\n", sb.sandboxType))
 		sb.sandboxType = SandboxNone
 		sb.available = true
 	}
 
 	// Fall back to none if requested sandbox unavailable
 	if !sb.available && sb.sandboxType != SandboxNone {
-		fmt.Printf("Warning: %s sandbox not available, falling back to standard containers\n", sb.sandboxType)
+		warnOnce(fmt.Sprintf("Warning: %s sandbox not available, falling back to standard containers\n", sb.sandboxType))
 		sb.sandboxType = SandboxNone
 		sb.available = true
 	}
