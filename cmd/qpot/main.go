@@ -173,7 +173,7 @@ func newUpCommand() *cobra.Command {
 			}
 
 			// Show QPot ID popup before starting
-			showQPotIDPopup(qpotID.ID, cfg.WebUI.Port)
+			showQPotIDPopup(qpotID.ID, cfg.InstanceName, cfg.WebUI.Port)
 
 			// The containers always run detached; this process (or, with -d, a
 			// background `qpot serve`) then runs the control plane. If they are
@@ -737,79 +737,101 @@ func newIDCommand() *cobra.Command {
 	return cmd
 }
 
-// showQPotIDPopup displays a GUI notification with the QPot ID
-func showQPotIDPopup(id string, webPort int) {
-	// Build message
-	title := "QPot Started"
-	message := fmt.Sprintf("Your QPot ID:\n%s\n\nWeb UI: http://localhost:%d\n\nSave this ID to track your honeypot!", id, webPort)
+// popupCmd is one desktop notification helper to launch.
+type popupCmd struct {
+	name  string
+	args  []string
+	env   []string // added to the environment
+	delay time.Duration
+}
 
-	// id is generated from base32 ([a-z2-7] + the literal "qp_" prefix), so
-	// it cannot break out of any of the script literals below. webPort is an
-	// int. title is a constant. The popup is best-effort: console output
-	// (printed unconditionally below) is the source of truth.
-	tryStart := func(name string, args ...string) {
-		c := exec.Command(name, args...)
+// popupIDEnv hands the QPot ID to the notification scripts. Any local user
+// can read another process's command line (ps, /proc/<pid>/cmdline), so the
+// ID never goes into an argument; a process's environment is readable only
+// by its own user.
+const popupIDEnv = "QPOT_POPUP_ID"
+
+// popupCommands returns the notification helpers to run on goos. has reports
+// whether a binary is on PATH.
+func popupCommands(goos, id, instanceName string, webPort int, has func(string) bool) []popupCmd {
+	env := []string{popupIDEnv + "=" + id}
+	switch goos {
+	case "windows":
+		// Prefer pwsh (PowerShell 7+, the default on modern installs); fall
+		// back to legacy Windows PowerShell if it isn't on PATH.
+		shell := "powershell"
+		if has("pwsh") {
+			shell = "pwsh"
+		}
+		text := fmt.Sprintf("\"QPot ID: $env:%s`nWeb UI: http://localhost:%d\"", popupIDEnv, webPort)
+		balloon := "Add-Type -AssemblyName System.Windows.Forms\n" +
+			"$notify = New-Object System.Windows.Forms.NotifyIcon\n" +
+			"$notify.Icon = [System.Drawing.SystemIcons]::Information\n" +
+			"$notify.Visible = $true\n" +
+			"$notify.BalloonTipTitle = \"QPot Started\"\n" +
+			"$notify.BalloonTipText = " + text + "\n" +
+			"$notify.ShowBalloonTip(10000)\n"
+		box := "Add-Type -AssemblyName System.Windows.Forms; [System.Windows.Forms.MessageBox]::Show(" +
+			text + ", \"QPot Started\", \"OK\", \"Information\")"
+		return []popupCmd{
+			{name: shell, args: []string{"-NoProfile", "-Command", balloon}, env: env},
+			{name: shell, args: []string{"-NoProfile", "-Command", box}, env: env, delay: 500 * time.Millisecond},
+		}
+
+	case "darwin":
+		idExpr := `(system attribute "` + popupIDEnv + `")`
+		notify := fmt.Sprintf(`display notification ("QPot ID: " & %s) with title "QPot Started" subtitle "Web UI: http://localhost:%d"`, idExpr, webPort)
+		alert := fmt.Sprintf(`display alert "QPot Started" message ("QPot ID: " & %s & return & return & "Web UI: http://localhost:%d" & return & return & "Save this ID to access your honeypot!") as informational buttons {"Copy ID", "OK"} default button "OK"`, idExpr, webPort)
+		return []popupCmd{
+			{name: "osascript", args: []string{"-e", notify}, env: env},
+			{name: "osascript", args: []string{"-e", alert}, env: env, delay: 500 * time.Millisecond},
+		}
+
+	default:
+		// Linux: try notify-send, then zenity, then kdialog. Headless or
+		// minimal installs (common on Arch) may have none of these — that's
+		// fine, the console box still shows the ID. These tools only take
+		// the text as an argument, so the popup names the command that shows
+		// the ID instead of the ID itself.
+		hint := fmt.Sprintf("Show your QPot ID with: qpot id -i %s", instanceName)
+		web := fmt.Sprintf("Web UI: http://localhost:%d", webPort)
+		switch {
+		case has("notify-send"):
+			return []popupCmd{{name: "notify-send", args: []string{"-t", "10000", "QPot Started", hint + "\n\n" + web}}}
+		case has("zenity"):
+			return []popupCmd{{name: "zenity", args: []string{"--info", "--title=QPot Started", "--width=400",
+				"--text=<big><b>QPot started</b></big>\n\n" + hint + "\n\n" + web}}}
+		case has("kdialog"):
+			return []popupCmd{{name: "kdialog", args: []string{"--title", "QPot Started", "--msgbox", hint + "\n" + web}}}
+		}
+	}
+	return nil
+}
+
+// showQPotIDPopup displays a GUI notification with the QPot ID
+func showQPotIDPopup(id, instanceName string, webPort int) {
+	// The popup is best-effort: console output (printed unconditionally
+	// below) is the source of truth.
+	tryStart := func(p popupCmd) {
+		c := exec.Command(p.name, p.args...)
+		c.Env = append(os.Environ(), p.env...)
 		if err := c.Start(); err != nil {
-			slog.Debug("popup helper failed", "tool", name, "error", err)
+			slog.Debug("popup helper failed", "tool", p.name, "error", err)
 			return
 		}
 		// Reap the child so it doesn't linger as a zombie on Linux/macOS
 		// once the user dismisses the dialog.
 		go func() { _ = c.Wait() }()
 	}
-
-	switch runtime.GOOS {
-	case "windows":
-		psCmd := fmt.Sprintf(`
-Add-Type -AssemblyName System.Windows.Forms
-$notify = New-Object System.Windows.Forms.NotifyIcon
-$notify.Icon = [System.Drawing.SystemIcons]::Information
-$notify.Visible = $true
-$notify.BalloonTipTitle = "%s"
-$notify.BalloonTipText = @"
-QPot ID: %s
-Web UI: http://localhost:%d
-"@
-$notify.ShowBalloonTip(10000)
-`, title, id, webPort)
-		// Prefer pwsh (PowerShell 7+, the default on modern installs); fall
-		// back to legacy Windows PowerShell if it isn't on PATH.
-		shell := "powershell"
-		if _, err := exec.LookPath("pwsh"); err == nil {
-			shell = "pwsh"
+	for _, p := range popupCommands(runtime.GOOS, id, instanceName, webPort, hasBinary) {
+		if p.delay == 0 {
+			tryStart(p)
+			continue
 		}
-		tryStart(shell, "-NoProfile", "-Command", psCmd)
-
-		msgCmd := fmt.Sprintf(`Add-Type -AssemblyName System.Windows.Forms; [System.Windows.Forms.MessageBox]::Show("QPot ID: %s`+"\n"+`Web UI: http://localhost:%d", "QPot Started", "OK", "Information")`, id, webPort)
-		go func() {
-			time.Sleep(500 * time.Millisecond)
-			tryStart(shell, "-NoProfile", "-Command", msgCmd)
-		}()
-
-	case "darwin":
-		script := fmt.Sprintf(`display notification "QPot ID: %s" with title "%s" subtitle "Web UI: http://localhost:%d"`, id, title, webPort)
-		tryStart("osascript", "-e", script)
-
-		alertScript := fmt.Sprintf(`display alert "%s" message "QPot ID: %s\n\nWeb UI: http://localhost:%d\n\nSave this ID to access your honeypot!" as informational buttons {"Copy ID", "OK"} default button "OK"`, title, id, webPort)
-		go func() {
-			time.Sleep(500 * time.Millisecond)
-			tryStart("osascript", "-e", alertScript)
-		}()
-
-	default:
-		// Linux: try notify-send, then zenity, then kdialog. Headless or
-		// minimal installs (common on Arch) may have none of these — that's
-		// fine, the console box below still shows the ID.
-		switch {
-		case hasBinary("notify-send"):
-			tryStart("notify-send", "-t", "10000", title, message)
-		case hasBinary("zenity"):
-			zenityMsg := fmt.Sprintf("<big><b>Your QPot ID</b></big>\n\n<span font='monospace'>%s</span>\n\nWeb UI: http://localhost:%d\n\nSave this ID to track your honeypot!", id, webPort)
-			tryStart("zenity", "--info", "--title=QPot Started", "--width=400", "--text="+zenityMsg)
-		case hasBinary("kdialog"):
-			tryStart("kdialog", "--title", "QPot Started",
-				"--msgbox", fmt.Sprintf("QPot ID: %s\nWeb UI: http://localhost:%d", id, webPort))
-		}
+		go func(p popupCmd) {
+			time.Sleep(p.delay)
+			tryStart(p)
+		}(p)
 	}
 
 	// Also print to console
