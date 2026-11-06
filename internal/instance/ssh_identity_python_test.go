@@ -18,7 +18,8 @@ import (
 // base class, its filesystem and event log are stubbed with a fake tree of the
 // files the test passes (path -> base64), qpot_bait.py is the real module.
 // For each case (args, home, cwd) it prints the events ssh dispatched and the
-// paths it read. Mode "fuzz" instead feeds public_key() mutated key files.
+// paths it read. Mode "fuzz" instead feeds public_key() mutated key files,
+// mode "timeout" asks how long ssh would wait on an address that never answers.
 const sshHarness = `
 import base64, json, posixpath, random, sys, time, types, importlib.util
 bait_path, ssh_path, mode, spec_path = sys.argv[1:5]
@@ -97,6 +98,23 @@ events = []
 class Events:
     def dispatch(self, eventid, fmt, **fields):
         events.append(dict(fields, eventid=eventid))
+if mode == "timeout":
+    # how long ssh waits on an address that never answers, and how long working that out took
+    out = []
+    for case in spec["cases"]:
+        files.clear()
+        if case.get("config") is not None:
+            files["/root/.ssh/config"] = base64.b64decode(case["config"])
+        cmd = ssh.Command_ssh.__new__(ssh.Command_ssh)
+        cmd.environ = {"HOME": "/root"}
+        cmd.fs = FS()
+        waits = []
+        cmd.callLater = lambda delay, fn, *a: waits.append(delay)
+        t0 = time.perf_counter()
+        cmd.qpot_unreachable("10.0.0.9", [tuple(o) for o in case["opts"] or []])
+        out.append({"timeout": waits[0], "seconds": time.perf_counter() - t0})
+    print(json.dumps(out))
+    sys.exit(0)
 out = []
 for case in spec["cases"]:
     events.clear(); reads.clear()
@@ -114,8 +132,9 @@ for case in spec["cases"]:
             user = opt[1]
     if "@" in args[0]:
         user, host = args[0].split("@", 1)
+    t0 = time.perf_counter()
     cmd.qpot_log_identities(optlist, user, host)
-    out.append({"events": list(events), "reads": list(reads)})
+    out.append({"events": list(events), "reads": list(reads), "seconds": time.perf_counter() - t0})
 print(json.dumps(out))
 `
 
@@ -226,11 +245,15 @@ func TestSSHLogsTheKeysItWouldOffer(t *testing.T) {
 		{Args: []string{"-F", "/root/.ssh/config", "-i", "/root/.ssh/id_ed25519", "db01"}, Home: "/home/u"},
 		{Args: []string{"web7"}, Home: "/home/u"}, // the user has no key
 		{Args: []string{"-i", "/tmp/mismatch.pub", "a@b"}},
+		// an -o IdentityFile that is no option ssh takes (a value past 1024 characters) after a long run
+		// of blanks: no key of its own, the default files, in linear time
+		{Args: []string{"-o", "IdentityFile" + strings.Repeat(" ", 64000) + "/tmp/" + strings.Repeat("x", 2000), "a@b"}},
 	}
 	raw := runSSHHarness(t, py, "cases", map[string]any{"files": files, "cases": cases})
 	var got []struct {
-		Events []sshEvent `json:"events"`
-		Reads  []string   `json:"reads"`
+		Events  []sshEvent `json:"events"`
+		Reads   []string   `json:"reads"`
+		Seconds float64    `json:"seconds"`
 	}
 	if err := json.Unmarshal(raw, &got); err != nil {
 		t.Fatalf("%v\n%s", err, raw)
@@ -252,8 +275,12 @@ func TestSSHLogsTheKeysItWouldOffer(t *testing.T) {
 		{[]string{fp}, "root", "/root/.ssh/id_ed25519"},
 		{nil, "", ""},
 		{nil, "", ""},
+		{[]string{fp}, "a", "/root/.ssh/id_ed25519"},
 	}
 	for i, w := range want {
+		if got[i].Seconds > 0.5 {
+			t.Errorf("case %d: %.2f s", i, got[i].Seconds)
+		}
 		ev := got[i].Events
 		var fps []string
 		for _, e := range ev {
@@ -307,4 +334,54 @@ func TestPublicKeyOfMutatedFiles(t *testing.T) {
 		t.Error("no mutated file still read as a key: the mutations or the parser are off")
 	}
 	t.Logf("worst %.4f s, %d of 3000 still a key", res.Worst, res.Found)
+}
+
+// TestSSHConnectTimeoutInLinearTime: ssh on the honeypot waits on a bait
+// host for the ConnectTimeout of -o, else of ~/.ssh/config, else the
+// kernel's 127 s; reading either takes linear time, though both are the
+// attacker's to write (the separator's \s*[ =]\s* and [ \t]*[ \t=][ \t]*
+// tried every split of a run of blanks: 64 000 blanks held the reactor for
+// 25 to 30 s on each ssh).
+func TestSSHConnectTimeoutInLinearTime(t *testing.T) {
+	py := python(t)
+	b64 := func(s string) *string {
+		v := base64.StdEncoding.EncodeToString([]byte(s))
+		return &v
+	}
+	blanks := strings.Repeat(" ", 64000)
+	type tcase struct {
+		Config *string     `json:"config"`
+		Opts   [][2]string `json:"opts"`
+		want   float64
+	}
+	cases := []tcase{
+		{Config: b64("Host *\n    ConnectTimeout 7\n"), want: 7},
+		{Config: b64("Host *\n  ConnectTimeout=5\n"), want: 5},
+		{Config: b64("  ConnectTimeout = 9  \n"), want: 9},
+		{Config: b64("ConnectTimeout\t3\n"), want: 3},
+		{Config: b64("ConnectTimeout10\n"), want: 127},
+		{Config: b64("ConnectTimeout 0\n"), want: 127},
+		{Config: b64("ConnectTimeout 900\n"), want: 127},
+		{Config: b64("ConnectTimeout" + blanks + "x\nConnectTimeout 4\n"), want: 4},
+		{Config: b64("ConnectTimeout" + blanks + "=" + blanks + "x\n"), want: 127},
+		{Opts: [][2]string{{"-o", "ConnectTimeout=4"}}, Config: b64("ConnectTimeout 7\n"), want: 4},
+		{Opts: [][2]string{{"-o", "connecttimeout 6"}}, want: 6},
+		{Opts: [][2]string{{"-o", " ConnectTimeout = 2 "}}, want: 2},
+		{Opts: [][2]string{{"-o", "ConnectTimeout" + blanks + "x"}}, want: 127},
+		{Opts: [][2]string{{"-o", "ConnectTimeout" + blanks + "=" + blanks + "x"}}, Config: b64("ConnectTimeout 8\n"), want: 8},
+	}
+	out := runSSHHarness(t, py, "timeout", map[string]any{"files": map[string]string{}, "cases": cases})
+	var got []struct {
+		Timeout float64 `json:"timeout"`
+		Seconds float64 `json:"seconds"`
+	}
+	if err := json.Unmarshal(out, &got); err != nil || len(got) != len(cases) {
+		t.Fatalf("%v: %s", err, out)
+	}
+	for i, c := range cases {
+		if got[i].Timeout != c.want || got[i].Seconds > 0.5 {
+			t.Errorf("case %d (opts %d, config %v): waits %v in %.3f s, want %v", i, len(c.Opts), c.Config != nil,
+				got[i].Timeout, got[i].Seconds, c.want)
+		}
+	}
 }

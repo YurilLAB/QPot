@@ -218,7 +218,7 @@ class Command_ssh(HoneyPotCommand):
             elif opt == "-F":
                 config = value
             elif opt == "-o":
-                found = re.fullmatch(r"(?i)\s*identityfile\s*[ =]\s*(\S.{0,1023})", value)
+                found = re.fullmatch(r"(?i)\s*identityfile(?:\s*=|[^\S ]* )\s*(\S.{0,1023})", value)
                 if found:
                     given.append(found.group(1).strip().strip('"'))
         if config:
@@ -280,7 +280,9 @@ class Command_ssh(HoneyPotCommand):
             if opt == "-p" and value.isdigit() and len(value) <= 5:
                 port = value
             elif opt == "-o":
-                found = re.fullmatch(r"(?i)\s*connecttimeout\s*[ =]\s*([0-9]{1,4})\s*", value)
+                # one way to match the separator (here and for IdentityFile): \s*[ =]\s* tried
+                # every split of a run of blanks, and 62 000 of them held the reactor 56 s
+                found = re.fullmatch(r"(?i)\s*connecttimeout(?:\s*=|[^\S ]* )\s*([0-9]{1,4})\s*", value)
                 if found:
                     timeout = int(found.group(1))
         if timeout is None:
@@ -298,7 +300,8 @@ class Command_ssh(HoneyPotCommand):
             data = self.fs.file_contents(home.rstrip("/") + "/.ssh/config")[:65536]
         except Exception:  # noqa: BLE001 - no config, a folder, a broken link: no timeout of its own
             return None
-        found = re.search(rb"(?im)^[ \t]*ConnectTimeout[ \t]*[ \t=][ \t]*([0-9]{1,4})[ \t]*$", data)
+        # one way to match the separator, as for -o: the config is the attacker's to write
+        found = re.search(rb"(?im)^[ \t]*ConnectTimeout(?:[ \t]*=[ \t]*|[ \t]+)([0-9]{1,4})[ \t]*$", data)
         return int(found.group(1)) if found else None
 
     def qpot_timed_out(self, address: str, port: str) -> None:
