@@ -6,6 +6,9 @@ import (
 	"encoding/json"
 	"io"
 	"net"
+	"net/netip"
+	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"testing"
@@ -175,6 +178,74 @@ func FuzzEventJSON(f *testing.F) {
 		var e Event
 		if err := json.Unmarshal([]byte(strings.TrimRight(line, "\n")), &e); err != nil {
 			t.Fatalf("event not valid JSON: %v (%q)", err, line)
+		}
+	})
+}
+
+// FuzzSourceKey checks the unit the per-IP limits apply to: every address in
+// one IPv6 /64 is one source, an IPv4 address is its own source in any
+// spelling (plain or IPv4-mapped), and nothing panics.
+func FuzzSourceKey(f *testing.F) {
+	f.Add([]byte{0x20, 1, 0xd, 0xb8, 0, 1, 0, 2, 0, 0, 0, 0, 0, 0, 0, 1}, []byte{0xde, 0xad, 0xbe, 0xef, 0, 0, 0, 9}, "fe80::1%eth0")
+	f.Add([]byte{0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xff, 0xff, 192, 0, 2, 1}, []byte{}, "not an ip")
+	f.Fuzz(func(t *testing.T, addr16, low []byte, raw string) {
+		_ = sourceKey(raw) // arbitrary text: must not panic
+		var a [16]byte
+		copy(a[:], addr16)
+		ip := netip.AddrFrom16(a)
+		if ip.Is4In6() {
+			v4 := ip.Unmap()
+			if sourceKey(ip.String()) != sourceKey(v4.String()) || sourceKey(v4.String()) != v4.String() {
+				t.Fatalf("IPv4 %s: keys %q / %q", v4, sourceKey(ip.String()), sourceKey(v4.String()))
+			}
+			return
+		}
+		// Another address in the same /64.
+		b := a
+		copy(b[8:], low)
+		other := netip.AddrFrom16(b)
+		if other.Is4In6() {
+			return
+		}
+		if k1, k2 := sourceKey(ip.String()), sourceKey(other.String()); k1 != k2 {
+			t.Fatalf("%s and %s share a /64 but have keys %q and %q", ip, other, k1, k2)
+		}
+		// A different /64 is a different source.
+		c := a
+		c[7] ^= 1
+		if sourceKey(netip.AddrFrom16(c).String()) == sourceKey(ip.String()) {
+			t.Fatalf("%s and %s are in different /64s but share a key", ip, netip.AddrFrom16(c))
+		}
+	})
+}
+
+// FuzzGenerationID checks that a backend id, whatever it contains, can only
+// ever name a counter file inside the generations directory.
+func FuzzGenerationID(f *testing.F) {
+	for _, s := range []string{"be1", "..", "../secret", `..\secret`, "/etc/passwd", "C:secret", "a/../../secret", "x:stream", ""} {
+		f.Add(s)
+	}
+	root := f.TempDir()
+	dir := filepath.Join(root, "gen")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		f.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "secret"), []byte("99\n"), 0o644); err != nil {
+		f.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "be1"), []byte("7\n"), 0o644); err != nil {
+		f.Fatal(err)
+	}
+	g := NewGenerationGate(dir)
+	f.Fuzz(func(t *testing.T, id string) {
+		switch n := g.Generation(id); n {
+		case 0:
+		case 7:
+			if id != "be1" {
+				t.Fatalf("Generation(%q) read be1's counter", id)
+			}
+		default:
+			t.Fatalf("Generation(%q) = %d, read outside the directory", id, n)
 		}
 	})
 }

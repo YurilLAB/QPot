@@ -117,3 +117,52 @@ func FuzzExtract(f *testing.F) {
 		}
 	})
 }
+
+// FuzzURLHost feeds arbitrary URL authorities to the host parser. The host is
+// what an IOC (and an IDS rule built from it) will name, so it must never be
+// the userinfo, a port, a private or loopback address in any spelling, or a
+// non-canonical number that is really an IPv4 address.
+func FuzzURLHost(f *testing.F) {
+	for _, s := range []string{
+		"evil.example/x", "cdn.example.com@203.0.113.9/x.sh", "u:p@dl.evil.example:8080/b",
+		"[2001:db8::9]:80/", "[::ffff:10.0.0.1]/", "127.1/", "0x7f.0.0.1", "0177.0.0.1",
+		"2130706433", "0xcb.0.0x71.9", "203.0.28937", "1.2.3.4.5", "999.1.1.1", "a.b.c.123",
+		"evil.example.", "@", "[", "a@b@c.example", "x.example\\y@z", "0x", "0x.0x.0x.0x",
+		"08.1.1.1", "4294967296", "1..2", "%65vil.example",
+	} {
+		f.Add(s)
+	}
+	f.Fuzz(func(t *testing.T, rest string) {
+		u := "http://" + rest
+		host := urlHost(u)
+		if strings.ContainsAny(host, "@/?#\\") {
+			t.Fatalf("urlHost(%q) = %q keeps authority punctuation", u, host)
+		}
+		typ, v := hostIOC(host)
+		switch typ {
+		case "":
+			if v != "" {
+				t.Fatalf("hostIOC(%q) = (%q, %q)", host, typ, v)
+			}
+		case IOCTypeIP:
+			if net.ParseIP(v) == nil || isPrivateIP(v) {
+				t.Fatalf("hostIOC(%q) gave IP IOC %q", host, v)
+			}
+		case IOCTypeDomain:
+			if !reHostname.MatchString(v) {
+				t.Fatalf("hostIOC(%q) gave domain %q", host, v)
+			}
+			if _, numeric := looseIPv4(v); numeric {
+				t.Fatalf("hostIOC(%q) gave numeric host %q as a domain", host, v)
+			}
+		default:
+			t.Fatalf("hostIOC(%q) gave type %q", host, typ)
+		}
+		// A plain dotted quad reads the same both ways.
+		if ip := net.ParseIP(host); ip != nil && ip.To4() != nil && !strings.Contains(host, ":") {
+			if v4, numeric := looseIPv4(host); !numeric || v4 != ip.To4().String() {
+				t.Fatalf("looseIPv4(%q) = %q, %v; net.ParseIP says %s", host, v4, numeric, ip)
+			}
+		}
+	})
+}

