@@ -418,6 +418,9 @@ func (m *Manager) InitCluster(name, password string, cfg *ClusterConfig) (*Clust
 	if len(password) < 8 {
 		return nil, fmt.Errorf("password must be at least 8 characters")
 	}
+	if len(password) > maxPasswordBytes {
+		return nil, fmt.Errorf("password must be at most %d bytes", maxPasswordBytes)
+	}
 
 	clusterID, err := generateClusterID()
 	if err != nil {
@@ -489,6 +492,9 @@ func (m *Manager) JoinCluster(clusterID, password string, localNode *Node, seedN
 	}
 	if password == "" {
 		return nil, fmt.Errorf("cluster password is required")
+	}
+	if len(password) > maxPasswordBytes {
+		return nil, fmt.Errorf("password must be at most %d bytes", maxPasswordBytes)
 	}
 	if localNode == nil {
 		return nil, fmt.Errorf("local node info is required")
@@ -1923,6 +1929,10 @@ func generateID(prefix string, length int) (string, error) {
 	encoded := hex.EncodeToString(bytes)
 	return strings.ToLower(prefix + encoded[:length]), nil
 }
+
+// maxPasswordBytes is bcrypt's input limit. A longer password cannot be
+// hashed, so a cluster created with one could never be unlocked again.
+const maxPasswordBytes = 72
 
 // hashPassword hashes a password using bcrypt with a random salt.
 // On a bcrypt failure (only realistically possible if the password is
