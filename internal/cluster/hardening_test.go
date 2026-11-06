@@ -149,6 +149,38 @@ func TestJoinQueueIsBounded(t *testing.T) {
 	}
 }
 
+// TestJoinFloodFromOneSourceLeavesRoom: one password holder filing requests
+// under ever-new names took every slot of the queue, so no other joiner could
+// be queued for the host to approve. One address (an IPv6 /64 counts as one)
+// now holds a few slots at most.
+func TestJoinFloodFromOneSourceLeavesRoom(t *testing.T) {
+	const pw = "correct-horse-battery"
+	m := NewManager(t.TempDir())
+	cl, err := m.InitCluster("c", pw, DefaultClusterConfig())
+	if err != nil {
+		t.Fatal(err)
+	}
+	join := func(name, source string) *JoinResponse {
+		return m.HandleJoinRequest(&JoinRequest{ClusterID: cl.ID, Password: pw, NodeName: name,
+			NodeAddress: "10.0.0.9", NodePort: 7946}, source)
+	}
+	for i := 0; i < maxPendingJoins+10; i++ {
+		join("flood-"+strconv.Itoa(i), "198.51.100.7")
+		join("flood6-"+strconv.Itoa(i), "[2001:db8:1:2::"+strconv.FormatInt(int64(i+1), 16)+"]:40000")
+	}
+	if resp := join("office-pc", "203.0.113.20"); resp.Status != "pending" || resp.RequestID == "" {
+		t.Fatalf("a second joiner after a flood: %+v", resp)
+	}
+	counts := map[string]int{}
+	for _, p := range m.ListPendingJoins() {
+		counts[authSource(p.SourceIP)]++
+	}
+	if counts["198.51.100.7"] != maxPendingPerSource || counts["2001:db8:1:2::/64"] != maxPendingPerSource ||
+		counts["203.0.113.20"] != 1 || len(counts) != 3 {
+		t.Fatalf("pending per source: %v", counts)
+	}
+}
+
 // TestPeerIntelOnlyFromMembers: intel was stored under whatever node_id the
 // body named, so one password holder could fill the map with any number of
 // 1 MiB entries.

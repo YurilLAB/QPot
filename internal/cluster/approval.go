@@ -16,11 +16,14 @@ import (
 
 // Join queue bounds. Anyone with the cluster password can file join
 // requests, so the queue and the decision records are capped, and both expire
-// after joinRequestTTL: a joiner stops polling after five minutes.
+// after joinRequestTTL: a joiner stops polling after five minutes. One source
+// address (an IPv6 /64 counts as one) holds at most maxPendingPerSource of the
+// queue, so a single password holder cannot fill it and lock other joiners out.
 const (
-	maxPendingJoins = 256
-	maxJoinOutcomes = 1024
-	joinRequestTTL  = 10 * time.Minute
+	maxPendingJoins     = 256
+	maxPendingPerSource = 4
+	maxJoinOutcomes     = 1024
+	joinRequestTTL      = 10 * time.Minute
 )
 
 // PendingJoin is a password-authenticated join request awaiting host approval.
@@ -69,6 +72,16 @@ func (m *Manager) queuePendingJoinLocked(req *JoinRequest, sourceIP string) *Joi
 	if len(m.pendingJoins) >= maxPendingJoins {
 		slog.Warn("Cluster join request dropped: approval queue full", "source_ip", sourceIP)
 		return &JoinResponse{Success: false, Error: "too many pending join requests"}
+	}
+	source, fromSource := authSource(sourceIP), 0
+	for _, p := range m.pendingJoins {
+		if authSource(p.SourceIP) == source {
+			fromSource++
+		}
+	}
+	if fromSource >= maxPendingPerSource {
+		slog.Warn("Cluster join request dropped: too many pending from one address", "source_ip", sourceIP)
+		return &JoinResponse{Success: false, Error: "too many pending join requests from this address"}
 	}
 
 	id, err := generateID("req", 16)
