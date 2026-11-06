@@ -133,6 +133,18 @@ NO_REPLY = [ipaddress.ip_network(n) for n in (
 LABEL = re.compile(r"[A-Za-z0-9_](?:[A-Za-z0-9_-]{0,61}[A-Za-z0-9_])?")
 
 
+# Names only a local resolver answers: never asked for, so the honeypot's network is not
+# enumerated through it (a single label is looked up in the host's search domains).
+LOCAL_SUFFIXES = (".local", ".lan", ".home", ".internal", ".intranet", ".corp", ".private",
+                  ".localdomain", ".arpa", ".localhost", ".test", ".invalid", ".example")
+
+
+def local_name(name: str) -> bool:
+    """Whether name is one only the honeypot's own network would answer for."""
+    name = name.lower().rstrip(".")
+    return "." not in name or name.endswith(LOCAL_SUFFIXES)
+
+
 def host_name(name: str) -> bool:
     """Whether the C library's resolver would look name up: at most 253 characters, labels of 63."""
     name = name[:-1] if name.endswith(".") else name
@@ -412,14 +424,23 @@ class Command_ping(HoneyPotCommand):
             name = host.encode("idna").decode("ascii")
         except UnicodeError:
             name = ""
-        if not host_name(name):
+        if not host_name(name) or local_name(name):
             self.not_found()
             return
         # the C library's resolver, as ping's: its message tells a name that does not exist from a
         # resolver that cannot be reached ("Temporary failure in name resolution")
         d = qpot_lookup("name", name.lower(), socket.getaddrinfo, name, None, socket.AF_INET, socket.SOCK_RAW)
         d.addTimeout(12, reactor)
-        d.addCallbacks(lambda found: self.found(str(found[0][4][0]), host, numeric=False), self.lookup_failed)
+        d.addCallbacks(lambda found: self.resolved(str(found[0][4][0]), host), self.lookup_failed)
+
+    def resolved(self, ip: str, host: str) -> None:
+        # The host's resolver also answers for the network the honeypot runs in (a home router's
+        # names, a company's internal zone): an answer that is not a public address is never shown,
+        # and reads as a name that does not exist.
+        if not ipaddress.ip_address(ip).is_global:
+            self.not_found()
+            return
+        self.found(ip, host, numeric=False)
 
     def lookup_failed(self, failure) -> None:
         # glibc's texts (the personas' C library), not those of the image's own C library
@@ -448,6 +469,9 @@ class Command_ping(HoneyPotCommand):
         if name or ipaddress.ip_address(ip).is_loopback:
             self.label = name or self.protocol.hostname
             self.begin()
+            return
+        if not ipaddress.ip_address(ip).is_global:
+            self.named(None)  # never ask the host's resolver about its own network
             return
         d = qpot_lookup("address", ip, socket.gethostbyaddr, ip)
         d.addTimeout(2, reactor)
