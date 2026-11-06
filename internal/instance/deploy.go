@@ -66,6 +66,7 @@ const cowriePatchVersion = "24.04.2"
 //	commands/__init__.py   74da6fe7d2fa304bfab8594a21056ed94905db4bade7a80602697d35df52d68e
 //	commands/ssh.py        4844fe51fa5288818bdcce1d1f730ebf92c4e21ffddb6b432e36797b863e1ae5
 //	core/honeyfs.py        589d5dedf1473a0db69f443c53c836e711343e5bb6e30fd63033caa99cc53fc0
+//	commands/find.py       4f098f1066f471698f82f34380cf349706e416aa2219c935af185328dbb5420f
 //
 // protocol.py: the line editor writes what bash's readline (or BusyBox's ash
 // on the firmware personas) writes, as recorded from bash 5.2.37 and BusyBox
@@ -84,7 +85,10 @@ const cowriePatchVersion = "24.04.2"
 // reads the history file at login, as bash does, so `history` shows what
 // ~/.bash_history holds; ssh.py times out on the internal hosts the files name
 // and logs what is typed at its prompts; awscli.py (new) answers the AWS CLI
-// the bait installs.
+// the bait installs. find.py: the image's find
+// followed every link to a directory, so `find / -name id_rsa` (the first
+// thing a credential harvester runs) held the reactor for many minutes; it
+// now walks as GNU find -P does, bounded.
 var (
 	//go:embed honeypotfiles/cowrie/protocol.py
 	cowrieProtocolPy []byte
@@ -102,6 +106,8 @@ var (
 	cowrieHoneyfsPy []byte
 	//go:embed honeypotfiles/cowrie/qpot_bait.py
 	cowrieQPotBaitPy []byte
+	//go:embed honeypotfiles/cowrie/find.py
+	cowrieFindPy []byte
 )
 
 // cowrieSource is where the image keeps Cowrie's Python package.
@@ -122,6 +128,7 @@ func cowriePatchVolumes() []deployVolume {
 		file("awscli.py", "commands/awscli.py", cowrieAWSCLIPy),
 		file("honeyfs.py", "core/honeyfs.py", cowrieHoneyfsPy),
 		file("qpot_bait.py", "core/qpot_bait.py", cowrieQPotBaitPy),
+		file("find.py", "commands/find.py", cowrieFindPy),
 	}
 }
 

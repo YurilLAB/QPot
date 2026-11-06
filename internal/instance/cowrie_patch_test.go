@@ -33,6 +33,7 @@ func TestCowriePatchMounts(t *testing.T) {
 		cowrieSource + "/commands/awscli.py":    cowrieAWSCLIPy,
 		cowrieSource + "/core/honeyfs.py":       cowrieHoneyfsPy,
 		cowrieSource + "/core/qpot_bait.py":     cowrieQPotBaitPy,
+		cowrieSource + "/commands/find.py":      cowrieFindPy,
 	}
 	d := deployProfile(config.Default("cowrie-patch"), "cowrie")
 	for _, v := range d.Volumes {
@@ -61,6 +62,7 @@ func TestCowriePatchMounts(t *testing.T) {
 		"/honeypots/cowrie/patch/awscli.py:" + cowrieSource + "/commands/awscli.py:ro\n",
 		"/honeypots/cowrie/patch/honeyfs.py:" + cowrieSource + "/core/honeyfs.py:ro\n",
 		"/honeypots/cowrie/patch/qpot_bait.py:" + cowrieSource + "/core/qpot_bait.py:ro\n",
+		"/honeypots/cowrie/patch/find.py:" + cowrieSource + "/commands/find.py:ro\n",
 	} {
 		if !strings.Contains(svc, line) {
 			t.Errorf("cowrie service lacks %q", strings.TrimSpace(line))
@@ -125,7 +127,8 @@ func TestCowriePatchFiles(t *testing.T) {
 	}
 	for name, content := range map[string][]byte{"protocol.py": cowrieProtocolPy, "ping.py": cowriePingPy,
 		"coreutils.py": cowrieCoreutilsPy, "commands_init.py": cowrieCommandsInitPy, "ssh.py": cowrieSSHPy,
-		"awscli.py": cowrieAWSCLIPy, "honeyfs.py": cowrieHoneyfsPy, "qpot_bait.py": cowrieQPotBaitPy} {
+		"awscli.py": cowrieAWSCLIPy, "honeyfs.py": cowrieHoneyfsPy, "qpot_bait.py": cowrieQPotBaitPy,
+		"find.py": cowrieFindPy} {
 		if bytes.Contains(content, []byte("\r")) {
 			t.Errorf("%s has CR bytes", name)
 		}
@@ -147,7 +150,8 @@ func TestCowriePatchWritten(t *testing.T) {
 	}
 	for name, content := range map[string][]byte{"protocol.py": cowrieProtocolPy, "ping.py": cowriePingPy,
 		"coreutils.py": cowrieCoreutilsPy, "commands_init.py": cowrieCommandsInitPy, "ssh.py": cowrieSSHPy,
-		"awscli.py": cowrieAWSCLIPy, "honeyfs.py": cowrieHoneyfsPy, "qpot_bait.py": cowrieQPotBaitPy} {
+		"awscli.py": cowrieAWSCLIPy, "honeyfs.py": cowrieHoneyfsPy, "qpot_bait.py": cowrieQPotBaitPy,
+		"find.py": cowrieFindPy} {
 		got, err := os.ReadFile(filepath.Join(cfg.DataPath, "honeypots", "cowrie", "patch", name))
 		if err != nil || !bytes.Equal(got, content) {
 			t.Errorf("patch/%s not written (err %v, %d bytes)", name, err, len(got))
