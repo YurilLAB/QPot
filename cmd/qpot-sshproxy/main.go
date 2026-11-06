@@ -30,6 +30,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"net"
@@ -128,7 +129,11 @@ func run() error {
 
 	log.Printf("qpot-sshproxy %q listening on %s -> %d backend(s); idle=%s maxSession=%s",
 		name, listen, pool.Size(), cfg.IdleTimeout, cfg.MaxSession)
-	return broker.Serve(ctx, ln)
+	err = broker.Serve(ctx, ln)
+	if errors.Is(err, context.Canceled) {
+		return nil // SIGINT/SIGTERM: a clean, drained shutdown
+	}
+	return err
 }
 
 func env(key, def string) string {
