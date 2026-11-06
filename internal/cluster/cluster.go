@@ -17,6 +17,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -960,6 +961,11 @@ func (m *Manager) HandleJoinRequest(req *JoinRequest, sourceIP string) *JoinResp
 		}
 	}
 
+	// The address and port become every member's request URL for this node.
+	if !validPeerAddress(req.NodeAddress) || req.NodePort < 1 || req.NodePort > 65535 {
+		return &JoinResponse{Success: false, Error: "invalid node address or port"}
+	}
+
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	// The cluster may have been left/replaced while we verified.
@@ -1390,8 +1396,8 @@ func (m *Manager) gossip() {
 	// the round ends or every round leaves one idle TLS connection per peer.
 	defer gossipClient.CloseIdleConnections()
 	for _, peer := range peers {
-		peerURL := fmt.Sprintf("%s://%s:%d/api/v1/cluster/gossip", scheme, peer.address, peer.port)
-		req, err := http.NewRequest(http.MethodPost, peerURL, bytes.NewReader(body))
+		gossipURL := peerURL(scheme, peer.address, peer.port, "/api/v1/cluster/gossip")
+		req, err := http.NewRequest(http.MethodPost, gossipURL, bytes.NewReader(body))
 		if err != nil {
 			continue
 		}
@@ -1509,13 +1515,43 @@ func (m *Manager) markSuspect(nodeID string) {
 // fabricated records that would otherwise be stored and later interpolated into
 // outbound request URLs (SSRF / wasted dials).
 func validPeerNode(n *Node) bool {
-	if n == nil || n.ID == "" || strings.TrimSpace(n.Address) == "" {
+	if n == nil || n.ID == "" || !validPeerAddress(n.Address) {
 		return false
 	}
 	if n.Port < 1 || n.Port > 65535 {
 		return false
 	}
 	return true
+}
+
+// validPeerAddress reports whether a is a bare IP address or DNS host name.
+// Peer addresses come from other nodes and end up in request URLs, so
+// anything that could add a port, path, query or user info is refused.
+func validPeerAddress(a string) bool {
+	if a == "" || len(a) > 253 {
+		return false
+	}
+	if net.ParseIP(a) != nil {
+		return true
+	}
+	for _, label := range strings.Split(a, ".") {
+		if label == "" || len(label) > 63 || label[0] == '-' || label[len(label)-1] == '-' {
+			return false
+		}
+		for i := 0; i < len(label); i++ {
+			c := label[i]
+			if !(c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9' || c == '-') {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+// peerURL is the URL of a cluster API path on a peer. JoinHostPort brackets
+// IPv6 addresses ("http://::1:7946" does not parse).
+func peerURL(scheme, address string, port int, path string) string {
+	return scheme + "://" + net.JoinHostPort(address, strconv.Itoa(port)) + path
 }
 
 // sync aggregates node statistics and shares threat intelligence with peers.
@@ -1562,8 +1598,8 @@ func (m *Manager) sync() {
 		intelBody, err := json.Marshal(localIntel)
 		if err == nil {
 			for _, peer := range peers {
-				peerURL := fmt.Sprintf("%s://%s:%d/api/v1/cluster/intel", syncScheme, peer.address, peer.port)
-				intelReq, err := http.NewRequest(http.MethodPost, peerURL, bytes.NewReader(intelBody))
+				intelURL := peerURL(syncScheme, peer.address, peer.port, "/api/v1/cluster/intel")
+				intelReq, err := http.NewRequest(http.MethodPost, intelURL, bytes.NewReader(intelBody))
 				if err != nil {
 					continue
 				}
@@ -1866,7 +1902,7 @@ func (m *Manager) LeaveCluster() error {
 		return fmt.Errorf("marshal leave body: %w", err)
 	}
 	for _, peer := range peers {
-		url := fmt.Sprintf("%s://%s:%d/api/v1/cluster/leave", leaveScheme, peer.address, peer.port)
+		url := peerURL(leaveScheme, peer.address, peer.port, "/api/v1/cluster/leave")
 		req, err := http.NewRequest(http.MethodPost, url, bytes.NewReader(leaveBody))
 		if err != nil {
 			slog.Debug("LeaveCluster: build request failed", "node_id", peer.id, "error", err)
