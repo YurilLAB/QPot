@@ -373,7 +373,7 @@ func (m *Manager) peerHTTPClient(timeout time.Duration) *http.Client {
 			}
 		}
 	}
-	return clusterHTTPClient(timeout, m.cluster.ID, m.plainPassword, pool)
+	return clusterHTTPClient(timeout, m.cluster.ID, m.plainPassword, m.cluster.MemberKey, pool)
 }
 
 // HTTPClient returns a client for talking to this cluster's API (e.g. the
@@ -593,7 +593,7 @@ func (m *Manager) attemptJoin(seedAddr, clusterID, password string, localNode *N
 
 	joinClient := &http.Client{Timeout: 15 * time.Second}
 	if scheme == "https" {
-		joinClient = clusterHTTPClient(15*time.Second, clusterID, password, nil)
+		joinClient = clusterHTTPClient(15*time.Second, clusterID, password, "", nil)
 	}
 	resp, err := joinClient.Post(url, "application/json", bytes.NewReader(reqBody))
 	if err != nil {
@@ -680,7 +680,7 @@ func (m *Manager) attemptJoin(seedAddr, clusterID, password string, localNode *N
 func (m *Manager) pollJoinApproval(scheme, host, clusterID, password, requestID string) (*JoinResponse, error) {
 	client := &http.Client{Timeout: 15 * time.Second}
 	if scheme == "https" {
-		client = clusterHTTPClient(15*time.Second, clusterID, password, nil)
+		client = clusterHTTPClient(15*time.Second, clusterID, password, "", nil)
 	}
 	url := fmt.Sprintf("%s://%s/api/v1/cluster/join/status?request_id=%s", scheme, host, requestID)
 
@@ -1246,7 +1246,8 @@ func (m *Manager) startAPIServer() error {
 		if err != nil {
 			return fmt.Errorf("cluster TLS: %w", err)
 		}
-		srv.TLSConfig = &tls.Config{MinVersion: tls.VersionTLS12, Certificates: []tls.Certificate{cert}}
+		srv.TLSConfig = &tls.Config{MinVersion: tls.VersionTLS12,
+			GetCertificate: m.autoTLSCertificate(cert, m.cluster.ID, m.plainPassword, nodeID)}
 	}
 
 	ln, err := net.Listen("tcp", addr)
@@ -1272,6 +1273,33 @@ func (m *Manager) startAPIServer() error {
 	}()
 
 	return nil
+}
+
+// autoTLSCertificate picks the certificate a node serves with automatic TLS:
+// the member-CA one for a client asking for memberServerName (a member, which
+// holds the member key), else the password-CA one (a joiner). The member
+// certificate is made on first use and again when the member key changes (a
+// node gets it on admission, after its API server started).
+func (m *Manager) autoTLSCertificate(join tls.Certificate, clusterID, password, nodeID string) func(*tls.ClientHelloInfo) (*tls.Certificate, error) {
+	var mu sync.Mutex
+	var member *tls.Certificate
+	var memberFor string
+	return func(hello *tls.ClientHelloInfo) (*tls.Certificate, error) {
+		key := m.memberKey()
+		if hello.ServerName != memberServerName || key == "" {
+			return &join, nil
+		}
+		mu.Lock()
+		defer mu.Unlock()
+		if member == nil || memberFor != key {
+			cert, err := newMemberCertificate(clusterID, password, key, nodeID)
+			if err != nil {
+				return nil, fmt.Errorf("cluster TLS: %w", err)
+			}
+			member, memberFor = &cert, key
+		}
+		return member, nil
+	}
 }
 
 // HTTP handlers

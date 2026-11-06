@@ -98,3 +98,71 @@ func itoa(i int) string {
 	b.Write(digits)
 	return b.String()
 }
+
+// TestTwoNodeJoinOverAutoTLS: a node joins over automatic TLS (verifying the
+// seed by the password CA), receives the member key, and then both nodes reach
+// each other under the member CA: each serves a member certificate made from
+// the key and trusts only that for its own member calls.
+func TestTwoNodeJoinOverAutoTLS(t *testing.T) {
+	const password = "correct-horse-battery"
+	free := func() int {
+		ln, err := net.Listen("tcp", "127.0.0.1:0")
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer ln.Close()
+		return ln.Addr().(*net.TCPAddr).Port
+	}
+	hostPort, joinerPort := free(), free()
+
+	host := NewManager(t.TempDir())
+	cfg := DefaultClusterConfig()
+	cfg.RequireApproval = false
+	cfg.BindAddr = "127.0.0.1"
+	cfg.BindPort = hostPort
+	cl, err := host.InitCluster("prod", password, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := host.Start(); err != nil {
+		t.Fatal(err)
+	}
+	defer host.Stop()
+	waitListening(t, hostPort)
+
+	joiner := newJoiner(t)
+	joined, err := joiner.JoinCluster(cl.ID, password,
+		&Node{Name: "node-2", Address: "127.0.0.1", Port: joinerPort}, []string{"127.0.0.1:" + itoa(hostPort)})
+	if err != nil {
+		t.Fatalf("join over automatic TLS: %v", err)
+	}
+	if joined.MemberKey == "" || joined.MemberKey != cl.MemberKey {
+		t.Fatalf("joiner's member key %q, host's %q", joined.MemberKey, cl.MemberKey)
+	}
+	joiner.mu.Lock()
+	joiner.cluster.Config.BindAddr = "127.0.0.1"
+	joiner.cluster.Config.BindPort = joinerPort
+	joiner.mu.Unlock()
+	if err := joiner.Start(); err != nil {
+		t.Fatal(err)
+	}
+	defer joiner.Stop()
+	waitListening(t, joinerPort)
+
+	get := func(from *Manager, port int) (int, error) {
+		req, _ := http.NewRequest(http.MethodGet, "https://127.0.0.1:"+itoa(port)+"/api/v1/cluster/nodes", nil)
+		setPeerAuth(req, password, from.memberKey())
+		resp, err := from.peerHTTPClient(3 * time.Second).Do(req)
+		if err != nil {
+			return 0, err
+		}
+		resp.Body.Close()
+		return resp.StatusCode, nil
+	}
+	if code, err := get(joiner, hostPort); err != nil || code != http.StatusOK {
+		t.Fatalf("joiner -> host under the member CA: code=%d err=%v", code, err)
+	}
+	if code, err := get(host, joinerPort); err != nil || code != http.StatusOK {
+		t.Fatalf("host -> joiner under the member CA: code=%d err=%v", code, err)
+	}
+}
