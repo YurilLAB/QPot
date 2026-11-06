@@ -37,6 +37,23 @@ func (g *GenerationGate) Generation(id string) uint64 {
 	if id == "" || strings.ContainsAny(id, `/\`) || id == "." || id == ".." {
 		return 0
 	}
+	// Open only an entry named exactly id. On a case-insensitive or aliasing
+	// filesystem (Windows, macOS, Docker Desktop bind mounts) "BE1", "be1."
+	// or "be1::$DATA" open be1's counter, so two backends could share one.
+	entries, err := os.ReadDir(g.dir)
+	if err != nil {
+		return 0
+	}
+	found := false
+	for _, e := range entries {
+		if e.Name() == id {
+			found = true
+			break
+		}
+	}
+	if !found {
+		return 0
+	}
 	b, err := os.ReadFile(filepath.Join(g.dir, id))
 	if err != nil {
 		return 0

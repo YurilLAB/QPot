@@ -160,6 +160,24 @@ func TestGenerationGateIgnoresPathIDs(t *testing.T) {
 	}
 }
 
+// On a case-insensitive or aliasing filesystem (Windows, macOS, a Docker
+// Desktop bind mount) another spelling of an id opened the same counter file,
+// so two backends whose ids differ only in case shared one counter and a
+// recreation of one passed the other's gate. Found by FuzzGenerationID.
+func TestGenerationGateExactIDs(t *testing.T) {
+	dir := t.TempDir()
+	writeGen(t, dir, "be1", 7)
+	g := NewGenerationGate(dir)
+	if n := g.Generation("be1"); n != 7 {
+		t.Fatalf("Generation(be1) = %d, want 7", n)
+	}
+	for _, id := range []string{"BE1", "Be1", "be1.", "be1 ", "be1::$DATA"} {
+		if n := g.Generation(id); n != 0 {
+			t.Errorf("Generation(%q) = %d, read be1's counter", id, n)
+		}
+	}
+}
+
 // The pool calls the lease hook so the gate snapshots each session's start.
 func TestPoolLeaseHook(t *testing.T) {
 	p := NewPool([]Backend{{ID: "a", Addr: "x:22"}}, nil)
