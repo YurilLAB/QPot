@@ -159,6 +159,20 @@ gives each instance a distinct, self-consistent identity:
   instance and keeps the identity it draws (host name, patch level, boot time,
   addresses) for a year across restarts, so a returning attacker meets the same
   box. Pin one with `qpot honeypot set cowrie persona=<id>`.
+- **Cowrie patch layer** – QPot mounts a few corrected Cowrie source files
+  read-only over the image. The terminal now writes what the persona's shell
+  writes (checked byte for byte against bash 5.2's readline and BusyBox's
+  `ash`). Before, the prompt came with the `ESC[4h` insert-mode switch, and
+  Ctrl-C printed no `^C`. `ping` is now the persona's iputils or BusyBox ping
+  with real statistics; before, `ping -c 4 host` failed. `hostname -f` no
+  longer renames the host. `bash --version` reports the persona's bash, and
+  `exit` says `logout`. Programs that ended in "Exec format error" now work:
+  `arch`, `timeout`, `setsid`, `nice`, `basename`, `dirname`, `md5sum`/`sha*sum`,
+  `mktemp`, `tty`, `sync`, `printenv` and `expr`.
+- **Dionaea machine name** – every T-Pot dionaea answered SMB as `ADFS` in
+  `DACH`, and its RPC and MSSQL services as `HOMEUSER-3AF6FE`. Each instance
+  now answers everywhere as one Windows 7 machine of its own (`<USER>-PC` or
+  `WIN-` and 11 characters) in `WORKGROUP`.
 - **Conpot devices** – conpot emulates one of the T-Pot conpot image's devices
   (a Siemens substation RTU on IEC 104/DNP3/SNMP, a Veeder-Root tank gauge, a
   Supermicro BMC, a Kamstrup meter, a Beckhoff PLC on ADS/OPC UA, a LOYTEC

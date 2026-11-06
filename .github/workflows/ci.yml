@@ -86,6 +86,16 @@ jobs:
       - name: go vet
         run: go vet ./...
 
+      # The patch layers are Python mounted into the images; a syntax
+      # error there would only show as a honeypot that does not start.
+      - name: Compile the embedded cowrie and dionaea patch files
+        run: |
+          set -euo pipefail
+          for f in internal/instance/honeypotfiles/cowrie/*.py internal/instance/honeypotfiles/dionaea/*.py; do
+            python3 -c 'import ast, sys; ast.parse(open(sys.argv[1], encoding="utf-8").read(), sys.argv[1])' "$f"
+            echo "ok $f"
+          done
+
       - name: staticcheck
         run: |
           go install "honnef.co/go/tools/cmd/staticcheck@${STATICCHECK_VERSION}"

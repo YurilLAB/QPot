@@ -10,6 +10,8 @@ package instance
 // cowrie/endlessh profiles are verified by actually running the images.
 
 import (
+	"bytes"
+	"crypto/sha256"
 	_ "embed"
 	"fmt"
 	"maps"
@@ -47,6 +49,60 @@ type deployVolume struct {
 //
 //go:embed honeypotfiles/heralding.yml
 var heraldingConfig []byte
+
+// cowriePatchVersion is the TPotVersion whose cowrie image the files below
+// were made from; a test fails when TPotVersion moves, so they are compared
+// again before they are mounted over a different image.
+const cowriePatchVersion = "24.04.2"
+
+// The cowrie patch layer: files of ghcr.io/telekom-security/cowrie at
+// cowriePatchVersion with QPot's changes, mounted read-only over the image's
+// own (the image's .pyc files are timestamp-checked, so Python compiles the
+// mounted source). Each change is marked "QPot:" in the file. The image's
+// originals were (sha256):
+//
+//	shell/protocol.py      c96e9155ac0133572a746fbbd9599acdd66d8100996f4811221e46174f41c6be
+//	commands/ping.py       4465c53089915a5085a5c4d0a5de5577e7e8c1de2dcf730c9fa53932b021cd2b
+//	commands/__init__.py   74da6fe7d2fa304bfab8594a21056ed94905db4bade7a80602697d35df52d68e
+//
+// protocol.py: the line editor writes what bash's readline (or BusyBox's ash
+// on the firmware personas) writes, as recorded from bash 5.2.37 and BusyBox
+// 1.37.0: no terminal insert mode (ESC[4h before every prompt), bracketed
+// paste on bash 5.1 and later, ^C at the prompt, readline's cursor and erase
+// sequences. ping.py: iputils of the persona's release or BusyBox's ping,
+// where Cowrie's rejected `ping -c 4 host`. coreutils.py (new, loaded last
+// through commands/__init__.py): hostname (`hostname -f` renamed the host to
+// "-f"), bash --version, logout at the login shell, and programs every
+// persona has that ended in "Exec format error": arch, timeout, setsid, nice,
+// basename, dirname, md5sum and the sha sums, mktemp, tty, sync, printenv,
+// expr.
+var (
+	//go:embed honeypotfiles/cowrie/protocol.py
+	cowrieProtocolPy []byte
+	//go:embed honeypotfiles/cowrie/ping.py
+	cowriePingPy []byte
+	//go:embed honeypotfiles/cowrie/coreutils.py
+	cowrieCoreutilsPy []byte
+	//go:embed honeypotfiles/cowrie/commands_init.py
+	cowrieCommandsInitPy []byte
+)
+
+// cowrieSource is where the image keeps Cowrie's Python package.
+const cowrieSource = "/home/cowrie/cowrie/src/cowrie"
+
+// cowriePatchVolumes mounts the patch layer read-only over the image's files.
+func cowriePatchVolumes() []deployVolume {
+	file := func(name, target string, content []byte) deployVolume {
+		return deployVolume{HostSubdir: "patch/" + name, ContainerPath: cowrieSource + "/" + target,
+			File: true, ReadOnly: true, Content: content}
+	}
+	return []deployVolume{
+		file("protocol.py", "shell/protocol.py", cowrieProtocolPy),
+		file("ping.py", "commands/ping.py", cowriePingPy),
+		file("coreutils.py", "commands/coreutils.py", cowrieCoreutilsPy),
+		file("commands_init.py", "commands/__init__.py", cowrieCommandsInitPy),
+	}
+}
 
 // adbhoneyConfig is the adbhoney.cfg of ghcr.io/telekom-security/adbhoney at
 // TPotVersion with two changes. device_id, the banner every ADB client gets,
@@ -179,8 +235,132 @@ func deployProfile(cfg *config.Config, name string) honeypotDeploy {
 				d.Volumes[i].Content = adbhoneyConfig(cfg)
 			}
 		}
+	case "dionaea":
+		named := map[string][]byte{}
+		for _, v := range dionaeaPatchVolumes(cfg) {
+			named[v.ContainerPath] = v.Content
+		}
+		d.Volumes = slices.Clone(d.Volumes)
+		for i, v := range d.Volumes {
+			if content, ok := named[v.ContainerPath]; ok {
+				d.Volumes[i].Content = content
+			}
+		}
 	}
 	return d
+}
+
+// Dionaea's machine name. Every T-Pot install answered as the same machine:
+// SMB named it ADFS in the domain DACH (services/smb.yaml), while the LSA and
+// SAMR calls (smb/rpcservices.py) and the MSSQL login reply
+// (mssql/include/tds.py) still said dionaea's own default, HOMEUSER-3AF6FE, so
+// one box gave two names. Each instance now answers everywhere with one name of
+// its own, in the workgroup a standalone Windows 7 joins by default. The image's
+// files are mounted read-only with that name in place of the old ones (the
+// image's .pyc files are timestamp-checked, so Python compiles the mounted
+// source); nothing else in them changes. Dionaea is GPL-2.0-or-later. The
+// image's originals were (sha256):
+//
+//	etc/dionaea/services/smb.yaml   918009dbab404b00d0bab8ab4d338b986d963e2f1188557ff431a57e8942188a
+//	smb/rpcservices.py              40d3000b53d41db87539b12fdfaf54b87553d45627dafe4ec9f7e42730c8b4c7
+//	smb/include/smbfields.py        926f5f850d9d527e775e8d4bb3917e72c4e5618bc67b5846bf7bd9dec51f8c5d
+//	smb/extras.py                   839f8205009acd69857060623bdb7ed53c3d8f5e1d7fb1d97a52e7686e0883b3
+//	mssql/include/tds.py            7e72a4b5d0dd4d54d71b62331a829c0bf9be317ea9692bcc5d3a2f77fbdf7546
+var (
+	//go:embed honeypotfiles/dionaea/smb.yaml
+	dionaeaSMBYaml []byte
+	//go:embed honeypotfiles/dionaea/rpcservices.py
+	dionaeaRPCServicesPy []byte
+	//go:embed honeypotfiles/dionaea/smbfields.py
+	dionaeaSMBFieldsPy []byte
+	//go:embed honeypotfiles/dionaea/extras.py
+	dionaeaExtrasPy []byte
+	//go:embed honeypotfiles/dionaea/tds.py
+	dionaeaTDSPy []byte
+)
+
+// dionaeaStockName is dionaea's own default name, hard-coded in its Python.
+const dionaeaStockName = "HOMEUSER-3AF6FE"
+
+// dionaeaWorkgroup is the workgroup of a Windows 7 machine that joined none.
+const dionaeaWorkgroup = "WORKGROUP"
+
+// dionaeaSMBStock are the lines of the image's smb.yaml that named every
+// install's machine, and the setting each one holds.
+var dionaeaSMBStock = [][2]string{
+	{"    primary_domain: DACH\n", "primary_domain"},
+	{"    oem_domain_name: DACH\n", "oem_domain_name"},
+	{"    server_name: ADFS\n", "server_name"},
+}
+
+// dionaeaSource and dionaeaEtc are where the image keeps dionaea's Python
+// package and its configuration.
+const (
+	dionaeaSource = "/opt/dionaea/lib/dionaea/python/dionaea"
+	dionaeaEtc    = "/opt/dionaea/etc/dionaea"
+)
+
+// dionaeaUsers are the names Windows 7 setup makes a computer name of
+// (<USER>-PC); a machine set up from an image is named WIN- and 11 random
+// characters instead.
+var dionaeaUsers = []string{"ADMIN", "USER", "OWNER", "OFFICE", "RECEPTION", "ACCOUNTS", "SALES",
+	"FRONTDESK", "MANAGER", "STUDIO", "LAB", "SHOP", "WORKSHOP", "PAYROLL"}
+
+// dionaeaName is the instance's machine name: stable for the instance and at
+// most 15 characters (a NetBIOS name).
+func dionaeaName(cfg *config.Config) string {
+	seed := deceptionSeed(cfg)
+	sum := sha256.Sum256([]byte("dionaea-name:" + seed))
+	if sum[0]%5 < 2 {
+		const alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
+		var b strings.Builder
+		b.WriteString("WIN-")
+		for _, c := range sum[1:12] {
+			b.WriteByte(alphabet[int(c)%len(alphabet)])
+		}
+		return b.String()
+	}
+	return dionaeaUsers[seededIndex("dionaea-user:"+seed, len(dionaeaUsers))] + "-PC"
+}
+
+// dionaeaSMBConfig is the image's smb.yaml with the instance's name and
+// workgroup.
+func dionaeaSMBConfig(cfg *config.Config) []byte {
+	out := dionaeaSMBYaml
+	values := map[string]string{"primary_domain": dionaeaWorkgroup, "oem_domain_name": dionaeaWorkgroup,
+		"server_name": dionaeaName(cfg)}
+	for _, line := range dionaeaSMBStock {
+		out = bytes.Replace(out, []byte(line[0]), []byte("    "+line[1]+": "+values[line[1]]+"\n"), 1)
+	}
+	return out
+}
+
+// dionaeaPatchVolumes mounts the name-bearing files with cfg's name; with a nil
+// cfg the volumes carry no content (deployProfile fills it in).
+func dionaeaPatchVolumes(cfg *config.Config) []deployVolume {
+	files := []struct {
+		name, target string
+		original     []byte
+	}{
+		{"smb.yaml", dionaeaEtc + "/services/smb.yaml", dionaeaSMBYaml},
+		{"rpcservices.py", dionaeaSource + "/smb/rpcservices.py", dionaeaRPCServicesPy},
+		{"smbfields.py", dionaeaSource + "/smb/include/smbfields.py", dionaeaSMBFieldsPy},
+		{"extras.py", dionaeaSource + "/smb/extras.py", dionaeaExtrasPy},
+		{"tds.py", dionaeaSource + "/mssql/include/tds.py", dionaeaTDSPy},
+	}
+	out := make([]deployVolume, 0, len(files))
+	for _, f := range files {
+		v := deployVolume{HostSubdir: "patch/" + f.name, ContainerPath: f.target, File: true, ReadOnly: true}
+		if cfg != nil {
+			if f.name == "smb.yaml" {
+				v.Content = dionaeaSMBConfig(cfg)
+			} else {
+				v.Content = bytes.ReplaceAll(f.original, []byte(dionaeaStockName), []byte(dionaeaName(cfg)))
+			}
+		}
+		out = append(out, v)
+	}
+	return out
 }
 
 // deployProfileFor returns the configuration-independent deployment profile
@@ -204,11 +384,11 @@ func deployProfileFor(name string) honeypotDeploy {
 				"/tmp/cowrie:uid=2000,gid=2000",
 				"/tmp/cowrie/data:uid=2000,gid=2000",
 			},
-			Volumes: []deployVolume{
+			Volumes: append([]deployVolume{
 				{HostSubdir: "etc", ContainerPath: "/home/cowrie/cowrie/etc"},
 				{HostSubdir: "logs", ContainerPath: "/home/cowrie/cowrie/log"},
 				{HostSubdir: "dl", ContainerPath: "/home/cowrie/cowrie/dl"},
-			},
+			}, cowriePatchVolumes()...),
 			Ports:    []int{22, 23},
 			Settings: []string{"persona", "persona_rotation"},
 			Values:   map[string][]string{"persona": CowriePersonaIDs()},
@@ -269,8 +449,12 @@ func deployProfileFor(name string) honeypotDeploy {
 	// (docker/<name>/docker-compose.yml): the in-container log path, the ports
 	// each honeypot listens on, and any required tmpfs.
 	case "dionaea":
+		// SMB, DCE/RPC and MSSQL name the machine; the files that hold its name
+		// are mounted with the instance's own (dionaeaPatchVolumes, content from
+		// deployProfile).
 		return honeypotDeploy{
-			Volumes:  []deployVolume{{HostSubdir: "logs", ContainerPath: "/opt/dionaea/var/log"}},
+			Volumes: append([]deployVolume{{HostSubdir: "logs", ContainerPath: "/opt/dionaea/var/log"}},
+				dionaeaPatchVolumes(nil)...),
 			Ports:    []int{20, 21, 42, 81, 135, 443, 445, 1433, 1723, 1883, 3306, 5060, 5061, 27017},
 			UDPPorts: []int{69, 5060},
 		}

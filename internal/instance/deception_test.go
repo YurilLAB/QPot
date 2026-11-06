@@ -111,9 +111,17 @@ func TestCowriePersonaRotation(t *testing.T) {
 // environment, and must not mount any of QPot's former config/fake-fs files
 // over the image: on 24.04.2 those overrides left /.dockerenv visible, removed
 // /etc/os-release and broke mount/dmesg/lsblk, dpkg, systemctl and python3.
+// The only files it mounts are the patch layer's Cowrie sources.
 func TestCowrieRunsImagePersonaLauncher(t *testing.T) {
 	d := deployProfileFor("cowrie")
+	patch := map[string]bool{}
+	for _, v := range cowriePatchVolumes() {
+		patch[v.ContainerPath] = true
+	}
 	for _, v := range d.Volumes {
+		if v.File && patch[v.ContainerPath] && strings.HasPrefix(v.ContainerPath, cowrieSource+"/") {
+			continue
+		}
 		if v.File || strings.Contains(v.ContainerPath, "honeyfs") || strings.HasPrefix(v.ContainerPath, "/proc") {
 			t.Errorf("cowrie mounts %s over the image", v.ContainerPath)
 		}
