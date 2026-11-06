@@ -187,9 +187,18 @@ func readServePID(path string) (int, error) {
 // or 0. The pid must still be alive AND be a `qpot serve` for this instance,
 // so a stale pid file can never make us signal an unrelated process.
 func runningServePID(cfg *config.Config) int {
-	pid, err := readServePID(servePIDPath(cfg))
+	path := servePIDPath(cfg)
+	pid, err := readServePID(path)
 	if err != nil || !processAlive(pid) || !isServeProcess(pid, cfg.InstanceName) {
 		return 0
+	}
+	// A stale pid file (crash, reboot) can name a PID since reused by
+	// another program; one that started after the file was written did not
+	// write it. Windows has no command line to check, so this is its guard.
+	if fi, err := os.Stat(path); err == nil {
+		if started, ok := processStartTime(pid); ok && started.After(fi.ModTime().Add(2*time.Second)) {
+			return 0
+		}
 	}
 	return pid
 }

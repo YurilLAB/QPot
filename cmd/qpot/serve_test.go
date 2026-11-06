@@ -20,6 +20,45 @@ func TestHelperServeProcess(t *testing.T) {
 	time.Sleep(60 * time.Second)
 }
 
+// TestStalePIDFileDoesNotNameANewerProcess: a pid file left by a control plane
+// that crashed (or by a reboot) can name a PID the OS has since given to an
+// unrelated program. On Windows the pid file was trusted as is, so `qpot down`
+// killed that program and `qpot up -d` reported it as the running control
+// plane. A process that started after the pid file was written cannot be the
+// one that wrote it.
+func TestStalePIDFileDoesNotNameANewerProcess(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("USERPROFILE", os.Getenv("HOME"))
+	cfg := config.Default("stale-pid")
+	if err := config.Save(cfg); err != nil {
+		t.Fatal(err)
+	}
+	pidPath := servePIDPath(cfg)
+
+	// An unrelated program that happens to have the recorded PID.
+	other := exec.Command(os.Args[0], "-test.run=^TestHelperServeProcess$", "--", "serve", "-i", "stale-pid")
+	other.Env = append(os.Environ(), "QPOT_HELPER_SERVE=1")
+	if err := other.Start(); err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = other.Process.Kill(); _ = other.Wait() }()
+	if err := writeServePID(pidPath, other.Process.Pid); err != nil {
+		t.Fatal(err)
+	}
+	old := time.Now().Add(-time.Hour)
+	if err := os.Chtimes(pidPath, old, old); err != nil { // written long before it started
+		t.Fatal(err)
+	}
+
+	if pid := runningServePID(cfg); pid != 0 {
+		t.Fatalf("a process started after the pid file was written is taken for the control plane (pid %d)", pid)
+	}
+	stopBackgroundServe(cfg)
+	if !processAlive(other.Process.Pid) {
+		t.Fatal("qpot down killed an unrelated process named by a stale pid file")
+	}
+}
+
 // TestServeRefusesSecondControlPlane: a second `qpot serve` for an instance
 // whose control plane already runs overwrote the pid file, failed on the busy
 // web UI port, and then deleted the pid file on the way out. `qpot down`

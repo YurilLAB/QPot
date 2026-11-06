@@ -8,6 +8,7 @@ import (
 	"strconv"
 	"strings"
 	"syscall"
+	"time"
 )
 
 // detachProcess starts c in its own session so it survives the terminal.
@@ -39,6 +40,45 @@ func isServeProcess(pid int, instanceName string) bool {
 		}
 	}
 	return hasServe && hasInst
+}
+
+// processStartTime returns when pid started, from /proc (Linux); false where
+// that is not available.
+func processStartTime(pid int) (time.Time, bool) {
+	stat, err := os.ReadFile("/proc/" + itoa(pid) + "/stat")
+	if err != nil {
+		return time.Time{}, false
+	}
+	// The command name (field 2) may contain spaces and parentheses; the
+	// fields after its closing parenthesis start at field 3, so the start
+	// time (field 22, in clock ticks since boot) is the 20th of them.
+	i := strings.LastIndexByte(string(stat), ')')
+	if i < 0 {
+		return time.Time{}, false
+	}
+	f := strings.Fields(string(stat[i+1:]))
+	if len(f) < 20 {
+		return time.Time{}, false
+	}
+	ticks, err := strconv.ParseInt(f[19], 10, 64)
+	if err != nil {
+		return time.Time{}, false
+	}
+	boot, err := os.ReadFile("/proc/stat")
+	if err != nil {
+		return time.Time{}, false
+	}
+	for _, line := range strings.Split(string(boot), "\n") {
+		if v, ok := strings.CutPrefix(line, "btime "); ok {
+			secs, err := strconv.ParseInt(strings.TrimSpace(v), 10, 64)
+			if err != nil {
+				return time.Time{}, false
+			}
+			// USER_HZ is 100 on every Linux architecture's user ABI.
+			return time.Unix(secs, 0).Add(time.Duration(ticks) * 10 * time.Millisecond), true
+		}
+	}
+	return time.Time{}, false
 }
 
 func terminateProcess(pid int) {

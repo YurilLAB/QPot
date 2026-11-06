@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"syscall"
+	"time"
 )
 
 func detachProcess(c *exec.Cmd) {
@@ -24,6 +25,20 @@ func processAlive(pid int) bool {
 // isServeProcess cannot cheaply read another process's command line on
 // Windows; the pid file is private to the instance directory, so trust it.
 func isServeProcess(pid int, instanceName string) bool { return true }
+
+// processStartTime returns when pid started.
+func processStartTime(pid int) (time.Time, bool) {
+	h, err := syscall.OpenProcess(syscall.PROCESS_QUERY_INFORMATION, false, uint32(pid)) // #nosec G115 -- a pid fits uint32
+	if err != nil {
+		return time.Time{}, false
+	}
+	defer syscall.CloseHandle(h)
+	var created, exited, kernel, user syscall.Filetime
+	if err := syscall.GetProcessTimes(h, &created, &exited, &kernel, &user); err != nil {
+		return time.Time{}, false
+	}
+	return time.Unix(0, created.Nanoseconds()), true
+}
 
 func terminateProcess(pid int) {
 	if p, err := os.FindProcess(pid); err == nil {
