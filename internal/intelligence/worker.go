@@ -26,7 +26,20 @@ type Worker struct {
 	interval   time.Duration
 	batchSize  int
 	canary     CanaryMatcher
+
+	// Writes that failed, tried again on every pass: the events they came
+	// from are already marked classified, so a database that was briefly
+	// unavailable otherwise lost them for good. Only the Run goroutine (or a
+	// test calling runOnce/drain) touches them.
+	pendingIOCs     []*database.IOC
+	pendingSessions map[string]*database.TTPSession // by SessionID, the latest version
 }
+
+// Bounds of the retry buffers: the newest are kept beyond them.
+const (
+	maxPendingIOCs     = 100_000
+	maxPendingSessions = 10_000
+)
 
 // Sane fallbacks so a Worker built from a partially-specified config never
 // runs with a zero interval (which would panic time.NewTicker) or a zero
@@ -73,11 +86,28 @@ func (w *Worker) Run(ctx context.Context) {
 	for {
 		select {
 		case <-ctx.Done():
+			w.shutdown()
 			return
 		case <-ticker.C:
 			w.drain(ctx)
 		}
 	}
+}
+
+// shutdownTimeout bounds the final writes when the worker stops.
+const shutdownTimeout = 10 * time.Second
+
+// shutdown writes what is still pending and the sessions still in progress,
+// which live only in memory and would be lost with the process.
+func (w *Worker) shutdown() {
+	ctx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
+	defer cancel()
+	if w.classifier.ttpBuilder != nil {
+		for _, session := range w.classifier.ttpBuilder.GetActiveSessions() {
+			w.queueSession(session)
+		}
+	}
+	w.flush(ctx)
 }
 
 // maxBatchesPerTick bounds one drain so a single tick cannot run forever.
@@ -91,6 +121,7 @@ const maxBatchesPerTick = 200
 // Draining stops early when a batch could not be marked classified, since the
 // same events would otherwise come straight back and be counted again.
 func (w *Worker) drain(ctx context.Context) {
+	defer w.flush(ctx)
 	for i := 0; i < maxBatchesPerTick && ctx.Err() == nil; i++ {
 		n, tagged := w.runBatch(ctx)
 		if n < w.batchSize || !tagged {
@@ -99,10 +130,72 @@ func (w *Worker) drain(ctx context.Context) {
 	}
 }
 
-// runOnce classifies one batch of unclassified events. Returns count classified.
+// runOnce classifies one batch of unclassified events and flushes. Returns
+// count classified.
 func (w *Worker) runOnce(ctx context.Context) int {
 	n, _ := w.runBatch(ctx)
+	w.flush(ctx)
 	return n
+}
+
+// flush runs on every pass, events or not: it persists the TTP sessions that
+// have expired (with no new events they used to stay in memory, unwritten)
+// and tries the writes that failed before again.
+func (w *Worker) flush(ctx context.Context) {
+	if w.classifier.ttpBuilder != nil {
+		for _, session := range w.classifier.ttpBuilder.FlushExpired() {
+			w.queueSession(session)
+		}
+	}
+	for id, session := range w.pendingSessions {
+		if err := w.db.UpsertTTPSession(ctx, session); err != nil {
+			slog.Warn("Intelligence worker: failed to upsert TTP session; will retry", "error", err,
+				"session_id", id, "pending", len(w.pendingSessions))
+			break // the database is likely down: try the rest next pass
+		}
+		delete(w.pendingSessions, id)
+	}
+	if len(w.pendingIOCs) > 0 {
+		w.writeIOCs(ctx, nil)
+	}
+}
+
+// queueSession adds a session to write, replacing an older version of it.
+func (w *Worker) queueSession(session *database.TTPSession) {
+	if w.pendingSessions == nil {
+		w.pendingSessions = make(map[string]*database.TTPSession)
+	}
+	if _, queued := w.pendingSessions[session.SessionID]; !queued && len(w.pendingSessions) >= maxPendingSessions {
+		var oldest string
+		for id, s := range w.pendingSessions {
+			if oldest == "" || s.LastSeen.Before(w.pendingSessions[oldest].LastSeen) {
+				oldest = id
+			}
+		}
+		delete(w.pendingSessions, oldest)
+		slog.Warn("Intelligence worker: TTP session retry buffer full; dropped the oldest", "session_id", oldest)
+	}
+	w.pendingSessions[session.SessionID] = session
+}
+
+// writeIOCs inserts the IOCs that failed before and iocs in one batch; on
+// failure they are kept (the newest maxPendingIOCs) for the next pass.
+func (w *Worker) writeIOCs(ctx context.Context, iocs []*database.IOC) {
+	batch := append(w.pendingIOCs, iocs...)
+	if len(batch) == 0 {
+		return
+	}
+	if err := w.db.InsertIOCs(ctx, batch); err != nil {
+		if drop := len(batch) - maxPendingIOCs; drop > 0 {
+			slog.Warn("Intelligence worker: IOC retry buffer full; dropped the oldest", "dropped", drop)
+			batch = batch[drop:]
+		}
+		w.pendingIOCs = batch
+		slog.Warn("Intelligence worker: failed to insert IOC batch; will retry", "error", err,
+			"count", len(batch))
+		return
+	}
+	w.pendingIOCs = nil
 }
 
 // runBatch classifies one batch and reports how many events it processed and
@@ -159,25 +252,12 @@ func (w *Worker) runBatch(ctx context.Context) (int, bool) {
 	// Persist all IOCs from this cycle in one batch. ClickHouse (the default
 	// backend) creates a data part per INSERT, so a per-IOC loop here caused
 	// avoidable merge pressure; InsertIOCs collapses it into a single batch.
-	if len(iocs) > 0 {
-		if err := w.db.InsertIOCs(ctx, iocs); err != nil {
-			slog.Warn("Intelligence worker: failed to insert IOC batch", "error", err,
-				"count", len(iocs))
-		}
+	// Earlier failed IOCs go in the same batch.
+	if len(iocs) > 0 || len(w.pendingIOCs) > 0 {
+		w.writeIOCs(ctx, iocs)
 	}
 
 	n := len(events)
-
-	// Flush and persist expired TTP sessions.
-	if w.classifier.ttpBuilder != nil {
-		expired := w.classifier.ttpBuilder.FlushExpired()
-		for _, session := range expired {
-			if err := w.db.UpsertTTPSession(ctx, session); err != nil {
-				slog.Warn("Intelligence worker: failed to upsert TTP session", "error", err,
-					"session_id", session.SessionID)
-			}
-		}
-	}
 
 	slog.Info("Intelligence worker classified events", "count", n, "interval", w.interval.String())
 	return n, tagged

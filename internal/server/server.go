@@ -357,8 +357,14 @@ func (s *Server) Start(ctx context.Context) error {
 	}
 
 	// Start intelligence worker goroutine when enabled.
+	workerDone := make(chan struct{})
 	if s.worker != nil {
-		go s.worker.Run(ctx)
+		go func() {
+			defer close(workerDone)
+			s.worker.Run(ctx)
+		}()
+	} else {
+		close(workerDone)
 	}
 
 	go func() {
@@ -368,7 +374,13 @@ func (s *Server) Start(ctx context.Context) error {
 		srv.Shutdown(shutdownCtx)
 	}()
 
-	return srv.ListenAndServe()
+	err := srv.ListenAndServe()
+	if errors.Is(err, http.ErrServerClosed) {
+		// The worker writes what it still holds when it stops (bounded by its
+		// own timeout); returning first let the process exit before that.
+		<-workerDone
+	}
+	return err
 }
 
 // alertingConfigured reports whether the alert loop has any work to do: a
