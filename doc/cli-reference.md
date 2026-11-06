@@ -465,6 +465,13 @@ qpot cluster deny    <request-id> [-p <password>]
 The request list shows the requester's **real source IP** (taken from the
 connection, not the request body) alongside its claimed hostname and instance.
 
+On approval the joiner receives the cluster's **member key**, which the peer
+endpoints (gossip, intel, nodes, status, leave) require besides the password,
+and which selects the member TLS CA nodes use between themselves. It travels
+over the join connection, protected by the password-derived CA only, so join
+over a trusted network or VPN: a password holder intercepting the join could
+take the key. Clusters created before member keys keep password-only access.
+
 ### `qpot cluster leave`
 
 ```text

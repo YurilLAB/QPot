@@ -323,7 +323,12 @@ qpot cluster status
 Joining needs the password **and** the host's approval (`require_approval`,
 on by default). Traffic between nodes is TLS-encrypted automatically – the
 cluster CA is derived from the cluster ID and password, so there are no
-certificates to manage. Membership runs in the control plane, so restart
+certificates to manage. An admitted node also receives a member key; members
+talk to each other under a second CA derived from the password and that key,
+so someone who only knows the password can neither pass as a member nor read
+members' traffic. The key reaches a joiner over the join connection, which the
+password alone protects: join over a network you trust (or a VPN), since a
+password holder able to intercept that connection could take the key. Membership runs in the control plane, so restart
 `qpot up -d` after `init`/`join`. The password is stored in
 `~/.qpot/cluster/cluster.secret` (0600) or read from `QPOT_CLUSTER_PASSWORD`.
 
