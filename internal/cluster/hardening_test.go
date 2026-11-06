@@ -119,7 +119,7 @@ func TestJoinQueueIsBounded(t *testing.T) {
 	}
 	const n = 3000
 	for i := 0; i < n; i++ {
-		m.HandleJoinRequest(&JoinRequest{ClusterID: cl.ID, Password: pw, NodeName: "flood-" + strconv.Itoa(i),
+		m.HandleJoinRequest(&JoinRequest{ClusterID: cl.ID, Password: pw, PollSecret: testPollSecret, NodeName: "flood-" + strconv.Itoa(i),
 			NodeAddress: "10.0.0.9", NodePort: 7946}, "198.51.100.7")
 	}
 	m.mu.RLock()
@@ -140,7 +140,7 @@ func TestJoinQueueIsBounded(t *testing.T) {
 		o.DecidedAt = o.DecidedAt.Add(-2 * joinRequestTTL)
 	}
 	m.mu.Unlock()
-	m.HandleJoinRequest(&JoinRequest{ClusterID: cl.ID, Password: pw, NodeName: "late", NodeAddress: "10.0.0.9", NodePort: 7946}, "198.51.100.8")
+	m.HandleJoinRequest(&JoinRequest{ClusterID: cl.ID, Password: pw, PollSecret: testPollSecret, NodeName: "late", NodeAddress: "10.0.0.9", NodePort: 7946}, "198.51.100.8")
 	m.mu.RLock()
 	outcomes = len(m.joinOutcomes)
 	m.mu.RUnlock()
@@ -161,7 +161,7 @@ func TestJoinFloodFromOneSourceLeavesRoom(t *testing.T) {
 		t.Fatal(err)
 	}
 	join := func(name, source string) *JoinResponse {
-		return m.HandleJoinRequest(&JoinRequest{ClusterID: cl.ID, Password: pw, NodeName: name,
+		return m.HandleJoinRequest(&JoinRequest{ClusterID: cl.ID, Password: pw, PollSecret: testPollSecret, NodeName: name,
 			NodeAddress: "10.0.0.9", NodePort: 7946}, source)
 	}
 	for i := 0; i < maxPendingJoins+10; i++ {
@@ -334,7 +334,7 @@ func TestPasswordGuessingIsThrottled(t *testing.T) {
 		t.Fatal("after 500 wrong passwords the same source can still test guesses (the right one answered 200)")
 	}
 	join := func(remote, password string) *JoinResponse {
-		return m.HandleJoinRequest(&JoinRequest{ClusterID: cl.ID, Password: password, NodeName: "n",
+		return m.HandleJoinRequest(&JoinRequest{ClusterID: cl.ID, Password: password, PollSecret: testPollSecret, NodeName: "n",
 			NodeAddress: "10.0.0.7", NodePort: 7946}, remote)
 	}
 	if r := join("198.51.100.66", pw); r.Status == "pending" || r.Success {
@@ -449,7 +449,7 @@ func TestDeniedJoinerCannotGossipItselfIn(t *testing.T) {
 	host.mu.Lock()
 	host.cluster.LocalNode.QPotID = "qp_hostsecretidhostsecretid"
 	host.mu.Unlock()
-	jr := host.HandleJoinRequest(&JoinRequest{ClusterID: cl.ID, Password: pw, NodeName: "evil",
+	jr := host.HandleJoinRequest(&JoinRequest{ClusterID: cl.ID, Password: pw, PollSecret: testPollSecret, NodeName: "evil",
 		NodeAddress: "10.6.6.6", NodePort: 7946}, "10.6.6.6")
 	if jr.Status != "pending" {
 		t.Fatalf("join: %+v", jr)

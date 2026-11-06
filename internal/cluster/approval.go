@@ -1,6 +1,10 @@
 package cluster
 
 import (
+	"crypto/rand"
+	"crypto/sha256"
+	"crypto/subtle"
+	"encoding/base64"
 	"fmt"
 	"log/slog"
 	"sort"
@@ -26,6 +30,28 @@ const (
 	joinRequestTTL      = 10 * time.Minute
 )
 
+// A join's poll secret (JoinRequest.PollSecret) is sent in pollSecretHeader on
+// every status poll. The joiner makes 32 random bytes; the host takes a secret
+// of minPollSecret to maxPollSecret characters.
+const (
+	pollSecretHeader = "X-Join-Secret"
+	minPollSecret    = 32
+	maxPollSecret    = 128
+)
+
+// errNoPollSecret refuses a join that would wait for approval without a poll
+// secret: its outcome could only be collected by request ID and password.
+const errNoPollSecret = "join request without a poll secret: the joining QPot is older than this cluster, update it"
+
+// newPollSecret makes a join's poll secret.
+func newPollSecret() (string, error) {
+	b := make([]byte, 32)
+	if _, err := rand.Read(b); err != nil {
+		return "", fmt.Errorf("make join poll secret: %w", err)
+	}
+	return base64.RawURLEncoding.EncodeToString(b), nil
+}
+
 // PendingJoin is a password-authenticated join request awaiting host approval.
 type PendingJoin struct {
 	RequestID string `json:"request_id"`
@@ -42,8 +68,11 @@ type PendingJoin struct {
 	Capabilities []string          `json:"capabilities,omitempty"`
 	RequestedAt  time.Time         `json:"requested_at"`
 
-	// req is the original request, retained so an approval can build the node.
+	// req is the original request (without its poll secret), retained so an
+	// approval can build the node.
 	req *JoinRequest
+	// pollHash is the SHA-256 of the joiner's poll secret.
+	pollHash [sha256.Size]byte
 }
 
 // JoinOutcome records the host's decision on a pending join so the joiner can
@@ -55,16 +84,38 @@ type JoinOutcome struct {
 	// response is the full approved JoinResponse the joiner needs (node id,
 	// member list, config). Only set when Status == "approved".
 	response *JoinResponse
+	// pollHash is the SHA-256 of the joiner's poll secret: only a poll with
+	// that secret receives the outcome.
+	pollHash [sha256.Size]byte
+}
+
+// pollMatches reports whether secret is the joiner's poll secret.
+func (o *JoinOutcome) pollMatches(secret string) bool {
+	if len(secret) < minPollSecret || len(secret) > maxPollSecret {
+		return false
+	}
+	h := sha256.Sum256([]byte(secret))
+	return subtle.ConstantTimeCompare(h[:], o.pollHash[:]) == 1
 }
 
 // queuePendingJoinLocked records a pending join and returns a "pending"
-// response. Caller must hold m.mu. An identical re-request (same source IP +
-// hostname + QPot ID) reuses the existing request ID so a retrying/polling
-// joiner does not spawn duplicate entries.
+// response. Caller must hold m.mu. A re-request from the same joiner (same
+// source IP, hostname, QPot ID and poll secret) reuses the existing request ID
+// so a retrying joiner does not spawn duplicate entries; another sender with
+// the same source and names is not given that ID.
 func (m *Manager) queuePendingJoinLocked(req *JoinRequest, sourceIP string) *JoinResponse {
+	if n := len(req.PollSecret); n < minPollSecret || n > maxPollSecret {
+		return &JoinResponse{Success: false, Error: errNoPollSecret}
+	}
+	pollHash := sha256.Sum256([]byte(req.PollSecret))
+	kept := *req
+	kept.PollSecret = ""
+	req = &kept
+
 	m.pruneJoinsLocked(time.Now())
 	for _, p := range m.pendingJoins {
-		if p.SourceIP == sourceIP && p.NodeName == req.NodeName && p.QPotID == req.QPotID {
+		if p.SourceIP == sourceIP && p.NodeName == req.NodeName && p.QPotID == req.QPotID &&
+			subtle.ConstantTimeCompare(p.pollHash[:], pollHash[:]) == 1 {
 			return &JoinResponse{Success: false, Status: "pending", RequestID: p.RequestID,
 				Error: "awaiting host approval"}
 		}
@@ -100,9 +151,10 @@ func (m *Manager) queuePendingJoinLocked(req *JoinRequest, sourceIP string) *Joi
 		Capabilities:   req.Capabilities,
 		RequestedAt:    time.Now(),
 		req:            req,
+		pollHash:       pollHash,
 	}
 	m.pendingJoins[id] = p
-	m.joinOutcomes[id] = &JoinOutcome{RequestID: id, Status: "pending"}
+	m.joinOutcomes[id] = &JoinOutcome{RequestID: id, Status: "pending", pollHash: pollHash}
 
 	slog.Info("Cluster join request awaiting approval",
 		"request_id", id, "node_name", req.NodeName,
@@ -175,7 +227,7 @@ func (m *Manager) ApproveJoin(requestID string) (*Node, error) {
 	}
 	delete(m.pendingJoins, requestID)
 	m.joinOutcomes[requestID] = &JoinOutcome{
-		RequestID: requestID, Status: "approved", DecidedAt: time.Now(), response: resp,
+		RequestID: requestID, Status: "approved", DecidedAt: time.Now(), response: resp, pollHash: p.pollHash,
 	}
 	slog.Info("Cluster join request approved",
 		"request_id", requestID, "node_id", resp.NodeID, "node_name", p.NodeName)
@@ -192,7 +244,7 @@ func (m *Manager) DenyJoin(requestID string) error {
 	}
 	delete(m.pendingJoins, requestID)
 	m.joinOutcomes[requestID] = &JoinOutcome{
-		RequestID: requestID, Status: "denied", DecidedAt: time.Now(),
+		RequestID: requestID, Status: "denied", DecidedAt: time.Now(), pollHash: p.pollHash,
 	}
 	slog.Info("Cluster join request denied", "request_id", requestID, "node_name", p.NodeName)
 	return nil

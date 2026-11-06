@@ -470,7 +470,10 @@ endpoints (gossip, intel, nodes, status, leave) require besides the password,
 and the key of the cluster's certificate authority, from which each node
 makes its TLS certificate. The cluster ID is that authority's fingerprint, so
 the joiner verifies the seed before sending the password and receives both
-keys over a connection only a real node can answer. A cluster created by an
+keys over a connection only a real node can answer. Only the joiner collects
+them: its join carries a random poll secret, and the host answers a poll for
+the decision only when it carries that secret, so knowing the password and a
+request ID is not enough. A cluster created by an
 earlier QPot, whose TLS was derived from the password, does not start; leave
 it on every node and create it again.
 

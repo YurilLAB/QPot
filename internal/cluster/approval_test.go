@@ -1,12 +1,19 @@
 package cluster
 
 import (
+	"encoding/json"
 	"net"
 	"net/http"
+	"net/http/httptest"
+	"strings"
 	"sync"
 	"testing"
 	"time"
 )
+
+// testPollSecret is a joiner's poll secret for tests that file join requests
+// directly.
+const testPollSecret = "test-poll-secret-0123456789abcdefghij"
 
 // startSeedServer stands up the cluster API for a seed manager on a free port
 // and returns its base URL.
@@ -174,5 +181,65 @@ func TestApproveUnknownRequest(t *testing.T) {
 	}
 	if err := seed.DenyJoin("req_does_not_exist"); err == nil {
 		t.Error("DenyJoin of unknown request should error")
+	}
+}
+
+// TestJoinOutcomeGoesOnlyToTheJoiner: an approved join's outcome carries the
+// member key and the cluster CA key. The request ID is no secret (it is logged
+// and listed to the host), so anyone with the password and that ID could
+// collect the outcome, and a request from the joiner's address under its names
+// was handed the same ID. Only the joiner's poll secret collects it now.
+func TestJoinOutcomeGoesOnlyToTheJoiner(t *testing.T) {
+	const pw = "correct-horse-battery"
+	host := NewManager(t.TempDir())
+	cl, err := host.InitCluster("prod", pw, DefaultClusterConfig())
+	if err != nil {
+		t.Fatal(err)
+	}
+	join := func(secret string) *JoinResponse {
+		return host.HandleJoinRequest(&JoinRequest{ClusterID: cl.ID, Password: pw, PollSecret: secret,
+			NodeName: "sensor-7", QPotID: "qp_sensor7", NodeAddress: "10.9.9.9", NodePort: 7946}, "10.9.9.9")
+	}
+	if r := join(""); r.Status == "pending" || r.RequestID != "" || r.Error != errNoPollSecret {
+		t.Fatalf("a join without a poll secret: %+v", r)
+	}
+	const otherSecret = "another-poll-secret-0123456789abcdefgh"
+	mine := join(testPollSecret)
+	if mine.Status != "pending" || mine.RequestID == "" {
+		t.Fatalf("join: %+v", mine)
+	}
+	if again := join(testPollSecret); again.RequestID != mine.RequestID {
+		t.Fatalf("the joiner's retry got request %q, not its own %q", again.RequestID, mine.RequestID)
+	}
+	if other := join(otherSecret); other.RequestID == mine.RequestID {
+		t.Fatal("another sender from the joiner's address and names was given its request ID")
+	}
+	if _, err := host.ApproveJoin(mine.RequestID); err != nil {
+		t.Fatal(err)
+	}
+
+	h := host.apiHandler()
+	poll := func(secret string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(http.MethodGet, "/api/v1/cluster/join/status?request_id="+mine.RequestID, nil)
+		req.RemoteAddr = "203.0.113.50:40000"
+		req.Header.Set("X-Cluster-Password", pw)
+		if secret != "" {
+			req.Header.Set(pollSecretHeader, secret)
+		}
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		return rec
+	}
+	for _, secret := range []string{"", otherSecret} {
+		if rec := poll(secret); rec.Code != http.StatusNotFound ||
+			strings.Contains(rec.Body.String(), cl.CAKey) || strings.Contains(rec.Body.String(), cl.MemberKey) {
+			t.Fatalf("a password holder without the joiner's poll secret got %d %q", rec.Code, rec.Body.String())
+		}
+	}
+	rec := poll(testPollSecret)
+	var got JoinResponse
+	if rec.Code != http.StatusOK || json.Unmarshal(rec.Body.Bytes(), &got) != nil ||
+		got.CAKey != cl.CAKey || got.MemberKey != cl.MemberKey || got.NodeID == "" {
+		t.Fatalf("the joiner's own poll: %d %q", rec.Code, rec.Body.String())
 	}
 }

@@ -222,6 +222,11 @@ type JoinRequest struct {
 	InstanceName string            `json:"instance_name"`
 	Metadata     map[string]string `json:"metadata,omitempty"`
 	Capabilities []string          `json:"capabilities,omitempty"`
+	// PollSecret is a random secret of the joiner's. A join that waits for
+	// host approval is collected only by a poll that carries it (the outcome
+	// holds the member key and CA key), not by anyone who has the password and
+	// the request ID. The host keeps only its hash.
+	PollSecret string `json:"poll_secret,omitempty"`
 }
 
 // JoinResponse represents the response to a join request
@@ -560,7 +565,12 @@ func (m *Manager) JoinCluster(clusterID, password string, localNode *Node, seedN
 
 // attemptJoin tries to join a cluster via a specific seed node
 func (m *Manager) attemptJoin(seedAddr, clusterID, password string, localNode *Node) (*Cluster, error) {
+	pollSecret, err := newPollSecret()
+	if err != nil {
+		return nil, err
+	}
 	joinReq := JoinRequest{
+		PollSecret:   pollSecret,
 		ClusterID:    clusterID,
 		Password:     password,
 		NodeName:     localNode.Name,
@@ -622,7 +632,7 @@ func (m *Manager) attemptJoin(seedAddr, clusterID, password string, localNode *N
 		if joinResp.Status == "pending" && joinResp.RequestID != "" {
 			slog.Info("Join request submitted; awaiting host approval",
 				"request_id", joinResp.RequestID, "cluster_id", clusterID)
-			approved, perr := m.pollJoinApproval(scheme, host, clusterID, password, joinResp.RequestID)
+			approved, perr := m.pollJoinApproval(scheme, host, clusterID, password, joinResp.RequestID, pollSecret)
 			if perr != nil {
 				return nil, perr
 			}
@@ -687,8 +697,8 @@ func (m *Manager) attemptJoin(seedAddr, clusterID, password string, localNode *N
 // pollJoinApproval polls a pending join's status endpoint until the host
 // approves it (returning the full JoinResponse the joiner needs), denies it, or
 // the overall timeout elapses. The poll is authenticated with the same cluster
-// password the join used.
-func (m *Manager) pollJoinApproval(scheme, host, clusterID, password, requestID string) (*JoinResponse, error) {
+// password the join used and carries the join's poll secret.
+func (m *Manager) pollJoinApproval(scheme, host, clusterID, password, requestID, pollSecret string) (*JoinResponse, error) {
 	client := &http.Client{Timeout: 15 * time.Second}
 	if scheme == "https" {
 		client = clusterHTTPClient(15*time.Second, clusterID, nil)
@@ -711,6 +721,7 @@ func (m *Manager) pollJoinApproval(scheme, host, clusterID, password, requestID 
 			return nil, fmt.Errorf("build status request: %w", err)
 		}
 		req.Header.Set("X-Cluster-Password", password)
+		req.Header.Set(pollSecretHeader, pollSecret)
 		resp, err := client.Do(req)
 		if err != nil {
 			continue // transient; keep polling until the deadline
@@ -1231,7 +1242,8 @@ func (m *Manager) apiHandler() http.Handler {
 	// Join-approval endpoints. /pending, /approve and /deny are host operations
 	// (require the password). /join/status lets a queued joiner - which already
 	// proved the password on /join - poll its request; it is also password-gated
-	// so an unauthenticated scanner cannot enumerate request IDs/outcomes.
+	// so an unauthenticated scanner cannot enumerate request IDs/outcomes, and
+	// answers only the joiner's poll secret.
 	mux.HandleFunc("/api/v1/cluster/pending", withHostOnly(m.withClusterAuth(m.handlePendingHTTP)))
 	mux.HandleFunc("/api/v1/cluster/approve", withHostOnly(m.withClusterAuth(m.handleApproveHTTP)))
 	mux.HandleFunc("/api/v1/cluster/deny", withHostOnly(m.withClusterAuth(m.handleDenyHTTP)))
@@ -1396,10 +1408,15 @@ func (m *Manager) handleJoinDecisionHTTP(w http.ResponseWriter, r *http.Request,
 }
 
 // handleJoinStatusHTTP lets a joiner poll the outcome of its pending request.
+// The request ID is not a secret (it is logged and listed to the host), so the
+// outcome goes only to a poll that carries the joiner's poll secret; any other
+// caller gets the same answer as for an unknown ID, and counts as a failure.
 func (m *Manager) handleJoinStatusHTTP(w http.ResponseWriter, r *http.Request) {
 	id := r.URL.Query().Get("request_id")
 	o, ok := m.joinOutcome(id)
-	if !ok {
+	if !ok || !o.pollMatches(r.Header.Get(pollSecretHeader)) {
+		trusted := fromThisHost(r) || m.isMemberAddress(r.RemoteAddr)
+		m.authLimit.failed(authKey(r.RemoteAddr, trusted), time.Now(), trusted)
 		http.Error(w, "unknown request_id", http.StatusNotFound)
 		return
 	}
