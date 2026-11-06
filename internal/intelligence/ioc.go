@@ -7,6 +7,7 @@ import (
 	"math/big"
 	"net"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 	"unicode"
@@ -89,10 +90,71 @@ func hostIOC(host string) (string, string) {
 		}
 		return IOCTypeIP, ip.String()
 	}
+	if v4, numeric := looseIPv4(host); numeric {
+		if v4 == "" || isPrivateIP(v4) {
+			return "", ""
+		}
+		return IOCTypeIP, v4
+	}
 	if reHostname.MatchString(host) {
 		return IOCTypeDomain, host
 	}
 	return "", ""
+}
+
+// looseIPv4 reads a host whose last label is a number the way URL parsers
+// (the WHATWG URL standard, curl, wget) do: up to four dot-separated parts,
+// each decimal, 0x-hex or 0-octal, the last one filling the remaining bytes.
+// "127.1", "0x7f.0.0.1", "0177.0.0.1" and "2130706433" are all 127.0.0.1.
+// numeric reports whether the host ends in a number at all, in which case it
+// is never a domain; addr is "" when it does but is not a valid address.
+func looseIPv4(host string) (addr string, numeric bool) {
+	parts := strings.Split(host, ".")
+	if len(parts) > 1 && parts[len(parts)-1] == "" {
+		parts = parts[:len(parts)-1]
+	}
+	last := parts[len(parts)-1]
+	if _, ok := ipv4Part(last); !ok && (last == "" || strings.Trim(last, "0123456789") != "") {
+		return "", false
+	}
+	if len(parts) > 4 {
+		return "", true
+	}
+	var n uint64
+	for i, p := range parts {
+		v, ok := ipv4Part(p)
+		if !ok {
+			return "", true
+		}
+		bits := uint(8)
+		if i == len(parts)-1 {
+			bits = 8 * uint(5-len(parts)) // the last part fills the rest
+		}
+		if v >= 1<<bits {
+			return "", true
+		}
+		n = n<<bits | v
+	}
+	return fmt.Sprintf("%d.%d.%d.%d", n>>24, n>>16&255, n>>8&255, n&255), true
+}
+
+// ipv4Part parses one part of a loose IPv4 host: decimal, 0x-hex or 0-octal.
+func ipv4Part(s string) (uint64, bool) {
+	if s == "" {
+		return 0, false
+	}
+	base := 10
+	switch {
+	case len(s) >= 2 && (s[:2] == "0x" || s[:2] == "0X"):
+		base, s = 16, s[2:]
+	case len(s) >= 2 && s[0] == '0':
+		base, s = 8, s[1:]
+	}
+	if s == "" {
+		return 0, true // "0x" alone is zero
+	}
+	v, err := strconv.ParseUint(s, base, 64)
+	return v, err == nil
 }
 
 // urlTrailingCutset is stripped from the end of a URL extracted from a command
