@@ -19,6 +19,7 @@ from __future__ import annotations
 import getopt
 import hashlib
 import ipaddress
+import math
 import posixpath
 import random
 import re
@@ -154,9 +155,15 @@ def qpot_own_address(protocol, name: str) -> str | None:
     return None
 
 
+QUOTE_ESCAPES = {"\\": "\\\\", "\a": "\\a", "\b": "\\b", "\f": "\\f", "\n": "\\n", "\r": "\\r",
+                 "\t": "\\t", "\v": "\\v"}
+
+
 def qpot_quote(text: str) -> str:
-    """A name in a message of GNU coreutils in a UTF-8 locale."""
-    return f"‘{text}’"
+    """A name in a message of GNU coreutils in a UTF-8 locale (quote(): C escapes inside ‘’)."""
+    escaped = "".join(QUOTE_ESCAPES.get(c) or (f"\\{ord(c):03o}" if ord(c) < 32 or ord(c) == 127 else c)
+                      for c in text)
+    return f"‘{escaped}’"
 
 
 def qpot_register(cls, *paths: str) -> None:
@@ -522,9 +529,9 @@ class QpotSum(QpotCommand):
                 self.errorWrite(f"{name}: {path}: No such file or directory\n")
                 return None
         # A program of the tree without contents reads as the same generic header for every file, so
-        # two of them would hash alike: hash bytes of its size that are its own and stable instead.
-        seed = f"{self.protocol.hostname}|{full}|{size}".encode()
-        return hashlib.shake_256(seed).digest(min(size, 1 << 26))
+        # two of them would hash alike: hash a few bytes that are its own and stable instead (not
+        # bytes of its size: summing a directory of large programs would stall the reactor).
+        return hashlib.sha256(f"{self.protocol.hostname}|{full}|{size}".encode()).digest()
 
 
 def qpot_sum(algorithm: str, name: str):
@@ -675,6 +682,174 @@ class ExprError(Exception):
         self.text, self.code = text, code
 
 
+# expr matches with Python's backtracking matcher, in the reactor: patterns that could take more
+# than about this many steps are not run (see Command_expr.match)
+EXPR_STEPS = 10_000_000
+
+# a size_t that a position or length of substr does not fit reads as
+SIZE_MAX = 2 ** 64 - 1
+
+# the classes of a bracket expression, as Python's
+BRE_CLASSES = {"alpha": "a-zA-Z", "digit": "0-9", "alnum": "a-zA-Z0-9", "upper": "A-Z", "lower": "a-z",
+               "space": r" \t\n\r\f\v", "blank": r" \t", "xdigit": "0-9A-Fa-f",
+               "punct": re.escape(string.punctuation), "cntrl": r"\000-\037\177", "print": " -~",
+               "graph": "!-~"}
+# GNU regex's own escapes, as Python's; the anchors among them repeat nothing
+BRE_ESCAPES = {"w": r"\w", "W": r"\W", "s": r"\s", "S": r"\S"}
+BRE_ANCHORS = {"b": r"\b", "B": r"\B", "<": r"\b(?=\w)", ">": r"\b(?<=\w)", "`": r"\A", "'": r"\Z"}
+BRE_BAD_BRACKET = "Unmatched [, [^, [:, [., or [="
+
+
+def bre_bracket(pattern: str, i: int) -> tuple[str, int]:
+    """The bracket expression that starts at pattern[i] as Python's, and the index after it."""
+    j, parts, negated = i + 1, [], pattern.startswith("^", i + 1)
+    j += negated
+    first = True
+    while j < len(pattern):
+        c = pattern[j]
+        if c == "]" and not first:
+            if not parts:  # only empty ranges: nothing matches, or anything does
+                return (r"[\s\S]" if negated else "(?!)"), j + 1
+            return "[" + "^" * negated + "".join(parts) + "]", j + 1
+        first = False
+        end = pattern[j + 2:j + 3]
+        if pattern[j + 1:j + 2] == "-" and end not in ("", "]") and c != "[":
+            if c <= end:  # a range from high to low is empty, not an error, in GNU expr
+                parts.append(re.escape(c) + "-" + re.escape(end))
+            j += 3
+            continue
+        if c == "[" and pattern[j + 1:j + 2] in (":", "=", "."):
+            kind = pattern[j + 1]
+            end = pattern.find(kind + "]", j + 2)
+            if end < 0:
+                raise ExprError(BRE_BAD_BRACKET)
+            name = pattern[j + 2:end]
+            if kind == ":" and name not in BRE_CLASSES:
+                raise ExprError("Invalid character class name")
+            parts.append(BRE_CLASSES[name] if kind == ":" else re.escape(name))
+            j = end + 2
+            continue
+        parts.append(re.escape(c))
+        j += 1
+    raise ExprError(BRE_BAD_BRACKET)
+
+
+def bre(pattern: str) -> tuple[str, int, int, bool, float]:
+    """GNU's basic regular expression as Python's: (regex, groups, repetitions, explosive, choices),
+    where explosive means a repetition repeats something that repeats or alternates, or a
+    back-reference is used (Python's matcher can then take exponential time), and choices is the log
+    of the number of ways its alternatives combine (the product of each group's branch count)."""
+    out: list[str] = []
+    opened: list[tuple[int, int, int]] = []  # each open group: where it starts, repetitions and
+    groups = closed = repeats = alternations = 0  # alternations before it
+    branches = [1]  # the branches of the expression and of each open group so far
+    choices = 0.0
+    explosive = False
+    atom: tuple[int, bool] | None = None  # the last atom: where it starts, whether it varies inside
+    last_op = ""  # the repetition the last atom ends with, if any
+    i, n = 0, len(pattern)
+
+    def add(text: str) -> None:
+        nonlocal atom, last_op
+        atom, last_op = (len(out), False), ""
+        out.append(text)
+
+    def repeat(op: str) -> None:
+        nonlocal atom, last_op, repeats, explosive
+        start, varies = atom
+        if last_op == "*" and op == "*":
+            return  # a** is a*
+        if last_op:
+            out.insert(start, "(?:")
+            out.append(")")
+        repeats += 1
+        explosive = explosive or varies or bool(last_op)
+        out.append(op)
+        atom, last_op = (start, True), op
+
+    while i < n:
+        c = pattern[i]
+        if c == "\\":
+            if i + 1 >= n:
+                raise ExprError("Trailing backslash")
+            e = pattern[i + 1]
+            i += 2
+            if e == "(":
+                opened.append((len(out), repeats, alternations))
+                branches.append(1)
+                out.append("(")
+                groups += 1
+                atom, last_op = None, ""
+            elif e == ")":
+                if not opened:
+                    raise ExprError("Unmatched ) or \\)")
+                start, repeats_before, alternations_before = opened.pop()
+                choices += math.log(branches.pop())
+                out.append(")")
+                closed += 1
+                atom = (start, repeats > repeats_before or alternations > alternations_before)
+                last_op = ""
+            elif e == "|":
+                out.append("|")
+                alternations += 1
+                branches[-1] += 1
+                atom, last_op = None, ""
+            elif e == "{" and atom is None:
+                add(re.escape("{"))  # nothing to repeat: a plain brace, as GNU expr reads it
+            elif e == "{":
+                end = pattern.find("\\}", i)
+                if end < 0:
+                    raise ExprError("Unmatched \\{")
+                bounds = re.fullmatch(r"(\d*)(,?)(\d*)", pattern[i:end])
+                i = end + 2
+                if not bounds or not (bounds.group(1) or bounds.group(2)) or (
+                        bounds.group(3) and not bounds.group(2)):
+                    raise ExprError("Invalid content of \\{\\}")
+                low = int(bounds.group(1) or 0)
+                high = int(bounds.group(3)) if bounds.group(3) else (low if not bounds.group(2) else None)
+                if max(low, high or 0) > 32767:
+                    raise ExprError("Regular expression too big")
+                if high is not None and low > high:
+                    raise ExprError("Invalid content of \\{\\}")
+                repeat(f"{{{low}}}" if high == low else f"{{{low},{'' if high is None else high}}}")
+            elif e in ("+", "?"):
+                if atom is None:
+                    add(re.escape(e))
+                else:
+                    repeat(e)
+            elif e in "123456789":
+                if int(e) > closed:
+                    raise ExprError("Invalid back reference")
+                explosive = True
+                add("\\" + e)
+            elif e in BRE_ESCAPES:
+                add(BRE_ESCAPES[e])
+            elif e in BRE_ANCHORS:
+                out.append(BRE_ANCHORS[e])
+                atom, last_op = None, ""
+            else:
+                add(re.escape(e))
+        elif c == "[":
+            text, i = bre_bracket(pattern, i)
+            add(text)
+        elif c == "*" and atom is not None:
+            repeat("*")
+            i += 1
+        elif c == "^" and (not out or out[-1] in ("(", "|")):
+            out.append("^")
+            i += 1
+        elif c == "$" and (i + 1 == n or pattern.startswith("\\)", i + 1) or pattern.startswith("\\|", i + 1)):
+            out.append(r"\Z")
+            atom, last_op = None, ""
+            i += 1
+        else:
+            add("." if c == "." else re.escape(c))
+            i += 1
+    if opened:
+        raise ExprError("Unmatched ( or \\(")
+    return "".join(out), groups, repeats, explosive, choices + math.log(branches[0])
+
+
 class Command_expr(QpotCommand):
     """expr of GNU coreutils: | & comparisons + - * / % : and match substr index length."""
 
@@ -683,10 +858,11 @@ class Command_expr(QpotCommand):
     def run(self) -> int | None:
         if self.usage_stop():
             return self.exit_code
-        if not self.args:
+        args = self.args[1:] if self.args[:1] == ["--"] else self.args
+        if not args:
             self.errorWrite("expr: missing operand\nTry 'expr --help' for more information.\n")
             return 2
-        self.tokens, self.at = list(self.args), 0
+        self.tokens, self.at, self.evaluate = list(args), 0, True
         try:
             value = self.parse_or()
             if self.at < len(self.tokens):
@@ -695,7 +871,7 @@ class Command_expr(QpotCommand):
             self.errorWrite(f"expr: {err.text}\n")
             return err.code
         self.write(f"{value}\n")
-        return 1 if value in ("", "0") or (self.is_int(value) and int(value) == 0) else 0
+        return 1 if self.null(value) else 0
 
     @staticmethod
     def is_int(value: str) -> bool:
@@ -716,33 +892,46 @@ class Command_expr(QpotCommand):
             raise ExprError("non-integer argument")
         return int(value)
 
+    @staticmethod
+    def null(value: str) -> bool:
+        """GNU's null(): empty, or a zero ("0", "-0", "000")."""
+        return value == "" or re.fullmatch(r"-?0+", value) is not None
+
+    def operator(self, names: tuple[str, ...]) -> str | None:
+        """The operator at the cursor, taken, when it is one of names."""
+        if self.peek() in names:
+            self.at += 1
+            return self.tokens[self.at - 1]
+        return None
+
+    def lazily(self, evaluate: bool, parse):
+        """parse(), evaluating only if evaluate (GNU expr parses the operand | or & will not use
+        without computing it, so `expr 1 \\| 1 / 0` prints 1)."""
+        saved, self.evaluate = self.evaluate, self.evaluate and evaluate
+        try:
+            return parse()
+        finally:
+            self.evaluate = saved
+
     def parse_or(self) -> str:
         left = self.parse_and()
-        while self.peek() == "|":
-            self.at += 1
-            if self.at >= len(self.tokens):
-                raise ExprError(f"syntax error: missing argument after {qpot_quote('|')}")
-            right = self.parse_and()
-            left = left if left not in ("", "0") else (right if right not in ("", "0") else "0")
+        while self.operator(("|",)):
+            right = self.lazily(self.null(left), self.parse_and)
+            if self.null(left):
+                left = "0" if self.null(right) else right
         return left
 
     def parse_and(self) -> str:
         left = self.parse_compare()
-        while self.peek() == "&":
-            self.at += 1
-            if self.at >= len(self.tokens):
-                raise ExprError(f"syntax error: missing argument after {qpot_quote('&')}")
-            right = self.parse_compare()
-            left = left if left not in ("", "0") and right not in ("", "0") else "0"
+        while self.operator(("&",)):
+            right = self.lazily(not self.null(left), self.parse_compare)
+            if self.null(left) or self.null(right):
+                left = "0"
         return left
 
     def parse_compare(self) -> str:
         left = self.parse_add()
-        while self.peek() in ("<", "<=", "=", "==", "!=", ">=", ">"):
-            op = self.tokens[self.at]
-            self.at += 1
-            if self.at >= len(self.tokens):
-                raise ExprError(f"syntax error: missing argument after {qpot_quote(op)}")
+        while op := self.operator(("<", "<=", "=", "==", "!=", ">=", ">")):
             right = self.parse_add()
             if self.is_int(left) and self.is_int(right):
                 a, b = int(left), int(right)
@@ -755,24 +944,19 @@ class Command_expr(QpotCommand):
 
     def parse_add(self) -> str:
         left = self.parse_mul()
-        while self.peek() in ("+", "-"):
-            op = self.tokens[self.at]
-            self.at += 1
-            if self.at >= len(self.tokens):
-                raise ExprError(f"syntax error: missing argument after {qpot_quote(op)}")
+        while op := self.operator(("+", "-")):
             right = self.parse_mul()
-            a, b = self.number(left), self.number(right)
-            left = str(a + b if op == "+" else a - b)
+            if self.evaluate:
+                a, b = self.number(left), self.number(right)
+                left = str(a + b if op == "+" else a - b)
         return left
 
     def parse_mul(self) -> str:
         left = self.parse_match()
-        while self.peek() in ("*", "/", "%"):
-            op = self.tokens[self.at]
-            self.at += 1
-            if self.at >= len(self.tokens):
-                raise ExprError(f"syntax error: missing argument after {qpot_quote(op)}")
+        while op := self.operator(("*", "/", "%")):
             right = self.parse_match()
+            if not self.evaluate:
+                continue
             a, b = self.number(left), self.number(right)
             if op != "*" and b == 0:
                 raise ExprError("division by zero")
@@ -784,53 +968,82 @@ class Command_expr(QpotCommand):
         return left
 
     def parse_match(self) -> str:
-        left = self.parse_primary()
-        while self.peek() == ":":
-            self.at += 1
-            if self.at >= len(self.tokens):
-                raise ExprError(f"syntax error: missing argument after {qpot_quote(':')}")
-            left = self.match(left, self.parse_primary())
+        left = self.parse_unary()
+        while self.operator((":",)):
+            right = self.parse_unary()
+            if self.evaluate:
+                left = self.match(left, right)
         return left
 
     def match(self, text: str, pattern: str) -> str:
         """A basic regular expression anchored at the start: the group, else the length matched."""
-        regex = pattern.replace("\\(", "\0(").replace("\\)", "\0)")
-        regex = re.sub(r"(?<!\0)([()+?{}|])", r"\\\1", regex).replace("\0(", "(").replace("\0)", ")")
-        try:
-            found = re.match(regex, text)
-        except re.error:
-            raise ExprError("Invalid regular expression") from None
-        if "(" in regex:
+        regex, groups, repeats, explosive, choices = bre(pattern)
+        # Python's matcher backtracks, and it runs in the reactor every session shares: a pattern
+        # that could take it too long reads as one that does not match. It can try about
+        # len(text) ** repeats ways for each way its alternatives combine, and 2 ** len(text) times
+        # that when a repetition repeats or a back-reference is used.
+        size = max(len(text), 1)
+        steps = choices + repeats * math.log(size) + (len(text) * math.log(2) if explosive else 0)
+        if steps > math.log(EXPR_STEPS):
+            found = None
+        else:
+            try:
+                found = re.match(regex, text, re.DOTALL)
+            except re.error as err:
+                bad_range = "bad character range" in str(err)
+                raise ExprError("Invalid range end" if bad_range else "Invalid regular expression") from None
+            except (OverflowError, RecursionError):
+                raise ExprError("Regular expression too big") from None
+        if groups:
             return found.group(1) if found and found.group(1) is not None else ""
         return str(found.end()) if found else "0"
 
-    def parse_primary(self) -> str:
+    def parse_unary(self) -> str:
+        """+ and the keywords, whose operands are parsed the same way (GNU's eval6)."""
+        token = self.peek()
+        if token == "+":
+            self.at += 1
+            return self.need("+")
+        if token == "length":
+            self.at += 1
+            return str(len(self.parse_unary()))
+        if token == "match":
+            self.at += 1
+            text, pattern = self.parse_unary(), self.parse_unary()
+            return self.match(text, pattern) if self.evaluate else text
+        if token == "index":
+            self.at += 1
+            text, chars = self.parse_unary(), self.parse_unary()
+            positions = [i + 1 for i, c in enumerate(text) if c in chars]
+            return str(positions[0]) if positions else "0"
+        if token == "substr":
+            self.at += 1
+            text, start, length = self.parse_unary(), self.parse_unary(), self.parse_unary()
+            if not (self.is_int(start) and self.is_int(length)):
+                return ""
+            # a position or length that does not fit a size_t reads as SIZE_MAX, which gives ""
+            first, count = int(start), int(length)
+            if not 1 <= first <= len(text) or not 0 < count < SIZE_MAX:
+                return ""
+            return text[first - 1:first - 1 + count]
+        return self.parse_atom()
+
+    def parse_atom(self) -> str:
+        """A parenthesised expression or a string (GNU's eval7)."""
         if self.at >= len(self.tokens):
             raise ExprError(f"syntax error: missing argument after {qpot_quote(self.tokens[-1])}")
         token = self.tokens[self.at]
         self.at += 1
         if token == "(":
             value = self.parse_or()
-            if self.peek() != ")":
+            if self.at >= len(self.tokens):
                 raise ExprError(f"syntax error: expecting ')' after {qpot_quote(self.tokens[self.at - 1])}")
+            if self.peek() != ")":
+                raise ExprError(f"syntax error: expecting ')' instead of {qpot_quote(self.tokens[self.at])}")
             self.at += 1
             return value
-        if token == "+":
-            return self.need("+")
-        if token == "length":
-            return str(len(self.need("length")))
-        if token == "substr":
-            text, start, length = self.need("substr"), self.need("substr"), self.need("substr")
-            if not (self.is_int(start) and self.is_int(length)) or int(start) < 1 or int(length) < 0:
-                return ""
-            return text[int(start) - 1: int(start) - 1 + int(length)]
-        if token == "index":
-            text, chars = self.need("index"), self.need("index")
-            positions = [i + 1 for i, c in enumerate(text) if c in chars]
-            return str(positions[0]) if positions else "0"
-        if token == "match":
-            text, pattern = self.need("match"), self.need("match")
-            return self.match(text, pattern)
+        if token == ")":
+            raise ExprError("syntax error: unexpected ')'")
         return token
 
 

@@ -19,11 +19,14 @@ import hashlib
 import ipaddress
 import math
 import random
+import re
 import socket
+import threading
 import time
 from typing import Any
 
-from twisted.internet import reactor, threads
+from twisted.internet import defer, reactor, threads
+from twisted.python import failure
 
 from cowrie.core.config import CowrieConfig
 from cowrie.shell.command import HoneyPotCommand
@@ -125,6 +128,58 @@ WELL_KNOWN = {"8.8.8.8": (128, 12, 9.0), "8.8.4.4": (128, 12, 9.5), "1.1.1.1": (
 NO_REPLY = [ipaddress.ip_network(n) for n in (
     "10.0.0.0/8", "100.64.0.0/10", "169.254.0.0/16", "172.16.0.0/12", "192.0.0.0/24", "192.0.2.0/24",
     "192.168.0.0/16", "198.18.0.0/15", "198.51.100.0/24", "203.0.113.0/24", "224.0.0.0/4", "240.0.0.0/4")]
+
+
+LABEL = re.compile(r"[A-Za-z0-9_](?:[A-Za-z0-9_-]{0,61}[A-Za-z0-9_])?")
+
+
+def host_name(name: str) -> bool:
+    """Whether the C library's resolver would look name up: at most 253 characters, labels of 63."""
+    name = name[:-1] if name.endswith(".") else name
+    return 0 < len(name) <= 253 and all(LABEL.fullmatch(label) for label in name.split("."))
+
+
+# Lookups run in Twisted's thread pool, which the whole honeypot shares, and a lookup that times out
+# keeps its thread until the C library gives up: at most LOOKUP_THREADS run at once, whatever the
+# sessions ask (more read as an unreachable resolver), and each answer is kept LOOKUP_TTL seconds,
+# as a caching resolver would.
+LOOKUP_THREADS = 4
+LOOKUP_TTL = 300
+LOOKUP_CACHE = 512
+lookup_lock = threading.Lock()
+lookup_busy = [0]
+lookup_cache: dict[tuple[str, str], tuple[float, Any]] = {}
+
+
+def qpot_lookup(kind: str, key: str, resolver, *args) -> defer.Deferred:
+    """A Deferred of resolver(*args), run in the thread pool within the limits above."""
+    kept = lookup_cache.get((kind, key))
+    if kept and time.monotonic() - kept[0] < LOOKUP_TTL:
+        return defer.fail(kept[1]) if isinstance(kept[1], Exception) else defer.succeed(kept[1])
+    with lookup_lock:
+        if lookup_busy[0] >= LOOKUP_THREADS:
+            return defer.fail(socket.gaierror(getattr(socket, "EAI_AGAIN", -3), "busy"))
+        lookup_busy[0] += 1
+
+    def run():
+        try:
+            return resolver(*args)
+        finally:
+            with lookup_lock:
+                lookup_busy[0] -= 1
+
+    def keep(result):
+        value = result.value if isinstance(result, failure.Failure) else result
+        if isinstance(value, Exception) and not isinstance(value, (socket.gaierror, socket.herror)):
+            return result  # a lookup that timed out or broke is asked again next time
+        if len(lookup_cache) >= LOOKUP_CACHE:
+            lookup_cache.pop(next(iter(lookup_cache)))
+        lookup_cache[(kind, key)] = (time.monotonic(), value)
+        return result
+
+    d = threads.deferToThread(run)
+    d.addBoth(keep)
+    return d
 
 
 def ping_style(tree) -> tuple[str, str]:
@@ -352,9 +407,17 @@ class Command_ping(HoneyPotCommand):
         if own:
             self.found(own, host, numeric=False)
             return
+        # a name the resolver would refuse is not asked for
+        try:
+            name = host.encode("idna").decode("ascii")
+        except UnicodeError:
+            name = ""
+        if not host_name(name):
+            self.not_found()
+            return
         # the C library's resolver, as ping's: its message tells a name that does not exist from a
         # resolver that cannot be reached ("Temporary failure in name resolution")
-        d = threads.deferToThread(socket.getaddrinfo, host, None, socket.AF_INET, socket.SOCK_RAW)
+        d = qpot_lookup("name", name.lower(), socket.getaddrinfo, name, None, socket.AF_INET, socket.SOCK_RAW)
         d.addTimeout(12, reactor)
         d.addCallbacks(lambda found: self.found(str(found[0][4][0]), host, numeric=False), self.lookup_failed)
 
@@ -386,7 +449,7 @@ class Command_ping(HoneyPotCommand):
             self.label = name or self.protocol.hostname
             self.begin()
             return
-        d = threads.deferToThread(socket.gethostbyaddr, ip)
+        d = qpot_lookup("address", ip, socket.gethostbyaddr, ip)
         d.addTimeout(2, reactor)
         d.addCallbacks(lambda result: self.named(result[0]), lambda _failure: self.named(None))
 
