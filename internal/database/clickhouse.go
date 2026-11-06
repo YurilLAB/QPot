@@ -989,8 +989,11 @@ func (ch *ClickHouse) TagEvent(ctx context.Context, event *Event) error {
 	)
 }
 
-// tagChunk bounds the size of one tagging mutation's statement.
-const tagChunk = 1000
+// tagChunk bounds the size of one tagging mutation's statement. clickhouse-go
+// inlines the bound lists, each event id appears seven times, and an event
+// costs about 400 bytes; ClickHouse refuses statements over max_query_size
+// (256 KiB by default), which 1000 events per chunk exceeded.
+const tagChunk = 250
 
 // TagEvents tags events by their event_id in one mutation per chunk, and waits
 // for it to apply (mutations_sync): ClickHouse mutations are otherwise

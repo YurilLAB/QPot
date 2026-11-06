@@ -184,3 +184,33 @@ func TestClickHouseInsertIOCsStaysUnderMaxQuerySize(t *testing.T) {
 		}
 	}
 }
+
+// TagEvents tagged up to 1000 events per mutation. Every event id appears
+// seven times in that statement (six transform() maps and the IN list), about
+// 400 bytes per event, so a worker batch over ~650 events (worker_batch_size
+// is configurable) exceeded max_query_size. Tagging then failed on every
+// cycle: the same events came back each time, were never marked classified,
+// and had their IOCs counted again.
+func TestClickHouseTagEventsStaysUnderMaxQuerySize(t *testing.T) {
+	conn := &sizeLimitedConn{}
+	ch := &ClickHouse{conn: conn}
+	now := time.Now().UTC()
+	events := make([]*Event, 1000)
+	for i := range events {
+		events[i] = &Event{
+			ID:          fmt.Sprintf("%08x-0000-4000-8000-%012x", i, i),
+			Timestamp:   now.Add(time.Duration(i) * time.Millisecond),
+			TechniqueID: "T1110.001", TechniqueName: "Brute Force: Password Guessing",
+			TacticID: "TA0006", TacticName: "Credential Access", KillChainStage: "initial-access",
+			Confidence: 0.85,
+		}
+	}
+	if err := ch.TagEvents(context.Background(), events); err != nil {
+		t.Fatalf("TagEvents: %v", err)
+	}
+	for _, n := range conn.sizes {
+		if n > chMaxQuerySize {
+			t.Errorf("a %d-byte mutation was sent", n)
+		}
+	}
+}
