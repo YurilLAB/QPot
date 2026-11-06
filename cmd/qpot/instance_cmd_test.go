@@ -2,6 +2,7 @@ package main
 
 import (
 	"io"
+	"os"
 	"strings"
 	"testing"
 )
@@ -22,6 +23,7 @@ func runInstance(args ...string) error {
 // create must error and leave the first instance untouched.
 func TestInstanceCreateRefusesClobber(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
+	t.Setenv("USERPROFILE", os.Getenv("HOME")) // os.UserHomeDir on Windows
 
 	if err := runInstance("create", "p1"); err != nil {
 		t.Fatalf("first create should succeed: %v", err)
@@ -40,6 +42,7 @@ func TestInstanceCreateRefusesClobber(t *testing.T) {
 // deleted an empty instance). It must error instead.
 func TestInstanceRemoveNonexistentErrors(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
+	t.Setenv("USERPROFILE", os.Getenv("HOME")) // os.UserHomeDir on Windows
 
 	err := runInstance("remove", "ghost")
 	if err == nil {

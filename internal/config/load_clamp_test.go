@@ -14,6 +14,7 @@ import (
 func TestLoadClampsResourceLimits(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home) // os.UserHomeDir on Windows
 	inst := "clamptest"
 	dir := filepath.Join(home, ".qpot", "instances", inst)
 	if err := os.MkdirAll(dir, 0o755); err != nil {

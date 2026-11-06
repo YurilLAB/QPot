@@ -216,6 +216,7 @@ func TestLoadFallsBackToDefault(t *testing.T) {
 func TestLoadClampsIntelligenceDefaults(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home) // os.UserHomeDir on Windows
 
 	const inst = "clamp-test-instance"
 	dir := filepath.Join(home, ".qpot", "instances", inst)
