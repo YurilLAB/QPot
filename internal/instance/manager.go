@@ -697,13 +697,12 @@ func (m *Manager) generateServiceConfigs() error {
 			// image shipped. Without it cowrie crashes the shell channel on every
 			// login (the recon shell dies the instant an attacker connects) - a
 			// broken honeypot that the port-only healthcheck never catches.
-			// Pre-create it, writable by cowrie's in-container uid 2000.
+			// Pre-create it, writable by cowrie's in-container uid 2000. It lies
+			// inside the logs mount, which cowrie writes to, so whatever cowrie
+			// left at log/tty is never followed (see ensureContainerDir).
 			ttyDir := filepath.Join(hpDir, "logs", "tty")
-			if err := os.MkdirAll(ttyDir, 0750); err != nil {
-				return fmt.Errorf("failed to create cowrie log/tty dir: %w", err)
-			}
-			if err := os.Chmod(ttyDir, 0777); err != nil {
-				return fmt.Errorf("failed to chmod cowrie log/tty dir: %w", err)
+			if err := ensureContainerDir(ttyDir, 0777); err != nil {
+				return fmt.Errorf("failed to prepare cowrie log/tty dir: %w", err)
 			}
 		}
 
