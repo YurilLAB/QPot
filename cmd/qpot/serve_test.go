@@ -20,6 +20,26 @@ func TestHelperServeProcess(t *testing.T) {
 	time.Sleep(60 * time.Second)
 }
 
+// startServeHelper starts a stand-in `qpot serve -i <name>` and returns once
+// its command line shows: exec.Cmd.Start can return before the kernel has set
+// up the new program's arguments, and /proc/<pid>/cmdline reads empty until
+// then, so a check made straight away sees no control plane at all.
+func startServeHelper(t *testing.T, name string) *exec.Cmd {
+	t.Helper()
+	c := exec.Command(os.Args[0], "-test.run=^TestHelperServeProcess$", "--", "serve", "-i", name)
+	c.Env = append(os.Environ(), "QPOT_HELPER_SERVE=1")
+	if err := c.Start(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = c.Process.Kill(); _ = c.Wait() })
+	for deadline := time.Now().Add(10 * time.Second); !isServeProcess(c.Process.Pid, name); time.Sleep(5 * time.Millisecond) {
+		if time.Now().After(deadline) {
+			t.Fatal("the helper process never showed its command line")
+		}
+	}
+	return c
+}
+
 // TestStalePIDFileDoesNotNameANewerProcess: a pid file left by a control plane
 // that crashed (or by a reboot) can name a PID the OS has since given to an
 // unrelated program. On Windows the pid file was trusted as is, so `qpot down`
@@ -36,12 +56,7 @@ func TestStalePIDFileDoesNotNameANewerProcess(t *testing.T) {
 	pidPath := servePIDPath(cfg)
 
 	// An unrelated program that happens to have the recorded PID.
-	other := exec.Command(os.Args[0], "-test.run=^TestHelperServeProcess$", "--", "serve", "-i", "stale-pid")
-	other.Env = append(os.Environ(), "QPOT_HELPER_SERVE=1")
-	if err := other.Start(); err != nil {
-		t.Fatal(err)
-	}
-	defer func() { _ = other.Process.Kill(); _ = other.Wait() }()
+	other := startServeHelper(t, "stale-pid")
 	if err := writeServePID(pidPath, other.Process.Pid); err != nil {
 		t.Fatal(err)
 	}
@@ -83,12 +98,7 @@ func TestServeRefusesSecondControlPlane(t *testing.T) {
 	}
 
 	// ...and is registered in the pid file.
-	first := exec.Command(os.Args[0], "-test.run=^TestHelperServeProcess$", "--", "serve", "-i", name)
-	first.Env = append(os.Environ(), "QPOT_HELPER_SERVE=1")
-	if err := first.Start(); err != nil {
-		t.Fatal(err)
-	}
-	defer func() { _ = first.Process.Kill(); _ = first.Wait() }()
+	first := startServeHelper(t, name)
 	pidPath := servePIDPath(cfg)
 	if err := writeServePID(pidPath, first.Process.Pid); err != nil {
 		t.Fatal(err)
