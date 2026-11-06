@@ -46,35 +46,85 @@ func TestLimiterLogRejectionBudgets(t *testing.T) {
 	l := newLimiter(1, 1, 1, 0)
 	now := time.Unix(1000, 0)
 	l.now = func() time.Time { return now }
+	logged := func(ip string) bool {
+		ok, _ := l.logRejection(ip)
+		return ok
+	}
 
 	// One source: the first rejection in a second is logged, repeats are not.
-	if !l.logRejection("203.0.113.5") {
+	if !logged("203.0.113.5") {
 		t.Fatal("first rejection not logged")
 	}
 	for i := 0; i < 50; i++ {
-		if l.logRejection("203.0.113.5") {
+		if logged("203.0.113.5") {
 			t.Fatalf("repeat %d within the second was logged", i)
 		}
 	}
 	// The same /64 is the same source.
-	if !l.logRejection("2001:db8::1") || l.logRejection("2001:db8::2") {
+	if !logged("2001:db8::1") || logged("2001:db8::2") {
 		t.Fatal("IPv6 rejections not thinned per /64")
 	}
 	now = now.Add(rejectLogEvery)
-	if !l.logRejection("203.0.113.5") {
+	if !logged("203.0.113.5") {
 		t.Fatal("rejection a second later not logged")
 	}
 
 	// Many sources at once: at most rejectLogRate a second overall.
 	now = now.Add(10 * time.Second)
-	logged := 0
+	count := 0
 	for i := 0; i < 1000; i++ {
-		if l.logRejection(fmt.Sprintf("10.0.%d.%d", i>>8, i&255)) {
-			logged++
+		if logged(fmt.Sprintf("10.0.%d.%d", i>>8, i&255)) {
+			count++
 		}
 	}
-	if logged != rejectLogRate {
-		t.Fatalf("%d of 1000 distinct sources logged in one instant, want %d", logged, rejectLogRate)
+	if count != rejectLogRate {
+		t.Fatalf("%d of 1000 distinct sources logged in one instant, want %d", count, rejectLogRate)
+	}
+}
+
+// TestLimiterCountsSuppressedRejections: a rejection the budget thins out is
+// not lost from the record. Each one is counted in exactly one later report:
+// the next logged rejection, or the summary the broker's sweep takes.
+func TestLimiterCountsSuppressedRejections(t *testing.T) {
+	l := newLimiter(1, 1, 1, 0)
+	now := time.Unix(1000, 0)
+	l.now = func() time.Time { return now }
+	var total, logged, reported int64
+	reject := func(ip string) {
+		total++
+		if ok, n := l.logRejection(ip); ok {
+			logged++
+			reported += n
+		}
+	}
+
+	reject("203.0.113.5")
+	for i := 0; i < 7; i++ {
+		reject("203.0.113.5") // thinned per source
+	}
+	for i := 0; i < 300; i++ {
+		reject(fmt.Sprintf("10.1.%d.%d", i>>8, i&255)) // past the overall budget
+	}
+	if logged == total {
+		t.Fatal("nothing was thinned; the test does not exercise suppression")
+	}
+	// The first rejection after the budget refills carries the count.
+	now = now.Add(rejectLogEvery)
+	before := reported
+	reject("198.51.100.7")
+	if reported-before == 0 {
+		t.Fatal("the next logged rejection does not carry the thinned ones")
+	}
+	// Thinned ones with no logged rejection after them go to the summary.
+	for i := 0; i < 5; i++ {
+		reject("198.51.100.7")
+	}
+	reported += l.takeSuppressed()
+	if logged+reported != total {
+		t.Fatalf("%d rejections: %d logged + %d reported as suppressed", total, logged, reported)
+	}
+	if n := l.takeSuppressed(); n != 0 {
+		t.Fatalf("summary reported %d twice", n)
 	}
 }
 

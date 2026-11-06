@@ -52,6 +52,9 @@ type Event struct {
 	BytesOut   int64  `json:"bytes_out,omitempty"`   // backend -> attacker bytes
 	DurationMs int64  `json:"duration_ms,omitempty"` // wall-clock session length
 	Reason     string `json:"reason,omitempty"`      // why a connection was rejected/closed
+	// Suppressed counts the rejections not logged (thinned) since the previous
+	// rejection line, so a flood that exhausts the log budget is still recorded.
+	Suppressed int64 `json:"suppressed,omitempty"`
 }
 
 // Event type constants. These are stable strings the analytics layer keys on.
@@ -69,14 +72,17 @@ const (
 // Reasons a connection is rejected or torn down. Kept as constants so dashboards
 // can group on them without matching free-form text.
 const (
-	ReasonRateLimited      = "rate_limited"
-	ReasonGlobalCap        = "max_concurrent_reached"
-	ReasonPerIPCap         = "max_concurrent_per_ip_reached"
-	ReasonPoolExhausted    = "no_backend_available"
-	ReasonBackendDialError = "backend_dial_failed"
-	ReasonIdleTimeout      = "idle_timeout"
-	ReasonSessionTimeout   = "max_session_reached"
-	ReasonClosed           = "closed"
+	// ReasonRejectionsSuppressed marks a summary line: Suppressed rejections
+	// were thinned out of the log since the last rejection line.
+	ReasonRejectionsSuppressed = "rejections_suppressed"
+	ReasonRateLimited          = "rate_limited"
+	ReasonGlobalCap            = "max_concurrent_reached"
+	ReasonPerIPCap             = "max_concurrent_per_ip_reached"
+	ReasonPoolExhausted        = "no_backend_available"
+	ReasonBackendDialError     = "backend_dial_failed"
+	ReasonIdleTimeout          = "idle_timeout"
+	ReasonSessionTimeout       = "max_session_reached"
+	ReasonClosed               = "closed"
 )
 
 // EventSink receives Events. Implementations must be safe for concurrent use by

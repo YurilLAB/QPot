@@ -155,6 +155,13 @@ func (b *Broker) sweepLoop(ctx context.Context) {
 			return
 		case <-t.C:
 			b.lim.sweep()
+			// Rejections thinned out since the last logged one, when none
+			// followed to carry the count: one summary line (it has no
+			// source address, so it stays in the session log).
+			if n := b.lim.takeSuppressed(); n > 0 {
+				b.cfg.Sink.Emit(Event{EventType: EventRejected, Honeypot: b.cfg.Honeypot,
+					Reason: ReasonRejectionsSuppressed, Suppressed: n})
+			}
 		}
 	}
 }
@@ -174,10 +181,10 @@ func (b *Broker) handle(ctx context.Context, client net.Conn) {
 	// Rejections are thinned (see limiter.logRejection) so a flood the limits
 	// turn away does not become a log and database flood.
 	reject := func(reason string) {
-		if b.lim.logRejection(ip) {
+		if log, suppressed := b.lim.logRejection(ip); log {
 			b.cfg.Sink.Emit(Event{
 				EventType: EventRejected, Honeypot: b.cfg.Honeypot,
-				SrcIP: ip, SrcPort: port, Reason: reason,
+				SrcIP: ip, SrcPort: port, Reason: reason, Suppressed: suppressed,
 			})
 		}
 	}

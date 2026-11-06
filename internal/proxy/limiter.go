@@ -59,8 +59,9 @@ type limiter struct {
 	global int
 	ips    map[string]*ipState
 
-	rejectTokens float64   // overall budget for logging rejections
-	rejectLast   time.Time // last refill of rejectTokens
+	rejectTokens     float64   // overall budget for logging rejections
+	rejectLast       time.Time // last refill of rejectTokens
+	rejectSuppressed int64     // rejections not logged since the last one that was
 
 	now func() time.Time // injectable clock for deterministic tests
 }
@@ -84,8 +85,10 @@ const (
 // should be written to the session log. Each logged rejection is a log line
 // and, after ingestion, a database row, while it costs the sender only a TCP
 // handshake; logging all of them let a flood the limits rejected fill the
-// disk anyway.
-func (l *limiter) logRejection(ip string) bool {
+// disk anyway. The ones it thins out are counted: a logged rejection carries
+// the number dropped since the previous one (suppressed), so a flood that
+// exhausts the budget is still on record.
+func (l *limiter) logRejection(ip string) (log bool, suppressed int64) {
 	key := sourceKey(ip)
 
 	l.mu.Lock()
@@ -101,7 +104,8 @@ func (l *limiter) logRejection(ip string) bool {
 		l.ips[key] = st
 	}
 	if !st.lastReject.IsZero() && now.Sub(st.lastReject) < rejectLogEvery {
-		return false
+		l.rejectSuppressed++
+		return false, 0
 	}
 	if el := now.Sub(l.rejectLast); el > 0 {
 		l.rejectTokens += el.Seconds() * rejectLogRate
@@ -111,11 +115,23 @@ func (l *limiter) logRejection(ip string) bool {
 		l.rejectLast = now
 	}
 	if l.rejectTokens < 1 {
-		return false
+		l.rejectSuppressed++
+		return false, 0
 	}
 	l.rejectTokens--
 	st.lastReject = now
-	return true
+	suppressed, l.rejectSuppressed = l.rejectSuppressed, 0
+	return true, suppressed
+}
+
+// takeSuppressed returns, and clears, the rejections thinned out of the log
+// since the last logged one, for a summary line when no rejection follows.
+func (l *limiter) takeSuppressed() int64 {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	n := l.rejectSuppressed
+	l.rejectSuppressed = 0
+	return n
 }
 
 func newLimiter(ratePerSec, burst float64, perIPMax, globalMax int) *limiter {
