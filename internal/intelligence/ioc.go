@@ -45,11 +45,55 @@ var (
 	// bare-40-hex SHA-1 matcher, whose \b never fires after the "x").
 	reBTC = regexp.MustCompile(`\b[13][a-km-zA-HJ-NP-Z1-9]{25,34}\b`)
 	reETH = regexp.MustCompile(`\b0x[0-9a-fA-F]{40}\b`)
-	// reDomain must accept every scheme reURL does (incl. ftp), otherwise
-	// ftp:// downloads — a common ingress-tool-transfer pattern — yield a URL
-	// IOC but never a domain IOC.
-	reDomain = regexp.MustCompile(`(?i)(?:https?|ftp)://([a-z0-9](?:[a-z0-9\-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9\-]{0,61}[a-z0-9])?)+)`)
+	// reHostname is a DNS name with at least one dot, as found in a URL host.
+	reHostname = regexp.MustCompile(`^[a-z0-9](?:[a-z0-9\-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9\-]{0,61}[a-z0-9])?)+$`)
 )
+
+// urlHost returns the lower-cased host a URL found by reURL connects to, or
+// "". The authority is split the way curl, wget and browsers do: it ends at
+// the first '/', '?', '#' or '\', everything up to the last '@' is userinfo,
+// then comes the host and an optional port, with an IPv6 literal in brackets.
+// In "http://cdn.example.com@203.0.113.9/x" the host is 203.0.113.9.
+func urlHost(u string) string {
+	i := strings.Index(u, "://")
+	if i < 0 {
+		return ""
+	}
+	auth := u[i+3:]
+	if j := strings.IndexAny(auth, `/?#\`); j >= 0 {
+		auth = auth[:j]
+	}
+	if j := strings.LastIndexByte(auth, '@'); j >= 0 {
+		auth = auth[j+1:]
+	}
+	host := auth
+	if strings.HasPrefix(host, "[") {
+		j := strings.IndexByte(host, ']')
+		if j < 0 {
+			return ""
+		}
+		host = host[1:j]
+	} else if j := strings.LastIndexByte(host, ':'); j >= 0 {
+		host = host[:j]
+	}
+	return strings.TrimSuffix(strings.ToLower(host), ".")
+}
+
+// hostIOC classifies a URL host as an IOC: (IOCTypeIP, address) for a public
+// IP literal, (IOCTypeDomain, name) for a DNS name, or ("", "") for anything
+// else (no host, a private or loopback address, an invalid name).
+func hostIOC(host string) (string, string) {
+	if ip := net.ParseIP(host); ip != nil {
+		if isPrivateIP(host) {
+			return "", ""
+		}
+		return IOCTypeIP, ip.String()
+	}
+	if reHostname.MatchString(host) {
+		return IOCTypeDomain, host
+	}
+	return "", ""
+}
 
 // urlTrailingCutset is stripped from the end of a URL extracted from a command
 // line. The greedy [^\s"']+ class otherwise swallows trailing shell
@@ -222,21 +266,12 @@ func (e *Extractor) Extract(event *database.Event) []*database.IOC {
 			}
 			iocs = append(iocs, makeIOC(IOCTypeURL, u))
 
-			// Extract the host from the URL. reDomain's character class also
-			// matches dotted-decimal IPv4 literals (e.g. http://203.0.113.9/x),
-			// so an IP-literal host would otherwise be mistyped as a domain.
-			// Classify it as an IP IOC instead - that is what it is, and it
-			// keeps the blocklist/correlation by-type correct.
-			if matches := reDomain.FindStringSubmatch(u); len(matches) > 1 {
-				host := strings.ToLower(matches[1])
-				if net.ParseIP(host) != nil {
-					// A loopback/private/unspecified literal is not an indicator.
-					if !isPrivateIP(host) {
-						iocs = append(iocs, makeIOC(IOCTypeIP, host))
-					}
-				} else {
-					iocs = append(iocs, makeIOC(IOCTypeDomain, host))
-				}
+			// The host the URL connects to: an IP literal (e.g.
+			// http://203.0.113.9/x) is an IP IOC, not a domain, which keeps the
+			// blocklist/correlation by-type correct; a loopback/private literal
+			// is not an indicator at all.
+			if typ, v := hostIOC(urlHost(u)); typ != "" {
+				iocs = append(iocs, makeIOC(typ, v))
 			}
 		}
 	}

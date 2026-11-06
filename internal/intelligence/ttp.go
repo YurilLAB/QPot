@@ -162,8 +162,8 @@ func updateState(s *sessionState, event *database.Event) {
 	// Tool signatures: domains from URLs in command + user agents
 	if event.Command != "" {
 		for _, u := range reURL.FindAllString(event.Command, -1) {
-			if matches := reDomain.FindStringSubmatch(u); len(matches) > 1 {
-				s.tools[strings.ToLower(matches[1])] = true
+			if h := toolHost(u); h != "" {
+				s.tools[h] = true
 			}
 		}
 	}
@@ -197,6 +197,16 @@ func rebuildSession(s *sessionState) {
 	s.session.Confidence = conf
 }
 
+// toolHost is the download host of a URL as a tool signature: the host it
+// really connects to (see urlHost) when that is an IP or a DNS name, else "".
+func toolHost(u string) string {
+	h := urlHost(u)
+	if net.ParseIP(h) != nil || reHostname.MatchString(h) {
+		return h
+	}
+	return ""
+}
+
 // campaignFingerprint generates a stable fingerprint for grouping sessions.
 // It is based on tool signatures + command stems. Falls back to source IP
 // for pure brute-forcers that have neither.
@@ -206,8 +216,8 @@ func campaignFingerprint(event *database.Event) string {
 
 	if event.Command != "" {
 		for _, u := range reURL.FindAllString(event.Command, -1) {
-			if matches := reDomain.FindStringSubmatch(u); len(matches) > 1 {
-				tools = append(tools, strings.ToLower(matches[1]))
+			if h := toolHost(u); h != "" {
+				tools = append(tools, h)
 			}
 		}
 		parts := strings.Fields(event.Command)

