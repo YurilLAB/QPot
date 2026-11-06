@@ -69,7 +69,12 @@ func NewStore(dataPath string, maxTrips int) (*Store, error) {
 		}
 		s.index(c)
 	}
-	s.trips = p.Trips
+	// Skip null entries as for canaries: every reader dereferences trips.
+	for _, t := range p.Trips {
+		if t != nil {
+			s.trips = append(s.trips, t)
+		}
+	}
 	s.capTripsLocked()
 	return s, nil
 }
