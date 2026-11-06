@@ -2345,11 +2345,18 @@ func newCanaryArtifactCommand() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			dest := out
+			dest, write := out, os.WriteFile
 			if dest == "" {
 				dest = artifactFileName(resp.Header.Get("Content-Disposition"), args[0]+".html")
+				write = func(name string, data []byte, _ os.FileMode) error {
+					err := writeNewFile(name, data)
+					if errors.Is(err, os.ErrExist) {
+						return fmt.Errorf("%s already exists; choose a file with -o", name)
+					}
+					return err
+				}
 			}
-			if err := os.WriteFile(dest, data, 0o600); err != nil {
+			if err := write(dest, data, 0o600); err != nil {
 				return fmt.Errorf("write artifact: %w", err)
 			}
 			fmt.Printf("[OK] Wrote %s (%d bytes). Plant it where an intruder would look.\n", dest, len(data))
@@ -2364,7 +2371,10 @@ func newCanaryArtifactCommand() *cobra.Command {
 // artifactFileName is the file name the server suggests in a
 // Content-Disposition header, reduced to a plain name in the working
 // directory, or fallback when there is no usable one. The response comes from
-// whatever answers on the web UI port, so its name is never used as a path.
+// whatever answers on the web UI port, so its name is never used as a path,
+// and only a name of the shape QPot gives (letters, digits, '-', '_' and '.',
+// as in "Q4-salaries.html") is taken: never a hidden file such as .bashrc, and
+// never a name Windows reads as a device (CON, NUL, COM1, ...).
 func artifactFileName(contentDisposition, fallback string) string {
 	_, params, err := mime.ParseMediaType(contentDisposition)
 	if err != nil {
@@ -2374,11 +2384,33 @@ func artifactFileName(contentDisposition, fallback string) string {
 	if i := strings.LastIndexAny(name, `/\`); i >= 0 {
 		name = name[i+1:]
 	}
-	name = strings.TrimSpace(name)
-	if name == "" || name == "." || name == ".." || strings.ContainsAny(name, ":\x00") {
+	if !artifactNamePattern.MatchString(name) || strings.HasSuffix(name, ".") {
+		return fallback
+	}
+	stem, _, _ := strings.Cut(strings.ToUpper(name), ".")
+	if windowsDeviceName.MatchString(stem) {
 		return fallback
 	}
 	return name
+}
+
+var (
+	artifactNamePattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$`)
+	windowsDeviceName   = regexp.MustCompile(`^(CON|PRN|AUX|NUL|COM[0-9]|LPT[0-9])$`)
+)
+
+// writeNewFile writes data to a file that must not exist yet, so a name the
+// server suggested never replaces one of the user's files.
+func writeNewFile(name string, data []byte) error {
+	f, err := os.OpenFile(name, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	if err != nil {
+		return err
+	}
+	if _, err := f.Write(data); err != nil {
+		f.Close()
+		return err
+	}
+	return f.Close()
 }
 
 func newCanaryRemoveCommand() *cobra.Command {

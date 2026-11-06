@@ -50,13 +50,72 @@ func FuzzArtifactFileName(f *testing.F) {
 		if got == fallback {
 			return
 		}
-		if got == "" || got == "." || got == ".." || strings.ContainsAny(got, "/\\:\x00") {
+		if got == "" || got == "." || got == ".." || strings.ContainsAny(got, "/\\:\x00") ||
+			!artifactNamePattern.MatchString(got) || strings.HasPrefix(got, ".") {
 			t.Fatalf("artifactFileName(%q) = %q", cd, got)
 		}
 		if filepath.Base(got) != got || filepath.IsAbs(got) {
 			t.Fatalf("artifactFileName(%q) = %q is not a plain name", cd, got)
 		}
 	})
+}
+
+// TestArtifactFileNameShape: the server's name is taken only in the shape QPot
+// gives it; a hidden file, a device name Windows would open instead of a file,
+// or anything else falls back to the canary's own name.
+func TestArtifactFileNameShape(t *testing.T) {
+	const fallback = "cnry_x.html"
+	for cd, want := range map[string]string{
+		`attachment; filename="Q4-salaries.html"`:  "Q4-salaries.html",
+		`attachment; filename="document.html"`:     "document.html",
+		`attachment; filename=".bashrc"`:           fallback,
+		`attachment; filename="../.profile"`:       fallback,
+		`attachment; filename="CON.html"`:          fallback,
+		`attachment; filename="nul"`:               fallback,
+		`attachment; filename="com1.txt"`:          fallback,
+		`attachment; filename="report.html."`:      fallback,
+		`attachment; filename="report .html"`:      fallback,
+		`attachment; filename="a\x1b]52;c;x.html"`: fallback,
+		`attachment; filename="CONSOLE.html"`:      "CONSOLE.html",
+	} {
+		if got := artifactFileName(cd, fallback); got != want {
+			t.Errorf("artifactFileName(%s) = %q, want %q", cd, got, want)
+		}
+	}
+}
+
+// TestCanaryArtifactKeepsExistingFile: a name the server suggests never
+// replaces a file already in the working directory; -o still may.
+func TestCanaryArtifactKeepsExistingFile(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Disposition", `attachment; filename="notes.html"`)
+		_, _ = w.Write([]byte("<html>bait</html>"))
+	}))
+	defer ts.Close()
+	name := canaryCLIInstance(t, ts)
+	work := t.TempDir()
+	t.Chdir(work)
+	if err := os.WriteFile("notes.html", []byte("mine"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	cmd := newCanaryArtifactCommand()
+	cmd.SetArgs([]string{"cnry_0123456789abcdef01234567", "-i", name})
+	if err := cmd.Execute(); err == nil || !strings.Contains(err.Error(), "-o") {
+		t.Fatalf("overwriting an existing file: err = %v", err)
+	}
+	if got, _ := os.ReadFile("notes.html"); string(got) != "mine" {
+		t.Fatalf("existing file now holds %q", got)
+	}
+
+	cmd = newCanaryArtifactCommand()
+	cmd.SetArgs([]string{"cnry_0123456789abcdef01234567", "-i", name, "-o", "notes.html"})
+	if err := cmd.Execute(); err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := os.ReadFile("notes.html"); string(got) != "<html>bait</html>" {
+		t.Fatalf("-o did not replace the file: %q", got)
+	}
 }
 
 // TestCanaryArtifactStaysInWorkingDir: `qpot canary artifact` named the output
