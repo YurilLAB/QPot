@@ -1280,10 +1280,18 @@ func clusterAPIRequest(method, path, password string, body []byte) ([]byte, int,
 		return nil, 0, fmt.Errorf("wrong cluster password")
 	}
 	port := cluster.DefaultClusterPort
-	if c.Config != nil && c.Config.BindPort != 0 {
-		port = c.Config.BindPort
+	host := "127.0.0.1"
+	if c.Config != nil {
+		if c.Config.BindPort != 0 {
+			port = c.Config.BindPort
+		}
+		// A cluster bound to one address listens only there.
+		bind := strings.Trim(c.Config.BindAddr, "[]")
+		if ip := net.ParseIP(bind); bind != "" && (ip == nil || !ip.IsUnspecified()) {
+			host = bind
+		}
 	}
-	base := fmt.Sprintf("%s://127.0.0.1:%d/api/v1/cluster", mgr.APIScheme(), port)
+	base := fmt.Sprintf("%s://%s/api/v1/cluster", mgr.APIScheme(), net.JoinHostPort(host, strconv.Itoa(port)))
 	var rdr io.Reader
 	if body != nil {
 		rdr = bytes.NewReader(body)

@@ -2,6 +2,7 @@ package cluster
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"net"
 	"net/http"
@@ -237,6 +238,38 @@ func TestRestartDoesNotShareLoopState(t *testing.T) {
 	time.Sleep(500 * time.Millisecond) // the stopped rounds finish
 	if g, s := loopGoroutines("(*Manager).gossipLoop"), loopGoroutines("(*Manager).syncLoop"); g != 1 || s != 1 {
 		t.Fatalf("after restarts: %d gossip loops and %d sync loops running, want 1 each", g, s)
+	}
+}
+
+// TestHostOnlyAcceptsOwnAddressOnly: the host check admits loopback and a
+// connection from this host's own address (a cluster bound to one address),
+// never another machine on the same network.
+func TestHostOnlyAcceptsOwnAddressOnly(t *testing.T) {
+	cases := []struct {
+		remote, local string
+		want          bool
+	}{
+		{"127.0.0.1:5000", "127.0.0.1:7946", true},
+		{"[::1]:5000", "[::1]:7946", true},
+		{"10.0.0.5:5000", "10.0.0.5:7946", true},
+		{"10.0.0.6:5000", "10.0.0.5:7946", false},
+		{"192.0.2.1:5000", "", false},
+		{"0.0.0.0:5000", "0.0.0.0:7946", false},
+		{"garbage", "10.0.0.5:7946", false},
+	}
+	for _, c := range cases {
+		r := httptest.NewRequest(http.MethodGet, "/api/v1/cluster/pending", nil)
+		r.RemoteAddr = c.remote
+		if c.local != "" {
+			la, err := net.ResolveTCPAddr("tcp", c.local)
+			if err != nil {
+				t.Fatal(err)
+			}
+			r = r.WithContext(context.WithValue(r.Context(), http.LocalAddrContextKey, net.Addr(la)))
+		}
+		if got := fromThisHost(r); got != c.want {
+			t.Errorf("remote %s, local %s: fromThisHost = %v, want %v", c.remote, c.local, got, c.want)
+		}
 	}
 }
 

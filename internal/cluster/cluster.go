@@ -1056,14 +1056,35 @@ func (m *Manager) withClusterAuth(next http.HandlerFunc) http.HandlerFunc {
 // (`qpot cluster requests/approve/deny`) always connects over loopback.
 func withHostOnly(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		host, _, err := net.SplitHostPort(r.RemoteAddr)
-		ip := net.ParseIP(host)
-		if err != nil || ip == nil || !ip.IsLoopback() {
+		if !fromThisHost(r) {
 			http.Error(w, "Forbidden: host operation", http.StatusForbidden)
 			return
 		}
 		next(w, r)
 	}
+}
+
+// fromThisHost reports whether r came from this machine: over loopback, or,
+// for a cluster bound to one non-loopback address, from that same address
+// (the CLI then has to dial it). A TCP connection whose peer address is our
+// own address was opened here: a remote host cannot complete a handshake
+// with a source address whose replies are delivered to us.
+func fromThisHost(r *http.Request) bool {
+	host, _, err := net.SplitHostPort(r.RemoteAddr)
+	ip := net.ParseIP(host)
+	if err != nil || ip == nil {
+		return false
+	}
+	if ip.IsLoopback() {
+		return true
+	}
+	local, ok := r.Context().Value(http.LocalAddrContextKey).(net.Addr)
+	if !ok {
+		return false
+	}
+	lhost, _, err := net.SplitHostPort(local.String())
+	lip := net.ParseIP(lhost)
+	return err == nil && lip != nil && !lip.IsUnspecified() && lip.Equal(ip)
 }
 
 // apiHandler builds the cluster API routes.

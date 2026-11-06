@@ -3,6 +3,7 @@ package main
 import (
 	"io"
 	"net"
+	"net/http"
 	"os"
 	"path/filepath"
 	"testing"
@@ -21,6 +22,42 @@ func clusterHome(t *testing.T) string {
 		t.Fatal(err)
 	}
 	return dir
+}
+
+// TestClusterApprovalWorksWithSpecificBindAddr: `qpot cluster init
+// --bind-addr 192.168.1.10` (the documented example) bound the cluster API to
+// that address only, but `qpot cluster requests/approve/deny` always dialled
+// 127.0.0.1, and the host-only check accepted nothing but loopback peers. With
+// approval on (the default) no node could ever be admitted.
+func TestClusterApprovalWorksWithSpecificBindAddr(t *testing.T) {
+	ip := getLocalIP()
+	if ip == "127.0.0.1" {
+		t.Skip("no non-loopback IPv4 address")
+	}
+	dir := clusterHome(t)
+	ln, err := net.Listen("tcp", net.JoinHostPort(ip, "0"))
+	if err != nil {
+		t.Skip("cannot listen on " + ip)
+	}
+	port := ln.Addr().(*net.TCPAddr).Port
+	ln.Close()
+
+	const pw = "correct-horse-battery"
+	host := cluster.NewManager(dir)
+	cfg := cluster.DefaultClusterConfig()
+	cfg.BindAddr, cfg.AdvertiseAddr, cfg.BindPort = ip, ip, port
+	if _, err := host.InitCluster("prod", pw, cfg); err != nil {
+		t.Fatal(err)
+	}
+	if err := host.Start(); err != nil {
+		t.Fatal(err)
+	}
+	defer host.Stop()
+
+	out, code, err := clusterAPIRequest(http.MethodGet, "/pending", pw, nil)
+	if err != nil || code != http.StatusOK {
+		t.Fatalf("cluster requests on a cluster bound to %s: code %d, err %v, body %s", ip, code, err, out)
+	}
 }
 
 // TestClusterInitAdvertisesReachableAddress: with the default --bind-addr
