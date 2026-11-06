@@ -750,27 +750,22 @@ func (s *Server) handleHoneypots(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet:
 		// List honeypots. Snapshot under the config lock so we never range the
-		// live map while a concurrent POST enables/disables a honeypot.
-		var list []map[string]interface{}
-		for name, hp := range s.config.SnapshotHoneypots() {
-			// Check if running
-			running := false
-			if s.manager != nil {
-				status, _ := s.manager.Status(ctx)
-				if status != nil {
-					for _, h := range status.Honeypots {
-						if h.Name == name {
-							running = h.Running
-							break
-						}
-					}
+		// live map while a concurrent POST enables/disables a honeypot. The
+		// instance status (two docker runs) is fetched once, not per honeypot.
+		running := map[string]bool{}
+		if s.manager != nil {
+			if status, _ := s.manager.Status(ctx); status != nil {
+				for _, h := range status.Honeypots {
+					running[h.Name] = h.Running
 				}
 			}
-
+		}
+		var list []map[string]interface{}
+		for name, hp := range s.config.SnapshotHoneypots() {
 			list = append(list, map[string]interface{}{
 				"name":    name,
 				"enabled": hp.Enabled,
-				"running": running,
+				"running": running[name],
 				"port":    hp.Port,
 				"risk":    hp.RiskLevel,
 			})
