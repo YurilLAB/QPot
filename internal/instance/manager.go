@@ -600,19 +600,14 @@ func (m *Manager) generateServiceConfigs() error {
 		return fmt.Errorf("failed to write vector.yaml: %w", err)
 	}
 
-	// Per-honeypot TPOT configs. Honeypots without a specific config simply
-	// return an empty set and write nothing.
+	// Per-honeypot data dirs. The images render their own configs (cowrie
+	// from its persona, conpot from its template), so QPot writes none.
 	for name, hp := range m.config.Honeypots {
 		if !hp.Enabled {
 			continue
 		}
-		cfgs, err := generator.GenerateTPOTConfig(name)
-		if err != nil {
-			return fmt.Errorf("failed to generate config for honeypot %q: %w", name, err)
-		}
-		prof := deployProfileFor(name)
+		prof := deployProfile(m.config, name)
 		hpDir := filepath.Join(m.config.DataPath, "honeypots", name)
-		cfgDir := hpDir
 		// Ensure all profile volume subdirs (and the config dir) exist so the
 		// bind mounts resolve to real directories. They must be writable by the
 		// honeypot's in-container non-root user (e.g. uid 2000), which is not
@@ -639,18 +634,8 @@ func (m *Manager) generateServiceConfigs() error {
 				return fmt.Errorf("failed to chmod %s dir for honeypot %q: %w", v.HostSubdir, name, err)
 			}
 		}
-		if err := os.MkdirAll(cfgDir, 0750); err != nil {
-			return fmt.Errorf("failed to create config dir for honeypot %q: %w", name, err)
-		}
-		for filename, content := range cfgs {
-			dest := filepath.Join(cfgDir, filename)
-			// World-readable (0644): these are decoy configs (cowrie.cfg,
-			// userdb.txt) with no real secrets, and the honeypot runs as a
-			// non-root user that must be able to read them — otherwise the
-			// honeypot silently falls back to its baked-in defaults.
-			if err := os.WriteFile(dest, []byte(content), 0644); err != nil {
-				return fmt.Errorf("failed to write %s for honeypot %q: %w", filename, name, err)
-			}
+		if err := os.MkdirAll(hpDir, 0750); err != nil {
+			return fmt.Errorf("failed to create data dir for honeypot %q: %w", name, err)
 		}
 
 		if name == "cowrie" {
@@ -895,7 +880,7 @@ func (m *Manager) prepareOwnership(ctx context.Context, name string) error {
 // HostProbePorts returns the published host TCP ports to probe for a honeypot
 // that has no in-container healthcheck (NoShell), else nil.
 func HostProbePorts(cfg *config.Config, name string) []int {
-	d := deployProfileFor(name)
+	d := deployProfile(cfg, name)
 	if !d.NoShell {
 		return nil
 	}

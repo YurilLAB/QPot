@@ -1,7 +1,5 @@
 package instance
 
-import "strings"
-
 // credentials.go provides realistic, per-instance login credential sets
 // ("personas") for the HiFi ssh-proxy's real-OpenSSH backends (BACKEND_USERS).
 //
@@ -367,24 +365,4 @@ func selectCredentialTemplate(explicit, seed string) credentialTemplate {
 var embeddedHardwarePersonas = map[string]bool{
 	"raspberry-pi": true, "iot-camera": true, "cctv-nvr": true,
 	"soho-router": true, "edge-router": true,
-}
-
-// sanitizeConfigValue strips control characters/newlines and caps length on a
-// value that will be interpolated into a single line of a generated config
-// (conpot.cfg). This prevents a stray newline in an operator-supplied or derived
-// string from injecting extra config directives.
-func sanitizeConfigValue(s string) string {
-	// Keep only printable ASCII. Control chars/newlines could inject config
-	// directives, and non-ASCII bytes abort cowrie's ASCII parse of
-	// cowrie.cfg/userdb.txt (silently disabling the whole file).
-	s = strings.Map(func(r rune) rune {
-		if r < 0x20 || r > 0x7e {
-			return -1
-		}
-		return r
-	}, s)
-	if len(s) > 128 {
-		s = s[:128]
-	}
-	return s
 }

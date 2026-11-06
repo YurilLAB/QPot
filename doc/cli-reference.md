@@ -256,6 +256,7 @@ start without a provider, so `enable` asks for these first:
 | `beelzebub` | `llm_provider` (`ollama` or `openai`), `llm_model`, `llm_host` | `llm_provider`, `llm_model` |
 | `galah` | `llm_provider`, `llm_server_url`, `llm_model`, `llm_temperature`, `llm_api_key`, `llm_cloud_location`, `llm_cloud_project` | `llm_provider`, `llm_model` |
 | `cowrie` | `persona` (one of the image's persona IDs), `persona_rotation` (days, 0-365) | – |
+| `conpot` | `template` (one of the image's deployed device templates) | – |
 | `ssh-proxy` | `backends` | – |
 
 ```bash
@@ -274,6 +275,29 @@ restarts:
 
 ```bash
 qpot honeypot set cowrie persona=centos-7 persona_rotation=365
+```
+
+Conpot emulates one device template of its image, picked per instance when
+`template` is unset, and publishes only that template's ports:
+
+| Template | Device | TCP | UDP |
+|----------|--------|-----|-----|
+| `IEC104` | Siemens S7-300 substation RTU (IEC 60870-5-104, DNP3, SNMP) | 2404, 20000 | 161 |
+| `guardian_ast` | Veeder-Root TLS-350 tank gauge | 10001 | – |
+| `ipmi` | Supermicro BMC (IPMI 2.0) | – | 623 |
+| `kamstrup_382` | Kamstrup 382 electricity meter | 1025, 50100 | – |
+| `beckhoff_cx` | Beckhoff CX5140 with TwinCAT 3 (ADS, OPC UA) | 4840, 48898 | 48899 |
+| `building_automation` | LOYTEC LINX-153 (BACnet/IP, KNXnet/IP) | – | 3671, 47808 |
+| `hart_gateway` | Emerson 1420 WirelessHART gateway (HART-IP) | 5094 | – |
+| `iccp` | SISCO ICCP / TASE.2 server | 102 | – |
+| `plc_modbus` | Schneider Modicon M340 (Modbus/TCP) | 502 | – |
+
+The image draws the device's address, MAC, serial numbers and PINs on first
+start and keeps them in the honeypot's `state` directory, so a restart does not
+turn it into a different unit:
+
+```bash
+qpot honeypot set conpot template=building_automation
 ```
 
 ---

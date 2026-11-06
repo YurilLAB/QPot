@@ -113,7 +113,7 @@ func (g *ComposeGenerator) buildHostPortMap() map[string]int {
 
 	assign := make(map[string]int)
 	for _, name := range names {
-		d := deployProfileFor(name)
+		d := deployProfile(g.Config, name)
 		ports := append(append([]int{}, d.Ports...), d.UDPPorts...)
 		if len(ports) == 0 {
 			ports = []int{g.Config.Honeypots[name].Port}
@@ -939,7 +939,7 @@ services:
 		"subnetFor":        subnetForNetwork,
 		"bridgeName":       bridgeName,
 		"macFor":           macForSeed,
-		"deployFor":        deployProfileFor,
+		"deployFor":        func(name string) honeypotDeploy { return deployProfile(g.Config, name) },
 		// listenCheck builds the container healthcheck command, probing the actual
 		// INTERNAL listen ports from the deploy profile (not the host/config port)
 		// via /proc/net so it needs no netstat/ss. See listenHealthCheck.
@@ -1763,68 +1763,6 @@ sinks:
 	}
 
 	return buf.String(), nil
-}
-
-// GenerateTPOTConfig generates TPOT-compatible configuration files
-func (g *ComposeGenerator) GenerateTPOTConfig(honeypot string) (map[string]string, error) {
-	configs := make(map[string]string)
-
-	hp, ok := g.Config.Honeypots[honeypot]
-	if !ok {
-		return configs, fmt.Errorf("honeypot not found: %s", honeypot)
-	}
-
-	// Only conpot takes a generated config file. Cowrie renders its own config
-	// from the persona QPot passes in its environment (see deception.go).
-	if honeypot == "conpot" {
-		configs["conpot.cfg"] = g.generateConpotConfig(hp)
-	}
-
-	return configs, nil
-}
-
-// generateConpotConfig generates TPOT-compatible Conpot config
-func (g *ComposeGenerator) generateConpotConfig(hp config.HoneypotConfig) string {
-	seed := deceptionSeed(g.Config)
-	// A per-instance, non-self-identifying sensor_id. The stock "qpot-conpot"
-	// both announced the platform and flagged the box as a honeypot; this looks
-	// like an ordinary industrial asset tag and is unique per deployment.
-	sensorID := sanitizeConfigValue(conpotSensorIDForSeed(seed))
-	return `[common]
- sensor_id = ` + sensorID + `
- device = default
-
-[session]
- timeout = 30
-
-[daemon]
-; local uids
- uid = 0
- gid = 0
-
-[json]
- enabled = true
- filename = conpot.json
- device = default
-
-[sqlite]
- enabled = false
-
-[syslog]
- enabled = false
- device = default
-
-[tfmt]
- device = default
-
-[taxii]
- enabled = false
- device = default
-
-[hibp]
- enabled = false
- api_key = 
-`
 }
 
 // TPotVersion is the T-Pot CE release whose honeypot images QPot runs. It is

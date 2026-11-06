@@ -11,8 +11,11 @@ package instance
 
 import (
 	"fmt"
+	"maps"
 	"slices"
 	"strings"
+
+	"github.com/qpot/qpot/internal/config"
 )
 
 // deployVolume maps a host path (under {DataPath}/honeypots/<name>) to a path
@@ -102,7 +105,25 @@ func (d honeypotDeploy) NeedsNetBind() bool {
 	return false
 }
 
-// deployProfileFor returns the deployment profile for a honeypot by name.
+// deployProfile returns the deployment profile of a honeypot in this instance:
+// deployProfileFor plus the parts that depend on the configuration. Conpot
+// runs the template conpotTemplate picks and publishes exactly the ports that
+// template listens on, no more: a published port with nothing behind it
+// accepts the connection and drops it, which no real device does.
+func deployProfile(cfg *config.Config, name string) honeypotDeploy {
+	d := deployProfileFor(name)
+	if name == "conpot" && cfg != nil {
+		t := conpotTemplate(cfg)
+		d.Ports = slices.Clone(t.TCP)
+		d.UDPPorts = slices.Clone(t.UDP)
+		d.Env = maps.Clone(d.Env)
+		d.Env["CONPOT_TEMPLATE"] = t.ID
+	}
+	return d
+}
+
+// deployProfileFor returns the configuration-independent deployment profile
+// for a honeypot by name; use deployProfile for what an instance runs.
 // Unknown honeypots get a generic profile (legacy behavior) so they are not
 // broken further, but the verified images (cowrie, endlessh) get correct specs.
 func deployProfileFor(name string) honeypotDeploy {
@@ -186,21 +207,28 @@ func deployProfileFor(name string) honeypotDeploy {
 			UDPPorts: []int{69, 5060},
 		}
 	case "conpot":
-		// conpot's CMD references CONPOT_* env vars; without them the entrypoint
-		// passes empty args (--mibcache <empty>) and crashes. The "default"
-		// template emulates a Siemens S7-200 over the ICS ports below.
+		// The image's CMD (tpot_templates.py render "$CONPOT_TEMPLATE") renders
+		// the template into CONPOT_TMP with the device identity it keeps in
+		// /var/lib/conpot, then starts conpot with the other CONPOT_* paths.
+		// Without a writable /var/lib/conpot it draws a new identity (address,
+		// MAC, serials) on every start. The template and its ports depend on
+		// the instance: deployProfile fills them in (see conpotTemplate).
+		// Verified by running ghcr.io/telekom-security/conpot:24.04.2 this way
+		// with each template.
 		return honeypotDeploy{
-			Tmpfs:    []string{"/tmp/conpot:uid=2000,gid=2000"},
-			Volumes:  []deployVolume{{HostSubdir: "logs", ContainerPath: "/var/log/conpot"}},
-			Ports:    []int{21, 80, 102, 1025, 2404, 10001, 44818, 50100},
-			UDPPorts: []int{69, 161, 623, 47808},
+			Tmpfs: []string{"/tmp/conpot:uid=2000,gid=2000"},
+			Volumes: []deployVolume{
+				{HostSubdir: "logs", ContainerPath: "/var/log/conpot"},
+				{HostSubdir: "state", ContainerPath: "/var/lib/conpot"},
+			},
 			Env: map[string]string{
 				"CONPOT_TMP":      "/tmp/conpot",
-				"CONPOT_TEMPLATE": "default",
 				"CONPOT_CONFIG":   "/etc/conpot/conpot.cfg",
 				"CONPOT_LOG":      "/var/log/conpot/conpot.log",
 				"CONPOT_JSON_LOG": "/var/log/conpot/conpot.json",
 			},
+			Settings: []string{"template"},
+			Values:   map[string][]string{"template": ConpotTemplateIDs()},
 		}
 	case "heralding":
 		return honeypotDeploy{

@@ -583,6 +583,13 @@ one, or set how many days (0-365, default 365) it keeps the identity it drew:
   qpot honeypot set cowrie persona=debian-bookworm
   qpot honeypot set cowrie persona_rotation=30
 
+Conpot emulates one of the Conpot image's devices, also picked per instance,
+and publishes only that device's ports. Pin one (IEC104, guardian_ast, ipmi,
+kamstrup_382, beckhoff_cx, building_automation, hart_gateway, iccp,
+plc_modbus):
+
+  qpot honeypot set conpot template=plc_modbus
+
 An empty value (key=) removes a setting. If the honeypot is enabled and the
 instance is running, it is recreated with the new settings.`,
 		Args: cobra.MinimumNArgs(2),

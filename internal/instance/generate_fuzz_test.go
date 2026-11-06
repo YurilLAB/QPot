@@ -9,7 +9,7 @@ import (
 )
 
 // FuzzGenerators feeds arbitrary values into the config fields that flow into
-// generated artifacts (compose YAML, vector.yaml, conpot.cfg) and asserts the
+// generated artifacts (compose YAML, vector.yaml) and asserts the
 // generators never panic. Config is operator-controlled, but odd
 // values (newlines, quotes, template metacharacters, huge strings) must not
 // crash generation or be silently dropped.
@@ -32,6 +32,9 @@ func FuzzGenerators(f *testing.F) {
 		hp.Stealth.BannerString = banner
 		hp.Stealth.FakeKernel = kernel
 		cfg.Honeypots["cowrie"] = hp
+		cp := cfg.Honeypots["conpot"]
+		cp.Enabled = true
+		cfg.Honeypots["conpot"] = cp
 
 		sb, err := security.NewSandbox(&cfg.Security)
 		if err != nil {
@@ -40,21 +43,17 @@ func FuzzGenerators(f *testing.F) {
 		g := &ComposeGenerator{Config: cfg, Sandbox: sb}
 
 		// None of these may panic on arbitrary string input.
-		if _, err := g.Generate(); err != nil {
-			// A template error is acceptable (returned, not panicked); just
-			// don't crash.
-			_ = err
+		out, err := g.Generate()
+		if err == nil {
+			// Whatever the instance identity, conpot runs one deployed
+			// template: the seed only chooses which.
+			svc := composeService(t, out, "conpot")
+			if n := strings.Count(svc, "- CONPOT_TEMPLATE="); n != 1 {
+				t.Errorf("conpot service has %d CONPOT_TEMPLATE lines, qpotID=%q", n, qpotID)
+			}
 		}
 		if _, err := g.GenerateVectorConfig(); err != nil {
 			_ = err
-		}
-		// conpot.cfg must keep exactly one sensor_id whatever the instance
-		// identity is: it is derived from the seed and interpolated into an
-		// INI line.
-		hpc := cfg.Honeypots["conpot"]
-		ccfg := g.generateConpotConfig(hpc)
-		if n := strings.Count(ccfg, "sensor_id ="); n != 1 {
-			t.Errorf("conpot.cfg has %d sensor_id lines, qpotID=%q", n, qpotID)
 		}
 	})
 }

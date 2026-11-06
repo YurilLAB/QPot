@@ -215,7 +215,7 @@ func TestAllHoneypotsHaveProfiles(t *testing.T) {
 		"heralding", "mailoney", "ddospot", "ciscoasa", "citrixhoneypot",
 		"elasticpot", "ipphoney", "medpot", "dicompot", "honeyaml",
 	} {
-		d := deployProfileFor(hp)
+		d := deployProfile(config.Default("profiles"), hp)
 		if len(d.Ports) == 0 && len(d.UDPPorts) == 0 {
 			t.Errorf("%s: profile exposes no ports", hp)
 		}
@@ -232,11 +232,25 @@ func TestAllHoneypotsHaveProfiles(t *testing.T) {
 }
 
 func TestConpotHasRequiredEnv(t *testing.T) {
-	d := deployProfileFor("conpot")
-	for _, k := range []string{"CONPOT_TEMPLATE", "CONPOT_CONFIG", "CONPOT_TMP", "CONPOT_LOG"} {
+	d := deployProfile(config.Default("conpot-env"), "conpot")
+	for _, k := range []string{"CONPOT_TEMPLATE", "CONPOT_CONFIG", "CONPOT_TMP", "CONPOT_LOG", "CONPOT_JSON_LOG"} {
 		if d.Env[k] == "" {
 			t.Errorf("conpot profile missing required env %q", k)
 		}
+	}
+	// The image keeps the device identity it draws in /var/lib/conpot; on the
+	// read-only root it would draw a new one on every start.
+	var state bool
+	for _, v := range d.Volumes {
+		state = state || (v.HostSubdir == "state" && v.ContainerPath == "/var/lib/conpot" && !v.ReadOnly)
+	}
+	if !state {
+		t.Errorf("conpot profile lacks a writable /var/lib/conpot volume: %+v", d.Volumes)
+	}
+	// The static profile must not carry a template: deployProfileFor callers
+	// would publish ports and run a device the instance does not run.
+	if s := deployProfileFor("conpot"); s.Env["CONPOT_TEMPLATE"] != "" || len(s.Ports)+len(s.UDPPorts) != 0 {
+		t.Errorf("static conpot profile carries a template: %+v", s)
 	}
 }
 
@@ -300,7 +314,7 @@ func TestEverySupportedHoneypotIsFullyWired(t *testing.T) {
 		if err := g.ValidateHoneypot(n); err != nil {
 			t.Errorf("%s: ValidateHoneypot: %v", n, err)
 		}
-		d := deployProfileFor(n)
+		d := deployProfile(cfg, n)
 		if len(d.Ports) == 0 && len(d.UDPPorts) == 0 {
 			t.Errorf("%s: deploy profile exposes no ports", n)
 		}

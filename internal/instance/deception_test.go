@@ -138,43 +138,6 @@ func TestCowrieRunsImagePersonaLauncher(t *testing.T) {
 	if n := strings.Count(out, "COWRIE_PERSONA="); n != 1 {
 		t.Errorf("COWRIE_PERSONA rendered %d times, want only on the cowrie service", n)
 	}
-	cfgs, err := (&ComposeGenerator{Config: cfg}).GenerateTPOTConfig("cowrie")
-	if err != nil || len(cfgs) != 0 {
-		t.Errorf("cowrie still gets generated config files: %v %v", cfgs, err)
-	}
-}
-
-// TestConpotSensorIDNonIdentifying guards that the Conpot sensor_id is
-// per-instance and never embeds a token that flags the box as QPot/T-Pot/a
-// honeypot (the stock value was the literal "qpot-conpot").
-func TestConpotSensorIDNonIdentifying(t *testing.T) {
-	a := conpotSensorIDForSeed("qp_aaaaaaaaaaaaaaaaaaaa1")
-	b := conpotSensorIDForSeed("qp_bbbbbbbbbbbbbbbbbbbb2")
-	if a == b {
-		t.Error("conpot sensor_id is not per-instance")
-	}
-	if a != conpotSensorIDForSeed("qp_aaaaaaaaaaaaaaaaaaaa1") {
-		t.Error("conpot sensor_id is not deterministic for a fixed seed")
-	}
-	for _, id := range []string{a, b} {
-		low := strings.ToLower(id)
-		for _, tell := range []string{"qpot", "conpot", "honeypot", "honey"} {
-			if strings.Contains(low, tell) {
-				t.Errorf("conpot sensor_id %q leaks self-identifying token %q", id, tell)
-			}
-		}
-	}
-	// And the generated conpot.cfg must carry it, not the old static value.
-	cfg := config.Default("conpot-id-test")
-	cfg.QPotID = "qp_conpotseed00000000001"
-	g := &ComposeGenerator{Config: cfg}
-	c := g.generateConpotConfig(cfg.Honeypots["conpot"])
-	if strings.Contains(c, "qpot-conpot") {
-		t.Error("conpot.cfg still contains the self-identifying sensor_id 'qpot-conpot'")
-	}
-	if !strings.Contains(c, conpotSensorIDForSeed(deceptionSeed(cfg))) {
-		t.Error("conpot.cfg does not contain the per-instance sensor_id")
-	}
 }
 
 // TestHostnamePersonaCoherence guards the "no persona/host mismatch" invariant:
@@ -312,9 +275,8 @@ func TestDeceptionSeedDoesNotExposeQPotID(t *testing.T) {
 	if deceptionSeed(other) == s {
 		t.Fatal("different QPot IDs share a deception seed")
 	}
-	g := &ComposeGenerator{Config: cfg}
 	for name, out := range map[string]string{
-		"conpot.cfg":   g.generateConpotConfig(cfg.Honeypots["conpot"]),
+		"conpot":       conpotTemplate(cfg).ID,
 		"ssh hostname": sshBackendHostname(cfg),
 		"ssh users":    sshBackendUsersCSV(cfg),
 		"persona":      cowriePersona(cfg),

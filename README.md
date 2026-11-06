@@ -159,6 +159,15 @@ gives each instance a distinct, self-consistent identity:
   instance and keeps the identity it draws (host name, patch level, boot time,
   addresses) for a year across restarts, so a returning attacker meets the same
   box. Pin one with `qpot honeypot set cowrie persona=<id>`.
+- **Conpot devices** – conpot emulates one of the T-Pot conpot image's devices
+  (a Siemens substation RTU on IEC 104/DNP3/SNMP, a Veeder-Root tank gauge, a
+  Supermicro BMC, a Kamstrup meter, a Beckhoff PLC on ADS/OPC UA, a LOYTEC
+  building controller on BACnet/KNX, an Emerson HART gateway, an ICCP server or
+  a Modicon PLC on Modbus), picked per instance. It publishes only that
+  device's ports, and the address, MAC, serials and PINs the image draws for it
+  are kept across restarts. The image's multi-protocol `default` template, the
+  same on every install, is never used. Pin one with
+  `qpot honeypot set conpot template=<id>`.
 - **HiFi credential personas** – the real-OpenSSH backends of HiFi mode accept a
   persona's believable weak passwords (30 personas: corporate Ubuntu, DB
   server, Proxmox host, …) under a matching host name. Pin one with the
@@ -179,6 +188,7 @@ network, and each backend is recreated after every session. Enable it with
 ```bash
 qpot honeypot set cowrie persona=debian-bookworm   # optional; picked per instance if unset
 qpot honeypot set cowrie persona_rotation=30       # days to keep the drawn identity (0-365, default 365)
+qpot honeypot set conpot template=plc_modbus       # optional; picked per instance if unset
 ```
 
 ---

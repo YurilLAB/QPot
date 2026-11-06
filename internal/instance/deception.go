@@ -18,7 +18,6 @@ package instance
 import (
 	"crypto/sha256"
 	"encoding/hex"
-	"fmt"
 	"hash/fnv"
 	"strconv"
 	"strings"
@@ -135,6 +134,59 @@ func parsePersonaRotation(v string) (int, bool) {
 	return days, true
 }
 
+// tpotConpotTemplate is one device template of the Conpot image and the ports
+// it listens on inside the container.
+type tpotConpotTemplate struct {
+	ID  string
+	TCP []int
+	UDP []int
+}
+
+// tpotConpotTemplates are the templates marked deploy = true in the Conpot
+// image's /opt/tpot/templates.toml at TPotVersion. Each draws its own device
+// identity (addresses, MAC, serials, PINs) on first start and keeps it in
+// /var/lib/conpot. The ports were measured by running each template in the
+// image. Left out on purpose: "default", the multi-protocol S7-200 whose
+// identity is the same on every install, which T-Pot itself does not deploy,
+// and "proxy". Check the list again when TPotVersion changes: a name the image
+// does not know stops the container.
+var tpotConpotTemplates = []tpotConpotTemplate{
+	{ID: "IEC104", TCP: []int{2404, 20000}, UDP: []int{161}},
+	{ID: "guardian_ast", TCP: []int{10001}},
+	{ID: "ipmi", UDP: []int{623}},
+	{ID: "kamstrup_382", TCP: []int{1025, 50100}},
+	{ID: "beckhoff_cx", TCP: []int{4840, 48898}, UDP: []int{48899}},
+	{ID: "building_automation", UDP: []int{3671, 47808}},
+	{ID: "hart_gateway", TCP: []int{5094}},
+	{ID: "iccp", TCP: []int{102}},
+	{ID: "plc_modbus", TCP: []int{502}},
+}
+
+// ConpotTemplateIDs returns every Conpot template QPot can run.
+func ConpotTemplateIDs() []string {
+	ids := make([]string, len(tpotConpotTemplates))
+	for i, t := range tpotConpotTemplates {
+		ids[i] = t.ID
+	}
+	return ids
+}
+
+// conpotTemplate returns the device this instance's Conpot emulates: the
+// operator's custom_config "template" when the image deploys it, otherwise one
+// picked from the instance seed, so restarts keep the same device and
+// different instances emulate different ones.
+func conpotTemplate(cfg *config.Config) tpotConpotTemplate {
+	if hp, ok := cfg.GetHoneypotConfig("conpot"); ok {
+		want := strings.TrimSpace(hp.CustomConfig["template"])
+		for _, t := range tpotConpotTemplates {
+			if t.ID == want {
+				return t
+			}
+		}
+	}
+	return tpotConpotTemplates[seededIndex("tpot-conpot:"+deceptionSeed(cfg), len(tpotConpotTemplates))]
+}
+
 // realisticHostnames is a pool of plausible production-server hostnames. None is
 // Cowrie's old default "svr04" or T-Pot's "srv01".
 var realisticHostnames = []string{
@@ -235,23 +287,4 @@ func hostnameForPersona(t credentialTemplate, seed string) string {
 		return hostnameForSeed(seed)
 	}
 	return pool[seededIndex("host:"+seed, len(pool))]
-}
-
-// icsStationPrefixes are believable industrial device/station tag prefixes used
-// to build a Conpot sensor_id that looks like a real PLC/RTU/SCADA asset rather
-// than a honeypot. Real ICS assets carry tags like "PLC-01", "RTU-A", "S7-300".
-var icsStationPrefixes = []string{
-	"PLC", "RTU", "HMI", "S7-300", "S7-1200", "MTU", "IED", "DCS", "SCADA",
-}
-
-// conpotSensorIDForSeed builds a per-instance Conpot sensor_id that (a) does NOT
-// contain "qpot"/"conpot"/"honeypot" - the stock value "qpot-conpot" literally
-// announced both the platform and that it is a honeypot - and (b) is unique per
-// deployment so two QPot instances do not share a SCADA-sensor signature. The
-// result looks like a plausible industrial asset tag, e.g. "RTU-7a3f".
-func conpotSensorIDForSeed(seed string) string {
-	prefix := icsStationPrefixes[seededIndex("conpot-prefix:"+seed, len(icsStationPrefixes))]
-	h := fnv.New32a()
-	_, _ = h.Write([]byte("conpot-id:" + seed))
-	return fmt.Sprintf("%s-%04x", prefix, h.Sum32()&0xffff)
 }

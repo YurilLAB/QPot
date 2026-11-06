@@ -209,26 +209,6 @@ func TestLoadFallsBackToDefault(t *testing.T) {
 	}
 }
 
-func TestGetTPOTConfig(t *testing.T) {
-	cfg := Default("test")
-	hp := cfg.Honeypots["cowrie"]
-	hp.Stealth.Enabled = true
-	hp.Stealth.FakeHostname = "webserver01"
-	hp.Stealth.FakeOS = "Ubuntu 22.04"
-	cfg.Honeypots["cowrie"] = hp
-
-	tpotCfg := cfg.GetTPOTConfig("cowrie")
-	if tpotCfg["STEALTH_ENABLED"] != "true" {
-		t.Error("STEALTH_ENABLED should be true when stealth is enabled")
-	}
-	if tpotCfg["FAKE_HOSTNAME"] != "webserver01" {
-		t.Errorf("FAKE_HOSTNAME = %q, want webserver01", tpotCfg["FAKE_HOSTNAME"])
-	}
-	if tpotCfg["FAKE_OS"] != "Ubuntu 22.04" {
-		t.Errorf("FAKE_OS = %q, want Ubuntu 22.04", tpotCfg["FAKE_OS"])
-	}
-}
-
 // TestLoadClampsIntelligenceDefaults verifies that a config file which enables
 // intelligence but omits the worker tunables gets safe defaults merged on
 // load. A zero WorkerInterval would otherwise panic time.NewTicker in the

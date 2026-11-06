@@ -4,11 +4,13 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/spf13/cobra"
 
 	"github.com/qpot/qpot/internal/config"
+	"github.com/qpot/qpot/internal/instance"
 )
 
 func TestLocalBaseURLHandlesIPv6(t *testing.T) {
@@ -86,5 +88,25 @@ func TestLastLogLineSkipsNoise(t *testing.T) {
 	}
 	if got := lastLogLine(p); got != "web UI address 127.0.0.1:8080 is already in use" {
 		t.Errorf("lastLogLine = %q", got)
+	}
+}
+
+// TestHoneypotSetHelpListsConpotTemplates keeps the help text's device list in
+// step with the templates QPot can run.
+func TestHoneypotSetHelpListsConpotTemplates(t *testing.T) {
+	var set *cobra.Command
+	for _, c := range newHoneypotCommand().Commands() {
+		if c.Name() == "set" {
+			set = c
+		}
+	}
+	if set == nil {
+		t.Fatal("no honeypot set command")
+	}
+	help := strings.Join(strings.Fields(set.Long), " ")
+	for _, id := range instance.ConpotTemplateIDs() {
+		if !strings.Contains(help, id) {
+			t.Errorf("honeypot set help does not list conpot template %q", id)
+		}
 	}
 }
