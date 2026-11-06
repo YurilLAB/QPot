@@ -265,6 +265,14 @@ func TestInstallerNeedsPrivateTempDir(t *testing.T) {
 	if err := os.Chmod(open, 0o755); err != nil {
 		t.Fatal(err)
 	}
+	// Group access alone is enough to swap a file before root installs it.
+	group := filepath.Join(t.TempDir(), "group")
+	if err := os.Mkdir(group, 0o770); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(group, 0o770); err != nil {
+		t.Fatal(err)
+	}
 	private := t.TempDir()
 	// A relative name is refused even when that folder exists and is private.
 	cwd := t.TempDir()
@@ -276,7 +284,8 @@ func TestInstallerNeedsPrivateTempDir(t *testing.T) {
 	if err := os.Symlink(private, link); err != nil {
 		t.Fatal(err)
 	}
-	for name, dir := range map[string]string{"empty": "", "relative": "qpot-tmp", "group-writable": open, "symlink": link} {
+	for name, dir := range map[string]string{"empty": "", "relative": "qpot-tmp", "world-readable": open,
+		"group-writable": group, "symlink": link} {
 		in := h.installer(rs, ubuntuOSRelease, 1000)
 		in.TempDir = dir
 		plan, err := in.Plan(ctx, NeedFor(detect(h, in)))
