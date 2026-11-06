@@ -64,6 +64,8 @@ const cowriePatchVersion = "24.04.2"
 //	shell/protocol.py      c96e9155ac0133572a746fbbd9599acdd66d8100996f4811221e46174f41c6be
 //	commands/ping.py       4465c53089915a5085a5c4d0a5de5577e7e8c1de2dcf730c9fa53932b021cd2b
 //	commands/__init__.py   74da6fe7d2fa304bfab8594a21056ed94905db4bade7a80602697d35df52d68e
+//	commands/ssh.py        4844fe51fa5288818bdcce1d1f730ebf92c4e21ffddb6b432e36797b863e1ae5
+//	core/honeyfs.py        589d5dedf1473a0db69f443c53c836e711343e5bb6e30fd63033caa99cc53fc0
 //
 // protocol.py: the line editor writes what bash's readline (or BusyBox's ash
 // on the firmware personas) writes, as recorded from bash 5.2.37 and BusyBox
@@ -76,6 +78,13 @@ const cowriePatchVersion = "24.04.2"
 // persona has that ended in "Exec format error": arch, timeout, setsid, nice,
 // basename, dirname, md5sum and the sha sums, mktemp, tty, sync, printenv,
 // expr.
+//
+// The bait files (bait.go): core/qpot_bait.py (new) adds the plan to the
+// persona's tree, called by honeyfs.py when it loads the tree; protocol.py
+// reads the history file at login, as bash does, so `history` shows what
+// ~/.bash_history holds; ssh.py times out on the internal hosts the files name
+// and logs what is typed at its prompts; awscli.py (new) answers the AWS CLI
+// the bait installs.
 var (
 	//go:embed honeypotfiles/cowrie/protocol.py
 	cowrieProtocolPy []byte
@@ -85,6 +94,14 @@ var (
 	cowrieCoreutilsPy []byte
 	//go:embed honeypotfiles/cowrie/commands_init.py
 	cowrieCommandsInitPy []byte
+	//go:embed honeypotfiles/cowrie/ssh.py
+	cowrieSSHPy []byte
+	//go:embed honeypotfiles/cowrie/awscli.py
+	cowrieAWSCLIPy []byte
+	//go:embed honeypotfiles/cowrie/honeyfs.py
+	cowrieHoneyfsPy []byte
+	//go:embed honeypotfiles/cowrie/qpot_bait.py
+	cowrieQPotBaitPy []byte
 )
 
 // cowrieSource is where the image keeps Cowrie's Python package.
@@ -101,6 +118,10 @@ func cowriePatchVolumes() []deployVolume {
 		file("ping.py", "commands/ping.py", cowriePingPy),
 		file("coreutils.py", "commands/coreutils.py", cowrieCoreutilsPy),
 		file("commands_init.py", "commands/__init__.py", cowrieCommandsInitPy),
+		file("ssh.py", "commands/ssh.py", cowrieSSHPy),
+		file("awscli.py", "commands/awscli.py", cowrieAWSCLIPy),
+		file("honeyfs.py", "core/honeyfs.py", cowrieHoneyfsPy),
+		file("qpot_bait.py", "core/qpot_bait.py", cowrieQPotBaitPy),
 	}
 }
 
@@ -235,6 +256,13 @@ func deployProfile(cfg *config.Config, name string) honeypotDeploy {
 				d.Volumes[i].Content = adbhoneyConfig(cfg)
 			}
 		}
+	case "cowrie":
+		d.Volumes = slices.Clone(d.Volumes)
+		for i, v := range d.Volumes {
+			if v.ContainerPath == baitPlanPath {
+				d.Volumes[i].Content = cowrieBaitJSON(cfg)
+			}
+		}
 	case "dionaea":
 		named := map[string][]byte{}
 		for _, v := range dionaeaPatchVolumes(cfg) {
@@ -248,6 +276,19 @@ func deployProfile(cfg *config.Config, name string) honeypotDeploy {
 		}
 	}
 	return d
+}
+
+// deployPorts returns the container ports (TCP, UDP) deployProfile gives the
+// honeypot, without building the files it mounts: the host port map asks for
+// every honeypot's ports many times per render, and Cowrie's bait plan takes
+// milliseconds to draw.
+func deployPorts(cfg *config.Config, name string) (tcp, udp []int) {
+	if cfg != nil && name == "conpot" {
+		t := conpotTemplate(cfg)
+		return slices.Clone(t.TCP), slices.Clone(t.UDP)
+	}
+	d := deployProfileFor(name)
+	return d.Ports, d.UDPPorts
 }
 
 // Dionaea's machine name. Every T-Pot install answered as the same machine:
@@ -388,10 +429,14 @@ func deployProfileFor(name string) honeypotDeploy {
 				{HostSubdir: "etc", ContainerPath: "/home/cowrie/cowrie/etc"},
 				{HostSubdir: "logs", ContainerPath: "/home/cowrie/cowrie/log"},
 				{HostSubdir: "dl", ContainerPath: "/home/cowrie/cowrie/dl"},
+				// The bait files and canaries of the persona (bait.go), added to
+				// its tree by the patch layer's qpot_bait.py; the content depends
+				// on the instance (deployProfile).
+				{HostSubdir: "bait/plan.json", ContainerPath: baitPlanPath, File: true, ReadOnly: true},
 			}, cowriePatchVolumes()...),
 			Ports:    []int{22, 23},
-			Settings: []string{"persona", "persona_rotation"},
-			Values:   map[string][]string{"persona": CowriePersonaIDs()},
+			Settings: []string{"persona", "persona_rotation", baitSetting},
+			Values:   map[string][]string{"persona": CowriePersonaIDs(), baitSetting: {"on", "off"}},
 		}
 	case "endlessh":
 		// Verified: endlessh redirects its log to /var/log/endlessh and listens

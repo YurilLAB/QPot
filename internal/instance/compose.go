@@ -113,8 +113,8 @@ func (g *ComposeGenerator) buildHostPortMap() map[string]int {
 	}
 	sort.Strings(names)
 	containerPorts := func(name string) []int {
-		d := deployProfile(g.Config, name)
-		ports := append(append([]int{}, d.Ports...), d.UDPPorts...)
+		tcp, udp := deployPorts(g.Config, name)
+		ports := append(append([]int{}, tcp...), udp...)
 		if len(ports) == 0 {
 			ports = []int{g.Config.Honeypots[name].Port}
 		}
@@ -1578,9 +1578,11 @@ transforms:
 
       # metadata is Map(String, String) / JSONB: rebuild it from a fixed set
       # of string-coerced keys so an odd honeypot field type can never make the
-      # whole batch fail to insert.
+      # whole batch fail to insert. fingerprint and key are the public key a
+      # cowrie login offered (a stolen canary key trips on them), realm what
+      # a typed line answered (ssh's prompts, aws configure).
       md = {}
-      for_each(["session", "session_id", "sensor", "dst_ip", "dest_ip", "destination_ip", "version", "hassh", "shasum", "outfile", "filename", "duration", "num_auth_attempts", "backend", "reason"]) -> |_i, k| {
+      for_each(["session", "session_id", "sensor", "dst_ip", "dest_ip", "destination_ip", "version", "hassh", "shasum", "outfile", "filename", "duration", "num_auth_attempts", "backend", "reason", "fingerprint", "key", "realm"]) -> |_i, k| {
         v = get(., [k]) ?? null
         if v != null {
           sv = to_string(v) ?? ""

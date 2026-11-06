@@ -1,6 +1,7 @@
 package instance
 
 import (
+	"slices"
 	"strings"
 	"testing"
 
@@ -493,5 +494,24 @@ func TestDdospotLogsWhereItWrites(t *testing.T) {
 	}
 	if !found {
 		t.Errorf("logs not mounted at DDOSPOT_LOG_DIR %q: %+v", dir, d.Volumes)
+	}
+}
+
+// TestDeployPortsMatchProfile: the ports the host port map reads without
+// building the mounted files are the ones the profile publishes, for every
+// honeypot and every Conpot template.
+func TestDeployPortsMatchProfile(t *testing.T) {
+	cfg := config.Default("ports-match")
+	for _, id := range ConpotTemplateIDs() {
+		hp := cfg.Honeypots["conpot"]
+		hp.CustomConfig = map[string]string{"template": id}
+		cfg.Honeypots["conpot"] = hp
+		for name := range cfg.Honeypots {
+			d := deployProfile(cfg, name)
+			tcp, udp := deployPorts(cfg, name)
+			if !slices.Equal(tcp, d.Ports) || !slices.Equal(udp, d.UDPPorts) {
+				t.Errorf("%s (conpot %s): ports %v/%v, profile %v/%v", name, id, tcp, udp, d.Ports, d.UDPPorts)
+			}
+		}
 	}
 }

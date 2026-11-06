@@ -538,6 +538,95 @@ def qpot_sum(algorithm: str, name: str):
     return type(f"Command_{name}", (QpotSum,), {"algorithm": algorithm, "qpot_name": name})
 
 
+# --- zcat -----------------------------------------------------------------------------------
+
+
+class Command_zcat(QpotSum):
+    """zcat of gzip (a script running gzip -cd, so its messages are gzip's) or of BusyBox: the
+    database dump of the bait files is read with it. Members are decompressed one after the other
+    as gzip does; the output stops at QPOT_ZCAT_MAX bytes and after QPOT_ZCAT_MEMBERS members
+    (each member copies the rest of the file), which bounds what a file of the attacker's (a
+    bomb, a file of empty members) can make the reactor do."""
+
+    qpot_name = "zcat"
+    QPOT_ZCAT_MAX = 8 << 20
+    QPOT_ZCAT_MEMBERS = 16
+    QPOT_GLOB_MAX = 4096
+
+    def qpot_glob(self, arg: str) -> list[str]:
+        """The names a pattern in the last part of a path matches, sorted as bash sorts them; the
+        word itself when it has no pattern or matches nothing (bash without nullglob). Cowrie's
+        parser leaves pathname expansion to the commands."""
+        import fnmatch
+
+        head, tail = posixpath.split(arg)
+        if not any(c in tail for c in "*?[") or any(c in head for c in "*?[") or len(tail) > 255:
+            return [arg]
+        try:
+            names = self.fs.listdir(self.fs.resolve_path(head or ".", self.cwd))[: self.QPOT_GLOB_MAX]
+        except Exception:  # noqa: BLE001 - no such folder: the word stays
+            return [arg]
+        found = sorted(n for n in names if (tail.startswith(".") or not n.startswith("."))
+                       and fnmatch.fnmatchcase(n, tail))
+        return [posixpath.join(head, n) if head else n for n in found] or [arg]
+
+    def run(self) -> int | None:
+        import zlib
+
+        busybox = self.busybox()
+        prog = "zcat" if busybox else "gzip"
+        files = []
+        for arg in self.args:
+            if arg in ("-f", "--force", "-q", "--quiet", "-v", "--verbose", "--"):
+                continue
+            if arg.startswith("-") and arg != "-":
+                letter = arg.lstrip("-")[:1]
+                if busybox:
+                    return self.try_help(f"zcat: invalid option -- '{letter}'\n")
+                self.errorWrite(f"gzip: invalid option -- '{letter}'\n"
+                                "Try `gzip --help' for more information.\n")
+                return 1
+            files.extend(self.qpot_glob(arg))
+        code, left = 0, self.QPOT_ZCAT_MAX
+        for path in files or ["-"]:
+            data = self.contents(path, prog)
+            if data is None:
+                code = 1
+                continue
+            label = "stdin" if path == "-" else path
+            if data[:2] != b"\x1f\x8b":
+                self.errorWrite("zcat: invalid magic\n" if busybox else f"gzip: {label}: not in gzip format\n")
+                code = 1
+                continue
+            out, members = [], 0
+            while data and left > 0 and members < self.QPOT_ZCAT_MEMBERS:
+                members += 1
+                if data[:2] != b"\x1f\x8b":
+                    # trailing garbage after a member: gzip warns and ignores it
+                    if not busybox:
+                        self.errorWrite(f"gzip: {label}: decompression OK, trailing garbage ignored\n")
+                        code = code or 2
+                    break
+                member = zlib.decompressobj(16 + zlib.MAX_WBITS)
+                try:
+                    chunk = member.decompress(data, left)
+                except zlib.error:
+                    self.errorWrite("zcat: corrupted data\n" if busybox else f"gzip: {label}: invalid compressed data--format violated\n")
+                    code = 1
+                    break
+                out.append(chunk)
+                left -= len(chunk)
+                if not member.eof:
+                    if left > 0:
+                        self.errorWrite("zcat: unexpected end of file\n" if busybox
+                                        else f"gzip: {label}: unexpected end of file\n")
+                        code = 1
+                    break
+                data = member.unused_data
+            self.writeBytes(b"".join(out))
+        return code
+
+
 # --- mktemp ---------------------------------------------------------------------------------
 
 
@@ -1135,5 +1224,6 @@ for qpot_cls, qpot_names in (
     (qpot_sum("sha1", "sha1sum"), qpot_bin("sha1sum")),
     (qpot_sum("sha256", "sha256sum"), qpot_bin("sha256sum")),
     (qpot_sum("sha512", "sha512sum"), qpot_bin("sha512sum")),
+    (Command_zcat, qpot_bin("zcat")),
 ):
     qpot_register(qpot_cls, *qpot_names)

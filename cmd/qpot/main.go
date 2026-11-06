@@ -584,6 +584,12 @@ one, or set how many days (0-365, default 365) it keeps the identity it drew:
   qpot honeypot set cowrie persona=debian-bookworm
   qpot honeypot set cowrie persona_rotation=30
 
+On the server personas Cowrie also carries an ops box's files (SSH key, shell
+history, backup script, cloud credentials, a database dump) whose secrets are
+canaries (docs/canary.md). Turn them off:
+
+  qpot honeypot set cowrie bait=off
+
 Conpot emulates one of the Conpot image's devices, also picked per instance,
 and publishes only that device's ports. Pin one (IEC104, guardian_ast, ipmi,
 kamstrup_382, beckhoff_cx, building_automation, hart_gateway, iccp,
@@ -2270,11 +2276,12 @@ func newCanaryListCommand() *cobra.Command {
 				fmt.Println("No canaries. Mint one with 'qpot canary create'.")
 				return nil
 			}
-			fmt.Printf("%-22s %-6s %-20s %-6s %s\n", "ID", "KIND", "NAME", "TRIPS", "MEMO")
+			// planted canaries have longer IDs (cnry_ + 24 hex) and kinds
+			fmt.Printf("%-29s %-10s %-36s %-6s %s\n", "ID", "KIND", "NAME", "TRIPS", "MEMO")
 			for _, it := range items {
 				c, _ := it.(map[string]interface{})
-				fmt.Printf("%-22v %-6v %-20v %-6v %v\n",
-					c["id"], c["kind"], truncField(c["name"], 20), c["trips"], termSafe(fmt.Sprint(c["memo"])))
+				fmt.Printf("%-29v %-10v %-36v %-6v %v\n",
+					c["id"], c["kind"], truncField(c["name"], 36), c["trips"], termSafe(fmt.Sprint(c["memo"])))
 			}
 			return nil
 		},

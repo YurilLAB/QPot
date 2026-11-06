@@ -111,7 +111,8 @@ func TestCowriePersonaRotation(t *testing.T) {
 // environment, and must not mount any of QPot's former config/fake-fs files
 // over the image: on 24.04.2 those overrides left /.dockerenv visible, removed
 // /etc/os-release and broke mount/dmesg/lsblk, dpkg, systemctl and python3.
-// The only files it mounts are the patch layer's Cowrie sources.
+// The only files it mounts are the patch layer's Cowrie sources and the bait
+// plan, a file the image does not have that the patch layer reads.
 func TestCowrieRunsImagePersonaLauncher(t *testing.T) {
 	d := deployProfileFor("cowrie")
 	patch := map[string]bool{}
@@ -120,6 +121,9 @@ func TestCowrieRunsImagePersonaLauncher(t *testing.T) {
 	}
 	for _, v := range d.Volumes {
 		if v.File && patch[v.ContainerPath] && strings.HasPrefix(v.ContainerPath, cowrieSource+"/") {
+			continue
+		}
+		if v.File && v.ReadOnly && v.ContainerPath == baitPlanPath {
 			continue
 		}
 		if v.File || strings.Contains(v.ContainerPath, "honeyfs") || strings.HasPrefix(v.ContainerPath, "/proc") {
@@ -138,8 +142,19 @@ func TestCowrieRunsImagePersonaLauncher(t *testing.T) {
 			t.Errorf("cowrie service lacks %q", strings.TrimSpace(want))
 		}
 	}
+	// the patch layer's own sources (core/honeyfs.py among them) aside
+	var rest []string
+	for _, ln := range strings.Split(svc, "\n") {
+		src := false
+		for p := range patch {
+			src = src || strings.HasSuffix(strings.TrimSpace(ln), ":"+p+":ro")
+		}
+		if !src {
+			rest = append(rest, ln)
+		}
+	}
 	for _, bad := range []string{"command:", "working_dir:", "qpot_patch_fs", "cowrie.cfg", "/proc/meminfo", "honeyfs"} {
-		if strings.Contains(svc, bad) {
+		if strings.Contains(strings.Join(rest, "\n"), bad) {
 			t.Errorf("cowrie service still renders %q", bad)
 		}
 	}

@@ -94,6 +94,14 @@ func TestVectorRemapLive(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	// Credential-shaped values are built here: a literal one would trip the
+	// secret scanner of the CI.
+	blob := "AAAAC3NzaC1lZDI1NTE5AAAAI" + strings.Repeat("Q", 43)
+	fp := strings.TrimSuffix(strings.Repeat("ab:", 16), ":")
+	keyID := "AKIA" + strings.Repeat("Z", 16)
+	secret := strings.Repeat("s", 40)
+	typed := "Hunter-" + strings.Repeat("x", 12)
+
 	in := strings.Join([]string{
 		"/data/honeypots/cowrie/logs/cowrie.json\t" + `{"eventid":"cowrie.session.connect","src_ip":"203.0.113.9","src_port":55632,"dst_ip":"172.20.0.2","dst_port":22,"session":"s1","protocol":"ssh"}`,
 		"/data/honeypots/cowrie/logs/cowrie.json\t" + `{"eventid":"cowrie.login.failed","username":"root","password":"123456","src_ip":"203.0.113.9","session":"s1","protocol":"ssh"}`,
@@ -130,6 +138,12 @@ func TestVectorRemapLive(t *testing.T) {
 		"/data/honeypots/sentrypeer/logs/sentrypeer.json\t" + `{"source_ip":"203.0.113.32:5061","transport_type":"UDP","sip_method":"OPTIONS"}`,
 		"/data/honeypots/wordpot/logs/profile-state.json\t" + `{"pid": 1, "profile_count": 4, "profile_id": "maintenance-lag"}`,
 		"/data/honeypots/medpot/logs/medpot.log\t" + `{"level":"info","message":"Connection found","src_port":"44462","src_ip":"203.0.113.33","data":"TVNIfA=="}`,
+		// A public key login (the bait's stolen key trips on its key and
+		// fingerprint), a password typed at the emulated ssh's prompt and the
+		// credentials the emulated aws signs with.
+		"/data/honeypots/cowrie/logs/cowrie.json\t" + `{"eventid":"cowrie.client.fingerprint","username":"root","fingerprint":"` + fp + `","key":"ssh-ed25519 ` + blob + `","type":"ssh-ed25519","src_ip":"203.0.113.40","session":"s9","protocol":"ssh"}`,
+		"/data/honeypots/cowrie/logs/cowrie.json\t" + `{"eventid":"cowrie.command.input","realm":"ssh","input":"` + typed + `","src_ip":"203.0.113.41","session":"s10","protocol":"ssh"}`,
+		"/data/honeypots/cowrie/logs/cowrie.json\t" + `{"eventid":"cowrie.credentials.use","realm":"aws","username":"` + keyID + `","password":"` + secret + `","service":"sts","input":"aws sts get-caller-identity","src_ip":"203.0.113.42","session":"s11","protocol":"ssh"}`,
 	}, "\n") + "\n"
 
 	cmd := exec.Command(run[0], append(run[1:], "--quiet", "--config", cfgPath)...)
@@ -172,12 +186,23 @@ func TestVectorRemapLive(t *testing.T) {
 		}
 		rows = append(rows, r)
 	}
-	// 32 input lines: broken JSON, cowrie.log chatter, endlessh's banner line
+	// 35 input lines: broken JSON, cowrie.log chatter, endlessh's banner line
 	// and the lines without an attacker address (dicompot's finished line,
 	// hellpot's/log4pot's startup lines, wordpot's profile state) must be
 	// dropped.
-	if len(rows) != 25 {
-		t.Fatalf("got %d events, want 25: %+v", len(rows), rows)
+	if len(rows) != 28 {
+		t.Fatalf("got %d events, want 28: %+v", len(rows), rows)
+	}
+	if r := rows[25]; r.EventType != "cowrie.client.fingerprint" || r.Username != "root" ||
+		r.Metadata["fingerprint"] != fp || r.Metadata["key"] != "ssh-ed25519 "+blob {
+		t.Errorf("public key login: key and fingerprint not kept: %+v", r)
+	}
+	if r := rows[26]; r.Command != typed || r.Metadata["realm"] != "ssh" {
+		t.Errorf("input at ssh's prompt: %+v", r)
+	}
+	if r := rows[27]; r.EventType != "cowrie.credentials.use" || r.Username != keyID || r.Password != secret ||
+		r.Command != "aws sts get-caller-identity" || r.Metadata["realm"] != "aws" {
+		t.Errorf("aws credentials use: %+v", r)
 	}
 
 	r := rows[0]

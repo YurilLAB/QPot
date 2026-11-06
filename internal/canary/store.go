@@ -2,9 +2,11 @@ package canary
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -145,13 +147,23 @@ func (s *Store) List() []*Canary {
 	return out
 }
 
-// Delete removes a canary and persists. Returns false if it did not exist.
+// ErrPlanted is returned for a change only QPot makes to the canaries it
+// planted itself: they come back with the next start, so they are not
+// deleted one by one; turning the honeypot's bait off removes them.
+var ErrPlanted = errors.New("canary is planted by QPot in Cowrie's bait files; " +
+	"turn the bait off with 'qpot honeypot set cowrie bait=off'")
+
+// Delete removes a canary and persists. Returns false if it did not exist,
+// and ErrPlanted for a planted canary.
 func (s *Store) Delete(id string) (bool, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	c, ok := s.canaries[id]
 	if !ok {
 		return false, nil
+	}
+	if c.Planted {
+		return false, ErrPlanted
 	}
 	s.deindex(c)
 	if err := s.saveLocked(); err != nil {
@@ -160,6 +172,67 @@ func (s *Store) Delete(id string) (bool, error) {
 		return false, err
 	}
 	return true, nil
+}
+
+// SyncPlanted makes the planted canaries of the store exactly planned (the
+// canaries QPot plants in its honeypots, derived from the instance): a new one
+// is added enabled; one already there takes the planned kind, name, memo and
+// values but keeps its enabled state, trip count and creation time; a planted
+// canary no longer planned (its honeypot or bait turned off) is removed, its
+// trips stay in the history. The store is written only when something changed.
+func (s *Store) SyncPlanted(planned []*Canary) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	want := make(map[string]*Canary, len(planned))
+	for _, p := range planned {
+		if p == nil || !p.Planted || !strings.HasPrefix(p.ID, "cnry_") || !p.Kind.Valid() {
+			return fmt.Errorf("not a planted canary: %+v", p)
+		}
+		if _, dup := want[p.ID]; dup {
+			return fmt.Errorf("planted canary %s listed twice", p.ID)
+		}
+		want[p.ID] = p
+	}
+	changed := false
+	for id, c := range s.canaries {
+		if c.Planted && want[id] == nil {
+			s.deindex(c)
+			changed = true
+		}
+	}
+	for _, p := range planned {
+		cur, ok := s.canaries[p.ID]
+		next := *p
+		next.Values = append([]string(nil), p.Values...)
+		if ok {
+			next.Enabled = cur.Enabled
+			next.CreatedAt = cur.CreatedAt
+			next.Trips = cur.Trips
+			next.LastTrip = cur.LastTrip
+			if plantedEqual(cur, &next) {
+				continue
+			}
+			s.deindex(cur)
+		} else {
+			next.Enabled = true
+			if next.CreatedAt.IsZero() {
+				next.CreatedAt = time.Now().UTC()
+			}
+		}
+		s.index(&next)
+		changed = true
+	}
+	if !changed {
+		return nil
+	}
+	return s.saveLocked()
+}
+
+// plantedEqual reports whether two versions of a planted canary are the same.
+func plantedEqual(a, b *Canary) bool {
+	return a.Kind == b.Kind && a.Name == b.Name && a.Memo == b.Memo && a.Token == b.Token &&
+		a.AccessKeyID == b.AccessKeyID && a.SecretAccessKey == b.SecretAccessKey &&
+		a.PublicKey == b.PublicKey && a.Planted == b.Planted && slices.Equal(a.Values, b.Values)
 }
 
 // SetEnabled toggles a canary's enabled state and persists.

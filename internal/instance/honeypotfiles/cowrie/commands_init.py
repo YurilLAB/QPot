@@ -65,6 +65,8 @@ command_modules = [
     "wget",
     "which",
     "yum",
+    # QPot: the AWS CLI of the bait files (registered under its installer's paths only)
+    "awscli",
     # QPot: last, so its commands (hostname, bash, exit) win over those above
     "coreutils",
 ]

@@ -934,13 +934,13 @@ func (m *Manager) prepareOwnership(ctx context.Context, name string) error {
 // HostProbePorts returns the published host TCP ports to probe for a honeypot
 // that has no in-container healthcheck (NoShell), else nil.
 func HostProbePorts(cfg *config.Config, name string) []int {
-	d := deployProfile(cfg, name)
-	if !d.NoShell {
+	if !deployProfileFor(name).NoShell {
 		return nil
 	}
+	tcp, _ := deployPorts(cfg, name)
 	all := PublishedHostPorts(cfg)
 	var out []int
-	for _, p := range d.Ports {
+	for _, p := range tcp {
 		if hp, ok := all[portKey(name, p)]; ok {
 			out = append(out, hp)
 		}

@@ -16,11 +16,17 @@
 //
 //   - http     — someone fetched the canary's unique beacon URL (a web token,
 //     or the beacon embedded in a document/file token). Served by the QPot web
-//     server at /c/<token>; any GET is a trip.
-//   - honeypot — a planted credential value (e.g. an AKIA… key) showed up in a
-//     captured QPot honeypot session. The attacker exfiltrated the token from
-//     wherever it was planted and is now using it against our own deception
-//     estate. Detected by the intelligence worker as it processes events.
+//     server at /c/<token>; any GET is a trip. This needs the web server to be
+//     reachable at canary.base_url.
+//   - honeypot — a planted value (an AKIA… key, a password, an SSH public key,
+//     a beacon token) showed up in a captured QPot honeypot session. The
+//     attacker took it from wherever it was planted and is now using it against
+//     our own deception estate. Detected by the intelligence worker as it
+//     processes events; it needs nothing reachable but the honeypots.
+//
+// Besides the canaries an operator mints, QPot plants canaries of its own in
+// the fake files of its Cowrie personas (see instance/bait.go and
+// Store.SyncPlanted).
 //
 // Every trip is mapped to a database.Event tagged honeypot="canary" so it flows
 // through the existing pipeline (events feed, IOC extraction,
@@ -61,16 +67,32 @@ const (
 	// against real AWS, but the moment its key id or secret appears in a
 	// captured QPot honeypot session we know it was stolen and replayed.
 	KindAWS Kind = "aws"
+
+	// KindCredential is a password or API token (Values) QPot planted in a
+	// honeypot's fake files. It trips when one of its values shows up in a
+	// captured honeypot session: a login, a typed command, a request.
+	KindCredential Kind = "credential"
+
+	// KindSSHKey is an SSH private key QPot planted in a honeypot's fake
+	// files. It trips when its public key (Values: the base64 key blob and its
+	// MD5 fingerprint) is offered in a login to a QPot honeypot.
+	KindSSHKey Kind = "ssh-key"
 )
 
 // Valid reports whether k is a known canary kind.
 func (k Kind) Valid() bool {
 	switch k {
-	case KindWeb, KindFile, KindAWS:
+	case KindWeb, KindFile, KindAWS, KindCredential, KindSSHKey:
 		return true
 	default:
 		return false
 	}
+}
+
+// Creatable reports whether an operator can mint a canary of kind k through
+// the API; the credential and SSH key kinds are only planted by QPot itself.
+func (k Kind) Creatable() bool {
+	return k == KindWeb || k == KindFile || k == KindAWS
 }
 
 // Canary is a single minted decoy. It is persisted in canaries.json and is
@@ -90,6 +112,14 @@ type Canary struct {
 	// AWS-specific rendered credentials (KindAWS only).
 	AccessKeyID     string `json:"access_key_id,omitempty"`
 	SecretAccessKey string `json:"secret_access_key,omitempty"`
+
+	// Values are the watched values of a credential or SSH key canary.
+	Values []string `json:"values,omitempty"`
+	// PublicKey is the authorized_keys line of an SSH key canary.
+	PublicKey string `json:"public_key,omitempty"`
+	// Planted marks a canary QPot planted in its own honeypots (see
+	// Store.SyncPlanted): derived from the instance, not deletable.
+	Planted bool `json:"planted,omitempty"`
 }
 
 // Trip is a single recorded interaction with a canary. Trips are the alert.
@@ -194,19 +224,30 @@ func New(kind Kind, name, memo string) (*Canary, error) {
 	return c, nil
 }
 
+// MinWatchLen is the shortest value a canary is watched for: anything shorter
+// could turn up in a session by chance (a brute-forced password, a word).
+const MinWatchLen = 12
+
 // watchValues returns the literal strings whose appearance in a captured
-// honeypot session constitutes a trip. Only credential canaries are watched;
-// web/file tokens trip via the HTTP beacon, not value-matching.
+// honeypot session constitutes a trip: the credentials of an AWS, credential
+// or SSH key canary, and the beacon token of a web or file canary (its URL
+// typed or fetched in a honeypot is a use of it, whether or not the QPot web
+// server is reachable).
 func (c *Canary) watchValues() []string {
-	if c.Kind != KindAWS {
-		return nil
+	var all []string
+	switch c.Kind {
+	case KindAWS:
+		all = []string{c.AccessKeyID, c.SecretAccessKey}
+	case KindCredential, KindSSHKey:
+		all = c.Values
+	case KindWeb, KindFile:
+		all = []string{c.Token}
 	}
 	var v []string
-	if c.AccessKeyID != "" {
-		v = append(v, c.AccessKeyID)
-	}
-	if c.SecretAccessKey != "" {
-		v = append(v, c.SecretAccessKey)
+	for _, s := range all {
+		if len(s) >= MinWatchLen {
+			v = append(v, s)
+		}
 	}
 	return v
 }
@@ -292,6 +333,10 @@ func attckFor(k Kind) (techID, techName, tacticID, tacticName string) {
 	switch k {
 	case KindAWS:
 		return "T1078.004", "Valid Accounts: Cloud Accounts", "TA0005", "Defense Evasion"
+	case KindCredential:
+		return "T1552.001", "Unsecured Credentials: Credentials In Files", "TA0006", "Credential Access"
+	case KindSSHKey:
+		return "T1552.004", "Unsecured Credentials: Private Keys", "TA0006", "Credential Access"
 	case KindFile:
 		return "T1530", "Data from Cloud Storage", "TA0009", "Collection"
 	default: // KindWeb
@@ -306,7 +351,7 @@ func attckFor(k Kind) (techID, techName, tacticID, tacticName string) {
 func (t *Trip) ToEvent() *database.Event {
 	techID, techName, tacticID, tacticName := attckFor(t.Kind)
 	proto := "http"
-	if t.Kind == KindAWS {
+	if t.Kind == KindAWS || t.Kind == KindCredential || t.Kind == KindSSHKey {
 		proto = "credential"
 	}
 	meta := map[string]string{

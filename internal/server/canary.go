@@ -12,6 +12,7 @@ package server
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net"
@@ -141,6 +142,15 @@ func (s *Server) canaryView(c *canary.Canary) map[string]interface{} {
 		m["access_key_id"] = c.AccessKeyID
 		m["secret_access_key"] = c.SecretAccessKey
 	}
+	if c.Kind == canary.KindCredential || c.Kind == canary.KindSSHKey {
+		m["values"] = c.Values
+	}
+	if c.PublicKey != "" {
+		m["public_key"] = c.PublicKey
+	}
+	if c.Planted {
+		m["planted"] = true
+	}
 	return m
 }
 
@@ -167,7 +177,7 @@ func (s *Server) handleCanaries(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		kind := canary.Kind(strings.ToLower(strings.TrimSpace(req.Kind)))
-		if !kind.Valid() {
+		if !kind.Creatable() {
 			s.sendError(w, http.StatusBadRequest, "kind must be one of: web, file, aws")
 			return
 		}
@@ -185,6 +195,10 @@ func (s *Server) handleCanaries(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		ok, err := s.canaries.Delete(id)
+		if errors.Is(err, canary.ErrPlanted) {
+			s.sendError(w, http.StatusConflict, err.Error())
+			return
+		}
 		if err != nil {
 			s.sendInternalError(w, "delete canary failed", err)
 			return

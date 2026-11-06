@@ -32,6 +32,10 @@ type tpotCowriePersona struct {
 	// are embedded devices (routers, NAS, cameras), some with no SSH server at
 	// all (Cowrie then drops every SSH connection before its banner).
 	Server bool
+	// Family and User are the persona's "family" and login "user" in
+	// personas.json: the OS the bait files are written for and the account
+	// whose home they go in (see bait.go).
+	Family, User string
 }
 
 // tpotCowriePersonas are the personas of the Cowrie image at TPotVersion
@@ -50,22 +54,22 @@ type tpotCowriePersona struct {
 // mount/dmesg/lsblk, an lscpu that contradicted /proc/cpuinfo, empty package
 // and unit lists and `python3 -V` printing Python 2.7.
 var tpotCowriePersonas = []tpotCowriePersona{
-	{"ubuntu-noble", true},
-	{"ubuntu-jammy", true},
-	{"debian-trixie", true},
-	{"debian-bookworm", true},
-	{"rhel-9", true},
-	{"centos-7", true},
-	{"raspios", true},
-	{"gpu-ubuntu", true},
-	{"dlink-dir859", false},
-	{"tplink-archer-c7", false},
-	{"zyxel-nas326", false},
-	{"openwrt", false},
-	{"qnap-qts", false},
-	{"synology-dsm", false},
-	{"ubiquiti-edgerouter-x", false},
-	{"ipcam", false},
+	{"ubuntu-noble", true, "ubuntu", "ubuntu"},
+	{"ubuntu-jammy", true, "ubuntu", "ubuntu"},
+	{"debian-trixie", true, "debian", "debian"},
+	{"debian-bookworm", true, "debian", "debian"},
+	{"rhel-9", true, "rhel", "cloud-user"},
+	{"centos-7", true, "centos", "centos"},
+	{"raspios", true, "raspios", "pi"},
+	{"gpu-ubuntu", true, "ubuntu", "ubuntu"},
+	{"dlink-dir859", false, "dlink", "admin"},
+	{"tplink-archer-c7", false, "tplink", "root"},
+	{"zyxel-nas326", false, "zyxel", "admin"},
+	{"openwrt", false, "openwrt", "root"},
+	{"qnap-qts", false, "qnap", "admin"},
+	{"synology-dsm", false, "synology", "admin"},
+	{"ubiquiti-edgerouter-x", false, "ubiquiti", "ubnt"},
+	{"ipcam", false, "ipcam", "admin"},
 }
 
 // CowriePersonaIDs returns every persona ID the Cowrie image accepts.
@@ -80,6 +84,16 @@ func CowriePersonaIDs() []string {
 // cowriePersonaMaxRotation is the longest COWRIE_PERSONA_ROTATION the image
 // accepts (days); the launcher refuses to start on a larger value.
 const cowriePersonaMaxRotation = 365
+
+// cowriePersonaByID returns the persona of the table with that ID.
+func cowriePersonaByID(id string) (tpotCowriePersona, bool) {
+	for _, p := range tpotCowriePersonas {
+		if p.ID == id {
+			return p, true
+		}
+	}
+	return tpotCowriePersona{}, false
+}
 
 // cowriePersona returns the persona this instance's Cowrie presents: the
 // operator's custom_config "persona" when the image knows it, otherwise one

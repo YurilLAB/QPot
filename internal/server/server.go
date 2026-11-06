@@ -148,6 +148,12 @@ func New(cfg *config.Config) (*Server, error) {
 			slog.Warn("Canary store failed to load; canary subsystem disabled this run", "error", err)
 		} else {
 			s.canaries = cs
+			// The canaries planted in this instance's honeypots (the bait files
+			// of its Cowrie persona), derived from the instance: watched from
+			// the first event on. A failed write keeps them in memory.
+			if err := cs.SyncPlanted(instance.PlantedCanaries(cfg)); err != nil {
+				slog.Warn("Canary store: could not save the planted canaries", "error", err)
+			}
 		}
 	}
 

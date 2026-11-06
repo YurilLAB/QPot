@@ -867,6 +867,7 @@ class HoneyPotInteractiveProtocol(HoneyPotBaseProtocol, recvline.HistoricRecvLin
 
         HoneyPotBaseProtocol.connectionMade(self)
         recvline.HistoricRecvLine.connectionMade(self)
+        self.qpot_read_history()
 
         self.cmdstack = [honeypot.HoneyPotShell(self)]
         # Show the first prompt now that the interactive shell is on the stack.
@@ -892,6 +893,35 @@ class HoneyPotInteractiveProtocol(HoneyPotBaseProtocol, recvline.HistoricRecvLin
                 b"\x1b": self.handle_ESC,  # ESC
             }
         )
+
+    # QPot: the most of the history file a login reads (bytes, from its end)
+    QPOT_HISTFILE_MAX = 65536
+
+    def qpot_read_history(self) -> None:
+        """QPot: an interactive bash reads its history file at the start, so `history` and the up
+        arrow show the lines of ~/.bash_history before the session's own. Only the last HISTSIZE
+        lines are kept, numbered on from those dropped, as bash's stifle_history does; a line read
+        from the file has no time (HISTTIMEFORMAT shows "??" for it, as bash 4.4 and later)."""
+        path = str((self.environ or {}).get("HISTFILE", "") or "")
+        if not path.startswith("/"):
+            return
+        try:
+            data = self.fs.file_contents(path)
+        except Exception:  # noqa: BLE001 - no history file, a folder, a broken link: an empty history
+            return
+        if not isinstance(data, bytes) or not data:
+            return
+        if len(data) > self.QPOT_HISTFILE_MAX:
+            data = data[-self.QPOT_HISTFILE_MAX:]
+            data = data[data.find(b"\n") + 1:]
+        lines = [line for line in data.split(b"\n") if line]
+        size = tpot_history_size(getattr(self.user, "uid", None) == 0)
+        dropped = max(len(lines) - size, 0) if size else 0
+        lines = lines[dropped:]
+        self.historyLines = lines
+        self.tpot_history_times = [None] * len(lines)
+        self.tpot_history_base = dropped
+        self.historyPosition = len(lines)
 
     def displayMOTD(self) -> None:
         try:

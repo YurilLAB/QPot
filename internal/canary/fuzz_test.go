@@ -1,10 +1,13 @@
 package canary
 
 import (
+	"crypto/ed25519"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"golang.org/x/crypto/ssh"
 )
 
 // FuzzStoreLoad: canaries.json is read at every start. Whatever it holds, the
@@ -60,6 +63,41 @@ func FuzzMatch(f *testing.F) {
 		_, ok, _ := s.Match(text, "198.51.100."+string(rune('0'+len(text)%10)), "fuzz")
 		if ok && !want {
 			t.Fatalf("Match tripped on text without a planted value: %q", text)
+		}
+	})
+}
+
+// FuzzDeriver: whatever the seed and label, the derived values keep their
+// shapes (charset, length, watchable), the key file parses back to its key,
+// and the same input derives the same values.
+func FuzzDeriver(f *testing.F) {
+	f.Add("ds_0123", "label", 16)
+	f.Add("", "", 0)
+	f.Add(strings.Repeat("\x00", 64), "\xff", 300)
+	f.Fuzz(func(t *testing.T, seed, label string, n int) {
+		n = (n%256 + 256) % 256
+		d := NewDeriver(seed)
+		chars := d.Chars(label, n, charsAlnum)
+		if len(chars) != n || strings.Trim(chars, charsAlnum) != "" {
+			t.Fatalf("Chars(%d) = %q", n, chars)
+		}
+		if again := NewDeriver(seed).Chars(label, n, charsAlnum); again != chars {
+			t.Fatal("not stable")
+		}
+		if v := d.Intn(label, n+1); v < 0 || v > n {
+			t.Fatalf("Intn(%d) = %d", n+1, v)
+		}
+		pw := d.HumanPassword(label)
+		if len(pw) <= MinWatchLen || strings.ContainsAny(pw, "'\"\\ $`") {
+			t.Fatalf("human password %q", pw)
+		}
+		key := d.Ed25519Key(label)
+		parsed, err := ssh.ParseRawPrivateKey(MarshalEd25519PrivateKey(key, label, uint32(n)))
+		if err != nil {
+			t.Fatalf("key file does not parse: %v", err)
+		}
+		if got, ok := parsed.(*ed25519.PrivateKey); !ok || !got.Equal(key) {
+			t.Fatal("key file holds another key")
 		}
 	})
 }

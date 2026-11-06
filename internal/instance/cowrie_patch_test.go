@@ -29,6 +29,10 @@ func TestCowriePatchMounts(t *testing.T) {
 		cowrieSource + "/commands/ping.py":      cowriePingPy,
 		cowrieSource + "/commands/coreutils.py": cowrieCoreutilsPy,
 		cowrieSource + "/commands/__init__.py":  cowrieCommandsInitPy,
+		cowrieSource + "/commands/ssh.py":       cowrieSSHPy,
+		cowrieSource + "/commands/awscli.py":    cowrieAWSCLIPy,
+		cowrieSource + "/core/honeyfs.py":       cowrieHoneyfsPy,
+		cowrieSource + "/core/qpot_bait.py":     cowrieQPotBaitPy,
 	}
 	d := deployProfile(config.Default("cowrie-patch"), "cowrie")
 	for _, v := range d.Volumes {
@@ -53,6 +57,10 @@ func TestCowriePatchMounts(t *testing.T) {
 		"/honeypots/cowrie/patch/ping.py:" + cowrieSource + "/commands/ping.py:ro\n",
 		"/honeypots/cowrie/patch/coreutils.py:" + cowrieSource + "/commands/coreutils.py:ro\n",
 		"/honeypots/cowrie/patch/commands_init.py:" + cowrieSource + "/commands/__init__.py:ro\n",
+		"/honeypots/cowrie/patch/ssh.py:" + cowrieSource + "/commands/ssh.py:ro\n",
+		"/honeypots/cowrie/patch/awscli.py:" + cowrieSource + "/commands/awscli.py:ro\n",
+		"/honeypots/cowrie/patch/honeyfs.py:" + cowrieSource + "/core/honeyfs.py:ro\n",
+		"/honeypots/cowrie/patch/qpot_bait.py:" + cowrieSource + "/core/qpot_bait.py:ro\n",
 	} {
 		if !strings.Contains(svc, line) {
 			t.Errorf("cowrie service lacks %q", strings.TrimSpace(line))
@@ -69,10 +77,40 @@ func TestCowriePatchFiles(t *testing.T) {
 	if last < 0 || strings.Count(init, `"coreutils",`) != 1 || last < strings.LastIndex(init, `"yum",`) {
 		t.Errorf("commands/__init__.py does not load coreutils last")
 	}
-	for _, module := range []string{`"base",`, `"bash",`, `"ping",`, `"netstat",`, `"uname",`} {
+	for _, module := range []string{`"base",`, `"bash",`, `"ping",`, `"netstat",`, `"uname",`, `"ssh",`} {
 		if !strings.Contains(init, module) {
 			t.Errorf("commands/__init__.py lost %s", module)
 		}
+	}
+	if aws := strings.Index(init, `"awscli",`); aws < 0 || aws > last {
+		t.Errorf("commands/__init__.py does not load awscli (before coreutils)")
+	}
+	// the bait: honeyfs plants it once when it loads the tree, a broken plan
+	// never stops the tree from loading; the history file is read at login;
+	// ssh times out on the bait's hosts and logs what is typed at its prompts
+	honeyfs := string(cowrieHoneyfsPy)
+	plant := strings.Index(honeyfs, "qpot_bait.plant(tree)")
+	if plant < 0 || !strings.Contains(honeyfs[:plant], "try:") || !strings.Contains(honeyfs[plant:], "except Exception") ||
+		!strings.Contains(honeyfs, "@functools.cache\ndef _tree()") {
+		t.Errorf("honeyfs.py does not plant the bait once, guarded")
+	}
+	if !strings.Contains(string(cowrieQPotBaitPy), `PLAN_PATH = "`+baitPlanPath+`"`) {
+		t.Errorf("qpot_bait.py reads the plan from elsewhere than it is mounted")
+	}
+	if p := string(cowrieProtocolPy); !strings.Contains(p, "self.qpot_read_history()") || !strings.Contains(p, "QPOT_HISTFILE_MAX") {
+		t.Errorf("protocol.py does not read the history file at login")
+	}
+	sshPy := string(cowrieSSHPy)
+	for _, want := range []string{"qpot_bait.internal_host(host)", `"cowrie.command.input"`, `realm="ssh"`, "def handle_CTRL_C"} {
+		if !strings.Contains(sshPy, want) {
+			t.Errorf("ssh.py lacks %q", want)
+		}
+	}
+	if !strings.Contains(string(cowrieAWSCLIPy), `"cowrie.credentials.use"`) {
+		t.Errorf("awscli.py does not log the credentials it uses")
+	}
+	if !strings.Contains(string(cowrieCoreutilsPy), "(Command_zcat, qpot_bin(\"zcat\"))") {
+		t.Errorf("coreutils.py does not answer zcat")
 	}
 	protocol := string(cowrieProtocolPy)
 	for _, kept := range []string{"def tpot_history_size", "def tpot_commands", "class HoneyPotInteractiveProtocol",
@@ -86,7 +124,8 @@ func TestCowriePatchFiles(t *testing.T) {
 		t.Error("protocol.py sets the terminal's insert mode")
 	}
 	for name, content := range map[string][]byte{"protocol.py": cowrieProtocolPy, "ping.py": cowriePingPy,
-		"coreutils.py": cowrieCoreutilsPy, "commands_init.py": cowrieCommandsInitPy} {
+		"coreutils.py": cowrieCoreutilsPy, "commands_init.py": cowrieCommandsInitPy, "ssh.py": cowrieSSHPy,
+		"awscli.py": cowrieAWSCLIPy, "honeyfs.py": cowrieHoneyfsPy, "qpot_bait.py": cowrieQPotBaitPy} {
 		if bytes.Contains(content, []byte("\r")) {
 			t.Errorf("%s has CR bytes", name)
 		}
@@ -107,10 +146,15 @@ func TestCowriePatchWritten(t *testing.T) {
 		t.Fatalf("Initialize: %v", err)
 	}
 	for name, content := range map[string][]byte{"protocol.py": cowrieProtocolPy, "ping.py": cowriePingPy,
-		"coreutils.py": cowrieCoreutilsPy, "commands_init.py": cowrieCommandsInitPy} {
+		"coreutils.py": cowrieCoreutilsPy, "commands_init.py": cowrieCommandsInitPy, "ssh.py": cowrieSSHPy,
+		"awscli.py": cowrieAWSCLIPy, "honeyfs.py": cowrieHoneyfsPy, "qpot_bait.py": cowrieQPotBaitPy} {
 		got, err := os.ReadFile(filepath.Join(cfg.DataPath, "honeypots", "cowrie", "patch", name))
 		if err != nil || !bytes.Equal(got, content) {
 			t.Errorf("patch/%s not written (err %v, %d bytes)", name, err, len(got))
 		}
+	}
+	plan, err := os.ReadFile(filepath.Join(cfg.DataPath, "honeypots", "cowrie", "bait", "plan.json"))
+	if err != nil || !bytes.Equal(plan, cowrieBaitJSON(cfg)) {
+		t.Errorf("bait/plan.json not written (err %v, %d bytes)", err, len(plan))
 	}
 }
