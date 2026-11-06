@@ -103,6 +103,81 @@ func FuzzPeerURL(f *testing.F) {
 	})
 }
 
+// TestJoinQueueIsBounded: every password-holding join request with a new
+// hostname added a pending entry (up to 1 MiB of metadata each) and a
+// decision record that were never removed, so the host's memory grew with
+// every request.
+func TestJoinQueueIsBounded(t *testing.T) {
+	const pw = "correct-horse-battery"
+	m := NewManager(t.TempDir())
+	cl, err := m.InitCluster("c", pw, DefaultClusterConfig())
+	if err != nil {
+		t.Fatal(err)
+	}
+	const n = 3000
+	for i := 0; i < n; i++ {
+		m.HandleJoinRequest(&JoinRequest{ClusterID: cl.ID, Password: pw, NodeName: "flood-" + strconv.Itoa(i),
+			NodeAddress: "10.0.0.9", NodePort: 7946}, "198.51.100.7")
+	}
+	m.mu.RLock()
+	pending, outcomes := len(m.pendingJoins), len(m.joinOutcomes)
+	m.mu.RUnlock()
+	if pending > maxPendingJoins || outcomes > maxPendingJoins+maxJoinOutcomes {
+		t.Fatalf("%d join requests left %d pending entries and %d outcomes", n, pending, outcomes)
+	}
+
+	// Decided requests are dropped once the joiner can no longer be polling.
+	for _, p := range m.ListPendingJoins() {
+		if err := m.DenyJoin(p.RequestID); err != nil {
+			t.Fatal(err)
+		}
+	}
+	m.mu.Lock()
+	for _, o := range m.joinOutcomes {
+		o.DecidedAt = o.DecidedAt.Add(-2 * joinRequestTTL)
+	}
+	m.mu.Unlock()
+	m.HandleJoinRequest(&JoinRequest{ClusterID: cl.ID, Password: pw, NodeName: "late", NodeAddress: "10.0.0.9", NodePort: 7946}, "198.51.100.8")
+	m.mu.RLock()
+	outcomes = len(m.joinOutcomes)
+	m.mu.RUnlock()
+	if outcomes != 1 {
+		t.Fatalf("%d expired outcomes kept", outcomes-1)
+	}
+}
+
+// TestPeerIntelOnlyFromMembers: intel was stored under whatever node_id the
+// body named, so one password holder could fill the map with any number of
+// 1 MiB entries.
+func TestPeerIntelOnlyFromMembers(t *testing.T) {
+	m := plainCluster(t)
+	h := m.apiHandler()
+	for i := 0; i < 500; i++ {
+		body, _ := json.Marshal(ThreatIntel{NodeID: "qn_fake" + strconv.Itoa(i), TopSourceIPs: []IPCount{{IP: "203.0.113.1", Count: 1}}})
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/cluster/intel", bytes.NewReader(body))
+		req.Header.Set("X-Cluster-Password", "password123")
+		h.ServeHTTP(httptest.NewRecorder(), req)
+	}
+	m.mu.RLock()
+	got := len(m.peerIntel)
+	m.mu.RUnlock()
+	if got != 0 {
+		t.Fatalf("stored intel for %d nodes that are not members", got)
+	}
+
+	// A member's intel is still kept.
+	m.mu.Lock()
+	m.cluster.Nodes["qn_member"] = &Node{ID: "qn_member", Address: "10.0.0.2", Port: 7946, Status: NodeStatusHealthy}
+	m.mu.Unlock()
+	body, _ := json.Marshal(ThreatIntel{NodeID: "qn_member"})
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/cluster/intel", bytes.NewReader(body))
+	req.Header.Set("X-Cluster-Password", "password123")
+	h.ServeHTTP(httptest.NewRecorder(), req)
+	if len(m.GetThreatIntel()) != 1 {
+		t.Fatal("member intel was not stored")
+	}
+}
+
 // TestGossipReachesIPv6Peer: peer URLs were built with "%s:%d", which gives
 // "http://::1:7946/..." for an IPv6 member, so IPv6 peers were never reached
 // and were marked failed.

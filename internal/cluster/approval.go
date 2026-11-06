@@ -14,6 +14,15 @@ import (
 // explicitly approves or denies it. The joiner polls the request's status until
 // it is approved (and receives the membership) or denied.
 
+// Join queue bounds. Anyone with the cluster password can file join
+// requests, so the queue and the decision records are capped, and both expire
+// after joinRequestTTL: a joiner stops polling after five minutes.
+const (
+	maxPendingJoins = 256
+	maxJoinOutcomes = 1024
+	joinRequestTTL  = 10 * time.Minute
+)
+
 // PendingJoin is a password-authenticated join request awaiting host approval.
 type PendingJoin struct {
 	RequestID string `json:"request_id"`
@@ -50,11 +59,16 @@ type JoinOutcome struct {
 // hostname + QPot ID) reuses the existing request ID so a retrying/polling
 // joiner does not spawn duplicate entries.
 func (m *Manager) queuePendingJoinLocked(req *JoinRequest, sourceIP string) *JoinResponse {
+	m.pruneJoinsLocked(time.Now())
 	for _, p := range m.pendingJoins {
 		if p.SourceIP == sourceIP && p.NodeName == req.NodeName && p.QPotID == req.QPotID {
 			return &JoinResponse{Success: false, Status: "pending", RequestID: p.RequestID,
 				Error: "awaiting host approval"}
 		}
+	}
+	if len(m.pendingJoins) >= maxPendingJoins {
+		slog.Warn("Cluster join request dropped: approval queue full", "source_ip", sourceIP)
+		return &JoinResponse{Success: false, Error: "too many pending join requests"}
 	}
 
 	id, err := generateID("req", 16)
@@ -83,6 +97,35 @@ func (m *Manager) queuePendingJoinLocked(req *JoinRequest, sourceIP string) *Joi
 
 	return &JoinResponse{Success: false, Status: "pending", RequestID: id,
 		Error: "awaiting host approval"}
+}
+
+// pruneJoinsLocked drops pending requests and decisions older than
+// joinRequestTTL, then the oldest decisions beyond maxJoinOutcomes. Caller
+// holds m.mu.
+func (m *Manager) pruneJoinsLocked(now time.Time) {
+	for id, p := range m.pendingJoins {
+		if now.Sub(p.RequestedAt) > joinRequestTTL {
+			delete(m.pendingJoins, id)
+			delete(m.joinOutcomes, id)
+		}
+	}
+	var decided []*JoinOutcome
+	for id, o := range m.joinOutcomes {
+		if o.Status == "pending" {
+			continue
+		}
+		if now.Sub(o.DecidedAt) > joinRequestTTL {
+			delete(m.joinOutcomes, id)
+			continue
+		}
+		decided = append(decided, o)
+	}
+	if extra := len(decided) - maxJoinOutcomes; extra > 0 {
+		sort.Slice(decided, func(i, j int) bool { return decided[i].DecidedAt.Before(decided[j].DecidedAt) })
+		for _, o := range decided[:extra] {
+			delete(m.joinOutcomes, o.RequestID)
+		}
+	}
 }
 
 // ListPendingJoins returns the join requests awaiting approval, newest first.

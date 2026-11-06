@@ -1623,7 +1623,7 @@ func (m *Manager) sync() {
 					m.mu.Unlock()
 					return
 				}
-				m.peerIntel[peerIntel.NodeID] = &peerIntel
+				m.storePeerIntelLocked(&peerIntel)
 				// Update event count for this peer node based on intel total.
 				if node, ok := m.cluster.Nodes[peer.id]; ok {
 					var total int64
@@ -1763,9 +1763,7 @@ func (m *Manager) handleIntelHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	m.mu.Lock()
-	if incoming.NodeID != "" {
-		m.peerIntel[incoming.NodeID] = &incoming
-	}
+	m.storePeerIntelLocked(&incoming)
 	localIntel := m.localIntel
 	m.mu.Unlock()
 
@@ -1775,6 +1773,19 @@ func (m *Manager) handleIntelHTTP(w http.ResponseWriter, r *http.Request) {
 	} else {
 		json.NewEncoder(w).Encode(&ThreatIntel{Timestamp: time.Now()})
 	}
+}
+
+// storePeerIntelLocked keeps intel only for current members, so the map is
+// bounded by the membership (maxClusterNodes) whatever node IDs peers send.
+// Caller holds m.mu.
+func (m *Manager) storePeerIntelLocked(intel *ThreatIntel) {
+	if m.cluster == nil || intel.NodeID == "" {
+		return
+	}
+	if _, member := m.cluster.Nodes[intel.NodeID]; !member {
+		return
+	}
+	m.peerIntel[intel.NodeID] = intel
 }
 
 // saveCluster saves cluster configuration to disk.
