@@ -34,6 +34,7 @@ func TestCowriePatchMounts(t *testing.T) {
 		cowrieSource + "/core/honeyfs.py":       cowrieHoneyfsPy,
 		cowrieSource + "/core/qpot_bait.py":     cowrieQPotBaitPy,
 		cowrieSource + "/commands/find.py":      cowrieFindPy,
+		cowrieSource + "/shell/bashparse.py":    cowrieBashparsePy,
 	}
 	d := deployProfile(config.Default("cowrie-patch"), "cowrie")
 	for _, v := range d.Volumes {
@@ -63,6 +64,7 @@ func TestCowriePatchMounts(t *testing.T) {
 		"/honeypots/cowrie/patch/honeyfs.py:" + cowrieSource + "/core/honeyfs.py:ro\n",
 		"/honeypots/cowrie/patch/qpot_bait.py:" + cowrieSource + "/core/qpot_bait.py:ro\n",
 		"/honeypots/cowrie/patch/find.py:" + cowrieSource + "/commands/find.py:ro\n",
+		"/honeypots/cowrie/patch/bashparse.py:" + cowrieSource + "/shell/bashparse.py:ro\n",
 	} {
 		if !strings.Contains(svc, line) {
 			t.Errorf("cowrie service lacks %q", strings.TrimSpace(line))
@@ -109,6 +111,16 @@ func TestCowriePatchFiles(t *testing.T) {
 			t.Errorf("ssh.py lacks %q", want)
 		}
 	}
+	// pathname expansion runs on every word that may glob, with one bound for the whole command;
+	// fnmatch's cache of compiled patterns is capped when the parser loads
+	bashparse := string(cowrieBashparsePy)
+	for _, want := range []string{"qpot_budget = [self.QPOT_GLOB_SCAN, self.QPOT_GLOB_BYTES]", "split=not whole, qpot_budget=qpot_budget)",
+		"self.qpot_pathnames(text, mask, qpot_budget)", "masked = self.qpot_split_masked(pieces, qpot_globbing)",
+		"\n\nqpot_cap_fnmatch_cache()\n"} {
+		if strings.Count(bashparse, want) != 1 {
+			t.Errorf("bashparse.py lacks %q", want)
+		}
+	}
 	if !strings.Contains(string(cowrieAWSCLIPy), `"cowrie.credentials.use"`) {
 		t.Errorf("awscli.py does not log the credentials it uses")
 	}
@@ -129,7 +141,7 @@ func TestCowriePatchFiles(t *testing.T) {
 	for name, content := range map[string][]byte{"protocol.py": cowrieProtocolPy, "ping.py": cowriePingPy,
 		"coreutils.py": cowrieCoreutilsPy, "commands_init.py": cowrieCommandsInitPy, "ssh.py": cowrieSSHPy,
 		"awscli.py": cowrieAWSCLIPy, "honeyfs.py": cowrieHoneyfsPy, "qpot_bait.py": cowrieQPotBaitPy,
-		"find.py": cowrieFindPy} {
+		"find.py": cowrieFindPy, "bashparse.py": cowrieBashparsePy} {
 		if bytes.Contains(content, []byte("\r")) {
 			t.Errorf("%s has CR bytes", name)
 		}
@@ -152,7 +164,7 @@ func TestCowriePatchWritten(t *testing.T) {
 	for name, content := range map[string][]byte{"protocol.py": cowrieProtocolPy, "ping.py": cowriePingPy,
 		"coreutils.py": cowrieCoreutilsPy, "commands_init.py": cowrieCommandsInitPy, "ssh.py": cowrieSSHPy,
 		"awscli.py": cowrieAWSCLIPy, "honeyfs.py": cowrieHoneyfsPy, "qpot_bait.py": cowrieQPotBaitPy,
-		"find.py": cowrieFindPy} {
+		"find.py": cowrieFindPy, "bashparse.py": cowrieBashparsePy} {
 		got, err := os.ReadFile(filepath.Join(cfg.DataPath, "honeypots", "cowrie", "patch", name))
 		if err != nil || !bytes.Equal(got, content) {
 			t.Errorf("patch/%s not written (err %v, %d bytes)", name, err, len(got))
