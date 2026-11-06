@@ -103,7 +103,8 @@ func TestCowriePatchFiles(t *testing.T) {
 		t.Errorf("protocol.py does not read the history file at login")
 	}
 	sshPy := string(cowrieSSHPy)
-	for _, want := range []string{"qpot_bait.internal_host(host)", `"cowrie.command.input"`, `realm="ssh"`, "def handle_CTRL_C"} {
+	for _, want := range []string{"qpot_bait.internal_host(host)", `"cowrie.command.input"`, `realm="ssh"`, "def handle_CTRL_C",
+		"self.qpot_log_identities(optlist, user, host)"} {
 		if !strings.Contains(sshPy, want) {
 			t.Errorf("ssh.py lacks %q", want)
 		}

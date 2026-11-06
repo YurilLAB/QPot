@@ -67,7 +67,7 @@ bait is:
 
 | Canary | Where the attacker finds it | It trips when |
 |--------|-----------------------------|---------------|
-| root's SSH key (`ssh-key`) | `/root/.ssh/id_ed25519`, with `config` and `known_hosts` naming the database host | it is offered in a public key login to a QPot honeypot (Cowrie logs the key and its fingerprint), or the public key shows up in a session |
+| root's SSH key (`ssh-key`) | `/root/.ssh/id_ed25519`, with `config` and `known_hosts` naming the database host | `ssh` on the honeypot uses it (`-i`, or the `IdentityFile` of `config`: Cowrie logs the key ssh would offer), it is offered in a public key login to a QPot honeypot (Cowrie logs the key and its fingerprint), or the public key shows up in a session |
 | the database password (`credential`) | the backup script (in `/usr/local/sbin`, `/usr/local/bin` or `/root/bin`), run from `/etc/cron.d`, and root's `.bash_history` | it is typed in a command, at the password prompt of `ssh` on the honeypot, or used to log in to any QPot honeypot |
 | the AWS key (`aws`, on some instances) | `/root/.aws/credentials` and `config` | the `aws` command on the honeypot uses it (Cowrie logs the key it would sign with), or either half shows up in a session |
 | the healthcheck URL (`web`) | the backup script and root's `.bash_history` | its token shows up in a session (`curl` of the URL on the honeypot); with `canary.base_url` set, also a GET of `<base_url>/c/<token>` |
@@ -83,7 +83,7 @@ from the instance's deception seed: a regenerated compose plants the same files
 and canaries, another instance gets different ones. The patch layer also makes
 the files usable the way an attacker uses them: `history` shows the history
 file, `ssh` to one of the internal hosts times out like an unreachable host
-(what is typed at its prompts is logged), `aws` answers like a CLI without
+(what is typed at its prompts and the keys it would offer are logged), `aws` answers like a CLI without
 network, and `zcat` reads the dump.
 
 **No trip needs the web UI to be reachable.** The planted canaries trip on the

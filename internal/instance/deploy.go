@@ -84,8 +84,8 @@ const cowriePatchVersion = "24.04.2"
 // persona's tree, called by honeyfs.py when it loads the tree; protocol.py
 // reads the history file at login, as bash does, so `history` shows what
 // ~/.bash_history holds; ssh.py times out on the internal hosts the files name
-// and logs what is typed at its prompts; awscli.py (new) answers the AWS CLI
-// the bait installs. find.py: the image's find
+// and logs what is typed at its prompts and the keys it would offer; awscli.py
+// (new) answers the AWS CLI the bait installs. find.py: the image's find
 // followed every link to a directory, so `find / -name id_rsa` (the first
 // thing a credential harvester runs) held the reactor for many minutes; it
 // now walks as GNU find -P does, bounded.

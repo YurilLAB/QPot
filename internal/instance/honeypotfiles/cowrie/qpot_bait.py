@@ -24,7 +24,10 @@ broken plan leaves the persona's tree as it was and never stops Cowrie.
 
 from __future__ import annotations
 
+import base64
+import binascii
 import functools
+import hashlib
 import json
 import os
 import posixpath
@@ -202,6 +205,72 @@ def _parent(tree: list, parts: list[str], when: int) -> list | None:
             return None
         node = child
     return node
+
+
+# an identity file ssh reads: a private key is a few KB, its .pub one line
+MAX_KEY_FILE = 1 << 16
+_OPENSSH_KEY = re.compile(r"-----BEGIN OPENSSH PRIVATE KEY-----([A-Za-z0-9+/=\s]{1,65536}?)-----END OPENSSH PRIVATE KEY-----")
+_KEY_TYPES = ("ssh-", "ecdsa-sha2-", "sk-")
+
+
+def _ssh_string(data: bytes, pos: int) -> tuple[bytes | None, int]:
+    """The SSH wire string at pos and the position after it; None when data ends first."""
+    if pos + 4 > len(data):
+        return None, pos
+    size = struct.unpack(">I", data[pos:pos + 4])[0]
+    if pos + 4 + size > len(data):
+        return None, pos
+    return data[pos + 4:pos + 4 + size], pos + 4 + size
+
+
+def key_type(blob: bytes) -> str | None:
+    """The type a public key blob names (ssh-ed25519, ecdsa-sha2-nistp256 ...), None for no key blob."""
+    name, _ = _ssh_string(blob, 0)
+    if not name or len(name) > 64:
+        return None
+    text = name.decode("ascii", "replace")
+    return text if text.startswith(_KEY_TYPES) and text.isprintable() else None
+
+
+def public_key(data: bytes) -> bytes | None:
+    """The public key blob of an identity file, as ssh offers it: an OpenSSH private key keeps its
+    public half in the clear (encrypted or not), a .pub or authorized_keys line is one; None for
+    anything else (a PEM key ssh would read the public half of from its .pub)."""
+    text = data[:MAX_KEY_FILE].decode("ascii", "replace")
+    found = _OPENSSH_KEY.search(text)
+    if found:
+        try:
+            raw = base64.b64decode("".join(found.group(1).split()), validate=True)
+        except (binascii.Error, ValueError):
+            return None
+        magic = b"openssh-key-v1\0"
+        if not raw.startswith(magic):
+            return None
+        pos = len(magic)
+        for _ in range(3):  # cipher, kdf and its options
+            field, pos = _ssh_string(raw, pos)
+            if field is None:
+                return None
+        if pos + 4 > len(raw) or struct.unpack(">I", raw[pos:pos + 4])[0] < 1:
+            return None
+        blob, _ = _ssh_string(raw, pos + 4)
+        return blob if blob and key_type(blob) else None
+    for line in text.splitlines()[:64]:
+        words = line.split()
+        for i, word in enumerate(words[:-1]):
+            if word.startswith(_KEY_TYPES) and len(word) <= 64:
+                try:
+                    blob = base64.b64decode(words[i + 1], validate=True)
+                except (binascii.Error, ValueError):
+                    continue
+                if key_type(blob) == word:
+                    return blob
+    return None
+
+
+def key_fingerprint(blob: bytes) -> str:
+    """The colon-separated MD5 fingerprint of a public key blob, the form Cowrie logs for a login's key."""
+    return ":".join(f"{b:02x}" for b in hashlib.md5(blob).digest())  # noqa: S324 - OpenSSH's legacy fingerprint
 
 
 def gzip_bytes(data: bytes) -> bytes:

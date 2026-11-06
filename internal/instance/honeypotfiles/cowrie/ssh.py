@@ -6,6 +6,8 @@
 
 from __future__ import annotations
 
+import base64
+import fnmatch
 import getopt
 import hashlib
 import re
@@ -18,6 +20,7 @@ from twisted.logger import Logger
 from cowrie.core import qpot_bait
 from cowrie.core.config import CowrieConfig
 from cowrie.shell.command import HoneyPotCommand
+from cowrie.shell.fs import A_SIZE
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -86,6 +89,10 @@ class Command_ssh(HoneyPotCommand):
                 user = opt[1]
         if args[0].count("@"):
             user, host = args[0].split("@", 1)
+
+        # QPot: the keys ssh would offer (-i, IdentityFile, its defaults) are logged as used: a stolen
+        #   key used from here (ssh -i ~/.ssh/id_ed25519 backup@db01) trips as one offered in a login
+        self.qpot_log_identities(optlist, user, host)
 
         # QPot: an internal host the bait files name (qpot_bait.py) is out of reach from here, as is
         #   the network behind the persona: ssh waits out its connect timeout and gives up
@@ -158,6 +165,112 @@ class Command_ssh(HoneyPotCommand):
 
     # QPot: the kernel's SYN retries (net.ipv4.tcp_syn_retries 6) give up after 127 s
     QPOT_KERNEL_TIMEOUT = 127
+    # QPot: OpenSSH's default identity files, tried when none is given
+    QPOT_DEFAULT_IDS = ("id_rsa", "id_ecdsa", "id_ecdsa_sk", "id_ed25519", "id_ed25519_sk", "id_dsa")
+    # QPot: at most so many identity files are read per ssh (an attacker can name any number)
+    QPOT_MAX_IDS = 8
+
+    def qpot_home(self) -> str:
+        home = str((getattr(self, "environ", None) or {}).get("HOME", "") or "")
+        return home.rstrip("/") if home.startswith("/") else ""
+
+    def qpot_read_small(self, path: str) -> bytes | None:
+        """The contents of a regular file of at most MAX_KEY_FILE bytes, None for anything else."""
+        try:
+            if not self.fs.exists(path) or self.fs.isdir(path):
+                return None
+            node = self.fs.getfile(path)
+            if node is None or int(node[A_SIZE] or 0) > qpot_bait.MAX_KEY_FILE:
+                return None
+            return self.fs.file_contents(path)[: qpot_bait.MAX_KEY_FILE]
+        except Exception:  # noqa: BLE001 - a broken link, a folder: no file
+            return None
+
+    def qpot_config_identities(self, data: bytes, host: str) -> list[str]:
+        """IdentityFile of the Host blocks of an ssh_config that match host (Match blocks are skipped)."""
+        found, active = [], True
+        for raw in data[:65536].decode("utf-8", "replace").splitlines()[:2048]:
+            line = raw.strip()
+            if not line or line.startswith("#"):
+                continue
+            parts = re.split(r"[ \t]*=[ \t]*|[ \t]+", line, maxsplit=1)
+            key, value = parts[0].lower(), (parts[1] if len(parts) > 1 else "").strip()
+            if key == "host":
+                pats = value.lower().split()[:64]
+                name = host.lower()
+                active = (any(fnmatch.fnmatchcase(name, p) for p in pats if not p.startswith("!"))
+                          and not any(fnmatch.fnmatchcase(name, p[1:]) for p in pats if p.startswith("!")))
+            elif key == "match":
+                active = False
+            elif key == "identityfile" and active and value:
+                found.append(value.strip('"'))
+        return found
+
+    def qpot_identities(self, optlist: list[tuple[str, str]], user: str, host: str) -> list[str]:
+        """The identity files ssh would try for user@host, as paths of the fake filesystem: -i and
+        -o IdentityFile, then the IdentityFile of the config (-F, else ~/.ssh/config), else the
+        default files of ~/.ssh that exist."""
+        home = self.qpot_home()
+        given, config = [], home + "/.ssh/config" if home else ""
+        for opt, value in optlist:
+            if opt == "-i":
+                given.append(value)
+            elif opt == "-F":
+                config = value
+            elif opt == "-o":
+                found = re.fullmatch(r"(?i)\s*identityfile\s*[ =]\s*(\S.{0,1023})", value)
+                if found:
+                    given.append(found.group(1).strip().strip('"'))
+        if config:
+            data = self.qpot_read_small(self.fs.resolve_path(config.replace("~", home, 1) if config.startswith("~")
+                                                             else config, self.cwd))
+            if data:
+                given += self.qpot_config_identities(data, host)
+        if not given and home:
+            given = [home + "/.ssh/" + name for name in self.QPOT_DEFAULT_IDS]
+
+        def expand(path: str) -> str:
+            local = str(getattr(getattr(self.protocol, "user", None), "username", "") or "")
+            path = (path.replace("%d", home).replace("%u", local).replace("%r", user).replace("%h", host)
+                    .replace("%%", "%"))
+            if path == "~" or path.startswith("~/"):
+                path = home + path[1:]
+            return self.fs.resolve_path(path, self.cwd)
+
+        paths: list[str] = []
+        for path in given[: self.QPOT_MAX_IDS * 4]:
+            full = expand(path[:1024])
+            if full and full not in paths:
+                paths.append(full)
+        return paths[: self.QPOT_MAX_IDS]
+
+    def qpot_log_identities(self, optlist: list[tuple[str, str]], user: str, host: str) -> None:
+        """Log each public key ssh would offer for user@host (read from the identity file, else its
+        .pub) as a cowrie.credentials.use event with its fingerprint, as Cowrie logs a login's key."""
+        seen = set()
+        for path in self.qpot_identities(optlist, user, host):
+            blob = None
+            for candidate in (path, path + ".pub"):
+                data = self.qpot_read_small(candidate)
+                blob = qpot_bait.public_key(data) if data else None
+                if blob:
+                    break
+            if not blob or blob in seen:
+                continue
+            seen.add(blob)
+            key_type = qpot_bait.key_type(blob) or ""
+            self.protocol.events.dispatch(
+                "cowrie.credentials.use",
+                "SSH key %(fingerprint)s used for %(username)s@%(host)s",
+                realm="ssh",
+                username=user[:256],
+                host=host[:256],
+                identity=path,
+                fingerprint=qpot_bait.key_fingerprint(blob),
+                key=key_type + " " + base64.b64encode(blob).decode(),
+                type=key_type,
+                input=" ".join(["ssh"] + list(self.args))[:4096],
+            )
 
     def qpot_unreachable(self, address: str, optlist: list[tuple[str, str]]) -> None:
         """Connect to an address that never answers: ConnectTimeout of -o, else of the user's
