@@ -6,6 +6,10 @@ import (
 	"time"
 )
 
+// maxTrackedSources bounds the per-source map between sweeps. A flood of fresh
+// source addresses would otherwise grow it for the whole idle-eviction window.
+const maxTrackedSources = 1 << 16
+
 // sourceKey is the unit the per-IP limits apply to. An IPv4 address is its own
 // source; an IPv6 address counts as its /64, the smallest prefix a single host
 // is routinely given, so rotating addresses inside it does not reset the
@@ -49,6 +53,7 @@ type limiter struct {
 	perIPMax     int           // max concurrent conns per IP; <=0 disables
 	globalMax    int           // max concurrent conns overall; <=0 disables
 	idleEviction time.Duration // drop idle per-IP buckets after this long
+	maxSources   int           // most per-source buckets kept at once
 
 	// state
 	global int
@@ -71,6 +76,7 @@ func newLimiter(ratePerSec, burst float64, perIPMax, globalMax int) *limiter {
 		perIPMax:     perIPMax,
 		globalMax:    globalMax,
 		idleEviction: 10 * time.Minute,
+		maxSources:   maxTrackedSources,
 		ips:          make(map[string]*ipState),
 		now:          time.Now,
 	}
@@ -95,6 +101,9 @@ func (l *limiter) admit(ip string) (bool, string, func()) {
 
 	st := l.ips[key]
 	if st == nil {
+		if len(l.ips) >= l.maxSources {
+			l.makeRoomLocked(now)
+		}
 		st = &ipState{tokens: l.burst, last: now}
 		l.ips[key] = st
 	}
@@ -154,7 +163,11 @@ func (l *limiter) admit(ip string) (bool, string, func()) {
 func (l *limiter) sweep() int {
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	cutoff := l.now().Add(-l.idleEviction)
+	return l.evictLocked(l.now().Add(-l.idleEviction))
+}
+
+// evictLocked drops buckets with no live connection last seen before cutoff.
+func (l *limiter) evictLocked(cutoff time.Time) int {
 	n := 0
 	for ip, st := range l.ips {
 		if st.active == 0 && st.lastSeen.Before(cutoff) {
@@ -163,6 +176,15 @@ func (l *limiter) sweep() int {
 		}
 	}
 	return n
+}
+
+// makeRoomLocked runs when the map is full and drops every bucket without a
+// live connection. That forgets those sources' rate-limit tokens, which only
+// helps someone who already controls this many sources; buckets with live
+// connections (at most the global cap) are kept so concurrency accounting
+// stays exact. Emptying the map rather than one slot keeps the scan amortized.
+func (l *limiter) makeRoomLocked(now time.Time) {
+	l.evictLocked(now.Add(time.Nanosecond))
 }
 
 // activeGlobal reports the current global concurrent-connection count (tests).

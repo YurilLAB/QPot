@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"fmt"
 	"sync"
 	"testing"
 	"time"
@@ -38,6 +39,47 @@ func TestLimiterGroupsIPv6By64(t *testing.T) {
 		t.Fatal("neighbouring IPv4 address was blocked")
 	} else {
 		r()
+	}
+}
+
+// Every new source address used to add a map entry that only the minute
+// sweeper removed, after 10 idle minutes: a flood of fresh sources (trivial
+// with IPv6) grew the map without bound in between, toward the broker's
+// 128 MiB memory limit.
+func TestLimiterBoundsTrackedSources(t *testing.T) {
+	l := newLimiter(5, 10, 3, 0)
+	const bound = 1 << 16
+	for i := 0; i < 3*bound; i++ {
+		ip := fmt.Sprintf("10.%d.%d.%d", i>>16&255, i>>8&255, i&255)
+		ok, reason, rel := l.admit(ip)
+		if !ok {
+			t.Fatalf("admit %s rejected: %s", ip, reason)
+		}
+		rel()
+	}
+	l.mu.Lock()
+	n := len(l.ips)
+	l.mu.Unlock()
+	if n > bound {
+		t.Fatalf("limiter tracks %d sources after churn, want at most %d", n, bound)
+	}
+}
+
+// Making room for new sources must never drop a source that still holds
+// connections, or its concurrency cap would reset.
+func TestLimiterBoundKeepsActiveSources(t *testing.T) {
+	l := newLimiter(0, 0, 1, 0)
+	ok, _, rel := l.admit("198.51.100.7")
+	if !ok {
+		t.Fatal("admit rejected")
+	}
+	defer rel()
+	for i := 0; i < 3<<16; i++ {
+		_, _, r := l.admit(fmt.Sprintf("10.%d.%d.%d", i>>16&255, i>>8&255, i&255))
+		r()
+	}
+	if ok, reason, _ := l.admit("198.51.100.7"); ok || reason != ReasonPerIPCap {
+		t.Fatalf("active source lost its accounting: ok=%v reason=%q", ok, reason)
 	}
 }
 
