@@ -371,12 +371,12 @@ func (m *canaryMatcher) MatchEvent(ctx context.Context, event *database.Event) b
 		b.WriteString(v)
 	}
 	detail := "matched in " + event.Honeypot + " session"
-	trip, ok, err := m.s.canaries.Match(b.String(), event.SourceIP, detail)
+	trips, err := m.s.canaries.MatchAll(b.String(), event.SourceIP, detail)
 	if err != nil {
 		slog.Error("canary: failed to persist matched trip", "error", err)
 	}
-	if ok {
+	for _, trip := range trips {
 		m.s.onCanaryTrip(ctx, trip)
 	}
-	return ok
+	return len(trips) > 0
 }

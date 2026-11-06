@@ -349,34 +349,59 @@ func (s *Store) TripByToken(token, srcIP, ua, detail string) (*Trip, bool, error
 	return &cp, true, err
 }
 
-// Match scans text for any watched credential value and, on the first hit,
-// records a honeypot-channel trip. Returns (nil, false, nil) when nothing
-// matches. detail describes where the value was seen (e.g. the honeypot name).
+// Match scans text for any watched credential value and records a
+// honeypot-channel trip of each canary found (see MatchAll); it returns the
+// first new one. Returns (nil, false, nil) when nothing new matched. detail
+// describes where the value was seen (e.g. the honeypot name).
 func (s *Store) Match(text, srcIP, detail string) (*Trip, bool, error) {
+	trips, err := s.MatchAll(text, srcIP, detail)
+	if len(trips) == 0 {
+		return nil, false, err
+	}
+	return trips[0], true, err
+}
+
+// MatchAll scans text for every watched credential value and records a
+// honeypot-channel trip of each enabled canary whose value is in it, in the
+// order of their IDs: one command can use several stolen values (a script
+// pasted back, the AWS key and the database password on one line), and a
+// canary that tripped a moment ago from the same source (folded into that
+// trip) must not hide another one. Returns the new trips (copies).
+func (s *Store) MatchAll(text, srcIP, detail string) ([]*Trip, error) {
 	if text == "" {
-		return nil, false, nil
+		return nil, nil
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if len(s.byValue) == 0 {
-		return nil, false, nil
+		return nil, nil
 	}
+	var found []*Canary
+	seen := map[string]bool{}
 	for value, id := range s.byValue {
-		if !strings.Contains(text, value) {
+		if seen[id] || !strings.Contains(text, value) {
 			continue
 		}
-		c := s.canaries[id]
-		if c == nil || !c.Enabled {
-			continue
+		if c := s.canaries[id]; c != nil && c.Enabled {
+			seen[id] = true
+			found = append(found, c)
 		}
+	}
+	sort.Slice(found, func(i, j int) bool { return found[i].ID < found[j].ID })
+	var trips []*Trip
+	var firstErr error
+	for _, c := range found {
 		t, err := s.recordTripLocked(c, "honeypot", srcIP, "", detail)
+		if err != nil && firstErr == nil {
+			firstErr = err
+		}
 		if t == nil {
-			return nil, false, nil // repeat within the dedupe window
+			continue // repeat within the dedupe window
 		}
 		cp := *t
-		return &cp, true, err
+		trips = append(trips, &cp)
 	}
-	return nil, false, nil
+	return trips, firstErr
 }
 
 // HasWatchValues reports whether any enabled credential canary is being watched

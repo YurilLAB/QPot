@@ -416,3 +416,42 @@ func mustRead(t *testing.T, path string) []byte {
 	}
 	return data
 }
+
+// TestMatcherTripsEveryCanaryOfAnEvent: an event that holds several planted
+// values gives one canary_trip event for each.
+func TestMatcherTripsEveryCanaryOfAnEvent(t *testing.T) {
+	cfg, planted := plantedCfg(t)
+	cs, err := canary.NewStore(cfg.DataPath, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := cs.SyncPlanted(planted); err != nil {
+		t.Fatal(err)
+	}
+	var cmd []string
+	for _, c := range planted {
+		switch c.Kind {
+		case canary.KindAWS:
+			cmd = append(cmd, c.AccessKeyID)
+		case canary.KindWeb:
+			cmd = append(cmd, c.Token)
+		default:
+			cmd = append(cmd, c.Values[0])
+		}
+	}
+	db := &fakeDB{}
+	m := &canaryMatcher{s: &Server{config: cfg, canaries: cs, database: db}}
+	if !m.MatchEvent(context.Background(), &database.Event{Timestamp: time.Now().UTC(), Honeypot: "cowrie",
+		SourceIP: "203.0.113.30", EventType: "cowrie.command.input", Command: strings.Join(cmd, " ; ")}) {
+		t.Fatal("no trip")
+	}
+	tripped := map[string]bool{}
+	for _, e := range db.insertedEvents() {
+		if e.EventType == "canary_trip" {
+			tripped[e.Metadata["canary_id"]] = true
+		}
+	}
+	if len(tripped) != len(planted) {
+		t.Errorf("%d of %d canaries tripped by one event", len(tripped), len(planted))
+	}
+}

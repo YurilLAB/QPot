@@ -180,3 +180,57 @@ func TestKindsCreatableAndTechniques(t *testing.T) {
 		}
 	}
 }
+
+// TestMatchAllTripsEveryCanaryOfAnEvent: one captured command that uses
+// several stolen values (the backup script pasted back, a key and a password
+// on one line) trips each of their canaries, once; a canary that tripped a
+// moment ago from the same source is folded into that trip and does not hide
+// the others.
+func TestMatchAllTripsEveryCanaryOfAnEvent(t *testing.T) {
+	s, err := NewStore(t.TempDir(), 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	p := planted("all")
+	if err := s.SyncPlanted(p); err != nil {
+		t.Fatal(err)
+	}
+	// the database password trips first, alone
+	if tr, ok, _ := s.Match("mysql -p'"+p[1].Values[0]+"'", "203.0.113.20", "cowrie"); !ok || tr.CanaryID != p[1].ID {
+		t.Fatalf("db password: %+v %v", tr, ok)
+	}
+	// then a line with the password again, the AWS key (both halves) and the URL
+	line := "DB_PASS='" + p[1].Values[0] + "' AWS_ACCESS_KEY_ID=" + p[0].AccessKeyID + " AWS_SECRET_ACCESS_KEY=" +
+		p[0].SecretAccessKey + " curl http://10.0.0.5:8000/ping/" + p[3].Token
+	for round := 0; round < 3; round++ {
+		trips, err := s.MatchAll(line, "203.0.113.20", "cowrie")
+		if err != nil {
+			t.Fatal(err)
+		}
+		var got []string
+		for _, tr := range trips {
+			got = append(got, tr.CanaryID)
+		}
+		want := []string{p[0].ID, p[3].ID}
+		if p[3].ID < p[0].ID {
+			want = []string{p[3].ID, p[0].ID}
+		}
+		if round > 0 {
+			want = nil // all of them repeats now
+		}
+		if strings.Join(got, ",") != strings.Join(want, ",") {
+			t.Errorf("round %d: tripped %v, want %v", round, got, want)
+		}
+	}
+	// a disabled canary in the same line stays silent, the others trip
+	if ok, err := s.SetEnabled(p[2].ID, false); !ok || err != nil {
+		t.Fatal(err)
+	}
+	trips, _ := s.MatchAll("key "+p[2].Values[1]+" and "+p[0].AccessKeyID, "203.0.113.21", "cowrie")
+	if len(trips) != 1 || trips[0].CanaryID != p[0].ID {
+		t.Errorf("disabled key in the line: %+v", trips)
+	}
+	if c, _ := s.Get(p[1].ID); c.Trips != 4 {
+		t.Errorf("db password counted %d hits, want 4", c.Trips)
+	}
+}
