@@ -205,9 +205,13 @@ func TestSSHLogsTheKeysItWouldOffer(t *testing.T) {
 		"/tmp/garbage":              b64("-----BEGIN OPENSSH PRIVATE KEY-----\nb3BlbnNzaC1rZXktdjEAAAAA////\n-----END OPENSSH PRIVATE KEY-----\n"),
 		"/home/u/.ssh/id_rsa.pub":   b64("ssh-rsa AAAA not-base64!\n"),
 	}
+	// a .pub line whose type is not the blob's: no key (ssh refuses it too)
+	files["/tmp/mismatch.pub"] = b64("ssh-rsa " + base64.StdEncoding.EncodeToString(blob) + " x\n")
 	many := []string{}
 	for i := 0; i < 40; i++ {
-		many = append(many, "-i", "/tmp/k"+strings.Repeat("x", i))
+		name := "/tmp/k" + strings.Repeat("x", i)
+		files[name] = b64("not a key")
+		many = append(many, "-i", name)
 	}
 	cases := []sshCase{
 		{Args: []string{"-o", "BatchMode=yes", "-i", "/root/.ssh/id_ed25519", "backup@10.9.8.7", "id"}},
@@ -221,6 +225,7 @@ func TestSSHLogsTheKeysItWouldOffer(t *testing.T) {
 		{Args: append(many, "a@b")},
 		{Args: []string{"-F", "/root/.ssh/config", "-i", "/root/.ssh/id_ed25519", "db01"}, Home: "/home/u"},
 		{Args: []string{"web7"}, Home: "/home/u"}, // the user has no key
+		{Args: []string{"-i", "/tmp/mismatch.pub", "a@b"}},
 	}
 	raw := runSSHHarness(t, py, "cases", map[string]any{"files": files, "cases": cases})
 	var got []struct {
@@ -246,6 +251,7 @@ func TestSSHLogsTheKeysItWouldOffer(t *testing.T) {
 		{nil, "", ""},
 		{[]string{fp}, "root", "/root/.ssh/id_ed25519"},
 		{nil, "", ""},
+		{nil, "", ""},
 	}
 	for i, w := range want {
 		ev := got[i].Events
@@ -269,7 +275,7 @@ func TestSSHLogsTheKeysItWouldOffer(t *testing.T) {
 			t.Error("a key file larger than the cap was read")
 		}
 	}
-	if n := len(got[8].Reads); n > 2*8 {
+	if n := len(got[8].Reads); n == 0 || n > 2*8 {
 		t.Errorf("40 identity files given: %d reads", n)
 	}
 }
