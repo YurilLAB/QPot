@@ -253,6 +253,52 @@ func TestIdleTimeoutTearsDown(t *testing.T) {
 	}
 }
 
+// A connection the limits turn away costs the sender one TCP handshake but
+// cost the broker a session-log line, and Vector turns each into a database
+// row: a flood that the rate limit rejected still filled the disk at line
+// rate. Rejections from one source are logged at most once a second.
+func TestRejectionLoggingIsThinned(t *testing.T) {
+	beAddr, beStop := blackholeBackend(t)
+	defer beStop()
+	sink := &capSink{}
+	cfg := Config{Honeypot: "ssh-proxy", Sink: sink, IdleTimeout: 5 * time.Second,
+		RatePerSecPerIP: 0.001, BurstPerIP: 1, MaxConcurrentIP: 100}
+	pool := NewPool([]Backend{{ID: "be", Addr: beAddr}}, nil)
+	addr, stop := startBroker(t, cfg, pool)
+	defer stop()
+
+	const flood = 40
+	var conns []net.Conn
+	for i := 0; i < flood; i++ {
+		c, err := net.Dial("tcp", addr)
+		if err != nil {
+			t.Fatalf("dial %d: %v", i, err)
+		}
+		conns = append(conns, c)
+	}
+	// Every connection after the first is rate-limited; wait until the broker
+	// has handled them all (each rejected one is closed by the broker).
+	buf := make([]byte, 1)
+	for _, c := range conns[1:] {
+		_ = c.SetReadDeadline(time.Now().Add(2 * time.Second))
+		if _, err := c.Read(buf); err == nil {
+			t.Fatal("rejected connection got data")
+		}
+	}
+	for _, c := range conns {
+		_ = c.Close()
+	}
+	n := 0
+	for _, e := range sink.snapshot() {
+		if e.EventType == EventRejected {
+			n++
+		}
+	}
+	if n == 0 || n > 2 {
+		t.Fatalf("%d rejection events for %d rate-limited connections from one source, want 1 or 2", n, flood-1)
+	}
+}
+
 // A client that stops reading must not hold the session, and its backend,
 // past the idle timeout. Only reads had a deadline, so a write stuck on a full
 // TCP window waited for MaxSession (2h by default); once the client had

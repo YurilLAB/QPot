@@ -171,12 +171,19 @@ func (b *Broker) handle(ctx context.Context, client net.Conn) {
 	ip, port := splitHostPort(client.RemoteAddr())
 
 	// 1) Admission control.
+	// Rejections are thinned (see limiter.logRejection) so a flood the limits
+	// turn away does not become a log and database flood.
+	reject := func(reason string) {
+		if b.lim.logRejection(ip) {
+			b.cfg.Sink.Emit(Event{
+				EventType: EventRejected, Honeypot: b.cfg.Honeypot,
+				SrcIP: ip, SrcPort: port, Reason: reason,
+			})
+		}
+	}
 	ok, reason, release := b.lim.admit(ip)
 	if !ok {
-		b.cfg.Sink.Emit(Event{
-			EventType: EventRejected, Honeypot: b.cfg.Honeypot,
-			SrcIP: ip, SrcPort: port, Reason: reason,
-		})
+		reject(reason)
 		return
 	}
 	defer release()
@@ -184,10 +191,7 @@ func (b *Broker) handle(ctx context.Context, client net.Conn) {
 	// 2) Lease a backend (fixed pool; never attacker-influenced).
 	backend, err := b.pool.Lease()
 	if err != nil {
-		b.cfg.Sink.Emit(Event{
-			EventType: EventRejected, Honeypot: b.cfg.Honeypot,
-			SrcIP: ip, SrcPort: port, Reason: ReasonPoolExhausted,
-		})
+		reject(ReasonPoolExhausted)
 		return
 	}
 	defer b.pool.Release(backend)

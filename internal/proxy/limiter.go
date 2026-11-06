@@ -59,14 +59,63 @@ type limiter struct {
 	global int
 	ips    map[string]*ipState
 
+	rejectTokens float64   // overall budget for logging rejections
+	rejectLast   time.Time // last refill of rejectTokens
+
 	now func() time.Time // injectable clock for deterministic tests
 }
 
 type ipState struct {
-	tokens   float64   // current bucket tokens
-	last     time.Time // last refill time
-	active   int       // concurrent connections from this IP
-	lastSeen time.Time // for idle eviction
+	tokens     float64   // current bucket tokens
+	last       time.Time // last refill time
+	active     int       // concurrent connections from this IP
+	lastSeen   time.Time // for idle eviction
+	lastReject time.Time // last rejection from this source that was logged
+}
+
+// Rejected connections are logged at most once per source per
+// rejectLogEvery, and at most rejectLogRate times a second overall.
+const (
+	rejectLogEvery = time.Second
+	rejectLogRate  = 100
+)
+
+// logRejection reports whether a connection from ip that was turned away
+// should be written to the session log. Each logged rejection is a log line
+// and, after ingestion, a database row, while it costs the sender only a TCP
+// handshake; logging all of them let a flood the limits rejected fill the
+// disk anyway.
+func (l *limiter) logRejection(ip string) bool {
+	key := sourceKey(ip)
+
+	l.mu.Lock()
+	defer l.mu.Unlock()
+
+	now := l.now()
+	st := l.ips[key]
+	if st == nil {
+		if len(l.ips) >= l.maxSources {
+			l.makeRoomLocked(now)
+		}
+		st = &ipState{tokens: l.burst, last: now, lastSeen: now}
+		l.ips[key] = st
+	}
+	if !st.lastReject.IsZero() && now.Sub(st.lastReject) < rejectLogEvery {
+		return false
+	}
+	if el := now.Sub(l.rejectLast); el > 0 {
+		l.rejectTokens += el.Seconds() * rejectLogRate
+		if l.rejectTokens > rejectLogRate {
+			l.rejectTokens = rejectLogRate
+		}
+		l.rejectLast = now
+	}
+	if l.rejectTokens < 1 {
+		return false
+	}
+	l.rejectTokens--
+	st.lastReject = now
+	return true
 }
 
 func newLimiter(ratePerSec, burst float64, perIPMax, globalMax int) *limiter {

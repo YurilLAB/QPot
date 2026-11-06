@@ -42,6 +42,42 @@ func TestLimiterGroupsIPv6By64(t *testing.T) {
 	}
 }
 
+func TestLimiterLogRejectionBudgets(t *testing.T) {
+	l := newLimiter(1, 1, 1, 0)
+	now := time.Unix(1000, 0)
+	l.now = func() time.Time { return now }
+
+	// One source: the first rejection in a second is logged, repeats are not.
+	if !l.logRejection("203.0.113.5") {
+		t.Fatal("first rejection not logged")
+	}
+	for i := 0; i < 50; i++ {
+		if l.logRejection("203.0.113.5") {
+			t.Fatalf("repeat %d within the second was logged", i)
+		}
+	}
+	// The same /64 is the same source.
+	if !l.logRejection("2001:db8::1") || l.logRejection("2001:db8::2") {
+		t.Fatal("IPv6 rejections not thinned per /64")
+	}
+	now = now.Add(rejectLogEvery)
+	if !l.logRejection("203.0.113.5") {
+		t.Fatal("rejection a second later not logged")
+	}
+
+	// Many sources at once: at most rejectLogRate a second overall.
+	now = now.Add(10 * time.Second)
+	logged := 0
+	for i := 0; i < 1000; i++ {
+		if l.logRejection(fmt.Sprintf("10.0.%d.%d", i>>8, i&255)) {
+			logged++
+		}
+	}
+	if logged != rejectLogRate {
+		t.Fatalf("%d of 1000 distinct sources logged in one instant, want %d", logged, rejectLogRate)
+	}
+}
+
 // Every new source address used to add a map entry that only the minute
 // sweeper removed, after 10 idle minutes: a flood of fresh sources (trivial
 // with IPv6) grew the map without bound in between, toward the broker's
