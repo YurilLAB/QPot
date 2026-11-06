@@ -294,6 +294,11 @@ func isCommandEvent(eventType string) bool {
 	return eventType == "command" || strings.Contains(eventType, ".command")
 }
 
+// maxIOCsPerType bounds how many IOCs of one type a single event yields. A
+// dropper names a few dozen mirrors at most; without a bound one command full
+// of URLs or hashes became that many IOC rows.
+const maxIOCsPerType = 256
+
 // Extractor extracts IOCs from honeypot events.
 type Extractor struct{}
 
@@ -319,6 +324,21 @@ func (e *Extractor) Extract(event *database.Event) []*database.IOC {
 		}
 	}
 
+	// add records one indicator. An event names each indicator once however
+	// often it repeats it (every IOC is one sighting, and the store adds
+	// sightings up), and at most maxIOCsPerType of each type.
+	seen := make(map[string]bool)
+	perType := make(map[string]int)
+	add := func(iocType, value string) {
+		k := iocType + "\x00" + value
+		if seen[k] || perType[iocType] >= maxIOCsPerType {
+			return
+		}
+		seen[k] = true
+		perType[iocType]++
+		iocs = append(iocs, makeIOC(iocType, value))
+	}
+
 	// addURLs extracts URL IOCs (and their host as a domain/IP IOC) from text.
 	addURLs := func(text string) {
 		for _, u := range reURL.FindAllString(text, -1) {
@@ -326,27 +346,26 @@ func (e *Extractor) Extract(event *database.Event) []*database.IOC {
 			if u == "" {
 				continue
 			}
-			iocs = append(iocs, makeIOC(IOCTypeURL, u))
+			add(IOCTypeURL, u)
 
 			// The host the URL connects to: an IP literal (e.g.
 			// http://203.0.113.9/x) is an IP IOC, not a domain, which keeps the
 			// blocklist/correlation by-type correct; a loopback/private literal
 			// is not an indicator at all.
 			if typ, v := hostIOC(urlHost(u)); typ != "" {
-				iocs = append(iocs, makeIOC(typ, v))
+				add(typ, v)
 			}
 		}
 	}
 
 	// Source IP
 	if event.SourceIP != "" && !isPrivateIP(event.SourceIP) {
-		iocs = append(iocs, makeIOC(IOCTypeIP, event.SourceIP))
+		add(IOCTypeIP, event.SourceIP)
 	}
 
 	// Credential pair
 	if event.Username != "" && event.Password != "" {
-		cred := event.Username + ":" + event.Password
-		iocs = append(iocs, makeIOC(IOCTypeCredential, cred))
+		add(IOCTypeCredential, event.Username+":"+event.Password)
 	}
 
 	// URLs from command
@@ -363,52 +382,22 @@ func (e *Extractor) Extract(event *database.Event) []*database.IOC {
 		// order + de-dup set keeps it robust. SHA-512 is increasingly the hash
 		// threat-intel feeds and `sha512sum`-based droppers use to identify
 		// payloads, so capturing it makes the IOC set usable against those feeds.
-		seen := make(map[string]bool)
-		for _, h := range reSHA512.FindAllString(cmd, -1) {
-			h = strings.ToLower(h)
-			if !seen[h] {
-				seen[h] = true
-				iocs = append(iocs, makeIOC(IOCTypeHash, h))
-			}
-		}
-		for _, h := range reSHA256.FindAllString(cmd, -1) {
-			h = strings.ToLower(h)
-			if !seen[h] {
-				seen[h] = true
-				iocs = append(iocs, makeIOC(IOCTypeHash, h))
-			}
-		}
-		for _, h := range reSHA1.FindAllString(cmd, -1) {
-			h = strings.ToLower(h)
-			if !seen[h] {
-				seen[h] = true
-				iocs = append(iocs, makeIOC(IOCTypeHash, h))
-			}
-		}
-		for _, h := range reMD5.FindAllString(cmd, -1) {
-			h = strings.ToLower(h)
-			if !seen[h] {
-				seen[h] = true
-				iocs = append(iocs, makeIOC(IOCTypeHash, h))
+		for _, re := range []*regexp.Regexp{reSHA512, reSHA256, reSHA1, reMD5} {
+			for _, h := range re.FindAllString(cmd, -1) {
+				add(IOCTypeHash, strings.ToLower(h))
 			}
 		}
 
 		// Cryptocurrency wallet addresses (coinminer/ransomware indicators).
 		// BTC candidates are base58check-validated so only real addresses are
 		// emitted; ETH addresses are kept as-is (lowercased for stable de-dup).
-		wseen := make(map[string]bool)
 		for _, w := range reBTC.FindAllString(cmd, -1) {
-			if !wseen[w] && validateBTCAddress(w) {
-				wseen[w] = true
-				iocs = append(iocs, makeIOC(IOCTypeWallet, w))
+			if !seen[IOCTypeWallet+"\x00"+w] && validateBTCAddress(w) {
+				add(IOCTypeWallet, w)
 			}
 		}
 		for _, w := range reETH.FindAllString(cmd, -1) {
-			w = strings.ToLower(w)
-			if !wseen[w] {
-				wseen[w] = true
-				iocs = append(iocs, makeIOC(IOCTypeWallet, w))
-			}
+			add(IOCTypeWallet, strings.ToLower(w))
 		}
 
 		// Interesting commands. Trim BEFORE the length check: a whitespace-only
@@ -417,7 +406,7 @@ func (e *Extractor) Extract(event *database.Event) []*database.IOC {
 		if isCommandEvent(event.EventType) {
 			cleaned := strings.ToLower(strings.TrimSpace(event.Command))
 			if len(cleaned) > 3 {
-				iocs = append(iocs, makeIOC(IOCTypeCommand, cleaned))
+				add(IOCTypeCommand, cleaned)
 			}
 		}
 	}
@@ -434,14 +423,14 @@ func (e *Extractor) Extract(event *database.Event) []*database.IOC {
 	// recording) are not malware and are skipped.
 	if event.Metadata != nil && (strings.Contains(event.EventType, "file_download") || strings.Contains(event.EventType, "file_upload")) {
 		if h := strings.ToLower(event.Metadata["shasum"]); reSHA256.MatchString(h) && len(h) == 64 {
-			iocs = append(iocs, makeIOC(IOCTypeHash, h))
+			add(IOCTypeHash, h)
 		}
 	}
 
 	// User agent from metadata
 	if event.Metadata != nil {
 		if ua, ok := event.Metadata["user_agent"]; ok && ua != "" {
-			iocs = append(iocs, makeIOC(IOCTypeUserAgent, ua))
+			add(IOCTypeUserAgent, ua)
 		}
 	}
 
