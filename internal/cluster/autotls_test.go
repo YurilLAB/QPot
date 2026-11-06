@@ -2,7 +2,11 @@ package cluster
 
 import (
 	"bytes"
+	"crypto/ed25519"
+	"crypto/hkdf"
+	"crypto/sha256"
 	"crypto/tls"
+	"crypto/x509"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -11,52 +15,69 @@ import (
 	"time"
 )
 
-func TestDeriveClusterCADeterministic(t *testing.T) {
-	_, a, err := deriveClusterCA("qc_1", "password123")
+// TestClusterCAIsRandomAndNamedByTheID: every init makes a new CA, the ID is
+// its fingerprint, every node rebuilds the same CA certificate from the key,
+// and nothing about it comes from the password.
+func TestClusterCAIsRandomAndNamedByTheID(t *testing.T) {
+	keyA, idA, err := newClusterCA()
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, b, _ := deriveClusterCA("qc_1", "password123")
+	keyB, idB, _ := newClusterCA()
+	if keyA == keyB || idA == idB {
+		t.Fatal("two clusters got the same CA")
+	}
+	if len(idA) != len(ClusterIDPrefix)+ClusterIDLength || idA[:len(ClusterIDPrefix)] != ClusterIDPrefix {
+		t.Fatalf("cluster ID %q", idA)
+	}
+	priv, a, err := clusterCA(keyA)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, b, _ := clusterCA(keyA)
 	if !bytes.Equal(a.Raw, b.Raw) {
-		t.Fatal("two members derived different cluster CAs from the same secret")
+		t.Fatal("two nodes built different CA certificates from the same key")
 	}
-	_, c, _ := deriveClusterCA("qc_1", "other-password")
-	_, d, _ := deriveClusterCA("qc_2", "password123")
-	if bytes.Equal(a.Raw, c.Raw) || bytes.Equal(a.Raw, d.Raw) {
-		t.Fatal("different secrets/clusters share a CA")
+	if clusterIDFor(priv.Public().(ed25519.PublicKey)) != idA || checkClusterCA(idA, keyA) != nil {
+		t.Fatal("the CA key does not give its cluster ID")
 	}
-	if _, _, err := deriveClusterCA("qc_1", ""); err == nil {
-		t.Fatal("derived a CA from an empty password")
+	if checkClusterCA(idB, keyA) == nil || checkClusterCA(idA, "") != errOldClusterFormat || checkClusterCA(idA, "bm90IGEga2V5") == nil {
+		t.Fatal("a wrong, missing or malformed CA key was accepted")
 	}
 }
 
-// A node with encryption on and no certificate files serves the cluster-CA
-// certificate; a client with the cluster secret trusts it, a client with a
-// different secret (an impostor's view) and plain HTTP do not.
-func TestAutoTLSServesAndVerifies(t *testing.T) {
+// startTLSNode starts a cluster host with automatic TLS on a free port.
+func startTLSNode(t *testing.T, name, password string) (*Manager, *Cluster, string) {
+	t.Helper()
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
 	}
 	port := ln.Addr().(*net.TCPAddr).Port
 	ln.Close()
-
 	m := NewManager(t.TempDir())
 	cfg := DefaultClusterConfig() // EnableEncryption = true, no cert files
 	cfg.BindAddr = "127.0.0.1"
 	cfg.BindPort = port
-	c, err := m.InitCluster("tls-test", "password123", cfg)
+	c, err := m.InitCluster(name, password, cfg)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if err := m.Start(); err != nil {
 		t.Fatalf("Start with automatic TLS: %v", err)
 	}
-	defer m.Stop()
+	t.Cleanup(func() { m.Stop() })
+	waitListening(t, port)
+	return m, c, "https://127.0.0.1:" + strconv.Itoa(port)
+}
 
-	url := "https://127.0.0.1:" + strconv.Itoa(port) + "/api/v1/cluster/status"
+// A node with encryption on and no certificate files serves a certificate
+// from its cluster's CA: a client that knows the cluster ID trusts it, one
+// pinned to another cluster and plain system roots do not.
+func TestAutoTLSServesAndVerifies(t *testing.T) {
+	_, c, base := startTLSNode(t, "tls-test", "password123")
 	get := func(client *http.Client) (int, error) {
-		req, _ := http.NewRequest(http.MethodGet, url, nil)
+		req, _ := http.NewRequest(http.MethodGet, base+"/api/v1/cluster/status", nil)
 		setPeerAuth(req, "password123", c.MemberKey)
 		resp, err := client.Do(req)
 		if err != nil {
@@ -65,20 +86,12 @@ func TestAutoTLSServesAndVerifies(t *testing.T) {
 		resp.Body.Close()
 		return resp.StatusCode, nil
 	}
-	var code int
-	deadline := time.Now().Add(5 * time.Second)
-	for {
-		code, err = get(clusterHTTPClient(3*time.Second, c.ID, "password123", c.MemberKey, nil))
-		if err == nil || time.Now().After(deadline) {
-			break
-		}
-		time.Sleep(50 * time.Millisecond)
-	}
-	if err != nil || code != http.StatusOK {
+	if code, err := get(clusterHTTPClient(3*time.Second, c.ID, nil)); err != nil || code != http.StatusOK {
 		t.Fatalf("member client: code=%d err=%v", code, err)
 	}
-	if _, err := get(clusterHTTPClient(3*time.Second, c.ID, "wrong-password", c.MemberKey, nil)); err == nil {
-		t.Fatal("client with the wrong cluster secret trusted the node")
+	_, other, _ := newClusterCA()
+	if _, err := get(clusterHTTPClient(3*time.Second, other, nil)); err == nil {
+		t.Fatal("a client of another cluster trusted the node")
 	}
 	plain := &http.Client{Timeout: 3 * time.Second, Transport: &http.Transport{TLSClientConfig: &tls.Config{MinVersion: tls.VersionTLS12}}}
 	if _, err := get(plain); err == nil {
@@ -86,103 +99,111 @@ func TestAutoTLSServesAndVerifies(t *testing.T) {
 	}
 }
 
-// TestMemberKeyNeverReachesPasswordOnlyImpostor: the password-derived CA can
-// be derived by anyone with the password, admitted or not. A member's calls
-// carry the member key, so a non-member on the path between members could
-// serve a password-CA certificate and collect the key. Member calls now trust
-// only the member CA (password and member key); joiners still reach a node.
-func TestMemberKeyNeverReachesPasswordOnlyImpostor(t *testing.T) {
+// TestPasswordHolderCannotPoseAsANode: the cluster CA used to be derived from
+// the password, so anyone who knew it could serve a node certificate, take a
+// joiner's password and member key, or collect a member's. A node now needs
+// the CA key, which the ID pins: an impostor with the password, its own CA
+// and the right node name gets no request at all.
+func TestPasswordHolderCannotPoseAsANode(t *testing.T) {
 	const pw = "password123"
 	m := NewManager(t.TempDir())
 	c, err := m.InitCluster("impostor-test", pw, DefaultClusterConfig())
 	if err != nil {
 		t.Fatal(err)
 	}
-	if c.MemberKey == "" {
-		t.Fatal("a new cluster has no member key")
-	}
-	cert, err := newNodeCertificate(c.ID, pw, "impostor")
+	ownKey, _, _ := newClusterCA()
+	cert, err := newNodeCertificate(ownKey, c.LocalNode.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
 	seen := make(chan string, 4)
 	impostor := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		seen <- r.Header.Get(memberKeyHeader)
+		seen <- r.Header.Get("X-Cluster-Password") + "|" + r.Header.Get(memberKeyHeader)
 	}))
 	impostor.TLS = &tls.Config{MinVersion: tls.VersionTLS12, Certificates: []tls.Certificate{cert}}
 	impostor.StartTLS()
 	defer impostor.Close()
 
-	req, _ := http.NewRequest(http.MethodPost, impostor.URL+"/api/v1/cluster/gossip", nil)
-	setPeerAuth(req, pw, c.MemberKey)
-	if resp, err := m.peerHTTPClient(3 * time.Second).Do(req); err == nil {
+	member, _ := http.NewRequest(http.MethodPost, impostor.URL+"/api/v1/cluster/gossip", nil)
+	setPeerAuth(member, pw, c.MemberKey)
+	if resp, err := m.peerHTTPClient(3 * time.Second).Do(member); err == nil {
 		resp.Body.Close()
-		t.Fatal("a member trusted a node that only knows the password")
+		t.Fatal("a member trusted a node outside the cluster's CA")
+	}
+	join, _ := http.NewRequest(http.MethodPost, impostor.URL+"/api/v1/cluster/join", bytes.NewReader([]byte(`{"password":"`+pw+`"}`)))
+	if resp, err := clusterHTTPClient(3*time.Second, c.ID, nil).Do(join); err == nil {
+		resp.Body.Close()
+		t.Fatal("a joiner trusted a node outside the cluster's CA")
 	}
 	select {
-	case key := <-seen:
-		t.Fatalf("the impostor received a request (member key %q)", key)
+	case got := <-seen:
+		t.Fatalf("the impostor received a request (%q)", got)
 	default:
-	}
-
-	// A joiner has no member key yet and still verifies a node by the password CA.
-	join, _ := http.NewRequest(http.MethodGet, impostor.URL+"/api/v1/cluster/join/status", nil)
-	resp, err := clusterHTTPClient(3*time.Second, c.ID, pw, "", nil).Do(join)
-	if err != nil {
-		t.Fatalf("a joiner could not reach a password-CA node: %v", err)
-	}
-	resp.Body.Close()
-	if key := <-seen; key != "" {
-		t.Fatalf("a joiner sent a member key: %q", key)
 	}
 }
 
-// TestAutoTLSServesJoinersAndMembers: one node serves both: the member-CA
-// certificate to members, the password-CA one to joiners.
-func TestAutoTLSServesJoinersAndMembers(t *testing.T) {
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
-	port := ln.Addr().(*net.TCPAddr).Port
-	ln.Close()
-	const pw = "password123"
-	m := NewManager(t.TempDir())
-	cfg := DefaultClusterConfig()
-	cfg.BindAddr = "127.0.0.1"
-	cfg.BindPort = port
-	c, err := m.InitCluster("both-test", pw, cfg)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := m.Start(); err != nil {
-		t.Fatal(err)
-	}
-	defer m.Stop()
-	base := "https://127.0.0.1:" + strconv.Itoa(port)
-	do := func(client *http.Client, path string, memberKey string) (int, error) {
-		req, _ := http.NewRequest(http.MethodGet, base+path, nil)
-		setPeerAuth(req, pw, memberKey)
-		var resp *http.Response
-		var err error
-		for deadline := time.Now().Add(5 * time.Second); ; time.Sleep(50 * time.Millisecond) {
-			if resp, err = client.Do(req); err == nil || time.Now().After(deadline) {
-				break
-			}
-		}
+// TestNodeServesNothingToGuessPasswordsAgainst: a node's certificate chain
+// must not depend on the password, or anyone who connects can test guesses
+// offline. Two clusters with the same password and two nodes of one cluster
+// with different passwords show the chain is the CA's alone.
+func TestNodeServesNothingToGuessPasswordsAgainst(t *testing.T) {
+	_, c1, base1 := startTLSNode(t, "one", "same-password")
+	_, c2, base2 := startTLSNode(t, "two", "same-password")
+	chain := func(base string) []*x509.Certificate {
+		conn, err := tls.Dial("tcp", base[len("https://"):], &tls.Config{InsecureSkipVerify: true}) // #nosec G402 -- reading the chain
 		if err != nil {
-			return 0, err
+			t.Fatal(err)
 		}
-		resp.Body.Close()
-		return resp.StatusCode, nil
+		defer conn.Close()
+		return conn.ConnectionState().PeerCertificates
 	}
-	if code, err := do(m.peerHTTPClient(3*time.Second), "/api/v1/cluster/status", c.MemberKey); err != nil || code != http.StatusOK {
-		t.Fatalf("member: code=%d err=%v", code, err)
+	a, b := chain(base1), chain(base2)
+	if len(a) != 2 || len(b) != 2 {
+		t.Fatalf("chains of %d and %d certificates, want leaf + CA", len(a), len(b))
 	}
-	if code, err := do(clusterHTTPClient(3*time.Second, c.ID, pw, "", nil), "/api/v1/cluster/join/status?request_id=x", ""); err != nil || code == 0 {
-		t.Fatalf("joiner: code=%d err=%v", code, err)
+	if bytes.Equal(a[1].Raw, b[1].Raw) {
+		t.Fatal("two clusters with the same password serve the same CA")
 	}
-	if _, err := do(clusterHTTPClient(3*time.Second, c.ID, pw, "qk_not-the-member-key", nil), "/api/v1/cluster/status", "qk_not-the-member-key"); err == nil {
-		t.Fatal("a client with a wrong member key trusted the node's member certificate")
+	if verifyClusterPeer(c1.ID, a) != nil || verifyClusterPeer(c2.ID, b) != nil || verifyClusterPeer(c1.ID, b) == nil {
+		t.Fatal("a chain verifies against the wrong cluster ID, or not its own")
+	}
+	// The offline check the old scheme allowed: derive the CA key from the ID
+	// and a guess (here the right password) and compare it with the served
+	// CA. It must not match.
+	seed, err := hkdf.Key(sha256.New, []byte("same-password"), []byte(c1.ID), "qpot-cluster-ca-v1", ed25519.SeedSize)
+	if err != nil {
+		t.Fatal(err)
+	}
+	guessed := ed25519.NewKeyFromSeed(seed).Public().(ed25519.PublicKey)
+	if served, ok := a[1].PublicKey.(ed25519.PublicKey); !ok || served.Equal(guessed) {
+		t.Fatal("the served CA is derived from the password: guesses can be checked offline")
+	}
+}
+
+// TestOldFormatClusterRefusesToStart: a cluster saved before clusters had
+// their own CA rests on the password-derived one; it does not start, and says
+// to re-create it.
+func TestOldFormatClusterRefusesToStart(t *testing.T) {
+	dir := t.TempDir()
+	m := NewManager(dir)
+	if _, err := m.InitCluster("old", "password123", DefaultClusterConfig()); err != nil {
+		t.Fatal(err)
+	}
+	m.mu.Lock()
+	m.cluster.CAKey = ""
+	if err := m.saveClusterLocked(); err != nil {
+		t.Fatal(err)
+	}
+	m.mu.Unlock()
+
+	loaded := NewManager(dir)
+	if c, err := loaded.LoadCluster(); err != nil || c == nil {
+		t.Fatalf("an old cluster file no longer loads (leave and status need it): %v", err)
+	}
+	if err := loaded.UnlockPassword("password123"); err != nil {
+		t.Fatal(err)
+	}
+	if err := loaded.Start(); err != errOldClusterFormat {
+		t.Fatalf("Start of an old-format cluster: %v", err)
 	}
 }

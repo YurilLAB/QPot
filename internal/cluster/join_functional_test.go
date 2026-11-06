@@ -100,9 +100,8 @@ func itoa(i int) string {
 }
 
 // TestTwoNodeJoinOverAutoTLS: a node joins over automatic TLS (verifying the
-// seed by the password CA), receives the member key, and then both nodes reach
-// each other under the member CA: each serves a member certificate made from
-// the key and trusts only that for its own member calls.
+// seed by the CA its cluster ID names), receives the member key and the CA
+// key, and then both nodes reach each other with certificates from that CA.
 func TestTwoNodeJoinOverAutoTLS(t *testing.T) {
 	const password = "correct-horse-battery"
 	free := func() int {
@@ -138,6 +137,9 @@ func TestTwoNodeJoinOverAutoTLS(t *testing.T) {
 	}
 	if joined.MemberKey == "" || joined.MemberKey != cl.MemberKey {
 		t.Fatalf("joiner's member key %q, host's %q", joined.MemberKey, cl.MemberKey)
+	}
+	if joined.CAKey != cl.CAKey || checkClusterCA(cl.ID, joined.CAKey) != nil {
+		t.Fatal("the joiner did not get the cluster's CA key")
 	}
 	joiner.mu.Lock()
 	joiner.cluster.Config.BindAddr = "127.0.0.1"

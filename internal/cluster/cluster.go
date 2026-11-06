@@ -42,7 +42,10 @@ type Cluster struct {
 	// endpoints require it besides the password, which every joiner has, so
 	// a node the host denied (or has not approved) cannot take part. Empty
 	// for clusters created before it existed: their peers use the password.
-	MemberKey string            `json:"member_key,omitempty" yaml:"member_key,omitempty"`
+	MemberKey string `json:"member_key,omitempty" yaml:"member_key,omitempty"`
+	// CAKey is the cluster's certificate authority (see autotls.go): the ID
+	// is derived from its public key, and a node gets it when admitted.
+	CAKey     string            `json:"ca_key,omitempty" yaml:"ca_key,omitempty"`
 	CreatedAt time.Time         `json:"created_at" yaml:"created_at"`
 	UpdatedAt time.Time         `json:"updated_at" yaml:"updated_at"`
 	Metadata  map[string]string `json:"metadata,omitempty" yaml:"metadata,omitempty"`
@@ -234,8 +237,9 @@ type JoinResponse struct {
 	ClusterName string         `json:"cluster_name,omitempty"`
 	Nodes       []*Node        `json:"nodes,omitempty"`
 	Config      *ClusterConfig `json:"config,omitempty"`
-	// MemberKey is only sent to an admitted node (see Cluster.MemberKey).
+	// MemberKey and CAKey are only sent to an admitted node (see Cluster).
 	MemberKey string `json:"member_key,omitempty"`
+	CAKey     string `json:"ca_key,omitempty"`
 	Error     string `json:"error,omitempty"`
 }
 
@@ -373,7 +377,7 @@ func (m *Manager) peerHTTPClient(timeout time.Duration) *http.Client {
 			}
 		}
 	}
-	return clusterHTTPClient(timeout, m.cluster.ID, m.plainPassword, m.cluster.MemberKey, pool)
+	return clusterHTTPClient(timeout, m.cluster.ID, pool)
 }
 
 // HTTPClient returns a client for talking to this cluster's API (e.g. the
@@ -435,9 +439,9 @@ func (m *Manager) InitCluster(name, password string, cfg *ClusterConfig) (*Clust
 		return nil, fmt.Errorf("password must be at most %d bytes", maxPasswordBytes)
 	}
 
-	clusterID, err := generateClusterID()
+	caKey, clusterID, err := newClusterCA()
 	if err != nil {
-		return nil, fmt.Errorf("failed to generate cluster ID: %w", err)
+		return nil, fmt.Errorf("failed to make the cluster CA: %w", err)
 	}
 
 	if cfg == nil {
@@ -457,6 +461,7 @@ func (m *Manager) InitCluster(name, password string, cfg *ClusterConfig) (*Clust
 		Name:          name,
 		PasswordHash:  passwordHash,
 		MemberKey:     memberKey,
+		CAKey:         caKey,
 		CreatedAt:     now,
 		UpdatedAt:     now,
 		Metadata:      make(map[string]string),
@@ -574,10 +579,9 @@ func (m *Manager) attemptJoin(seedAddr, clusterID, password string, localNode *N
 
 	// The seed address may name the scheme:
 	//   https://1.2.3.4:7946 or 1.2.3.4:7946 -> TLS (the default: new clusters
-	//     encrypt). The seed is verified against the cluster CA derived from
-	//     the cluster ID + password (automatic TLS) or the system roots
-	//     (operator certificate), so the password is never sent to an
-	//     impostor or in cleartext.
+	//     encrypt). The seed is verified against the cluster CA the cluster
+	//     ID names (automatic TLS) or the system roots (operator certificate),
+	//     so the password is never sent to an impostor or in cleartext.
 	//   http://1.2.3.4:7946 -> plain HTTP, only for clusters that turned
 	//     encryption off.
 	scheme := "https"
@@ -593,7 +597,7 @@ func (m *Manager) attemptJoin(seedAddr, clusterID, password string, localNode *N
 
 	joinClient := &http.Client{Timeout: 15 * time.Second}
 	if scheme == "https" {
-		joinClient = clusterHTTPClient(15*time.Second, clusterID, password, "", nil)
+		joinClient = clusterHTTPClient(15*time.Second, clusterID, nil)
 	}
 	resp, err := joinClient.Post(url, "application/json", bytes.NewReader(reqBody))
 	if err != nil {
@@ -628,6 +632,12 @@ func (m *Manager) attemptJoin(seedAddr, clusterID, password string, localNode *N
 		}
 	}
 
+	// The seed was verified by the CA the cluster ID names, and must hand over
+	// exactly that CA's key.
+	if err := checkClusterCA(clusterID, joinResp.CAKey); err != nil {
+		return nil, fmt.Errorf("join: the seed sent no valid key for cluster %s: %w", clusterID, err)
+	}
+
 	// Create local cluster state
 	now := time.Now()
 	localNode.ID = joinResp.NodeID
@@ -640,6 +650,7 @@ func (m *Manager) attemptJoin(seedAddr, clusterID, password string, localNode *N
 		Name:         joinResp.ClusterName,
 		PasswordHash: hashPassword(password), // bcrypt hash for local verification
 		MemberKey:    joinResp.MemberKey,
+		CAKey:        joinResp.CAKey,
 		CreatedAt:    now,
 		UpdatedAt:    now,
 		LocalNode:    localNode,
@@ -680,7 +691,7 @@ func (m *Manager) attemptJoin(seedAddr, clusterID, password string, localNode *N
 func (m *Manager) pollJoinApproval(scheme, host, clusterID, password, requestID string) (*JoinResponse, error) {
 	client := &http.Client{Timeout: 15 * time.Second}
 	if scheme == "https" {
-		client = clusterHTTPClient(15*time.Second, clusterID, password, "", nil)
+		client = clusterHTTPClient(15*time.Second, clusterID, nil)
 	}
 	url := fmt.Sprintf("%s://%s/api/v1/cluster/join/status?request_id=%s", scheme, host, requestID)
 
@@ -735,6 +746,9 @@ func (m *Manager) Start() error {
 
 	if m.cluster.isRunning {
 		return nil
+	}
+	if err := checkClusterCA(m.cluster.ID, m.cluster.CAKey); err != nil {
+		return err
 	}
 
 	// Only the bcrypt hash is persisted, so a manager restored by LoadCluster
@@ -1067,6 +1081,7 @@ func (m *Manager) admitNodeLocked(req *JoinRequest) (*JoinResponse, error) {
 		Nodes:       nodes,
 		Config:      m.cluster.Config,
 		MemberKey:   m.cluster.MemberKey,
+		CAKey:       m.cluster.CAKey,
 	}, nil
 }
 
@@ -1253,18 +1268,17 @@ func (m *Manager) startAPIServer() error {
 		srv.TLSConfig = &tls.Config{MinVersion: tls.VersionTLS12}
 	} else if autoTLS {
 		// No operator certificate: serve a node certificate signed by the
-		// cluster CA derived from the cluster secret (see autotls.go). Never
-		// fall back to plain HTTP, which would expose the password header.
+		// cluster's own CA (see autotls.go). Never fall back to plain HTTP,
+		// which would expose the password header.
 		var nodeID string
 		if m.cluster.LocalNode != nil {
 			nodeID = m.cluster.LocalNode.ID
 		}
-		cert, err := newNodeCertificate(m.cluster.ID, m.plainPassword, nodeID)
+		cert, err := newNodeCertificate(m.cluster.CAKey, nodeID)
 		if err != nil {
 			return fmt.Errorf("cluster TLS: %w", err)
 		}
-		srv.TLSConfig = &tls.Config{MinVersion: tls.VersionTLS12,
-			GetCertificate: m.autoTLSCertificate(cert, m.cluster.ID, m.plainPassword, nodeID)}
+		srv.TLSConfig = &tls.Config{MinVersion: tls.VersionTLS12, Certificates: []tls.Certificate{cert}}
 	}
 
 	ln, err := net.Listen("tcp", addr)
@@ -1290,33 +1304,6 @@ func (m *Manager) startAPIServer() error {
 	}()
 
 	return nil
-}
-
-// autoTLSCertificate picks the certificate a node serves with automatic TLS:
-// the member-CA one for a client asking for memberServerName (a member, which
-// holds the member key), else the password-CA one (a joiner). The member
-// certificate is made on first use and again when the member key changes (a
-// node gets it on admission, after its API server started).
-func (m *Manager) autoTLSCertificate(join tls.Certificate, clusterID, password, nodeID string) func(*tls.ClientHelloInfo) (*tls.Certificate, error) {
-	var mu sync.Mutex
-	var member *tls.Certificate
-	var memberFor string
-	return func(hello *tls.ClientHelloInfo) (*tls.Certificate, error) {
-		key := m.memberKey()
-		if hello.ServerName != memberServerName || key == "" {
-			return &join, nil
-		}
-		mu.Lock()
-		defer mu.Unlock()
-		if member == nil || memberFor != key {
-			cert, err := newMemberCertificate(clusterID, password, key, nodeID)
-			if err != nil {
-				return nil, fmt.Errorf("cluster TLS: %w", err)
-			}
-			member, memberFor = &cert, key
-		}
-		return member, nil
-	}
 }
 
 // HTTP handlers
@@ -2122,10 +2109,6 @@ func (m *Manager) LeaveCluster() error {
 }
 
 // Utility functions
-
-func generateClusterID() (string, error) {
-	return generateID(ClusterIDPrefix, ClusterIDLength)
-}
 
 func generateNodeID() (string, error) {
 	return generateID(NodeIDPrefix, NodeIDLength)

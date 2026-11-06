@@ -467,10 +467,12 @@ connection, not the request body) alongside its claimed hostname and instance.
 
 On approval the joiner receives the cluster's **member key**, which the peer
 endpoints (gossip, intel, nodes, status, leave) require besides the password,
-and which selects the member TLS CA nodes use between themselves. It travels
-over the join connection, protected by the password-derived CA only, so join
-over a trusted network or VPN: a password holder intercepting the join could
-take the key. Clusters created before member keys keep password-only access.
+and the key of the cluster's certificate authority, from which each node
+makes its TLS certificate. The cluster ID is that authority's fingerprint, so
+the joiner verifies the seed before sending the password and receives both
+keys over a connection only a real node can answer. A cluster created by an
+earlier QPot, whose TLS was derived from the password, does not start; leave
+it on every node and create it again.
 
 ### `qpot cluster leave`
 

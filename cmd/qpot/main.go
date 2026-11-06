@@ -1137,6 +1137,10 @@ func newClusterStatusCommand() *cobra.Command {
 			fmt.Printf("Cluster ID:    %s\n", status.ID)
 			fmt.Printf("Cluster Name:  %s\n", status.Name)
 			fmt.Printf("Status:        %s\n", map[bool]string{true: "running", false: "stopped"}[status.IsRunning])
+			if c.CAKey == "" {
+				fmt.Println("\n[!] This cluster was created by an older QPot (its TLS came from the password)")
+				fmt.Println("    and does not start. Leave it on every node, then create it again.")
+			}
 			fmt.Printf("\nNodes:\n")
 			fmt.Printf("  Total:       %d\n", status.NodeCount)
 			fmt.Printf("  Healthy:     %d\n", status.HealthyNodes)
