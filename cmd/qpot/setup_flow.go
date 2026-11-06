@@ -1006,11 +1006,22 @@ func realRuntimes(r hostsetup.Runner) func(ctx context.Context) string {
 	}
 }
 
-// newSetupEnv builds the environment for a real run.
+// newSetupEnv builds the environment for a real run. Without a private
+// temporary folder it stops: files that root installs are written there
+// first, and anywhere else (the current folder, a shared one) another user
+// could swap them before root installs them.
 func newSetupEnv(cmd interface {
 	InOrStdin() io.Reader
 	OutOrStdout() io.Writer
-}, verbose bool) (*setupEnv, func()) {
+}, verbose bool) (*setupEnv, func(), *hostsetup.Error) {
+	tmp, terr := os.MkdirTemp("", "qpot-setup-")
+	if terr != nil {
+		return nil, nil, hostsetup.E("QP-PERM-010").WithWhy("Setup could not make a private folder in %s.", os.TempDir()).Wrap(terr)
+	}
+	if perr := hostsetup.CheckPrivateDir(tmp); perr != nil {
+		_ = os.RemoveAll(tmp)
+		return nil, nil, perr
+	}
 	u := ""
 	if cu, err := user.Current(); err == nil {
 		u = cu.Username
@@ -1025,7 +1036,8 @@ func newSetupEnv(cmd interface {
 		lookPath: exec.LookPath, addrs: localAddrs, memBytes: totalMemoryBytes,
 		freeBytes: hostsetup.FreeBytes, geoip: provisionGeoIP, start: realStart, health: realHealth,
 	}
-	cleanup := []func(){}
+	env.tempDir = tmp
+	cleanup := []func(){func() { _ = os.RemoveAll(tmp) }}
 	var logW io.Writer
 	if home, err := os.UserHomeDir(); err == nil {
 		dir := filepath.Join(home, ".qpot", "logs")
@@ -1048,10 +1060,6 @@ func newSetupEnv(cmd interface {
 	}
 	prevWarn := security.SetWarningOutput(warnTo)
 	cleanup = append(cleanup, func() { security.SetWarningOutput(prevWarn) })
-	if tmp, err := os.MkdirTemp("", "qpot-setup-"); err == nil {
-		env.tempDir = tmp
-		cleanup = append(cleanup, func() { _ = os.RemoveAll(tmp) })
-	}
 	sudo, _ := exec.LookPath("sudo")
 	r := &hostsetup.ExecRunner{EUID: env.euid, Sudo: sudo, NoTTY: !env.stdinTTY, Log: logW,
 		Stdin: os.Stdin, Stdout: os.Stdout, Stderr: os.Stderr}
@@ -1065,5 +1073,5 @@ func newSetupEnv(cmd interface {
 		for i := len(cleanup) - 1; i >= 0; i-- {
 			cleanup[i]()
 		}
-	}
+	}, nil
 }

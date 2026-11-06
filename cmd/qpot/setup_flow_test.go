@@ -13,6 +13,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -136,7 +137,7 @@ func testEnv(t *testing.T, d *fakeDocker, stdin string, tty bool) (*setupEnv, *b
 		addrs:     func() []netip.Addr { return []netip.Addr{netip.MustParseAddr("192.0.2.7")} },
 		memBytes:  func() int64 { return 8 << 30 },
 		freeBytes: func(string) int64 { return 100 << 30 },
-		tempDir:   t.TempDir(),
+		tempDir:   privateTemp(t),
 		start: func(ctx context.Context, cfg *config.Config, service bool) (string, error) {
 			started = true
 			return "", nil
@@ -547,5 +548,73 @@ func TestDoctorExplain(t *testing.T) {
 	_ = cmd.Execute()
 	if code != 10 || !strings.Contains(errOut.String(), "QP-INPUT-011") {
 		t.Fatalf("unknown code: %d\n%s", code, errOut.String())
+	}
+}
+
+// privateTemp makes a temporary folder as setup does (os.MkdirTemp: mode
+// 0700); t.TempDir's own folder is 0755.
+func privateTemp(t testing.TB) string {
+	t.Helper()
+	d, err := os.MkdirTemp(t.TempDir(), "qpot-setup-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	return d
+}
+
+type stubCmd struct{}
+
+func (stubCmd) InOrStdin() io.Reader   { return strings.NewReader("") }
+func (stubCmd) OutOrStdout() io.Writer { return io.Discard }
+
+// Setup stops when it cannot make a private temporary folder: root installs
+// files from there, and a file anywhere else could be swapped first.
+func TestNewSetupEnvNeedsPrivateTempDir(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+	setTmp := func(dir string) {
+		for _, v := range []string{"TMPDIR", "TMP", "TEMP"} {
+			t.Setenv(v, dir)
+		}
+	}
+
+	setTmp(filepath.Join(t.TempDir(), "missing"))
+	env, cleanup, err := newSetupEnv(stubCmd{}, false)
+	if err == nil || err.Code != "QP-PERM-010" || env != nil || cleanup != nil {
+		t.Fatalf("missing temporary folder: env=%v err=%v", env, err)
+	}
+
+	setTmp(t.TempDir())
+	env, cleanup, err = newSetupEnv(stubCmd{}, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !filepath.IsAbs(env.tempDir) || hostsetup.CheckPrivateDir(env.tempDir) != nil {
+		t.Fatalf("temporary folder %q is not private", env.tempDir)
+	}
+	dir := env.tempDir
+	cleanup()
+	if _, err := os.Stat(dir); !os.IsNotExist(err) {
+		t.Fatalf("temporary folder left behind: %v", err)
+	}
+
+	if runtime.GOOS != "windows" {
+		// A temporary folder inside one other users can rename things in.
+		shared := filepath.Join(t.TempDir(), "shared")
+		if err := os.Mkdir(shared, 0o777); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chmod(shared, 0o777); err != nil {
+			t.Fatal(err)
+		}
+		setTmp(shared)
+		env, _, err = newSetupEnv(stubCmd{}, false)
+		if err == nil || err.Code != "QP-PERM-010" || !strings.Contains(err.Cause(), "not sticky") {
+			t.Fatalf("temporary folder in a shared folder: env=%v err=%v", env, err)
+		}
+		if ents, _ := os.ReadDir(shared); len(ents) != 0 {
+			t.Fatalf("refused temporary folder left behind: %v", ents)
+		}
 	}
 }

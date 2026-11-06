@@ -220,14 +220,92 @@ func TestKeyFingerprint(t *testing.T) {
 	}
 }
 
+// The armor must start the file and its BEGIN and END lines must be whole
+// lines: bytes outside the checked block could be read by apt, gpg or rpm as
+// another key that the fingerprint check never saw.
+func TestKeyArmorIsAnchored(t *testing.T) {
+	body := testKeyBody(t, 4)
+	want := fingerprintOf(body)
+	uid := newPacket(13, []byte("Docker Release (CE deb) <docker@docker.com>"))
+	good := append(newPacket(6, body), uid...)
+	other := append(newPacket(6, testKeyBody(t, 4)), newPacket(13, []byte("someone else"))...)
+	endGlued := bytes.Replace(armor(good, true), []byte("\n-----END"), []byte("-----END"), 1)
+	beginGlued := bytes.Replace(armor(good, true), []byte("-----\nComment"), []byte("-----Comment"), 1)
+	for name, data := range map[string][]byte{
+		"text before the armor":            append([]byte("junk\n"), armor(good, true)...),
+		"binary key before the armor":      append(append(append([]byte{}, other...), '\n'), armor(good, true)...),
+		"BEGIN not at the start of a line": append([]byte("x "), armor(good, true)...),
+		"END not at the start of a line":   endGlued,
+		"text after BEGIN on its line":     beginGlued,
+		"text after the armor":             append(armor(good, true), []byte("junk")...),
+		"binary key after the armor":       append(armor(good, true), other...),
+		"two blocks":                       append(armor(good, true), armor(other, true)...),
+		"two keys in one block":            armor(append(append([]byte{}, good...), other...), true),
+		"subkey before the primary key":    armor(append(newPacket(14, testKeyBody(t, 4)), good...), true),
+		"user ID before the primary key":   armor(append(append([]byte{}, uid...), newPacket(6, body)...), true),
+		"trailing bytes in the block":      armor(append(append([]byte{}, good...), 0x00), true),
+	} {
+		if got, err := KeyFingerprint(data); err == nil {
+			t.Errorf("%s: accepted with fingerprint %s", name, got)
+		}
+	}
+	// Leading blank lines are fine.
+	if got, err := KeyFingerprint(append([]byte("\n  \n"), armor(good, true)...)); err != nil || got != want {
+		t.Errorf("leading whitespace: %s %v", got, err)
+	}
+}
+
+// CanonicalKey re-armors exactly the checked packets in one fixed layout.
+func TestCanonicalKey(t *testing.T) {
+	body := testKeyBody(t, 4)
+	good := append(append(newPacket(6, body), newPacket(13, []byte("Docker Release"))...),
+		newPacket(2, bytes.Repeat([]byte{0x04}, 150))...)
+	sent := bytes.ReplaceAll(armor(good, false), []byte("\n"), []byte("\r\n")) // CRLF, a header, no checksum
+	fpr, canonical, err := CanonicalKey(append([]byte("\n\n"), sent...))
+	if err != nil || fpr != fingerprintOf(body) {
+		t.Fatalf("CanonicalKey: %s %v", fpr, err)
+	}
+	if !bytes.HasPrefix(canonical, []byte(armorBegin+"\n\n")) || !bytes.HasSuffix(canonical, []byte("\n"+armorEnd+"\n")) ||
+		bytes.Contains(canonical, []byte("\r")) || bytes.Contains(canonical, []byte("Comment")) || !bytes.Contains(canonical, []byte("\n=")) {
+		t.Fatalf("not canonical:\n%s", canonical)
+	}
+	for _, l := range strings.Split(string(canonical), "\n") {
+		if len(l) > 64 {
+			t.Fatalf("line longer than 64 characters: %q", l)
+		}
+	}
+	raw, err := dearmor(canonical)
+	if err != nil || !bytes.Equal(raw, good) {
+		t.Fatal("the canonical form holds other packets than the checked ones")
+	}
+	// It is a fixed point.
+	if _, again, err := CanonicalKey(canonical); err != nil || !bytes.Equal(again, canonical) {
+		t.Fatalf("canonical form changes when checked again: %v", err)
+	}
+}
+
 func FuzzKeyFingerprint(f *testing.F) {
 	body := testKeyBody(f, 4)
-	f.Add(armor(append(newPacket(6, body), newPacket(13, []byte("x"))...), true))
+	good := append(newPacket(6, body), newPacket(13, []byte("x"))...)
+	other := append(newPacket(6, testKeyBody(f, 4)), newPacket(13, []byte("y"))...)
+	f.Add(armor(good, true))
 	f.Add(armor(oldPacket(6, body), false))
 	f.Add([]byte("-----BEGIN PGP PUBLIC KEY BLOCK-----\n\n=AAAA\n-----END PGP PUBLIC KEY BLOCK-----"))
+	f.Add(append([]byte("junk\n"), armor(good, true)...))                                // text before the armor
+	f.Add(append(append(append([]byte{}, other...), '\n'), armor(good, true)...))        // binary key before it
+	f.Add(armor(append(append([]byte{}, good...), other...), true))                      // two keys in one block
+	f.Add(append(armor(good, true), armor(other, true)...))                              // two blocks
+	f.Add(append(armor(good, true), other...))                                           // data after the armor
+	f.Add(bytes.Replace(armor(good, true), []byte("\n="), []byte("\n=A"), 1))            // checksum mismatch
+	f.Add(bytes.Replace(armor(good, true), []byte("\n-----END"), []byte("-----END"), 1)) // END inside a line
+	f.Add(armor(append(newPacket(14, testKeyBody(f, 4)), good...), true))                // subkey first
+	f.Add(bytes.ReplaceAll(armor(good, true), []byte("\n"), []byte("\r\n")))             // CRLF
 	f.Fuzz(func(t *testing.T, data []byte) {
-		got, err := KeyFingerprint(data)
+		got, canonical, err := CanonicalKey(data)
 		if err != nil {
+			if fpr, ferr := KeyFingerprint(data); ferr == nil {
+				t.Fatalf("KeyFingerprint accepted what CanonicalKey refused (%s)", fpr)
+			}
 			return
 		}
 		if len(got) != 40 || strings.ToUpper(got) != got {
@@ -235,6 +313,39 @@ func FuzzKeyFingerprint(f *testing.F) {
 		}
 		if _, err := hex.DecodeString(got); err != nil {
 			t.Fatalf("fingerprint %q is not hex", got)
+		}
+		// Only blank lines may come before the armor.
+		if !strings.HasPrefix(strings.TrimLeft(strings.ReplaceAll(string(data), "\r\n", "\n"), " \t\n"), armorBegin+"\n") {
+			t.Fatalf("accepted with bytes before the BEGIN line: %q", data)
+		}
+		// The installed form holds the same packets and checks the same.
+		raw, err := dearmor(data)
+		if err != nil {
+			t.Fatal(err)
+		}
+		craw, err := dearmor(canonical)
+		if err != nil || !bytes.Equal(raw, craw) {
+			t.Fatalf("canonical form holds other packets: %v", err)
+		}
+		if again, _, err := CanonicalKey(canonical); err != nil || again != got {
+			t.Fatalf("canonical form checks as %s %v, want %s", again, err, got)
+		}
+		// Exactly one primary key, first.
+		primaries := 0
+		for rest, first := raw, true; len(rest) > 0; first = false {
+			tag, _, next, err := nextPacket(rest)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if tag == 6 {
+				primaries++
+			} else if first {
+				t.Fatalf("first packet is tag %d", tag)
+			}
+			rest = next
+		}
+		if primaries != 1 {
+			t.Fatalf("%d primary keys accepted", primaries)
 		}
 	})
 }

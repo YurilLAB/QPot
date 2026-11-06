@@ -158,8 +158,10 @@ yes without a terminal). On Linux:
 | Arch, Manjaro | `pacman -Syu docker docker-compose` (Arch only supports full upgrades) |
 
 Nothing is piped from the network into a shell: setup downloads the signing
-key itself, refuses it unless its fingerprint matches, and lets apt or dnf
-check every package against it. It waits up to two minutes for another program
+key itself, refuses it unless its fingerprint matches, installs only the key it
+checked (re-armored, never the downloaded bytes), and lets apt or dnf check
+every package against it. The key and package source files are prepared in a
+private temporary folder before `sudo install` copies them into place. It waits up to two minutes for another program
 that is installing software, removes packages that conflict with Docker's own
 only as a shown step, and starts Docker with `systemctl enable --now docker`
 (or Docker's start script where systemd is not running, such as WSL without

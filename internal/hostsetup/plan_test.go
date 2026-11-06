@@ -169,8 +169,8 @@ func TestAptRepoPlanRunsAndIsIdempotent(t *testing.T) {
 		t.Fatalf("locked install: %v (%s)", err, errDetails(err))
 	}
 	key, _ := os.ReadFile(filepath.Join(h.root, "etc/apt/keyrings/docker.asc"))
-	if !bytes.Equal(key, rs.key) {
-		t.Fatal("key not installed before the failing step")
+	if _, canonical, err := CanonicalKey(rs.key); err != nil || !bytes.Equal(key, canonical) {
+		t.Fatalf("key not installed (in canonical form) before the failing step: %v\n%s", err, key)
 	}
 
 	// Run again (a new plan, as a new setup run makes): the key and source
@@ -203,6 +203,123 @@ func TestAptRepoPlanRunsAndIsIdempotent(t *testing.T) {
 	if p, err := in.Plan(ctx, NeedFor(st)); err != nil || len(p.Steps) != 0 {
 		t.Fatalf("third plan = %+v, %v", p, err)
 	}
+}
+
+// The key file setup installs holds exactly the packets it checked: bytes
+// around the armor are refused, and a key it accepts is installed in a
+// canonical armor, never as the bytes the server sent.
+func TestKeyStepInstallsOnlyTheCheckedKey(t *testing.T) {
+	ctx := context.Background()
+	keyPath := func(h *fakeHost) string { return filepath.Join(h.root, "etc/apt/keyrings/docker.asc") }
+
+	h := newFakeHost(t, ubuntuOSRelease)
+	rs := newRepoServer(t)
+	rs.have["/ubuntu/dists/noble/Release"] = true
+	other := append(newPacket(6, testKeyBody(t, 4)), newPacket(13, []byte("someone else"))...)
+	rs.key = append(append(append([]byte{}, other...), '\n'), rs.key...)
+	in := h.installer(rs, ubuntuOSRelease, 1000)
+	plan, err := in.Plan(ctx, NeedFor(detect(h, in)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if e := in.Execute(ctx, plan); e == nil || e.Code != "QP-NET-005" {
+		t.Fatalf("a key file with another key before the armor: %v", e)
+	}
+	if _, err := os.Stat(keyPath(h)); err == nil {
+		t.Fatal("a key file with extra bytes was installed")
+	}
+
+	// A valid key sent with CRLF line ends and an armor header.
+	h = newFakeHost(t, ubuntuOSRelease)
+	rs = newRepoServer(t)
+	rs.have["/ubuntu/dists/noble/Release"] = true
+	rs.key = bytes.ReplaceAll(rs.key, []byte("\n"), []byte("\r\n"))
+	in = h.installer(rs, ubuntuOSRelease, 1000)
+	if plan, err = in.Plan(ctx, NeedFor(detect(h, in))); err != nil {
+		t.Fatal(err)
+	}
+	if e := in.Execute(ctx, plan); e != nil {
+		t.Fatalf("valid key: %v (%s)", e, errDetails(e))
+	}
+	got, _ := os.ReadFile(keyPath(h))
+	if bytes.Equal(got, rs.key) || bytes.Contains(got, []byte("\r")) || bytes.Contains(got, []byte("Comment:")) ||
+		!bytes.HasPrefix(got, []byte("-----BEGIN PGP PUBLIC KEY BLOCK-----\n\n")) {
+		t.Fatalf("installed key is not the canonical armor:\n%q", got)
+	}
+	if fpr, err := KeyFingerprint(got); err != nil || fpr != rs.fpr {
+		t.Fatalf("installed key: %s %v", fpr, err)
+	}
+}
+
+// Files a root step installs are written by setup into a folder only this
+// user can use, and never through a name that already exists.
+func TestInstallerNeedsPrivateTempDir(t *testing.T) {
+	ctx := context.Background()
+	h := newFakeHost(t, ubuntuOSRelease)
+	rs := newRepoServer(t)
+	rs.have["/ubuntu/dists/noble/Release"] = true
+	open := filepath.Join(t.TempDir(), "open")
+	if err := os.Mkdir(open, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(open, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	private := t.TempDir()
+	// A relative name is refused even when that folder exists and is private.
+	cwd := t.TempDir()
+	t.Chdir(cwd)
+	if err := os.Mkdir(filepath.Join(cwd, "qpot-tmp"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(t.TempDir(), "link")
+	if err := os.Symlink(private, link); err != nil {
+		t.Fatal(err)
+	}
+	for name, dir := range map[string]string{"empty": "", "relative": "qpot-tmp", "group-writable": open, "symlink": link} {
+		in := h.installer(rs, ubuntuOSRelease, 1000)
+		in.TempDir = dir
+		plan, err := in.Plan(ctx, NeedFor(detect(h, in)))
+		if err == nil || err.Code != "QP-PERM-010" {
+			var desc bytes.Buffer
+			if plan != nil {
+				in.Describe(&desc, plan)
+			}
+			t.Errorf("%s temp folder %q: plan made (%v):\n%s", name, dir, err, desc.String())
+		}
+	}
+
+	// Something already at a temp file's name is never written through.
+	in := h.installer(rs, ubuntuOSRelease, 1000)
+	victim := filepath.Join(t.TempDir(), "victim")
+	if err := os.WriteFile(victim, []byte("keep me"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(victim, filepath.Join(in.TempDir, "docker.asc")); err != nil {
+		t.Fatal(err)
+	}
+	plan, err := in.Plan(ctx, NeedFor(detect(h, in)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if e := in.Execute(ctx, plan); e != nil {
+		t.Fatalf("execute: %v (%s)", e, errDetails(e))
+	}
+	if v, _ := os.ReadFile(victim); string(v) != "keep me" {
+		t.Fatalf("setup wrote through a planted link: %q", v)
+	}
+	if fpr, err := KeyFingerprint(mustRead(t, filepath.Join(h.root, "etc/apt/keyrings/docker.asc"))); err != nil || fpr != rs.fpr {
+		t.Fatalf("installed key: %s %v", fpr, err)
+	}
+}
+
+func mustRead(t *testing.T, path string) []byte {
+	t.Helper()
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return data
 }
 
 func errDetails(e *Error) string {

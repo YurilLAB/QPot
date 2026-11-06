@@ -31,32 +31,53 @@ const maxKeySize = 64 << 10
 
 var errKey = errors.New("not a single OpenPGP public key")
 
+// The armor lines of a public key block (RFC 4880 6.2).
+const (
+	armorBegin = "-----BEGIN PGP PUBLIC KEY BLOCK-----"
+	armorEnd   = "-----END PGP PUBLIC KEY BLOCK-----"
+)
+
 // KeyFingerprint returns the upper-case hex v4 fingerprint of the one
 // primary public key in an ASCII-armored OpenPGP public key block. It
-// rejects anything else: no armor, a bad checksum, a second primary key
-// (which apt or rpm would also trust), packets that do not belong in a public
-// key file, or a key version other than 4.
+// rejects anything else: bytes around the armor, no armor, a bad checksum,
+// a second primary key (which apt or rpm would also trust), packets before
+// the primary key or that do not belong in a public key file, or a key
+// version other than 4.
 func KeyFingerprint(armored []byte) (string, error) {
+	fpr, _, err := CanonicalKey(armored)
+	return fpr, err
+}
+
+// CanonicalKey checks a key block as KeyFingerprint does and also returns it
+// re-armored from exactly the packets it checked (no armor headers, LF line
+// ends, a checksum). Setup installs this, never the downloaded bytes, so apt,
+// gpg and rpm only ever see the key whose fingerprint was checked.
+func CanonicalKey(armored []byte) (string, []byte, error) {
 	if len(armored) > maxKeySize {
-		return "", errKey
+		return "", nil, errKey
 	}
 	raw, err := dearmor(armored)
 	if err != nil {
-		return "", err
+		return "", nil, err
 	}
 	var fpr string
 	primaries := 0
-	for len(raw) > 0 {
-		tag, body, rest, err := nextPacket(raw)
+	for rest := raw; len(rest) > 0; {
+		tag, body, next, err := nextPacket(rest)
 		if err != nil {
-			return "", err
+			return "", nil, err
 		}
-		raw = rest
+		// The primary key comes first: a subkey, user ID or signature in
+		// front of it belongs to no key that was checked.
+		if len(rest) == len(raw) && tag != 6 {
+			return "", nil, errKey
+		}
+		rest = next
 		switch tag {
 		case 6: // public key
 			primaries++
 			if len(body) < 1 || body[0] != 4 || len(body) > 0xffff {
-				return "", errKey
+				return "", nil, errKey
 			}
 			h := sha1.New() // #nosec G401 -- v4 fingerprint definition (RFC 4880 12.2)
 			h.Write([]byte{0x99, byte(len(body) >> 8), byte(len(body))})
@@ -64,35 +85,52 @@ func KeyFingerprint(armored []byte) (string, error) {
 			fpr = strings.ToUpper(hex.EncodeToString(h.Sum(nil)))
 		case 2, 12, 13, 14, 17: // signature, trust, user ID, public subkey, user attribute
 		default:
-			return "", errKey
+			return "", nil, errKey
 		}
 	}
 	if primaries != 1 {
-		return "", errKey
+		return "", nil, errKey
 	}
-	return fpr, nil
+	return fpr, armorKey(raw), nil
+}
+
+// armorKey writes packets as a public key block in one fixed layout.
+func armorKey(raw []byte) []byte {
+	var b strings.Builder
+	b.WriteString(armorBegin + "\n\n")
+	enc := base64.StdEncoding.EncodeToString(raw)
+	for len(enc) > 64 {
+		b.WriteString(enc[:64] + "\n")
+		enc = enc[64:]
+	}
+	b.WriteString(enc + "\n")
+	c := crc24(raw)
+	b.WriteString("=" + base64.StdEncoding.EncodeToString([]byte{byte(c >> 16), byte(c >> 8), byte(c)}) + "\n")
+	b.WriteString(armorEnd + "\n")
+	return []byte(b.String())
 }
 
 // dearmor decodes an ASCII-armored public key block and checks its CRC-24
-// when one is present.
+// when one is present. The block must be the whole file: only blank lines
+// may come before its BEGIN line and after its END line, and both must be
+// whole lines. A tool reading the file could otherwise take bytes outside
+// the checked block (another key, in text or binary) for the key.
 func dearmor(data []byte) ([]byte, error) {
-	const begin = "-----BEGIN PGP PUBLIC KEY BLOCK-----"
-	const end = "-----END PGP PUBLIC KEY BLOCK-----"
 	text := strings.ReplaceAll(string(data), "\r\n", "\n")
-	i := strings.Index(text, begin)
-	if i < 0 {
+	text = strings.TrimLeft(text, " \t\n")
+	first, rest, ok := strings.Cut(text, "\n")
+	if !ok || strings.TrimRight(first, " \t") != armorBegin {
 		return nil, errKey
 	}
-	text = text[i+len(begin):]
-	j := strings.Index(text, end)
-	if j < 0 {
+	body, after, ok := strings.Cut(rest, "\n"+armorEnd)
+	if !ok {
 		return nil, errKey
 	}
 	// Nothing but whitespace may follow: a second block would be a second key.
-	if strings.TrimSpace(text[j+len(end):]) != "" {
+	if strings.TrimSpace(after) != "" {
 		return nil, errKey
 	}
-	lines := strings.Split(text[:j], "\n")
+	lines := strings.Split(body, "\n")
 	// Armor headers ("Comment: ...") run up to the first blank line.
 	k := 0
 	for k < len(lines) && strings.TrimSpace(lines[k]) == "" {
@@ -110,8 +148,14 @@ func dearmor(data []byte) ([]byte, error) {
 		switch {
 		case l == "":
 		case strings.HasPrefix(l, "="):
+			if crc != "" {
+				return nil, errKey
+			}
 			crc = l[1:]
 		default:
+			if crc != "" { // data after the checksum line
+				return nil, errKey
+			}
 			b64.WriteString(l)
 		}
 	}

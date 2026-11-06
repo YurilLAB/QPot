@@ -163,6 +163,9 @@ var catalog = []Code{
 	{"QP-PERM-009", "Setup could not add your user to the docker group.",
 		"The usermod command failed; the details show why (for example, the docker group does not exist yet).",
 		"Run: sudo groupadd -f docker && sudo usermod -aG docker $USER, log out and back in, and run qpot setup again. Or run QPot as root."},
+	{"QP-PERM-010", "Setup could not make a private temporary folder.",
+		"Files that root installs (Docker's signing key, its package source) are first written to a folder only you can use, so no other user can swap them. That folder could not be made, or it is not private.",
+		"Check that the temporary folder (TMPDIR, or /tmp) exists, is writable and has free space (df -h /tmp), and that TMPDIR does not point into another user's folder, then run qpot setup again."},
 
 	// NET: network and downloads.
 	{"QP-NET-001", "This computer could not look up a server name.",

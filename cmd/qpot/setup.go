@@ -468,7 +468,10 @@ and the database only on 127.0.0.1 with a random password.`,
 			o.bindSet, o.portSet, o.countrySet = f.Changed("bind"), f.Changed("port"), f.Changed("country")
 			o.geoipSet, o.databaseSet, o.outboundSet = f.Changed("no-geoip"), f.Changed("database"), f.Changed("outbound")
 			o.serviceSet = f.Changed("service")
-			env, cleanup := newSetupEnv(cmd, o.verbose)
+			env, cleanup, eerr := newSetupEnv(cmd, o.verbose)
+			if eerr != nil {
+				return finishCoded(cmd.ErrOrStderr(), eerr)
+			}
 			err := runSetup(cmd.Context(), env, o)
 			cleanup()
 			return finishCoded(cmd.ErrOrStderr(), err)

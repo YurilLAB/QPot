@@ -3,8 +3,10 @@ package hostsetup
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -328,13 +330,68 @@ func (in *Installer) installedOf(ctx context.Context, manager string, pkgs []str
 	return out
 }
 
-// tempFile is a file setup prepares in its private folder and then copies
-// into place with `install`.
+// tempPath is a file setup prepares in its private folder and a root step
+// then copies into place with `install`.
 func (in *Installer) tempPath(name string) string { return filepath.Join(in.TempDir, name) }
 
-func writePrivate(path string, data []byte) *Error {
-	if err := os.WriteFile(path, data, 0o600); err != nil {
-		return E("QP-PERM-007").WithWhy("Setup could not write its temporary file %s.", path).Wrap(err)
+// CheckPrivateDir checks that dir may hold files a root step installs: an
+// absolute path to a real folder (not a link) that only this user can use,
+// in folders no other user can rename things in. Otherwise another user
+// could swap a file between setup checking it and root installing it.
+func CheckPrivateDir(dir string) *Error {
+	bad := func(why string) *Error {
+		return E("QP-PERM-010").WithWhy("Setup's temporary folder %q is not safe to use: %s.", truncate(dir, 200), why)
+	}
+	if dir == "" {
+		return bad("setup has none")
+	}
+	if !filepath.IsAbs(dir) {
+		return bad("it is not a full path")
+	}
+	fi, err := os.Lstat(dir)
+	if err != nil {
+		return bad("it cannot be read").Wrap(err)
+	}
+	if fi.Mode()&os.ModeSymlink != 0 {
+		return bad("it is a symbolic link")
+	}
+	if !fi.IsDir() {
+		return bad("it is not a folder")
+	}
+	if why := notPrivate(fi); why != "" {
+		return bad(why)
+	}
+	if why := unsafeParent(dir); why != "" {
+		return bad(why)
+	}
+	return nil
+}
+
+// writeTemp writes a file a root step installs. It is created new in the
+// private folder: an entry already at that name (an earlier attempt in this
+// run) is removed, never followed or reused.
+func (in *Installer) writeTemp(name string, data []byte) *Error {
+	if err := CheckPrivateDir(in.TempDir); err != nil {
+		return err
+	}
+	if name == "" || name == "." || name == ".." || filepath.Base(name) != name {
+		return E("QP-BUG-001").WithWhy("Setup asked for a temporary file with a bad name (%q).", truncate(name, 64))
+	}
+	path := in.tempPath(name)
+	if err := os.Remove(path); err != nil && !errors.Is(err, fs.ErrNotExist) {
+		return E("QP-PERM-010").WithWhy("Setup could not clear its temporary file %s.", path).Wrap(err)
+	}
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL|oNoFollow, 0o600) // #nosec G304 -- a fixed name in setup's private folder
+	if err != nil {
+		return E("QP-PERM-010").WithWhy("Setup could not create its temporary file %s.", path).Wrap(err)
+	}
+	_, werr := f.Write(data)
+	if cerr := f.Close(); werr == nil {
+		werr = cerr
+	}
+	if werr != nil {
+		_ = os.Remove(path)
+		return E("QP-PERM-010").WithWhy("Setup could not write its temporary file %s.", path).Wrap(werr)
 	}
 	return nil
 }
@@ -362,6 +419,9 @@ func (in *Installer) aptInstall(pkgs ...string) Command {
 }
 
 func (in *Installer) planAptRepo(ctx context.Context, d Distro, need Need) (*Plan, *Error) {
+	if err := CheckPrivateDir(in.TempDir); err != nil {
+		return nil, err
+	}
 	debArch, _ := repoArch(in.P.GOARCH)
 	if res := in.R.Run(ctx, Command{Args: []string{"dpkg", "--print-architecture"}, Timeout: 30 * time.Second}); res.OK() {
 		if a := strings.TrimSpace(string(res.Stdout)); a == "amd64" || a == "arm64" {
@@ -410,7 +470,7 @@ func (in *Installer) planAptRepo(ctx context.Context, d Distro, need Need) (*Pla
 	srcStep := Step{Title: "Add Docker's package source (" + srcPath + ")", Kind: KindFile,
 		Info: indentLines(sources),
 		Prepare: func(context.Context) *Error {
-			return writePrivate(in.tempPath("docker.sources"), []byte(sources))
+			return in.writeTemp("docker.sources", []byte(sources))
 		},
 		Cmds: []Command{{Args: []string{"install", "-m", "0644", in.tempPath("docker.sources"), srcPath}, Root: true}},
 		Done: func(context.Context) bool {
@@ -525,6 +585,9 @@ func (in *Installer) dnfCmd(args ...string) Command {
 }
 
 func (in *Installer) planDnfRepo(ctx context.Context, d Distro, need Need) (*Plan, *Error) {
+	if err := CheckPrivateDir(in.TempDir); err != nil {
+		return nil, err
+	}
 	keyPath := in.P.Path("etc", "pki", "rpm-gpg", "docker-ce.gpg")
 	repoPath := in.P.Path("etc", "yum.repos.d", "docker-ce.repo")
 	keyOK, kerr := existingKeyOK(keyPath, in.rpmFingerprint())
@@ -562,7 +625,7 @@ func (in *Installer) planDnfRepo(ctx context.Context, d Distro, need Need) (*Pla
 	repoStep := Step{Title: "Add Docker's package source (" + repoPath + ")", Kind: KindFile,
 		Info: indentLines(repo),
 		Prepare: func(context.Context) *Error {
-			return writePrivate(in.tempPath("docker-ce.repo"), []byte(repo))
+			return in.writeTemp("docker-ce.repo", []byte(repo))
 		},
 		Cmds: []Command{{Args: []string{"install", "-m", "0644", in.tempPath("docker-ce.repo"), repoPath}, Root: true}},
 		Done: func(context.Context) bool { return other != "" }}
@@ -722,7 +785,8 @@ func (in *Installer) WaitDaemon(ctx context.Context, wait time.Duration) (Docker
 
 // keyStep downloads a signing key, checks its fingerprint, and installs it.
 func (in *Installer) keyStep(url, fpr, dest string, done bool, extra []Command) Step {
-	tmp := in.tempPath(filepath.Base(dest))
+	name := filepath.Base(dest)
+	tmp := in.tempPath(name)
 	return Step{Title: "Download Docker's signing key and check it is Docker's", Kind: KindFile,
 		Info: []string{"from " + url, "it must have the fingerprint " + FormatFingerprint(fpr) + " (as published by Docker)"},
 		Prepare: func(ctx context.Context) *Error {
@@ -730,14 +794,16 @@ func (in *Installer) keyStep(url, fpr, dest string, done bool, extra []Command) 
 			if err != nil {
 				return err
 			}
-			got, kerr := KeyFingerprint(data)
+			got, canonical, kerr := CanonicalKey(data)
 			if kerr != nil {
 				return E("QP-NET-005").WithWhy("The file downloaded from %s is not a single valid signing key.", url).Wrap(kerr)
 			}
 			if got != fpr {
 				return E("QP-NET-005").WithDetails("expected %s\ngot      %s", FormatFingerprint(fpr), FormatFingerprint(got))
 			}
-			return writePrivate(tmp, data)
+			// What is installed is the checked key re-armored, never the
+			// downloaded bytes: nothing the check did not see reaches apt or rpm.
+			return in.writeTemp(name, canonical)
 		},
 		Cmds: append([]Command{{Args: []string{"install", "-m", "0644", tmp, dest}, Root: true}}, extra...),
 		Done: func(context.Context) bool { return done }}

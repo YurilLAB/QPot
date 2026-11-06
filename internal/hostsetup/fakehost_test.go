@@ -210,7 +210,7 @@ func (h *fakeHost) installer(rs *repoServer, osRelease string, euid int) *Instal
 	in := &Installer{
 		P: Platform{GOOS: "linux", GOARCH: "amd64", Root: h.root, OS: ParseOSRelease([]byte(osRelease)),
 			EUID: euid, User: "alice", Systemd: true},
-		R: h.runner(euid), LookPath: h.lookPath, TempDir: h.t.TempDir(), Source: "auto",
+		R: h.runner(euid), LookPath: h.lookPath, TempDir: privateTemp(h.t), Source: "auto",
 		LockWait: time.Second, DaemonWait: 3 * time.Second,
 	}
 	if rs != nil {
@@ -219,6 +219,17 @@ func (h *fakeHost) installer(rs *repoServer, osRelease string, euid int) *Instal
 		in.debKey, in.rpmKey = rs.fpr, rs.fpr
 	}
 	return in
+}
+
+// privateTemp makes a temporary folder as setup does (os.MkdirTemp: mode
+// 0700); t.TempDir's own folder is 0755.
+func privateTemp(t testing.TB) string {
+	t.Helper()
+	d, err := os.MkdirTemp(t.TempDir(), "qpot-setup-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	return d
 }
 
 func detect(h *fakeHost, in *Installer) DockerState {
