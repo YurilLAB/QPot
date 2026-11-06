@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"io/fs"
 	"log/slog"
+	"mime"
 	"net/http"
 	"os"
 	"os/exec"
@@ -659,6 +660,15 @@ func (s *Server) authMiddleware(next http.Handler) http.Handler {
 			return
 		}
 
+		// A browser attaches cached Basic credentials to a cross-site form
+		// POST, and a form can send a JSON body as text/plain. Requiring a
+		// JSON body makes such a request impossible to forge: a cross-origin
+		// fetch with this type needs a CORS preflight, which is never granted.
+		if !jsonBodyAllowed(r) {
+			s.sendError(w, http.StatusUnsupportedMediaType, "Content-Type must be application/json")
+			return
+		}
+
 		// If QPot ID auth is enabled, skip basic auth
 		if s.config.WebUI.QPotIDAuth {
 			next.ServeHTTP(w, r)
@@ -684,6 +694,19 @@ func (s *Server) authMiddleware(next http.Handler) http.Handler {
 
 		next.ServeHTTP(w, r)
 	})
+}
+
+// jsonBodyAllowed reports whether r may reach a handler: requests that carry a
+// body (POST, PUT, PATCH) must declare it as application/json, the only type
+// the API accepts and one an HTML form cannot send.
+func jsonBodyAllowed(r *http.Request) bool {
+	switch r.Method {
+	case http.MethodPost, http.MethodPut, http.MethodPatch:
+	default:
+		return true
+	}
+	mt, _, err := mime.ParseMediaType(r.Header.Get("Content-Type"))
+	return err == nil && mt == "application/json"
 }
 
 // handleStatus returns instance status
