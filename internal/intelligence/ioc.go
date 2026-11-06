@@ -28,7 +28,9 @@ const (
 
 // pre-compiled patterns for IOC extraction.
 var (
-	reURL    = regexp.MustCompile(`https?://[^\s"']+|ftp://[^\s"']+`)
+	// Any case: curl and wget accept HTTP:// as well, and refang turns
+	// "HXXPS://" into "httPS://".
+	reURL    = regexp.MustCompile(`(?i)(?:https?|ftp)://[^\s"']+`)
 	reMD5    = regexp.MustCompile(`\b[0-9a-fA-F]{32}\b`)
 	reSHA1   = regexp.MustCompile(`\b[0-9a-fA-F]{40}\b`)
 	reSHA256 = regexp.MustCompile(`\b[0-9a-fA-F]{64}\b`)
