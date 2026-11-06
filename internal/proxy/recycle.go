@@ -69,9 +69,14 @@ func RecycleReset(o RecycleOptions) ResetFunc {
 		line, err := bufio.NewReader(c).ReadString('\n')
 		return err == nil && strings.HasPrefix(line, "SSH-")
 	}
+	// With a gate, a counter that already moved proves the recreation even if
+	// it finished before we looked (late, or between two quarantine retries);
+	// waiting to see the backend go down again would wait for a recreation
+	// nobody will do.
+	recreated := func(b Backend) bool { return o.Gate != nil && o.Gate.Advanced(b) }
 	return func(b Backend) error {
 		deadline := time.Now().Add(o.DownWithin)
-		for reachable(b.Addr) {
+		for !recreated(b) && reachable(b.Addr) {
 			if time.Now().After(deadline) {
 				return errNotRecycled
 			}

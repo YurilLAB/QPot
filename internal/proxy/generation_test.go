@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -57,6 +58,76 @@ func TestGenerationGateAcceptsHostRecreation(t *testing.T) {
 	}()
 	if err := gatedRecycle(g)(b); err != nil {
 		t.Fatalf("host recreation not accepted: %v", err)
+	}
+}
+
+// A recreation the reset did not watch happen (it finished after the reset
+// gave up, or between two WatchQuarantined retries) is already proven by the
+// generation counter, and the backend is back up. Waiting to see it go down
+// AGAIN kept a clean backend quarantined for the broker's lifetime, because
+// nothing recreates it a second time.
+func TestGenerationGateAcceptsRecreationAlreadyDone(t *testing.T) {
+	dir := t.TempDir()
+	writeGen(t, dir, "b", 3)
+	g := NewGenerationGate(dir)
+	f := newFakeBackend(t, "SSH-2.0-OpenSSH_9.2p1\r\n")
+	b := Backend{ID: "b", Addr: f.addr}
+	g.OnLease(b)
+	writeGen(t, dir, "b", 4) // recreated and back up before the reset looks
+	if err := gatedRecycle(g)(b); err != nil {
+		t.Fatalf("completed host recreation not accepted: %v", err)
+	}
+}
+
+// End to end: a backend quarantined because its recreation came late rejoins
+// the pool once WatchQuarantined sees the counter moved.
+func TestPoolRecoversLateRecreation(t *testing.T) {
+	dir := t.TempDir()
+	writeGen(t, dir, "b", 1)
+	g := NewGenerationGate(dir)
+	f := newFakeBackend(t, "SSH-2.0-OpenSSH_9.2p1\r\n")
+	p := NewPool([]Backend{{ID: "b", Addr: f.addr}}, gatedRecycle(g))
+	p.SetLeaseHook(g.OnLease)
+	b, err := p.Lease()
+	if err != nil {
+		t.Fatal(err)
+	}
+	p.Release(b) // the host is late: nothing seen in time -> quarantined
+	if avail, _, q := p.Stats(); avail != 0 || q != 1 {
+		t.Fatalf("after unrecycled release: available=%d quarantined=%d", avail, q)
+	}
+	// The recreation lands now, while no reset is watching.
+	f.stop()
+	f.start(t)
+	writeGen(t, dir, "b", 2)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go p.WatchQuarantined(ctx, 50*time.Millisecond)
+	deadline := time.Now().Add(3 * time.Second)
+	for {
+		if avail, _, q := p.Stats(); avail == 1 && q == 0 {
+			return
+		}
+		if time.Now().After(deadline) {
+			a, l, q := p.Stats()
+			t.Fatalf("recreated backend never left quarantine: available=%d leased=%d quarantined=%d", a, l, q)
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+}
+
+// Without a counter bump the shortcut must not apply: an up backend that was
+// never recreated stays out of rotation.
+func TestGenerationGateUpButNotRecreatedFails(t *testing.T) {
+	dir := t.TempDir()
+	writeGen(t, dir, "b", 3)
+	g := NewGenerationGate(dir)
+	f := newFakeBackend(t, "SSH-2.0-OpenSSH_9.2p1\r\n")
+	b := Backend{ID: "b", Addr: f.addr}
+	g.OnLease(b)
+	if err := gatedRecycle(g)(b); err == nil {
+		t.Fatal("a backend that was never recreated passed the reset")
 	}
 }
 
