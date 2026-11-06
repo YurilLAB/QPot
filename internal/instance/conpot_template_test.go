@@ -28,8 +28,9 @@ func conpotConfig(qpotID, template string) *config.Config {
 
 var publishedPortRe = regexp.MustCompile(`^- "\d+:(\d+)(/udp)?"$`)
 
-// publishedConpotPorts returns the container ports the conpot service publishes.
-func publishedConpotPorts(t *testing.T, cfg *config.Config) (svc string, tcp, udp []int) {
+// publishedPorts renders the compose and returns a honeypot's service block
+// and the container ports it publishes.
+func publishedPorts(t *testing.T, cfg *config.Config, name string) (svc string, tcp, udp []int) {
 	t.Helper()
 	sb, err := security.NewSandbox(&cfg.Security)
 	if err != nil {
@@ -39,7 +40,7 @@ func publishedConpotPorts(t *testing.T, cfg *config.Config) (svc string, tcp, ud
 	if err != nil {
 		t.Fatalf("Generate: %v", err)
 	}
-	svc = composeService(t, out, "conpot")
+	svc = composeService(t, out, name)
 	for _, ln := range strings.Split(svc, "\n") {
 		m := publishedPortRe.FindStringSubmatch(strings.TrimSpace(ln))
 		if m == nil {
@@ -107,7 +108,7 @@ func TestConpotPublishesOnlyTemplatePorts(t *testing.T) {
 	for _, tpl := range tpotConpotTemplates {
 		t.Run(tpl.ID, func(t *testing.T) {
 			cfg := conpotConfig("qp_conpotports00000001", tpl.ID)
-			svc, tcp, udp := publishedConpotPorts(t, cfg)
+			svc, tcp, udp := publishedPorts(t, cfg, "conpot")
 			if !slices.Equal(tcp, tpl.TCP) || !slices.Equal(udp, tpl.UDP) {
 				t.Errorf("published tcp %v udp %v, template listens on tcp %v udp %v", tcp, udp, tpl.TCP, tpl.UDP)
 			}
@@ -162,7 +163,7 @@ func FuzzConpotTemplateSetting(f *testing.F) {
 
 	f.Fuzz(func(t *testing.T, template, qpotID string) {
 		cfg := conpotConfig(qpotID, template)
-		svc, tcp, udp := publishedConpotPorts(t, cfg)
+		svc, tcp, udp := publishedPorts(t, cfg, "conpot")
 		var ids []string
 		for _, ln := range strings.Split(svc, "\n") {
 			if v, ok := strings.CutPrefix(strings.TrimSpace(ln), "- CONPOT_TEMPLATE="); ok {

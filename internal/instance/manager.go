@@ -600,8 +600,9 @@ func (m *Manager) generateServiceConfigs() error {
 		return fmt.Errorf("failed to write vector.yaml: %w", err)
 	}
 
-	// Per-honeypot data dirs. The images render their own configs (cowrie
-	// from its persona, conpot from its template), so QPot writes none.
+	// Per-honeypot data dirs, and the config files a profile mounts (most
+	// images render their own: cowrie from its persona, conpot from its
+	// template).
 	for name, hp := range m.config.Honeypots {
 		if !hp.Enabled {
 			continue
@@ -614,14 +615,26 @@ func (m *Manager) generateServiceConfigs() error {
 		// the host user that creates them, so use 0777. These dirs hold attacker
 		// logs / decoy SSH host keys / downloads — not QPot secrets.
 		for _, v := range prof.Volumes {
-			// File mounts (e.g. a generated cowrie.cfg) only need their parent
-			// directory; the file itself is written by the config loop below.
+			// File mounts (e.g. heralding.yml) need their parent directory and
+			// the file, written before start: docker would otherwise create a
+			// directory at the missing path.
 			dir := filepath.Join(hpDir, v.HostSubdir)
 			if v.File {
 				dir = filepath.Dir(dir)
 			}
 			if err := os.MkdirAll(dir, 0750); err != nil {
 				return fmt.Errorf("failed to create %s dir for honeypot %q: %w", v.HostSubdir, name, err)
+			}
+			if v.File {
+				// World-readable: the image's non-root user reads it. It is the
+				// honeypot's own config, no QPot secret.
+				dest := filepath.Join(hpDir, v.HostSubdir)
+				if err := os.WriteFile(dest, v.Content, 0644); err != nil {
+					return fmt.Errorf("failed to write %s for honeypot %q: %w", v.HostSubdir, name, err)
+				}
+				if err := os.Chmod(dest, 0644); err != nil {
+					return fmt.Errorf("failed to chmod %s for honeypot %q: %w", v.HostSubdir, name, err)
+				}
 			}
 			mode := os.FileMode(0777)
 			if v.ReadOnly {

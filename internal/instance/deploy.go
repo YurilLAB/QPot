@@ -10,6 +10,7 @@ package instance
 // cowrie/endlessh profiles are verified by actually running the images.
 
 import (
+	_ "embed"
 	"fmt"
 	"maps"
 	"slices"
@@ -30,7 +31,22 @@ type deployVolume struct {
 	// ReadOnly mounts it read-only. The host writes it; the container must
 	// not be able to change it.
 	ReadOnly bool
+	// Content is what setup writes to a File volume before start.
+	Content []byte
 }
+
+// heraldingConfig is the /etc/heralding/heralding.yml of
+// ghcr.io/telekom-security/heralding at TPotVersion with the values that
+// override heralding's persona cleared: the banners and FTP system type of
+// ftp, pop3(s), imap(s), ssh and smtp(s), and the certificate country. The
+// image's file kept stock greetings that every install shared and that
+// contradicted the persona on the other ports (an RHEL persona answering SSH
+// as OpenSSH 6.6.1p1 on Ubuntu 14.04, FTP as "Microsoft FTP Server" and SMTP
+// as Exchange). Empty values come from the persona. The rest of the file is
+// the image's; compare it again when TPotVersion changes.
+//
+//go:embed honeypotfiles/heralding.yml
+var heraldingConfig []byte
 
 // honeypotDeploy is the deployment profile for one honeypot image.
 type honeypotDeploy struct {
@@ -231,10 +247,21 @@ func deployProfileFor(name string) honeypotDeploy {
 			Values:   map[string][]string{"template": ConpotTemplateIDs()},
 		}
 	case "heralding":
+		// Heralding draws a persona (host name, OS, banners, certificate
+		// subject) on first start and keeps it, with the TLS certificates and
+		// SSH host keys made for it, in its working directory /tmp/heralding.
+		// On a tmpfs, as T-Pot mounts it, every restart turned the box into a
+		// different machine with new host keys, so the directory is a
+		// persistent volume. The config is QPot's (see heraldingConfig).
+		// Verified by running ghcr.io/telekom-security/heralding:24.04.2 this
+		// way: same persona, banners and certificate after a restart.
 		return honeypotDeploy{
-			Tmpfs:   []string{"/tmp/heralding:uid=2000,gid=2000"},
-			Volumes: []deployVolume{{HostSubdir: "logs", ContainerPath: "/var/log/heralding"}},
-			Ports:   []int{21, 22, 23, 25, 80, 110, 143, 443, 465, 993, 995, 1080, 3306, 3389, 5432, 5900},
+			Volumes: []deployVolume{
+				{HostSubdir: "logs", ContainerPath: "/var/log/heralding"},
+				{HostSubdir: "state", ContainerPath: "/tmp/heralding"},
+				{HostSubdir: "heralding.yml", ContainerPath: "/etc/heralding/heralding.yml", File: true, ReadOnly: true, Content: heraldingConfig},
+			},
+			Ports: []int{21, 22, 23, 25, 80, 110, 143, 443, 465, 993, 995, 1080, 3306, 3389, 5432, 5900},
 		}
 	case "mailoney":
 		return honeypotDeploy{

@@ -168,6 +168,13 @@ gives each instance a distinct, self-consistent identity:
   are kept across restarts. The image's multi-protocol `default` template, the
   same on every install, is never used. Pin one with
   `qpot honeypot set conpot template=<id>`.
+- **Heralding personas** – heralding answers every service as the machine its
+  persona describes (Ubuntu, Debian, RHEL or Windows Server): FTP, SSH, SMTP,
+  POP3 and IMAP greetings, web server header and certificate subject agree.
+  QPot runs it with the image's configuration minus the stock greetings that
+  overrode the persona (`OpenSSH_6.6.1p1 Ubuntu-2ubuntu2.8`, "Microsoft FTP
+  Server", Exchange SMTP), and keeps the persona, its certificates and SSH host
+  keys across restarts.
 - **HiFi credential personas** – the real-OpenSSH backends of HiFi mode accept a
   persona's believable weak passwords (30 personas: corporate Ubuntu, DB
   server, Proxmox host, …) under a matching host name. Pin one with the

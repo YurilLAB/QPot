@@ -19,10 +19,11 @@ func TestInitializeWritesServiceConfigs(t *testing.T) {
 	cfg.DataPath = dir
 	cfg.ConfigPath = filepath.Join(dir, "config.yaml")
 
-	// Ensure cowrie is enabled so we exercise the TPOT config path.
-	if hp, ok := cfg.Honeypots["cowrie"]; ok {
+	// Enable the honeypots whose data dirs and config files setup prepares.
+	for _, name := range []string{"cowrie", "conpot", "heralding"} {
+		hp := cfg.Honeypots[name]
 		hp.Enabled = true
-		cfg.Honeypots["cowrie"] = hp
+		cfg.Honeypots[name] = hp
 	}
 
 	m, err := NewManager(cfg)
@@ -59,5 +60,22 @@ func TestInitializeWritesServiceConfigs(t *testing.T) {
 		if _, err := os.Stat(filepath.Join(cowrie, stale)); err == nil {
 			t.Errorf("Initialize still writes cowrie %s", stale)
 		}
+	}
+
+	// Conpot and heralding keep the identity they draw in a state dir; the
+	// bind mount needs it to exist (docker would create it root-owned).
+	for _, name := range []string{"conpot", "heralding"} {
+		if info, err := os.Stat(filepath.Join(dir, "honeypots", name, "state")); err != nil || !info.IsDir() {
+			t.Errorf("%s state dir missing: %v", name, err)
+		}
+	}
+	if _, err := os.Stat(filepath.Join(dir, "honeypots", "conpot", "conpot.cfg")); err == nil {
+		t.Error("Initialize still writes the unmounted conpot.cfg")
+	}
+	// Heralding's config is mounted as a file, so it must be written before
+	// start, with QPot's content.
+	got, err := os.ReadFile(filepath.Join(dir, "honeypots", "heralding", "heralding.yml"))
+	if err != nil || string(got) != string(heraldingConfig) {
+		t.Errorf("heralding.yml not written with QPot's config (err %v, %d bytes)", err, len(got))
 	}
 }
