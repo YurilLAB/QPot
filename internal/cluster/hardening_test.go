@@ -62,7 +62,7 @@ func TestGossipedAddressCannotRewriteRequests(t *testing.T) {
 		{ID: "qn_evil2", Address: "user@" + hostPort + "#", Port: 7946, Status: NodeStatusHealthy},
 	}})
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/cluster/gossip", bytes.NewReader(digest))
-	req.Header.Set("X-Cluster-Password", "password123")
+	setPeerAuth(req, "password123", m.memberKey())
 	rec := httptest.NewRecorder()
 	m.apiHandler().ServeHTTP(rec, req)
 	if rec.Code != http.StatusOK {
@@ -158,7 +158,7 @@ func TestPeerIntelOnlyFromMembers(t *testing.T) {
 	for i := 0; i < 500; i++ {
 		body, _ := json.Marshal(ThreatIntel{NodeID: "qn_fake" + strconv.Itoa(i), TopSourceIPs: []IPCount{{IP: "203.0.113.1", Count: 1}}})
 		req := httptest.NewRequest(http.MethodPost, "/api/v1/cluster/intel", bytes.NewReader(body))
-		req.Header.Set("X-Cluster-Password", "password123")
+		setPeerAuth(req, "password123", m.memberKey())
 		h.ServeHTTP(httptest.NewRecorder(), req)
 	}
 	m.mu.RLock()
@@ -174,7 +174,7 @@ func TestPeerIntelOnlyFromMembers(t *testing.T) {
 	m.mu.Unlock()
 	body, _ := json.Marshal(ThreatIntel{NodeID: "qn_member"})
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/cluster/intel", bytes.NewReader(body))
-	req.Header.Set("X-Cluster-Password", "password123")
+	setPeerAuth(req, "password123", m.memberKey())
 	h.ServeHTTP(httptest.NewRecorder(), req)
 	if len(m.GetThreatIntel()) != 1 {
 		t.Fatal("member intel was not stored")
@@ -289,7 +289,7 @@ func TestPasswordGuessingIsThrottled(t *testing.T) {
 	status := func(remote, password string) int {
 		req := httptest.NewRequest(http.MethodGet, "/api/v1/cluster/status", nil)
 		req.RemoteAddr = remote
-		req.Header.Set("X-Cluster-Password", password)
+		setPeerAuth(req, password, m.memberKey())
 		rec := httptest.NewRecorder()
 		h.ServeHTTP(rec, req)
 		return rec.Code
@@ -324,6 +324,110 @@ func TestPasswordGuessingIsThrottled(t *testing.T) {
 	}
 	if r := join("203.0.113.10", pw); r.Status != "pending" {
 		t.Fatalf("an honest joiner was refused: %+v", r)
+	}
+}
+
+// TestDeniedJoinerCannotGossipItselfIn: "joining needs the password and the
+// host's approval", but the gossip, intel, leave, nodes and status endpoints
+// only checked the password, which every joiner has. A joiner the host denied
+// could post a gossip digest naming its own node and was a member, could read
+// every member's QPot ID from /nodes, and could remove members via /leave.
+func TestDeniedJoinerCannotGossipItselfIn(t *testing.T) {
+	const pw = "correct-horse-battery"
+	host := NewManager(t.TempDir())
+	cl, err := host.InitCluster("prod", pw, DefaultClusterConfig())
+	if err != nil {
+		t.Fatal(err)
+	}
+	host.mu.Lock()
+	host.cluster.LocalNode.QPotID = "qp_hostsecretidhostsecretid"
+	host.mu.Unlock()
+	jr := host.HandleJoinRequest(&JoinRequest{ClusterID: cl.ID, Password: pw, NodeName: "evil",
+		NodeAddress: "10.6.6.6", NodePort: 7946}, "10.6.6.6")
+	if jr.Status != "pending" {
+		t.Fatalf("join: %+v", jr)
+	}
+	if err := host.DenyJoin(jr.RequestID); err != nil {
+		t.Fatal(err)
+	}
+
+	h := host.apiHandler()
+	send := func(method, path string, body any) *httptest.ResponseRecorder {
+		b, _ := json.Marshal(body)
+		req := httptest.NewRequest(method, path, bytes.NewReader(b))
+		req.RemoteAddr = "10.6.6.6:50000"
+		req.Header.Set("X-Cluster-Password", pw)
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		return rec
+	}
+	send(http.MethodPost, "/api/v1/cluster/gossip", GossipMessage{SenderID: "qn_evil", NodeDigest: []*Node{
+		{ID: "qn_evil", Name: "evil", Address: "10.6.6.6", Port: 7946, Status: NodeStatusHealthy, LastSeen: time.Now()},
+	}})
+	for _, n := range host.GetNodes() {
+		if n.ID == "qn_evil" {
+			t.Fatal("the denied joiner added itself to the membership through gossip")
+		}
+	}
+	if rec := send(http.MethodGet, "/api/v1/cluster/nodes", nil); strings.Contains(rec.Body.String(), "qp_hostsecretid") {
+		t.Fatal("the denied joiner read the members' QPot IDs from /nodes")
+	}
+	send(http.MethodPost, "/api/v1/cluster/leave", map[string]string{"node_id": cl.LocalNode.ID})
+	if len(host.GetNodes()) != 1 {
+		t.Fatal("the denied joiner removed the host's own node via /leave")
+	}
+}
+
+// TestClusterWithoutMemberKeyKeepsPasswordPeers: a cluster.json written before
+// the member key existed has none, and its members never received one; they
+// must keep working on the password alone.
+func TestClusterWithoutMemberKeyKeepsPasswordPeers(t *testing.T) {
+	m := plainCluster(t)
+	m.mu.Lock()
+	m.cluster.MemberKey = ""
+	m.mu.Unlock()
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/cluster/status", nil)
+	req.Header.Set("X-Cluster-Password", "password123")
+	rec := httptest.NewRecorder()
+	m.apiHandler().ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("password-only peer of an older cluster: %d", rec.Code)
+	}
+}
+
+// TestApprovedMemberStillGossips is the positive control for the member key:
+// a node admitted by the host gossips with it over the real API.
+func TestApprovedMemberStillGossips(t *testing.T) {
+	const pw = "correct-horse-battery"
+	host := NewManager(t.TempDir())
+	cfg := DefaultClusterConfig()
+	cfg.EnableEncryption = false
+	cfg.RequireApproval = false
+	cl, err := host.InitCluster("prod", pw, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv := httptest.NewServer(host.apiHandler())
+	defer srv.Close()
+	hostIP, hostPort := peerAddr(t, srv.URL)
+	host.mu.Lock()
+	host.cluster.LocalNode.Address, host.cluster.LocalNode.Port = hostIP, hostPort
+	host.mu.Unlock()
+
+	member := NewManager(t.TempDir())
+	if _, err := member.JoinCluster(cl.ID, pw, &Node{Name: "m1", Address: "127.0.0.1", Port: 7999}, []string{srv.URL}); err != nil {
+		t.Fatal(err)
+	}
+	member.gossip()
+	for _, n := range member.GetNodes() {
+		if n.Address == hostIP && n.Port == hostPort && n.Status != NodeStatusHealthy {
+			t.Fatalf("member's gossip to the host failed: host marked %s", n.Status)
+		}
+	}
+	member.UpdateThreatIntel([]IPCount{{IP: "203.0.113.4", Count: 3}})
+	member.sync()
+	if len(host.GetThreatIntel()) != 1 {
+		t.Fatal("the host did not take intel from an admitted member")
 	}
 }
 

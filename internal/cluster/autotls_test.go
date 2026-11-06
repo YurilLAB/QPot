@@ -56,7 +56,7 @@ func TestAutoTLSServesAndVerifies(t *testing.T) {
 	url := "https://127.0.0.1:" + strconv.Itoa(port) + "/api/v1/cluster/status"
 	get := func(client *http.Client) (int, error) {
 		req, _ := http.NewRequest(http.MethodGet, url, nil)
-		req.Header.Set("X-Cluster-Password", "password123")
+		setPeerAuth(req, "password123", c.MemberKey)
 		resp, err := client.Do(req)
 		if err != nil {
 			return 0, err

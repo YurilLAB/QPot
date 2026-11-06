@@ -35,12 +35,17 @@ const (
 
 // Cluster represents a QPot cluster
 type Cluster struct {
-	ID           string            `json:"id" yaml:"id"`
-	Name         string            `json:"name" yaml:"name"`
-	PasswordHash string            `json:"password_hash" yaml:"password_hash"`
-	CreatedAt    time.Time         `json:"created_at" yaml:"created_at"`
-	UpdatedAt    time.Time         `json:"updated_at" yaml:"updated_at"`
-	Metadata     map[string]string `json:"metadata,omitempty" yaml:"metadata,omitempty"`
+	ID           string `json:"id" yaml:"id"`
+	Name         string `json:"name" yaml:"name"`
+	PasswordHash string `json:"password_hash" yaml:"password_hash"`
+	// MemberKey is given to a node only when it is admitted. The peer
+	// endpoints require it besides the password, which every joiner has, so
+	// a node the host denied (or has not approved) cannot take part. Empty
+	// for clusters created before it existed: their peers use the password.
+	MemberKey string            `json:"member_key,omitempty" yaml:"member_key,omitempty"`
+	CreatedAt time.Time         `json:"created_at" yaml:"created_at"`
+	UpdatedAt time.Time         `json:"updated_at" yaml:"updated_at"`
+	Metadata  map[string]string `json:"metadata,omitempty" yaml:"metadata,omitempty"`
 
 	// Node management
 	LocalNode *Node            `json:"local_node" yaml:"local_node"`
@@ -229,8 +234,13 @@ type JoinResponse struct {
 	ClusterName string         `json:"cluster_name,omitempty"`
 	Nodes       []*Node        `json:"nodes,omitempty"`
 	Config      *ClusterConfig `json:"config,omitempty"`
-	Error       string         `json:"error,omitempty"`
+	// MemberKey is only sent to an admitted node (see Cluster.MemberKey).
+	MemberKey string `json:"member_key,omitempty"`
+	Error     string `json:"error,omitempty"`
 }
+
+// memberKeyHeader carries Cluster.MemberKey on peer requests.
+const memberKeyHeader = "X-Cluster-Member"
 
 // ClusterStatus represents the overall cluster status
 type ClusterStatus struct {
@@ -436,12 +446,17 @@ func (m *Manager) InitCluster(name, password string, cfg *ClusterConfig) (*Clust
 
 	// Hash the password
 	passwordHash := hashPassword(password)
+	memberKey, err := generateID("qk_", 64)
+	if err != nil {
+		return nil, fmt.Errorf("failed to generate member key: %w", err)
+	}
 
 	now := time.Now()
 	cluster := &Cluster{
 		ID:            clusterID,
 		Name:          name,
 		PasswordHash:  passwordHash,
+		MemberKey:     memberKey,
 		CreatedAt:     now,
 		UpdatedAt:     now,
 		Metadata:      make(map[string]string),
@@ -624,6 +639,7 @@ func (m *Manager) attemptJoin(seedAddr, clusterID, password string, localNode *N
 		ID:           clusterID,
 		Name:         joinResp.ClusterName,
 		PasswordHash: hashPassword(password), // bcrypt hash for local verification
+		MemberKey:    joinResp.MemberKey,
 		CreatedAt:    now,
 		UpdatedAt:    now,
 		LocalNode:    localNode,
@@ -1041,6 +1057,7 @@ func (m *Manager) admitNodeLocked(req *JoinRequest) (*JoinResponse, error) {
 		ClusterName: m.cluster.Name,
 		Nodes:       nodes,
 		Config:      m.cluster.Config,
+		MemberKey:   m.cluster.MemberKey,
 	}, nil
 }
 
@@ -1062,6 +1079,40 @@ func (m *Manager) withClusterAuth(next http.HandlerFunc) http.HandlerFunc {
 		}
 		next(w, r)
 	}
+}
+
+// withMemberAuth guards the peer endpoints: the password (withClusterAuth)
+// and, for clusters that have one, the member key only admitted nodes hold.
+func (m *Manager) withMemberAuth(next http.HandlerFunc) http.HandlerFunc {
+	return m.withClusterAuth(func(w http.ResponseWriter, r *http.Request) {
+		if key := m.memberKey(); key != "" &&
+			subtle.ConstantTimeCompare([]byte(r.Header.Get(memberKeyHeader)), []byte(key)) != 1 {
+			m.authLimit.failed(authSource(r.RemoteAddr), time.Now())
+			http.Error(w, "Unauthorized", http.StatusUnauthorized)
+			return
+		}
+		next(w, r)
+	})
+}
+
+// setPeerAuth adds the credentials of a request to another member.
+func setPeerAuth(req *http.Request, password, memberKey string) {
+	if password != "" {
+		req.Header.Set("X-Cluster-Password", password)
+	}
+	if memberKey != "" {
+		req.Header.Set(memberKeyHeader, memberKey)
+	}
+}
+
+// memberKey returns the cluster's member key ("" for older clusters).
+func (m *Manager) memberKey() string {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	if m.cluster == nil {
+		return ""
+	}
+	return m.cluster.MemberKey
 }
 
 // withHostOnly restricts a handler to callers on this host. Approving or
@@ -1112,13 +1163,13 @@ func (m *Manager) apiHandler() http.Handler {
 	// cluster ID and topology that help an attacker target a join/password
 	// brute-force. Nothing internal depends on them being public - the local
 	// web UI and CLI read cluster state through in-process method calls, not
-	// over HTTP - so only password-holding peers/operators can reach them.
-	mux.HandleFunc("/api/v1/cluster/status", m.withClusterAuth(m.handleStatusHTTP))
-	mux.HandleFunc("/api/v1/cluster/nodes", m.withClusterAuth(m.handleNodesHTTP))
-	// Mutation/peer endpoints require cluster password authentication.
-	mux.HandleFunc("/api/v1/cluster/leave", m.withClusterAuth(m.handleLeaveHTTP))
-	mux.HandleFunc("/api/v1/cluster/gossip", m.withClusterAuth(m.handleGossipHTTP))
-	mux.HandleFunc("/api/v1/cluster/intel", m.withClusterAuth(m.handleIntelHTTP))
+	// over HTTP. They and the mutation/peer endpoints are for admitted
+	// members: the password alone, which every joiner has, is not enough.
+	mux.HandleFunc("/api/v1/cluster/status", m.withMemberAuth(m.handleStatusHTTP))
+	mux.HandleFunc("/api/v1/cluster/nodes", m.withMemberAuth(m.handleNodesHTTP))
+	mux.HandleFunc("/api/v1/cluster/leave", m.withMemberAuth(m.handleLeaveHTTP))
+	mux.HandleFunc("/api/v1/cluster/gossip", m.withMemberAuth(m.handleGossipHTTP))
+	mux.HandleFunc("/api/v1/cluster/intel", m.withMemberAuth(m.handleIntelHTTP))
 	// Join-approval endpoints. /pending, /approve and /deny are host operations
 	// (require the password). /join/status lets a queued joiner - which already
 	// proved the password on /join - poll its request; it is also password-gated
@@ -1430,6 +1481,7 @@ func (m *Manager) gossip() {
 	plainPwd := m.plainPassword
 	scheme := m.schemeLocked()
 	m.mu.RUnlock()
+	memberKey := m.memberKey()
 
 	gossipClient := m.peerHTTPClient(5 * time.Second)
 	// Each round builds its own transport; close its pooled connections when
@@ -1442,7 +1494,7 @@ func (m *Manager) gossip() {
 			continue
 		}
 		req.Header.Set("Content-Type", "application/json")
-		req.Header.Set("X-Cluster-Password", plainPwd)
+		setPeerAuth(req, plainPwd, memberKey)
 		resp, err := gossipClient.Do(req)
 		if err != nil {
 			slog.Debug("Gossip: peer unreachable", "node_id", peer.id, "error", err)
@@ -1629,6 +1681,7 @@ func (m *Manager) sync() {
 	syncPlainPwd := m.plainPassword
 	syncScheme := m.schemeLocked()
 	m.mu.RUnlock()
+	syncMemberKey := m.memberKey()
 
 	syncClient := m.peerHTTPClient(10 * time.Second)
 	defer syncClient.CloseIdleConnections()
@@ -1644,7 +1697,7 @@ func (m *Manager) sync() {
 					continue
 				}
 				intelReq.Header.Set("Content-Type", "application/json")
-				intelReq.Header.Set("X-Cluster-Password", syncPlainPwd)
+				setPeerAuth(intelReq, syncPlainPwd, syncMemberKey)
 				resp, err := syncClient.Do(intelReq)
 				if err != nil {
 					slog.Debug("Sync: failed to send intel to peer", "node_id", peer.id, "error", err)
@@ -1941,6 +1994,7 @@ func (m *Manager) LeaveCluster() error {
 		peers = append(peers, peerInfo{id: node.ID, address: node.Address, port: node.Port})
 	}
 	plainPwd := m.plainPassword
+	leaveMemberKey := m.cluster.MemberKey
 	leaveScheme := m.schemeLocked()
 	m.mu.RUnlock()
 
@@ -1960,12 +2014,10 @@ func (m *Manager) LeaveCluster() error {
 			continue
 		}
 		req.Header.Set("Content-Type", "application/json")
-		// The /leave endpoint is now password-authenticated; without this
-		// header peers reject the notification and silently keep the node
-		// in their member list as 'suspect'.
-		if plainPwd != "" {
-			req.Header.Set("X-Cluster-Password", plainPwd)
-		}
+		// The /leave endpoint is authenticated; without these headers peers
+		// reject the notification and silently keep the node in their member
+		// list as 'suspect'.
+		setPeerAuth(req, plainPwd, leaveMemberKey)
 		resp, err := leaveClient.Do(req)
 		if err != nil {
 			slog.Debug("LeaveCluster: failed to notify peer", "node_id", peer.id, "error", err)
