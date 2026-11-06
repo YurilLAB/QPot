@@ -82,6 +82,8 @@ func FuzzVectorProbeFilter(f *testing.F) {
 	f.Add("c\\d")
 	f.Add("e\nf")
 	f.Add("")
+	f.Add("g\uffffh")
+	f.Add("i\u2028j\u2029k\ufeffl\ufffe")
 
 	f.Fuzz(func(t *testing.T, probe string) {
 		cfg := config.Default("vec-fuzz")

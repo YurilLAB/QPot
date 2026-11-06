@@ -62,8 +62,10 @@ func vrlStringLiteral(s string) string {
 	b.WriteByte('"')
 	for _, r := range s {
 		// Drop C0 controls (incl. CR/LF/TAB), DEL, and C1 controls (0x80-0x9f).
-		// YAML rejects these inside the block scalar that holds the VRL filter.
-		if r < 0x20 || (r >= 0x7f && r <= 0x9f) {
+		// YAML rejects these inside the block scalar that holds the VRL filter,
+		// as it does U+FFFE and U+FFFF; libyaml-based parsers end the line at
+		// U+2028 and U+2029, and a BOM inside a document is not reliably kept.
+		if r < 0x20 || (r >= 0x7f && r <= 0x9f) || r == 0x2028 || r == 0x2029 || r == 0xfeff || r == 0xfffe || r == 0xffff {
 			continue
 		}
 		if r == '\\' || r == '"' {
