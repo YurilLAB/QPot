@@ -970,7 +970,7 @@ func (m *Manager) HandleJoinRequest(req *JoinRequest, sourceIP string) *JoinResp
 	m.mu.RUnlock()
 
 	src, now := authSource(sourceIP), time.Now()
-	if m.authLimit.blocked(src, now) {
+	if m.authLimit.blocked(src, now, m.isMemberSource(src)) {
 		return &JoinResponse{Success: false, Error: errTooManyAttempts}
 	}
 
@@ -1075,7 +1075,7 @@ func (m *Manager) admitNodeLocked(req *JoinRequest) (*JoinResponse, error) {
 func (m *Manager) withClusterAuth(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		src, now := authSource(r.RemoteAddr), time.Now()
-		if m.authLimit.blocked(src, now) {
+		if m.authLimit.blocked(src, now, fromThisHost(r) || m.isMemberSource(src)) {
 			http.Error(w, "Too many failed attempts", http.StatusTooManyRequests)
 			return
 		}
@@ -1136,6 +1136,24 @@ func withHostOnly(next http.HandlerFunc) http.HandlerFunc {
 		}
 		next(w, r)
 	}
+}
+
+// isMemberSource reports whether src (an authSource key) is the address of a
+// node of the cluster, so the shared overflow allowance of the password
+// throttle does not lock members out while many addresses guess.
+func (m *Manager) isMemberSource(src string) bool {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	if m.cluster == nil {
+		return false
+	}
+	for _, n := range m.cluster.Nodes {
+		if n != nil && n.Address != "" && authSource(n.Address) == src {
+			return true
+		}
+	}
+	return m.cluster.LocalNode != nil && m.cluster.LocalNode.Address != "" &&
+		authSource(m.cluster.LocalNode.Address) == src
 }
 
 // fromThisHost reports whether r came from this machine: over loopback, or,

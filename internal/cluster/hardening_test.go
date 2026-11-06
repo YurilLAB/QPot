@@ -359,6 +359,56 @@ func TestPasswordGuessingIsThrottled(t *testing.T) {
 	}
 }
 
+// TestThrottleTableFullKeepsBlocks: once the table of failing sources was
+// full, each new source evicted the oldest, so an attacker with enough
+// addresses (an IPv6 /48 has 65,536 /64s) cleared its own block and guessed
+// on. A source still inside its window now stays blocked, sources a full table
+// cannot hold share one allowance, and members are not caught by it.
+func TestThrottleTableFullKeepsBlocks(t *testing.T) {
+	const pw = "correct-horse-battery"
+	m := NewManager(t.TempDir())
+	if _, err := m.InitCluster("c", pw, DefaultClusterConfig()); err != nil {
+		t.Fatal(err)
+	}
+	m.mu.Lock()
+	m.cluster.Nodes["peer"] = &Node{ID: "peer", Address: "192.0.2.44", Port: 7946}
+	m.mu.Unlock()
+	h := m.apiHandler()
+	status := func(remote, password string) int {
+		req := httptest.NewRequest(http.MethodGet, "/api/v1/cluster/status", nil)
+		req.RemoteAddr = remote
+		setPeerAuth(req, password, m.memberKey())
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		return rec.Code
+	}
+	const first = "198.51.100.66:40000"
+	for i := 0; i < authFailLimit; i++ {
+		status(first, "guess")
+	}
+	if code := status(first, pw); code != http.StatusTooManyRequests {
+		t.Fatalf("the first source is not blocked: %d", code)
+	}
+	v6 := func(i int) string {
+		return "[2001:db8:" + strconv.FormatInt(int64(i/65536+1), 16) + ":" + strconv.FormatInt(int64(i%65536), 16) + "::1]:4000"
+	}
+	for i := 0; i < authFailSources+authFailLimit+50; i++ {
+		status(v6(i), "guess")
+	}
+	if code := status(first, pw); code != http.StatusTooManyRequests {
+		t.Fatalf("filling the table from other addresses lifted the first source's block: %d", code)
+	}
+	if code := status(v6(authFailSources+authFailLimit+60), pw); code != http.StatusTooManyRequests {
+		t.Fatalf("a source the full table cannot hold kept guessing: %d", code)
+	}
+	if code := status("192.0.2.44:7946", pw); code != http.StatusOK {
+		t.Fatalf("a member was locked out by the shared allowance: %d", code)
+	}
+	if code := status("127.0.0.1:50000", pw); code != http.StatusOK {
+		t.Fatalf("this host was locked out by the shared allowance: %d", code)
+	}
+}
+
 // TestDeniedJoinerCannotGossipItselfIn: "joining needs the password and the
 // host's approval", but the gossip, intel, leave, nodes and status endpoints
 // only checked the password, which every joiner has. A joiner the host denied

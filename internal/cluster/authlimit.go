@@ -11,10 +11,16 @@ import (
 // the network, so a source that keeps sending wrong passwords is refused for
 // the rest of the window, whatever it sends. Successful checks are not
 // counted, so members are never affected.
+//
+// At most authFailSources sources are tracked. A source still inside its
+// window is never dropped to make room (one guessing from enough addresses
+// could otherwise clear its own block): while the table is full, every source
+// it does not hold shares one overflow allowance of authFailLimit failures,
+// which does not apply to trusted sources (members and this host).
 const (
 	authFailLimit   = 20
 	authFailWindow  = 10 * time.Minute
-	authFailSources = 4096 // tracked sources; the oldest is dropped beyond this
+	authFailSources = 4096
 )
 
 // errTooManyAttempts is the join error for a throttled source.
@@ -28,8 +34,9 @@ type authFailures struct {
 // authLimiter counts failed password checks per source. The zero value is
 // ready to use.
 type authLimiter struct {
-	mu    sync.Mutex
-	fails map[string]*authFailures
+	mu       sync.Mutex
+	fails    map[string]*authFailures
+	overflow authFailures // failures of the sources a full table does not hold
 }
 
 // authSource keys a peer address: the IPv4 address, or the IPv6 /64 (one
@@ -49,19 +56,22 @@ func authSource(addr string) string {
 	return ip.Mask(net.CIDRMask(64, 128)).String() + "/64"
 }
 
-// blocked reports whether src has used up its failed attempts.
-func (l *authLimiter) blocked(src string, now time.Time) bool {
+// blocked reports whether src has used up its failed attempts, or, for a
+// source the table does not hold, whether the shared overflow allowance is
+// used up. A trusted source is held only to its own count.
+func (l *authLimiter) blocked(src string, now time.Time, trusted bool) bool {
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	f := l.fails[src]
-	if f == nil {
-		return false
-	}
-	if now.Sub(f.first) > authFailWindow {
+	if f := l.fails[src]; f != nil {
+		if now.Sub(f.first) <= authFailWindow {
+			return f.count >= authFailLimit
+		}
 		delete(l.fails, src)
+	}
+	if trusted || now.Sub(l.overflow.first) > authFailWindow {
 		return false
 	}
-	return f.count >= authFailLimit
+	return l.overflow.count >= authFailLimit
 }
 
 // failed records a failed password check from src.
@@ -76,19 +86,18 @@ func (l *authLimiter) failed(src string, now time.Time) {
 		return
 	}
 	if len(l.fails) >= authFailSources {
-		var oldest string
 		for k, f := range l.fails {
 			if now.Sub(f.first) > authFailWindow {
 				delete(l.fails, k)
-				continue
-			}
-			if oldest == "" || f.first.Before(l.fails[oldest].first) {
-				oldest = k
 			}
 		}
-		if len(l.fails) >= authFailSources {
-			delete(l.fails, oldest)
+	}
+	if len(l.fails) >= authFailSources {
+		if now.Sub(l.overflow.first) > authFailWindow {
+			l.overflow = authFailures{first: now}
 		}
+		l.overflow.count++
+		return
 	}
 	l.fails[src] = &authFailures{count: 1, first: now}
 }
