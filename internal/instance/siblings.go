@@ -80,6 +80,37 @@ func collectComposeReservations(data []byte, ports map[int]bool, subnets map[str
 	}
 }
 
+// ownHostPorts returns the host port each (service, container port) pair has
+// in the instance's own compose file, by portKey: the ports its running
+// services hold. A missing or unparsable file gives none.
+func ownHostPorts(composePath string) map[string]int {
+	data, err := os.ReadFile(composePath)
+	if err != nil {
+		return nil
+	}
+	var doc struct {
+		Services map[string]struct {
+			Ports []string `yaml:"ports"`
+		} `yaml:"services"`
+	}
+	if yaml.Unmarshal(data, &doc) != nil {
+		return nil
+	}
+	out := map[string]int{}
+	for name, svc := range doc.Services {
+		for _, spec := range svc.Ports {
+			host := publishedHostPort(spec)
+			bare, _, _ := strings.Cut(spec, "/")
+			parts := strings.Split(bare, ":")
+			container, err := strconv.Atoi(parts[len(parts)-1])
+			if host > 0 && err == nil {
+				out[portKey(name, container)] = host
+			}
+		}
+	}
+	return out
+}
+
 // publishedHostPort extracts the host port from a compose short-syntax port
 // ("8080:80", "127.0.0.1:19000:9000", "53:53/udp"); 0 if there is none.
 func publishedHostPort(spec string) int {

@@ -112,18 +112,39 @@ func (g *ComposeGenerator) buildHostPortMap() map[string]int {
 		}
 	}
 	sort.Strings(names)
-
-	assign := make(map[string]int)
-	for _, name := range names {
+	containerPorts := func(name string) []int {
 		d := deployProfile(g.Config, name)
 		ports := append(append([]int{}, d.Ports...), d.UDPPorts...)
 		if len(ports) == 0 {
 			ports = []int{g.Config.Honeypots[name].Port}
 		}
-		for _, p := range ports {
+		return ports
+	}
+
+	assign := make(map[string]int)
+	// A pair keeps the host port it has in the compose file in use (KeepPorts)
+	// before anything new is placed: a change to one honeypot's ports (a
+	// Conpot template, a honeypot enabled) otherwise moved another's, which
+	// kept running on its old port until recreated, and the honeypot that now
+	// wanted that port could not start.
+	if g.Config.Ports.AutoAllocate {
+		for _, name := range names {
+			for _, p := range containerPorts(name) {
+				key := portKey(name, p)
+				kept, ok := g.KeepPorts[key]
+				if _, done := assign[key]; done || !ok || used[kept] || kept < base || kept >= base+rangeSize {
+					continue
+				}
+				used[kept] = true
+				assign[key] = kept
+			}
+		}
+	}
+	for _, name := range names {
+		for _, p := range containerPorts(name) {
 			key := portKey(name, p)
 			if _, ok := assign[key]; ok {
-				continue // TCP+UDP on the same number share one host port (fine)
+				continue // kept, or TCP+UDP on the same number sharing one host port
 			}
 			cand := g.Config.AllocatePortFor(name, p)
 			if !g.Config.Ports.AutoAllocate {
@@ -154,6 +175,9 @@ type ComposeGenerator struct {
 	// ReservedNets are subnets of other docker networks on the host (any
 	// size); no allocated subnet may overlap them.
 	ReservedNets []*net.IPNet
+	// KeepPorts are the host ports of the compose file in use, by portKey
+	// (see ownHostPorts): pairs that still exist keep them.
+	KeepPorts map[string]int
 }
 
 // bridgeName builds the Linux bridge interface name for a honeypot network.

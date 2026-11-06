@@ -590,6 +590,7 @@ func (m *Manager) generateDockerCompose() error {
 		ReservedPorts:   ports,
 		ReservedSubnets: subnets,
 		ReservedNets:    hostDockerSubnets(context.Background(), composeProjectName(m.config)),
+		KeepPorts:       ownHostPorts(m.config.GetDockerComposePath()),
 	}
 
 	compose, err := generator.Generate()
@@ -869,7 +870,8 @@ func (m *Manager) ServiceStates(ctx context.Context) (map[string]ServiceState, e
 // instances' ports), so setup can check they are free before starting.
 func PublishedHostPorts(cfg *config.Config) map[string]int {
 	ports, subnets := siblingReservations(cfg.DataPath)
-	g := &ComposeGenerator{Config: cfg, ReservedPorts: ports, ReservedSubnets: subnets}
+	g := &ComposeGenerator{Config: cfg, ReservedPorts: ports, ReservedSubnets: subnets,
+		KeepPorts: ownHostPorts(cfg.GetDockerComposePath())}
 	return g.buildHostPortMap()
 }
 
