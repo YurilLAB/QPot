@@ -7,10 +7,12 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
 	"testing"
+	"time"
 )
 
 // recordingPeer is a peer API that records the paths it was asked for.
@@ -175,6 +177,66 @@ func TestPeerIntelOnlyFromMembers(t *testing.T) {
 	h.ServeHTTP(httptest.NewRecorder(), req)
 	if len(m.GetThreatIntel()) != 1 {
 		t.Fatal("member intel was not stored")
+	}
+}
+
+// loopGoroutines counts running goroutines whose stack is in fn.
+func loopGoroutines(fn string) int {
+	buf := make([]byte, 1<<20)
+	buf = buf[:runtime.Stack(buf, true)]
+	n := 0
+	for _, g := range strings.Split(string(buf), "\n\n") {
+		if strings.Contains(g, fn) {
+			n++
+		}
+	}
+	return n
+}
+
+// TestRestartDoesNotShareLoopState: Start re-creates stopCh and the tickers so
+// a stopped manager can start again, but the gossip and sync loops read those
+// fields on every turn. A loop that was mid-round during Stop+Start picked up
+// the new channel and ticker and kept running next to the loop the new Start
+// launched, so each restart added another gossip and sync loop.
+func TestRestartDoesNotShareLoopState(t *testing.T) {
+	slow := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		time.Sleep(150 * time.Millisecond)
+		_ = json.NewEncoder(w).Encode(GossipMessage{SenderID: "qn_peer"})
+	})
+	srv := httptest.NewServer(slow)
+	defer srv.Close()
+	host, port := peerAddr(t, srv.URL)
+
+	m := NewManager(t.TempDir())
+	cfg := DefaultClusterConfig()
+	cfg.EnableEncryption = false
+	cfg.BindAddr, cfg.BindPort = "127.0.0.1", 0
+	cfg.GossipInterval = 10 * time.Millisecond
+	cfg.SyncInterval = 10 * time.Millisecond
+	if _, err := m.InitCluster("c", "password123", cfg); err != nil {
+		t.Fatal(err)
+	}
+	m.UpdateThreatIntel([]IPCount{{IP: "203.0.113.5", Count: 1}})
+	m.mu.Lock()
+	m.cluster.Nodes["qn_peer"] = &Node{ID: "qn_peer", Address: host, Port: port, Status: NodeStatusHealthy}
+	m.mu.Unlock()
+
+	for i := 0; i < 3; i++ {
+		if err := m.Start(); err != nil {
+			t.Fatal(err)
+		}
+		time.Sleep(60 * time.Millisecond) // a round is in flight
+		if err := m.Stop(); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := m.Start(); err != nil {
+		t.Fatal(err)
+	}
+	defer m.Stop()
+	time.Sleep(500 * time.Millisecond) // the stopped rounds finish
+	if g, s := loopGoroutines("(*Manager).gossipLoop"), loopGoroutines("(*Manager).syncLoop"); g != 1 || s != 1 {
+		t.Fatalf("after restarts: %d gossip loops and %d sync loops running, want 1 each", g, s)
 	}
 }
 

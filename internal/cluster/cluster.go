@@ -739,8 +739,8 @@ func (m *Manager) Start() error {
 	m.gossipTicker = time.NewTicker(m.cluster.Config.GossipInterval)
 	m.syncTicker = time.NewTicker(m.cluster.Config.SyncInterval)
 
-	go m.gossipLoop()
-	go m.syncLoop()
+	go m.gossipLoop(m.stopCh, m.gossipTicker.C)
+	go m.syncLoop(m.stopCh, m.syncTicker.C)
 
 	m.cluster.isRunning = true
 	slog.Info("Cluster manager started", "cluster_id", m.cluster.ID)
@@ -1319,25 +1319,27 @@ func (m *Manager) handleLeaveHTTP(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
 }
 
-// gossipLoop periodically gossips with other nodes
-func (m *Manager) gossipLoop() {
+// gossipLoop periodically gossips with other nodes. It is handed the stop
+// channel and ticker of the Start that launched it: Start replaces the
+// fields on a restart, and a loop re-reading them would keep running.
+func (m *Manager) gossipLoop(stop <-chan struct{}, tick <-chan time.Time) {
 	for {
 		select {
-		case <-m.stopCh:
+		case <-stop:
 			return
-		case <-m.gossipTicker.C:
+		case <-tick:
 			m.gossip()
 		}
 	}
 }
 
-// syncLoop periodically syncs data with other nodes
-func (m *Manager) syncLoop() {
+// syncLoop periodically syncs data with other nodes (see gossipLoop).
+func (m *Manager) syncLoop(stop <-chan struct{}, tick <-chan time.Time) {
 	for {
 		select {
-		case <-m.stopCh:
+		case <-stop:
 			return
-		case <-m.syncTicker.C:
+		case <-tick:
 			m.sync()
 		}
 	}
