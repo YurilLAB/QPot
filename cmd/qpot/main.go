@@ -907,7 +907,12 @@ func newClusterInitCommand() *cobra.Command {
 			cfg := cluster.DefaultClusterConfig()
 			if bindAddr != "" {
 				cfg.BindAddr = bindAddr
-				cfg.AdvertiseAddr = bindAddr
+			}
+			// Members gossip to the address the host advertises; a wildcard
+			// bind address is not one they can reach.
+			cfg.AdvertiseAddr = cfg.BindAddr
+			if ip := net.ParseIP(strings.Trim(cfg.BindAddr, "[]")); cfg.BindAddr == "" || (ip != nil && ip.IsUnspecified()) {
+				cfg.AdvertiseAddr = getLocalIP()
 			}
 			if bindPort != 0 {
 				cfg.BindPort = bindPort
@@ -930,11 +935,11 @@ func newClusterInitCommand() *cobra.Command {
 			fmt.Printf("     Cluster ID:   %s\n", c.ID)
 			fmt.Printf("     Cluster Name: %s\n", c.Name)
 			fmt.Printf("     Node ID:      %s\n", c.LocalNode.ID)
-			fmt.Printf("     Bind Address: %s:%d\n", cfg.BindAddr, cfg.BindPort)
+			fmt.Printf("     Bind Address: %s\n", net.JoinHostPort(cfg.BindAddr, strconv.Itoa(cfg.BindPort)))
 			fmt.Println("\n[IMPORTANT] Save your Cluster ID and Password!")
 			fmt.Println("            Other nodes will need both to join.")
 			fmt.Printf("\nTo join this cluster, run:\n")
-			fmt.Printf("  qpot cluster join --id %s --seed %s:%d\n", c.ID, cfg.AdvertiseAddr, cfg.BindPort)
+			fmt.Printf("  qpot cluster join --id %s --seed %s\n", c.ID, net.JoinHostPort(cfg.AdvertiseAddr, strconv.Itoa(cfg.BindPort)))
 			fmt.Println("\nThe cluster runs with the QPot control plane: start it with 'qpot up' (or")
 			fmt.Println("restart a running 'qpot up -d' / 'qpot serve') so other nodes can join.")
 
