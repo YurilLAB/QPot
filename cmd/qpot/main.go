@@ -1298,6 +1298,24 @@ func clusterAPIRequest(method, path, password string, body []byte) ([]byte, int,
 	if err != nil {
 		return nil, 0, err
 	}
+	if password == "" {
+		// The host keeps the password (QPOT_CLUSTER_PASSWORD or the 0600
+		// cluster.secret), so it need not be typed where ps can see it.
+		if err := mgr.UnlockFromSecret(); err != nil {
+			if !term.IsTerminal(int(os.Stdin.Fd())) {
+				return nil, 0, fmt.Errorf("%w; pass --password", err)
+			}
+			fmt.Print("Enter cluster password: ")
+			pw, rerr := term.ReadPassword(int(os.Stdin.Fd()))
+			fmt.Println()
+			if rerr != nil {
+				return nil, 0, fmt.Errorf("failed to read password: %w", rerr)
+			}
+			password = string(pw)
+		} else {
+			password = mgr.Password()
+		}
+	}
 	if err := mgr.UnlockPassword(password); err != nil {
 		return nil, 0, fmt.Errorf("wrong cluster password")
 	}
@@ -1340,9 +1358,6 @@ func newClusterRequestsCommand() *cobra.Command {
 		Short: "List pending join requests awaiting approval",
 		Long:  "Show cluster join requests that supplied the correct password and are awaiting host approval, with the requester's source IP and hostname.",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			if password == "" {
-				return fmt.Errorf("--password is required (the cluster password)")
-			}
 			out, code, err := clusterAPIRequest(http.MethodGet, "/pending", password, nil)
 			if err != nil {
 				return err
@@ -1364,11 +1379,11 @@ func newClusterRequestsCommand() *cobra.Command {
 					p.RequestID, truncate(p.NodeName, 16), p.SourceIP,
 					truncate(p.InstanceName, 15), p.RequestedAt.Format(time.RFC3339))
 			}
-			fmt.Println("\nApprove with: qpot cluster approve <request-id> --password <pw>")
+			fmt.Println("\nApprove with: qpot cluster approve <request-id>")
 			return nil
 		},
 	}
-	cmd.Flags().StringVarP(&password, "password", "p", "", "cluster password")
+	cmd.Flags().StringVarP(&password, "password", "p", "", "cluster password (default: QPOT_CLUSTER_PASSWORD or the stored cluster secret)")
 	return cmd
 }
 
@@ -1379,9 +1394,6 @@ func newClusterApproveCommand() *cobra.Command {
 		Short: "Approve a pending join request",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			if password == "" {
-				return fmt.Errorf("--password is required (the cluster password)")
-			}
 			reqBody, _ := json.Marshal(map[string]string{"request_id": args[0]})
 			out, code, err := clusterAPIRequest(http.MethodPost, "/approve", password, reqBody)
 			if err != nil {
@@ -1398,7 +1410,7 @@ func newClusterApproveCommand() *cobra.Command {
 			}
 		},
 	}
-	cmd.Flags().StringVarP(&password, "password", "p", "", "cluster password")
+	cmd.Flags().StringVarP(&password, "password", "p", "", "cluster password (default: QPOT_CLUSTER_PASSWORD or the stored cluster secret)")
 	return cmd
 }
 
@@ -1409,9 +1421,6 @@ func newClusterDenyCommand() *cobra.Command {
 		Short: "Deny a pending join request",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			if password == "" {
-				return fmt.Errorf("--password is required (the cluster password)")
-			}
 			reqBody, _ := json.Marshal(map[string]string{"request_id": args[0]})
 			out, code, err := clusterAPIRequest(http.MethodPost, "/deny", password, reqBody)
 			if err != nil {
@@ -1428,7 +1437,7 @@ func newClusterDenyCommand() *cobra.Command {
 			}
 		},
 	}
-	cmd.Flags().StringVarP(&password, "password", "p", "", "cluster password")
+	cmd.Flags().StringVarP(&password, "password", "p", "", "cluster password (default: QPOT_CLUSTER_PASSWORD or the stored cluster secret)")
 	return cmd
 }
 

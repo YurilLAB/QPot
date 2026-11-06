@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/qpot/qpot/internal/cluster"
@@ -57,6 +58,45 @@ func TestClusterApprovalWorksWithSpecificBindAddr(t *testing.T) {
 	out, code, err := clusterAPIRequest(http.MethodGet, "/pending", pw, nil)
 	if err != nil || code != http.StatusOK {
 		t.Fatalf("cluster requests on a cluster bound to %s: code %d, err %v, body %s", ip, code, err, out)
+	}
+}
+
+// TestClusterHostCommandsUseStoredPassword: `qpot cluster requests`, `approve`
+// and `deny` demanded --password on the command line, where any local user
+// sees it in the process list (and it lands in shell history), although the
+// host already keeps the password in its 0600 cluster.secret.
+func TestClusterHostCommandsUseStoredPassword(t *testing.T) {
+	dir := clusterHome(t)
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	port := ln.Addr().(*net.TCPAddr).Port
+	ln.Close()
+	host := cluster.NewManager(dir)
+	cfg := cluster.DefaultClusterConfig()
+	cfg.BindAddr, cfg.BindPort = "127.0.0.1", port
+	if _, err := host.InitCluster("prod", "correct-horse-battery", cfg); err != nil {
+		t.Fatal(err)
+	}
+	if err := host.SaveSecret(); err != nil {
+		t.Fatal(err)
+	}
+	if err := host.Start(); err != nil {
+		t.Fatal(err)
+	}
+	defer host.Stop()
+
+	cmd := newClusterRequestsCommand()
+	cmd.SetOut(io.Discard)
+	cmd.SetArgs(nil)
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("cluster requests without --password on the host: %v", err)
+	}
+	deny := newClusterDenyCommand()
+	deny.SetArgs([]string{"req_unknown"})
+	if err := deny.Execute(); err == nil || strings.Contains(err.Error(), "--password") {
+		t.Fatalf("cluster deny without --password: %v (want the API's not-found error)", err)
 	}
 }
 

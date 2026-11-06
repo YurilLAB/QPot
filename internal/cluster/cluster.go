@@ -903,6 +903,14 @@ func (m *Manager) UnlockFromSecret() error {
 	return m.UnlockPassword(pw)
 }
 
+// Password returns the cluster password held in memory after an unlock
+// ("" while locked).
+func (m *Manager) Password() string {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.plainPassword
+}
+
 // UnlockPassword checks password against the stored hash and, if it matches,
 // keeps it in memory so a cluster restored by LoadCluster can authenticate to
 // its peers.
