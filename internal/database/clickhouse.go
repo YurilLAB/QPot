@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"strings"
 	"time"
 
 	"github.com/ClickHouse/clickhouse-go/v2"
@@ -1101,16 +1102,49 @@ func (ch *ClickHouse) InsertIOCs(ctx context.Context, iocs []*IOC) error {
 	return batch.Send()
 }
 
+// foldChunkBytes bounds the values bound into one fold SELECT. clickhouse-go
+// inlines "?" arguments into the statement text, ClickHouse refuses to parse a
+// statement over max_query_size (256 KiB by default), and IOC values include
+// attacker commands of up to 100 KiB (Vector's line limit).
+const foldChunkBytes = 128 << 10
+
+type iocKey struct{ t, v, h string }
+
 // foldStoredIOCs adds the stored count, earliest first_seen and latest
 // last_seen of each indicator to the rows about to be written.
 func (ch *ClickHouse) foldStoredIOCs(ctx context.Context, iocs []*IOC) error {
-	type key struct{ t, v, h string }
-	byKey := make(map[key]*IOC, len(iocs))
-	values := make([]string, 0, len(iocs))
+	byKey := make(map[iocKey]*IOC, len(iocs))
+	seen := make(map[string]bool, len(iocs))
+	var values []string
 	for _, ioc := range iocs {
-		byKey[key{ioc.Type, ioc.Value, ioc.Honeypot}] = ioc
-		values = append(values, ioc.Value)
+		byKey[iocKey{ioc.Type, ioc.Value, ioc.Honeypot}] = ioc
+		if !seen[ioc.Value] {
+			seen[ioc.Value] = true
+			values = append(values, ioc.Value)
+		}
 	}
+	// Each distinct value goes into exactly one chunk, so every stored row is
+	// read (and folded) once. A value bigger than the budget goes alone.
+	for start := 0; start < len(values); {
+		end, size := start, 0
+		for end < len(values) {
+			v := values[end]
+			n := len(v) + strings.Count(v, `\`) + strings.Count(v, `'`) + 4
+			if end > start && size+n > foldChunkBytes {
+				break
+			}
+			size += n
+			end++
+		}
+		if err := ch.foldStoredChunk(ctx, byKey, values[start:end]); err != nil {
+			return err
+		}
+		start = end
+	}
+	return nil
+}
+
+func (ch *ClickHouse) foldStoredChunk(ctx context.Context, byKey map[iocKey]*IOC, values []string) error {
 	rows, err := ch.conn.Query(ctx,
 		"SELECT type, value, honeypot, first_seen, last_seen, count, technique_id FROM iocs FINAL WHERE value IN ?", values)
 	if err != nil {
@@ -1118,7 +1152,7 @@ func (ch *ClickHouse) foldStoredIOCs(ctx context.Context, iocs []*IOC) error {
 	}
 	defer rows.Close()
 	for rows.Next() {
-		var k key
+		var k iocKey
 		var first, last time.Time
 		var cnt uint64
 		var tech string
