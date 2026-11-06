@@ -1,11 +1,14 @@
 package server
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -50,5 +53,39 @@ func TestAlertWebhookPayload(t *testing.T) {
 	}
 	if got["qpot_id"] != validTestID || got["instance"] != "edge-1" {
 		t.Errorf("alert payload missing/incorrect qpot_id/instance: %v / %v", got["qpot_id"], got["instance"])
+	}
+}
+
+// TestAlertWebhookDoesNotLogSecretURL: Slack, Discord and most webhook URLs
+// carry their credential in the path or query, so the URL must not reach the
+// log (qpot-serve.log, the journal) on success or on a failed request.
+func TestAlertWebhookDoesNotLogSecretURL(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer ts.Close()
+
+	var logs bytes.Buffer
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logs, nil)))
+	defer slog.SetDefault(prev)
+
+	s := newTestServer(false)
+	stats := &database.Stats{TotalEvents: 1}
+	for _, u := range []string{
+		ts.URL + "/services/T0000/B0000/XoXbSeCrEtToKeN?token=QuErYsEcReT", // delivered
+		"http://127.0.0.1:1/api/webhooks/123/UnReAcHaBlEsEcReT",            // refused
+	} {
+		s.config.Alerts.WebhookURL = u
+		s.fireWebhook(context.Background(), stats)
+	}
+	out := logs.String()
+	if !strings.Contains(out, "Alert webhook fired") || !strings.Contains(out, "request failed") {
+		t.Fatalf("expected both webhook log lines, got:\n%s", out)
+	}
+	for _, secret := range []string{"XoXbSeCrEtToKeN", "QuErYsEcReT", "UnReAcHaBlEsEcReT", "T0000"} {
+		if strings.Contains(out, secret) {
+			t.Errorf("webhook secret %q written to the log:\n%s", secret, out)
+		}
 	}
 }

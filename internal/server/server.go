@@ -13,6 +13,7 @@ import (
 	"log/slog"
 	"mime"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"path"
@@ -596,9 +597,11 @@ func (s *Server) fireWebhook(ctx context.Context, stats *database.Stats) {
 		return
 	}
 
+	// Webhook URLs (Slack, Discord, ...) carry their credential in the path or
+	// query, so only the scheme and host are ever logged.
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, s.config.Alerts.WebhookURL, bytes.NewReader(body))
 	if err != nil {
-		slog.Error("Alert webhook: failed to create request", "error", err)
+		slog.Error("Alert webhook: failed to create request", "error", withoutURL(err))
 		return
 	}
 	req.Header.Set("Content-Type", "application/json")
@@ -606,11 +609,20 @@ func (s *Server) fireWebhook(ctx context.Context, stats *database.Stats) {
 	webhookClient := &http.Client{Timeout: 10 * time.Second}
 	resp, err := webhookClient.Do(req)
 	if err != nil {
-		slog.Error("Alert webhook: request failed", "error", err)
+		slog.Error("Alert webhook: request failed", "host", req.URL.Host, "error", withoutURL(err))
 		return
 	}
 	resp.Body.Close()
-	slog.Info("Alert webhook fired", "status", resp.StatusCode, "url", s.config.Alerts.WebhookURL)
+	slog.Info("Alert webhook fired", "status", resp.StatusCode, "host", req.URL.Host)
+}
+
+// withoutURL strips the URL that net/http and net/url put in their errors.
+func withoutURL(err error) error {
+	var ue *url.Error
+	if errors.As(err, &ue) {
+		return fmt.Errorf("%s: %w", ue.Op, ue.Err)
+	}
+	return err
 }
 
 // isPublicPath reports paths served without authentication: the static pages
