@@ -31,6 +31,10 @@ type sessionState struct {
 	lastSeen  time.Time
 }
 
+// maxSessionIPs bounds the source addresses one session lists. A campaign many
+// bots share would otherwise grow the list (and the stored row) without limit.
+const maxSessionIPs = 10000
+
 // TTPBuilder builds and updates TTP sessions using behavioral fingerprinting.
 type TTPBuilder struct {
 	mu               sync.RWMutex
@@ -143,8 +147,16 @@ func updateState(s *sessionState, event *database.Event) {
 	}
 	s.session.EventCount++
 
-	if event.SourceIP != "" {
-		s.ips[event.SourceIP] = true
+	// Insert a new address in place: re-sorting the whole set on every event
+	// made a campaign shared by many bots quadratic.
+	if ip := event.SourceIP; ip != "" && !s.ips[ip] && len(s.ips) < maxSessionIPs {
+		s.ips[ip] = true
+		list := s.session.SourceIPs
+		i := sort.SearchStrings(list, ip)
+		list = append(list, "")
+		copy(list[i+1:], list[i:])
+		list[i] = ip
+		s.session.SourceIPs = list
 	}
 	if event.Honeypot != "" {
 		s.honeypots[event.Honeypot] = true
@@ -185,10 +197,9 @@ func updateState(s *sessionState, event *database.Event) {
 	s.session.SharedInfrastructure = isSharedInfrastructure(event.SourceIP)
 }
 
-// rebuildSession recomputes derived slice fields from accumulator state.
+// rebuildSession recomputes derived fields from accumulator state (the
+// sorted SourceIPs list is kept up to date by updateState).
 func rebuildSession(s *sessionState) {
-	s.session.SourceIPs = sortedKeys(s.ips)
-
 	// Confidence grows with event count, capped at 0.95.
 	conf := 0.5 + float64(s.session.EventCount)*0.01
 	if conf > 0.95 {
@@ -293,14 +304,4 @@ func addUnique(slice *[]string, v string) {
 		}
 	}
 	*slice = append(*slice, v)
-}
-
-// sortedKeys returns the sorted keys of a map[string]bool.
-func sortedKeys(m map[string]bool) []string {
-	keys := make([]string, 0, len(m))
-	for k := range m {
-		keys = append(keys, k)
-	}
-	sort.Strings(keys)
-	return keys
 }

