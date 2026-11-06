@@ -88,8 +88,13 @@ counts, duration, teardown reason). The broker never needs to see plaintext.
 * `Pool` (`pool.go`) — leases one backend per session; a `ResetFunc` hook runs on
   release so each attacker gets a pristine box; a backend whose reset fails is
   **quarantined** (never handed to a new attacker).
-* `limiter` (`limiter.go`) — per-IP token-bucket rate limit, per-IP concurrency
-  cap, and global concurrency cap, with idle-bucket eviction (bounded memory).
+* `limiter` (`limiter.go`) — per-source token-bucket rate limit, per-source
+  concurrency cap, and global concurrency cap, with idle-bucket eviction. A
+  source is an IPv4 address or an IPv6 /64, so rotating addresses inside one
+  /64 does not reset the limits. The map holds at most 65,536 sources; past that,
+  sources without a live connection are dropped. Rejections are logged at most
+  once per source per second and 100 times a second overall; the next logged
+  one (or a minute summary) carries how many were thinned out.
 * `Event` / `JSONSink` (`event.go`) — newline-delimited JSON the Vector collector
   ingests like any other honeypot log; every field is from a trusted source, so
   there is no log-injection surface and stream bytes are never logged.
@@ -170,9 +175,9 @@ parties, is a liability — so the backend is wrapped in defense-in-depth:
 |---|---|---|
 | 1 | **SSRF** — broker tricked into dialing arbitrary hosts | Backends come only from `ParseBackends` of operator config; attacker input is never used as a dial target. |
 | 2 | **Protocol-parser exploit** in the broker | None exists — the broker speaks no SSH; it copies opaque bytes. |
-| 3 | **Connection-flood DoS** exhausting the backend pool | `limiter`: per-IP rate + per-IP and global concurrency caps; `Pool.Lease` is non-blocking and fails fast (no unbounded queue). |
-| 4 | **Memory exhaustion** via churn of unique source IPs | `limiter.sweep` evicts idle per-IP buckets (bounded map). |
-| 5 | **Slowloris / abandoned sessions** pinning backends | Per-direction **idle deadline** + absolute **MaxSession** deadline. |
+| 3 | **Connection-flood DoS** exhausting the backend pool | `limiter`: per-source rate + per-source and global concurrency caps, a source being an IPv4 address or an IPv6 /64; `Pool.Lease` is non-blocking and fails fast (no unbounded queue). Rejections are thinned (and counted) so the flood does not move into the log and database. |
+| 4 | **Memory exhaustion** via churn of unique source IPs | `limiter.sweep` evicts idle per-source buckets; the map is capped at 65,536 sources between sweeps. |
+| 5 | **Slowloris / abandoned sessions** pinning backends | Per-direction **idle deadline** on reads and writes (a peer that stops reading is torn down too) + absolute **MaxSession** deadline. |
 | 6 | **Goroutine/fd leaks** | Every session’s goroutines exit on teardown; `Serve` drains via `WaitGroup`; conns closed in `defer`. Verified under `-race`. |
 | 7 | **Reason misattribution** (normal close mislabeled idle) | Teardown uses `Close` (→ `net.ErrClosed`, not a timeout) so only genuine idle reads surface as timeouts. Regression-tested. |
 | 8 | **TCP half-close** truncating a direction | `halfCloseWrite` propagates FIN to the peer and keeps the other direction draining. Fuzz-verified for transparency. |
