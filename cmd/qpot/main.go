@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"mime"
 	"net"
 	"net/http"
 	"os"
@@ -2296,15 +2297,7 @@ func newCanaryArtifactCommand() *cobra.Command {
 			}
 			dest := out
 			if dest == "" {
-				dest = args[0] + ".html"
-				if cd := resp.Header.Get("Content-Disposition"); strings.Contains(cd, "filename=") {
-					if i := strings.Index(cd, `filename="`); i >= 0 {
-						rest := cd[i+len(`filename="`):]
-						if j := strings.IndexByte(rest, '"'); j >= 0 {
-							dest = rest[:j]
-						}
-					}
-				}
+				dest = artifactFileName(resp.Header.Get("Content-Disposition"), args[0]+".html")
 			}
 			if err := os.WriteFile(dest, data, 0o600); err != nil {
 				return fmt.Errorf("write artifact: %w", err)
@@ -2316,6 +2309,26 @@ func newCanaryArtifactCommand() *cobra.Command {
 	cmd.Flags().StringVarP(&instanceName, "instance", "i", "default", "instance name")
 	cmd.Flags().StringVarP(&out, "out", "o", "", "output file (default: the canary's suggested name)")
 	return cmd
+}
+
+// artifactFileName is the file name the server suggests in a
+// Content-Disposition header, reduced to a plain name in the working
+// directory, or fallback when there is no usable one. The response comes from
+// whatever answers on the web UI port, so its name is never used as a path.
+func artifactFileName(contentDisposition, fallback string) string {
+	_, params, err := mime.ParseMediaType(contentDisposition)
+	if err != nil {
+		return fallback
+	}
+	name := params["filename"]
+	if i := strings.LastIndexAny(name, `/\`); i >= 0 {
+		name = name[i+1:]
+	}
+	name = strings.TrimSpace(name)
+	if name == "" || name == "." || name == ".." || strings.ContainsAny(name, ":\x00") {
+		return fallback
+	}
+	return name
 }
 
 func newCanaryRemoveCommand() *cobra.Command {
