@@ -138,6 +138,13 @@ func newServeCommand() *cobra.Command {
 			if err != nil {
 				return fmt.Errorf("failed to create instance manager: %w", err)
 			}
+			// A second control plane would take over the pid file, fail on the
+			// web UI port and delete the file on exit, leaving the running one
+			// unreachable for `qpot down`.
+			if pid := runningServePID(cfg); pid != 0 && pid != os.Getpid() {
+				return fmt.Errorf("the control plane of instance %q is already running (pid %d); stop it with: qpot down -i %s",
+					cfg.InstanceName, pid, cfg.InstanceName)
+			}
 			pidPath := servePIDPath(cfg)
 			if err := writeServePID(pidPath, os.Getpid()); err != nil {
 				return err
