@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -519,18 +520,54 @@ func (m *Manager) GetLogs(ctx context.Context, honeypot string, follow bool, tai
 		// before close(logs) (defers are LIFO).
 		defer close(logs)
 		defer func() { _ = cmd.Wait() }()
-		scanner := bufio.NewScanner(stdout)
-		for scanner.Scan() {
-			select {
-			case <-ctx.Done():
-				_ = cmd.Process.Kill()
+		// A line of any length is read (a honeypot logs what attackers send):
+		// stopping at the first long one left docker blocked writing to a pipe
+		// nobody read, and Wait() above waiting for it. Reading stops early
+		// only by killing docker first.
+		reader := bufio.NewReaderSize(stdout, 64<<10)
+		for {
+			line, err := readLogLine(reader, maxLogLine)
+			if err == nil || line != "" {
+				select {
+				case <-ctx.Done():
+					_ = cmd.Process.Kill()
+					return
+				case logs <- line:
+				}
+			}
+			if err != nil {
+				if !errors.Is(err, io.EOF) {
+					_ = cmd.Process.Kill()
+				}
 				return
-			case logs <- scanner.Text():
 			}
 		}
 	}()
 
 	return logs, nil
+}
+
+// maxLogLine is the most of one log line GetLogs passes on; the rest of a
+// longer line is read and dropped.
+const maxLogLine = 64 << 10
+
+// readLogLine reads one line of any length without its line ending, keeping
+// its first max bytes and marking it when more were dropped.
+func readLogLine(r *bufio.Reader, max int) (string, error) {
+	var line []byte
+	dropped := false
+	for {
+		chunk, more, err := r.ReadLine()
+		keep := min(len(chunk), max-len(line))
+		line = append(line, chunk[:keep]...)
+		dropped = dropped || keep < len(chunk)
+		if err != nil || !more {
+			if dropped {
+				line = append(line, " [line truncated]"...)
+			}
+			return string(line), err
+		}
+	}
 }
 
 // pullImages pulls Docker images for the instance
