@@ -1348,6 +1348,9 @@ func clusterAPIRequest(method, path, password string, body []byte) ([]byte, int,
 	}
 	defer resp.Body.Close()
 	out, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if resp.StatusCode == http.StatusTooManyRequests {
+		return nil, resp.StatusCode, fmt.Errorf("the cluster API is refusing this address after repeated wrong passwords; try again in 10 minutes")
+	}
 	return out, resp.StatusCode, nil
 }
 
