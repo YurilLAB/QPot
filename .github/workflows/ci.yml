@@ -104,6 +104,49 @@ jobs:
       - name: go test -race
         run: go test -race -timeout 10m ./...
 
+      - name: Makefile failure-path regressions
+        run: bash scripts/test-makefile.sh
+
+  clickhouse-integration:
+    name: ClickHouse database, worker & API integration
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    services:
+      clickhouse:
+        image: clickhouse/clickhouse-server:26.10.2.103@sha256:b2bfa4d8399ee9973868cc5c1754cb506a6f4b86fbddc41010cc090beb55c85e
+        env:
+          CLICKHOUSE_DB: qpot_test
+          CLICKHOUSE_USER: qpot
+          CLICKHOUSE_PASSWORD: qpotpass
+        ports:
+          - 19000:9000
+        options: >-
+          --health-cmd "clickhouse-client --user qpot --password qpotpass --query 'SELECT 1'"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
+    env:
+      QPOT_TEST_CLICKHOUSE: "1"
+      QPOT_TEST_CH_HOST: 127.0.0.1
+      QPOT_TEST_CH_PORT: "19000"
+      QPOT_TEST_CH_USER: qpot
+      QPOT_TEST_CH_PASS: qpotpass
+      QPOT_TEST_CH_DB: qpot_test
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Exercise the real storage pipeline
+        # These tests otherwise skip in the normal unit job. Run packages in
+        # sequence because they share this job's disposable database.
+        run: >-
+          go test -race -p 1 -count=1 -timeout 5m
+          ./internal/database ./internal/intelligence ./internal/server
+          -run 'Test(CH|ClickHouse|WorkerClassifiesAgainstClickHouse|ServerServesDataFromClickHouse)'
+
   build-run:
     name: Build binary & CLI smoke run
     runs-on: ubuntu-latest
@@ -221,6 +264,9 @@ jobs:
     name: Secret scan (gitleaks)
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    permissions:
+      contents: read
+      pull-requests: read
     steps:
       - uses: actions/checkout@v4
         with:
@@ -228,6 +274,8 @@ jobs:
       - name: Run gitleaks
         uses: gitleaks/gitleaks-action@v2
         env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITLEAKS_ENABLE_COMMENTS: "false"
           GITLEAKS_ENABLE_UPLOAD_ARTIFACT: "false"
           # GITLEAKS_LICENSE is only needed for org accounts; personal/public repos run free.
 
@@ -269,11 +317,10 @@ jobs:
 
           run_one() { go test "$1" -run '^$' -fuzz "^${2}\$" -fuzztime 10s 2>&1; }
 
-          # A non-zero exit that only reports "context deadline exceeded" - with
-          # no panic and no crash input written to testdata - is Go's known
-          # short-fuzztime flake (a worker is mid-exec when the deadline fires),
-          # not a finding. Treat that as a retryable flake; a real crash (panic
-          # or "Failing input written") always fails the job.
+          # A deadline failure without a crash marker may be a short-fuzztime
+          # flake. Retry once, but require a successful run: repeated deadlines
+          # are inconclusive and must not turn a failed check green. A crash
+          # (panic or "Failing input written") fails without retrying.
           is_flake() {
             grep -q 'context deadline exceeded' <<<"$1" \
               && ! grep -qE 'panic:|Failing input written|runtime error' <<<"$1"
@@ -290,8 +337,7 @@ jobs:
               out="$(run_one "$pkg" "$fn")"; rc=$?
               echo "$out"
               if [ "$rc" -ne 0 ] && is_flake "$out"; then
-                echo "::warning::$fn flaked again on the deadline (no crash); treating as pass"
-                rc=0
+                echo "::error::$fn hit the deadline again; fuzzing did not complete successfully"
               fi
             fi
             echo "::endgroup::"
@@ -336,7 +382,7 @@ jobs:
           shellcheck --version
           shellcheck -S error \
             install.sh deploy.sh update.sh uninstall.sh genuser.sh \
-            scripts/install.sh scripts/distro-smoke.sh \
+            scripts/install.sh scripts/distro-smoke.sh scripts/test-makefile.sh \
             docker/ssh-backend/files/entrypoint.sh \
             docker/ssh-backend/files/rec-shell.sh
           echo "shellcheck (error level) clean"

@@ -10,7 +10,7 @@ LDFLAGS = -ldflags "-X main.version=$(VERSION) -X main.commit=$(shell git rev-pa
 # Platforms
 PLATFORMS = linux/amd64 linux/arm64 darwin/amd64 darwin/arm64 windows/amd64
 
-.PHONY: all build clean test install uninstall fmt vet lint docker
+.PHONY: all build build-all release clean test install uninstall fmt vet lint docker security ci
 
 all: build
 
@@ -51,7 +51,8 @@ lint:
 		echo "Running linter..."; \
 		golangci-lint run; \
 	else \
-		echo "golangci-lint not installed, skipping..."; \
+		echo "golangci-lint not installed; install it before running this check" >&2; \
+		exit 1; \
 	fi
 
 # Install locally
@@ -71,22 +72,24 @@ uninstall:
 build-all:
 	@echo "Building for all platforms..."
 	@mkdir -p dist
-	@for platform in $(PLATFORMS); do \
+	@set -e; for platform in $(PLATFORMS); do \
 		GOOS=$$(echo $$platform | cut -d/ -f1); \
 		GOARCH=$$(echo $$platform | cut -d/ -f2); \
 		OUTPUT="dist/$(BINARY)_$(VERSION)_$${GOOS}_$${GOARCH}"; \
 		if [ "$$GOOS" = "windows" ]; then OUTPUT="$${OUTPUT}.exe"; fi; \
 		echo "  Building for $$GOOS/$$GOARCH..."; \
-		GOOS=$$GOOS GOARCH=$$GOARCH go build $(LDFLAGS) -o $$OUTPUT $(MAIN_PACKAGE); \
+		GOOS=$$GOOS GOARCH=$$GOARCH go build $(LDFLAGS) -o "$$OUTPUT" $(MAIN_PACKAGE); \
 	done
 	@echo "✓ Built all platforms"
 
 # Create release archives
 release: build-all
 	@echo "Creating release archives..."
-	@cd dist && for file in $(BINARY)_$(VERSION)_*; do \
-		if echo "$$file" | grep -q "\.exe$$"; then \
-			zip "$${file%.exe}.zip" "$$file"; \
+	@set -e; cd dist; for platform in $(PLATFORMS); do \
+		os=$${platform%/*}; arch=$${platform#*/}; \
+		file="$(BINARY)_$(VERSION)_$${os}_$${arch}"; \
+		if [ "$$os" = windows ]; then \
+			zip "$$file.zip" "$$file.exe"; \
 		else \
 			tar czf "$$file.tar.gz" "$$file"; \
 		fi; \
@@ -117,7 +120,8 @@ security:
 		echo "Checking for vulnerabilities..."; \
 		govulncheck ./...; \
 	else \
-		echo "govulncheck not installed, install with: go install golang.org/x/vuln/cmd/govulncheck@latest"; \
+		echo "govulncheck not installed, install with: go install golang.org/x/vuln/cmd/govulncheck@latest" >&2; \
+		exit 1; \
 	fi
 
 # Generate code
