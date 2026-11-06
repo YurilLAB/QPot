@@ -1,9 +1,30 @@
 package proxy
 
 import (
+	"net/netip"
 	"sync"
 	"time"
 )
+
+// sourceKey is the unit the per-IP limits apply to. An IPv4 address is its own
+// source; an IPv6 address counts as its /64, the smallest prefix a single host
+// is routinely given, so rotating addresses inside it does not reset the
+// limits. IPv4-mapped IPv6 is the IPv4 address. Unparseable input is used as is.
+func sourceKey(ip string) string {
+	a, err := netip.ParseAddr(ip)
+	if err != nil {
+		return ip
+	}
+	a = a.Unmap().WithZone("")
+	if a.Is4() {
+		return a.String()
+	}
+	p, err := a.Prefix(64)
+	if err != nil {
+		return ip
+	}
+	return p.String()
+}
 
 // limiter bounds how much load a single attacker (or the internet at large) can
 // place on the broker and its finite backend pool. A high-interaction honeypot
@@ -60,6 +81,8 @@ func newLimiter(ratePerSec, burst float64, perIPMax, globalMax int) *limiter {
 // connection ends. On rejection it returns (false, reason, nil) where reason is
 // one of the Reason* constants. release is safe to call once and only once.
 func (l *limiter) admit(ip string) (bool, string, func()) {
+	key := sourceKey(ip)
+
 	l.mu.Lock()
 	defer l.mu.Unlock()
 
@@ -70,10 +93,10 @@ func (l *limiter) admit(ip string) (bool, string, func()) {
 		return false, ReasonGlobalCap, nil
 	}
 
-	st := l.ips[ip]
+	st := l.ips[key]
 	if st == nil {
 		st = &ipState{tokens: l.burst, last: now}
-		l.ips[ip] = st
+		l.ips[key] = st
 	}
 
 	// Per-IP concurrency cap.
@@ -115,7 +138,7 @@ func (l *limiter) admit(ip string) (bool, string, func()) {
 		if l.global > 0 {
 			l.global--
 		}
-		if s := l.ips[ip]; s != nil {
+		if s := l.ips[key]; s != nil {
 			if s.active > 0 {
 				s.active--
 			}

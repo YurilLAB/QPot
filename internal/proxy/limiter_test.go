@@ -6,6 +6,41 @@ import (
 	"time"
 )
 
+// One IPv6 host is normally handed a whole /64 (often a /56 or /48), so it can
+// pick a fresh source address for every connection. Keyed on the full address,
+// the per-IP caps and rate limit did nothing against it.
+func TestLimiterGroupsIPv6By64(t *testing.T) {
+	l := newLimiter(0, 0, 1, 0) // one concurrent connection per source
+	ok, _, rel := l.admit("2001:db8:1:2::1")
+	if !ok {
+		t.Fatal("first admit rejected")
+	}
+	defer rel()
+	if ok, reason, _ := l.admit("2001:db8:1:2:dead:beef:0:1"); ok || reason != ReasonPerIPCap {
+		t.Fatalf("second address in the same /64: ok=%v reason=%q, want %s", ok, reason, ReasonPerIPCap)
+	}
+	if ok, _, r := l.admit("2001:db8:1:3::1"); !ok {
+		t.Fatal("a different /64 was blocked")
+	} else {
+		r()
+	}
+	// IPv4 keeps per-address granularity, and an IPv4-mapped form is the same
+	// source as the plain address.
+	ok4, _, r4 := l.admit("192.0.2.1")
+	if !ok4 {
+		t.Fatal("IPv4 admit rejected")
+	}
+	defer r4()
+	if ok, reason, _ := l.admit("::ffff:192.0.2.1"); ok || reason != ReasonPerIPCap {
+		t.Fatalf("IPv4-mapped form: ok=%v reason=%q, want %s", ok, reason, ReasonPerIPCap)
+	}
+	if ok, _, r := l.admit("192.0.2.2"); !ok {
+		t.Fatal("neighbouring IPv4 address was blocked")
+	} else {
+		r()
+	}
+}
+
 func TestLimiterGlobalCap(t *testing.T) {
 	l := newLimiter(0, 0, 0, 2) // only a global cap of 2
 	_, _, r1 := l.admit("1.1.1.1")
