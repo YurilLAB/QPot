@@ -3,6 +3,7 @@ package proxy
 import (
 	"context"
 	"net"
+	"runtime"
 	"sync"
 	"testing"
 	"time"
@@ -100,6 +101,56 @@ func TestRecycleResetRequiresSSHBanner(t *testing.T) {
 	}()
 	if err := fastRecycle()(Backend{ID: "b", Addr: f.addr}); err == nil {
 		t.Fatal("reset accepted a backend that came back without an SSH banner")
+	}
+}
+
+// The banner probe talks to a backend an attacker had root on (a restart
+// staged from inside answers it). It read up to the first newline with no
+// size limit for 2s, so a fake service streaming bytes without one made the
+// broker buffer all of it, against a 128 MiB container limit.
+func TestRecycleBannerProbeIsBounded(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	const streamed = 64 << 20
+	chunk := make([]byte, 1<<20)
+	for i := range chunk {
+		chunk[i] = 'A'
+	}
+	go func() {
+		for {
+			c, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			go func(c net.Conn) {
+				defer c.Close()
+				for sent := 0; sent < streamed; sent += len(chunk) {
+					if _, err := c.Write(chunk); err != nil {
+						return
+					}
+				}
+			}(c)
+		}
+	}()
+	dir := t.TempDir()
+	writeGen(t, dir, "b", 1)
+	g := NewGenerationGate(dir)
+	b := Backend{ID: "b", Addr: ln.Addr().String()}
+	g.OnLease(b)
+	writeGen(t, dir, "b", 2) // recreated: straight to the banner probe
+	reset := RecycleReset(RecycleOptions{DownWithin: time.Second, UpWithin: 200 * time.Millisecond, Poll: 20 * time.Millisecond, Gate: g})
+
+	var before, after runtime.MemStats
+	runtime.ReadMemStats(&before)
+	if err := reset(b); err == nil {
+		t.Fatal("a backend without an SSH banner passed the reset")
+	}
+	runtime.ReadMemStats(&after)
+	if grew := after.TotalAlloc - before.TotalAlloc; grew > 8<<20 {
+		t.Fatalf("banner probe allocated %d MiB reading a newline-free stream", grew>>20)
 	}
 }
 

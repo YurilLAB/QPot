@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"errors"
+	"io"
 	"net"
 	"strings"
 	"time"
@@ -66,7 +67,9 @@ func RecycleReset(o RecycleOptions) ResetFunc {
 		}
 		defer c.Close()
 		_ = c.SetReadDeadline(time.Now().Add(2 * time.Second))
-		line, err := bufio.NewReader(c).ReadString('\n')
+		// The backend may be one an attacker had root on, so read at most
+		// the 255 bytes RFC 4253 allows the identification line.
+		line, err := bufio.NewReader(io.LimitReader(c, 255)).ReadString('\n')
 		return err == nil && strings.HasPrefix(line, "SSH-")
 	}
 	// With a gate, a counter that already moved proves the recreation even if
