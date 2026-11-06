@@ -698,7 +698,7 @@ func newLogsCommand() *cobra.Command {
 			}
 
 			for line := range logs {
-				fmt.Println(line)
+				fmt.Println(termSafe(line)) // honeypot logs carry attacker input
 			}
 
 			return nil
@@ -1260,8 +1260,8 @@ func newClusterNodesCommand() *cobra.Command {
 				}
 				fmt.Printf("%-12s %-15s %-20s %-10s %-12d\n",
 					nodeID,
-					truncate(node.Name, 15),
-					fmt.Sprintf("%s:%d", node.Address, node.Port),
+					truncate(termSafe(node.Name), 15),
+					termSafe(fmt.Sprintf("%s:%d", node.Address, node.Port)),
 					node.Status,
 					node.Stats.TotalEvents)
 			}
@@ -1376,8 +1376,8 @@ func newClusterRequestsCommand() *cobra.Command {
 			fmt.Printf("%-22s  %-16s  %-16s  %-15s  %s\n", "REQUEST ID", "HOSTNAME", "SOURCE IP", "INSTANCE", "REQUESTED")
 			for _, p := range pending {
 				fmt.Printf("%-22s  %-16s  %-16s  %-15s  %s\n",
-					p.RequestID, truncate(p.NodeName, 16), p.SourceIP,
-					truncate(p.InstanceName, 15), p.RequestedAt.Format(time.RFC3339))
+					p.RequestID, truncate(termSafe(p.NodeName), 16), termSafe(p.SourceIP),
+					truncate(termSafe(p.InstanceName), 15), p.RequestedAt.Format(time.RFC3339))
 			}
 			fmt.Println("\nApprove with: qpot cluster approve <request-id>")
 			return nil
@@ -1736,10 +1736,13 @@ func newDockerLogsCommand() *cobra.Command {
 
 			dockerArgs := []string{"logs", "--tail", fmt.Sprintf("%d", tail), containerName}
 			dockerCmd := exec.CommandContext(ctx, "docker", dockerArgs...)
-			dockerCmd.Stdout = os.Stdout
-			dockerCmd.Stderr = os.Stderr
-
-			if err := dockerCmd.Run(); err != nil {
+			// Container output carries attacker input.
+			stdout, stderr := &termSafeWriter{w: os.Stdout}, &termSafeWriter{w: os.Stderr}
+			dockerCmd.Stdout, dockerCmd.Stderr = stdout, stderr
+			err := dockerCmd.Run()
+			stdout.Flush()
+			stderr.Flush()
+			if err != nil {
 				if isDockerNotFound(err) {
 					return fmt.Errorf("docker not found: install Docker to use this command")
 				}
@@ -2264,7 +2267,7 @@ func newCanaryListCommand() *cobra.Command {
 			for _, it := range items {
 				c, _ := it.(map[string]interface{})
 				fmt.Printf("%-22v %-6v %-20v %-6v %v\n",
-					c["id"], c["kind"], truncField(c["name"], 20), c["trips"], c["memo"])
+					c["id"], c["kind"], truncField(c["name"], 20), c["trips"], termSafe(fmt.Sprint(c["memo"])))
 			}
 			return nil
 		},
@@ -2298,7 +2301,7 @@ func newCanaryTripsCommand() *cobra.Command {
 			for _, it := range trips {
 				t, _ := it.(map[string]interface{})
 				fmt.Printf("%-24v %-9v %-16v %-20v %v\n",
-					t["time"], t["channel"], t["source_ip"], truncField(t["name"], 20), t["detail"])
+					t["time"], t["channel"], termSafe(fmt.Sprint(t["source_ip"])), truncField(t["name"], 20), termSafe(fmt.Sprint(t["detail"])))
 			}
 			return nil
 		},
@@ -2401,7 +2404,7 @@ func newCanaryRemoveCommand() *cobra.Command {
 
 // truncField renders a value as a string truncated to n runes for table output.
 func truncField(v interface{}, n int) string {
-	s := fmt.Sprintf("%v", v)
+	s := termSafe(fmt.Sprintf("%v", v))
 	if len(s) > n {
 		if n > 1 {
 			return s[:n-1] + "…"

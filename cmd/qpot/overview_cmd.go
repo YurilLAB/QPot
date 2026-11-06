@@ -177,8 +177,11 @@ func printOverview(w io.Writer, ov *overview.Overview, live bool) {
 		if e.Technique != "" {
 			tech = "[" + e.Technique + "]"
 		}
+		// Event fields are attacker input; the API strips C0 controls, but not
+		// C1 ones or bidi overrides, and this may be another program's answer.
 		fmt.Fprintf(tw, "  %s\t%s\t%s\t%s\t%s\t%s\n", e.Time.Local().Format("Jan 02 15:04:05"),
-			strings.ToUpper(e.Severity), e.Honeypot, e.SourceIP, truncate(e.Summary, 70), tech)
+			termSafe(strings.ToUpper(e.Severity)), termSafe(e.Honeypot), termSafe(e.SourceIP),
+			truncate(termSafe(e.Summary), 70), termSafe(tech))
 	}
 	tw.Flush()
 }
