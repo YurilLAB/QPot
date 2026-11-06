@@ -969,14 +969,15 @@ func (m *Manager) HandleJoinRequest(req *JoinRequest, sourceIP string) *JoinResp
 	clusterID, hash, plain := m.cluster.ID, m.cluster.PasswordHash, m.plainPassword
 	m.mu.RUnlock()
 
-	src, now := authSource(sourceIP), time.Now()
-	if m.authLimit.blocked(src, now, m.isMemberSource(src)) {
+	trusted := m.isMemberAddress(sourceIP)
+	src, now := authKey(sourceIP, trusted), time.Now()
+	if m.authLimit.blocked(src, now, trusted) {
 		return &JoinResponse{Success: false, Error: errTooManyAttempts}
 	}
 
 	// Verify cluster ID
 	if req.ClusterID != clusterID {
-		m.authLimit.failed(src, now)
+		m.authLimit.failed(src, now, trusted)
 		return &JoinResponse{
 			Success: false,
 			Error:   "invalid cluster ID",
@@ -984,7 +985,7 @@ func (m *Manager) HandleJoinRequest(req *JoinRequest, sourceIP string) *JoinResp
 	}
 
 	if !verifyClusterPassword(req.Password, hash, plain) {
-		m.authLimit.failed(src, now)
+		m.authLimit.failed(src, now, trusted)
 		slog.Warn("Join attempt with invalid password",
 			"cluster_id", req.ClusterID,
 			"from", sourceIP)
@@ -1074,14 +1075,15 @@ func (m *Manager) admitNodeLocked(req *JoinRequest) (*JoinResponse, error) {
 // unauthenticated nodes from disrupting the cluster.
 func (m *Manager) withClusterAuth(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		src, now := authSource(r.RemoteAddr), time.Now()
-		if m.authLimit.blocked(src, now, fromThisHost(r) || m.isMemberSource(src)) {
+		trusted := fromThisHost(r) || m.isMemberAddress(r.RemoteAddr)
+		src, now := authKey(r.RemoteAddr, trusted), time.Now()
+		if m.authLimit.blocked(src, now, trusted) {
 			http.Error(w, "Too many failed attempts", http.StatusTooManyRequests)
 			return
 		}
 		password := r.Header.Get("X-Cluster-Password")
 		if password == "" || !m.VerifyPassword(password) {
-			m.authLimit.failed(src, now)
+			m.authLimit.failed(src, now, trusted)
 			http.Error(w, "Unauthorized", http.StatusUnauthorized)
 			return
 		}
@@ -1095,7 +1097,8 @@ func (m *Manager) withMemberAuth(next http.HandlerFunc) http.HandlerFunc {
 	return m.withClusterAuth(func(w http.ResponseWriter, r *http.Request) {
 		if key := m.memberKey(); key != "" &&
 			subtle.ConstantTimeCompare([]byte(r.Header.Get(memberKeyHeader)), []byte(key)) != 1 {
-			m.authLimit.failed(authSource(r.RemoteAddr), time.Now())
+			trusted := fromThisHost(r) || m.isMemberAddress(r.RemoteAddr)
+			m.authLimit.failed(authKey(r.RemoteAddr, trusted), time.Now(), trusted)
 			http.Error(w, "Unauthorized", http.StatusUnauthorized)
 			return
 		}
@@ -1138,22 +1141,36 @@ func withHostOnly(next http.HandlerFunc) http.HandlerFunc {
 	}
 }
 
-// isMemberSource reports whether src (an authSource key) is the address of a
-// node of the cluster, so the shared overflow allowance of the password
-// throttle does not lock members out while many addresses guess.
-func (m *Manager) isMemberSource(src string) bool {
+// isMemberAddress reports whether addr (an address the request came from, the
+// port optional) is exactly the address of one of the cluster's nodes, so the
+// password throttle counts it as trusted (see authlimit.go): not the whole
+// IPv6 /64, which a neighbour of the node may share.
+func (m *Manager) isMemberAddress(addr string) bool {
+	host := addr
+	if h, _, err := net.SplitHostPort(addr); err == nil {
+		host = h
+	}
+	ip := net.ParseIP(host)
+	if ip == nil {
+		return false
+	}
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	if m.cluster == nil {
 		return false
 	}
+	is := func(n *Node) bool {
+		return n != nil && ip.Equal(net.ParseIP(n.Address))
+	}
+	if is(m.cluster.LocalNode) {
+		return true
+	}
 	for _, n := range m.cluster.Nodes {
-		if n != nil && n.Address != "" && authSource(n.Address) == src {
+		if is(n) {
 			return true
 		}
 	}
-	return m.cluster.LocalNode != nil && m.cluster.LocalNode.Address != "" &&
-		authSource(m.cluster.LocalNode.Address) == src
+	return false
 }
 
 // fromThisHost reports whether r came from this machine: over loopback, or,

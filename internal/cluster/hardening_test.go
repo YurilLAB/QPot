@@ -372,6 +372,7 @@ func TestThrottleTableFullKeepsBlocks(t *testing.T) {
 	}
 	m.mu.Lock()
 	m.cluster.Nodes["peer"] = &Node{ID: "peer", Address: "192.0.2.44", Port: 7946}
+	m.cluster.Nodes["peer6"] = &Node{ID: "peer6", Address: "2001:db8:ffff::10", Port: 7946}
 	m.mu.Unlock()
 	h := m.apiHandler()
 	status := func(remote, password string) int {
@@ -406,6 +407,30 @@ func TestThrottleTableFullKeepsBlocks(t *testing.T) {
 	}
 	if code := status("127.0.0.1:50000", pw); code != http.StatusOK {
 		t.Fatalf("this host was locked out by the shared allowance: %d", code)
+	}
+	if code := status("[2001:db8:ffff::10]:7946", pw); code != http.StatusOK {
+		t.Fatalf("an IPv6 member was locked out by the shared allowance: %d", code)
+	}
+
+	// Trust is the node's exact address: a neighbour in its /64 shares the
+	// overflow allowance like any other source.
+	if code := status("[2001:db8:ffff::11]:4000", pw); code != http.StatusTooManyRequests {
+		t.Fatalf("a neighbour of a member in its /64 was trusted: %d", code)
+	}
+	// A trusted source still has a limit of its own with the table full.
+	for i := 0; i < authFailLimit; i++ {
+		status("192.0.2.44:7946", "guess")
+	}
+	if code := status("192.0.2.44:7946", pw); code != http.StatusTooManyRequests {
+		t.Fatalf("a member's address guessed without limit: %d", code)
+	}
+	// Every loopback address is one source: a local program cannot take a
+	// fresh 127.x address for each guess.
+	for i := 0; i < authFailLimit; i++ {
+		status("127.0."+strconv.Itoa(i/250)+"."+strconv.Itoa(i%250+2)+":5000", "guess")
+	}
+	if code := status("127.0.0.1:50000", pw); code != http.StatusTooManyRequests {
+		t.Fatalf("guessing from many loopback addresses was not limited: %d", code)
 	}
 }
 
