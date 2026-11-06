@@ -187,6 +187,35 @@ func conpotTemplate(cfg *config.Config) tpotConpotTemplate {
 	return tpotConpotTemplates[seededIndex("tpot-conpot:"+deceptionSeed(cfg), len(tpotConpotTemplates))]
 }
 
+// adbDevice is how adbd names its device in the connection banner.
+type adbDevice struct {
+	Name, Model, Device string
+}
+
+// adbDevices are Android 8 phones on Qualcomm chips, the kind of device the
+// root listing adbhoney answers `ls` with comes from (Oreo's nonplat_*
+// contexts; the bt_firmware, dsp and persist partitions). The image's own
+// banner, the Galaxy S9 "starltexx", is the one every ADBHoney install sends.
+var adbDevices = []adbDevice{
+	{"walleye", "Pixel 2", "walleye"},
+	{"taimen", "Pixel 2 XL", "taimen"},
+	{"tissot", "Mi A1", "tissot_sprout"},
+	{"whyred", "Redmi Note 5", "whyred"},
+	{"ali", "moto g(6)", "ali"},
+	{"starqltesq", "SM-G960U", "starqlte"},
+	{"dreamqltesq", "SM-G950U", "dreamqlte"},
+	{"greatqltesq", "SM-N950U", "greatqlte"},
+	{"OnePlus5T", "ONEPLUS A5010", "OnePlus5T"},
+}
+
+// adbhoneyBanner returns the banner adbhoney sends in reply to an ADB client's
+// CONNECT: one device per instance, in the form an Android 8 adbd sends it.
+func adbhoneyBanner(cfg *config.Config) string {
+	d := adbDevices[seededIndex("adb-device:"+deceptionSeed(cfg), len(adbDevices))]
+	return "device::ro.product.name=" + d.Name + ";ro.product.model=" + d.Model +
+		";ro.product.device=" + d.Device + ";features=cmd,stat_v2,shell_v2"
+}
+
 // realisticHostnames is a pool of plausible production-server hostnames. None is
 // Cowrie's old default "svr04" or T-Pot's "srv01".
 var realisticHostnames = []string{

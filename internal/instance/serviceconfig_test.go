@@ -20,7 +20,7 @@ func TestInitializeWritesServiceConfigs(t *testing.T) {
 	cfg.ConfigPath = filepath.Join(dir, "config.yaml")
 
 	// Enable the honeypots whose data dirs and config files setup prepares.
-	for _, name := range []string{"cowrie", "conpot", "heralding"} {
+	for _, name := range []string{"cowrie", "conpot", "heralding", "adbhoney"} {
 		hp := cfg.Honeypots[name]
 		hp.Enabled = true
 		cfg.Honeypots[name] = hp
@@ -77,5 +77,12 @@ func TestInitializeWritesServiceConfigs(t *testing.T) {
 	got, err := os.ReadFile(filepath.Join(dir, "honeypots", "heralding", "heralding.yml"))
 	if err != nil || string(got) != string(heraldingConfig) {
 		t.Errorf("heralding.yml not written with QPot's config (err %v, %d bytes)", err, len(got))
+	}
+	got, err = os.ReadFile(filepath.Join(dir, "honeypots", "adbhoney", "adbhoney.cfg"))
+	if err != nil || string(got) != string(adbhoneyConfig(cfg)) {
+		t.Errorf("adbhoney.cfg not written with the instance's config (err %v, %d bytes)", err, len(got))
+	}
+	if info, err := os.Stat(filepath.Join(dir, "honeypots", "adbhoney", "dl")); err != nil || !info.IsDir() {
+		t.Errorf("adbhoney dl dir missing: %v", err)
 	}
 }

@@ -626,6 +626,9 @@ func (m *Manager) generateServiceConfigs() error {
 				return fmt.Errorf("failed to create %s dir for honeypot %q: %w", v.HostSubdir, name, err)
 			}
 			if v.File {
+				if len(v.Content) == 0 {
+					return fmt.Errorf("honeypot %q: no content for %s", name, v.HostSubdir)
+				}
 				// World-readable: the image's non-root user reads it. It is the
 				// honeypot's own config, no QPot secret.
 				dest := filepath.Join(hpDir, v.HostSubdir)

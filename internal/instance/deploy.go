@@ -48,6 +48,39 @@ type deployVolume struct {
 //go:embed honeypotfiles/heralding.yml
 var heraldingConfig []byte
 
+// adbhoneyConfig is the adbhoney.cfg of ghcr.io/telekom-security/adbhoney at
+// TPotVersion with two changes. device_id, the banner every ADB client gets,
+// was "device::http://ro.product.name =starltexx;...", whose stray "http://"
+// and space mark ADBHoney on every install; it is now a well-formed banner of
+// a device picked per instance (adbhoneyBanner). http_download is off: the
+// image's downloader fetches any URL an attacker types, from the honeypot's
+// own network (upstream fixed that SSRF in t3chn0m4g3/ADBHoney 6f2ac93, after
+// the commit the image is built from). Files pushed with `adb push` are kept.
+func adbhoneyConfig(cfg *config.Config) []byte {
+	return []byte(`[honeypot]
+hostname = honeypot01
+
+address = 0.0.0.0
+port = 5555
+http_download = false
+http_timeout = 45
+
+download_dir = dl/
+log_dir = log/
+
+device_id = ` + adbhoneyBanner(cfg) + `
+
+[output_log]
+enabled = true
+log_file = adbhoney.log
+log_level = info
+
+[output_json]
+enabled = true
+log_file = adbhoney.json
+`)
+}
+
 // honeypotDeploy is the deployment profile for one honeypot image.
 type honeypotDeploy struct {
 	// Tmpfs are raw docker-compose tmpfs entries the image needs (e.g. cowrie
@@ -125,15 +158,27 @@ func (d honeypotDeploy) NeedsNetBind() bool {
 // deployProfileFor plus the parts that depend on the configuration. Conpot
 // runs the template conpotTemplate picks and publishes exactly the ports that
 // template listens on, no more: a published port with nothing behind it
-// accepts the connection and drops it, which no real device does.
+// accepts the connection and drops it, which no real device does. Adbhoney's
+// config carries the instance's device banner.
 func deployProfile(cfg *config.Config, name string) honeypotDeploy {
 	d := deployProfileFor(name)
-	if name == "conpot" && cfg != nil {
+	if cfg == nil {
+		return d
+	}
+	switch name {
+	case "conpot":
 		t := conpotTemplate(cfg)
 		d.Ports = slices.Clone(t.TCP)
 		d.UDPPorts = slices.Clone(t.UDP)
 		d.Env = maps.Clone(d.Env)
 		d.Env["CONPOT_TEMPLATE"] = t.ID
+	case "adbhoney":
+		d.Volumes = slices.Clone(d.Volumes)
+		for i, v := range d.Volumes {
+			if v.HostSubdir == "adbhoney.cfg" {
+				d.Volumes[i].Content = adbhoneyConfig(cfg)
+			}
+		}
 	}
 	return d
 }
@@ -205,10 +250,17 @@ func deployProfileFor(name string) honeypotDeploy {
 		}
 	case "adbhoney":
 		// Android Debug Bridge honeypot: port 5555, logs to /opt/adbhoney/log.
-		// Derived from docker/adbhoney/docker-compose.yml.
+		// It saves files pushed with `adb push` to dl/ under its working dir;
+		// on the read-only root that write failed, so every push broke off
+		// mid-transfer and nothing was kept. The config it reads from
+		// _internal/ is QPot's, filled in by deployProfile (adbhoneyConfig).
+		// Verified by running ghcr.io/telekom-security/adbhoney:24.04.2 this
+		// way and pushing a file to it.
 		return honeypotDeploy{
 			Volumes: []deployVolume{
 				{HostSubdir: "logs", ContainerPath: "/opt/adbhoney/log"},
+				{HostSubdir: "dl", ContainerPath: "/opt/adbhoney/dl"},
+				{HostSubdir: "adbhoney.cfg", ContainerPath: "/opt/adbhoney/_internal/adbhoney.cfg", File: true, ReadOnly: true},
 			},
 			Ports: []int{5555},
 		}

@@ -175,13 +175,20 @@ gives each instance a distinct, self-consistent identity:
   overrode the persona (`OpenSSH_6.6.1p1 Ubuntu-2ubuntu2.8`, "Microsoft FTP
   Server", Exchange SMTP), and keeps the persona, its certificates and SSH host
   keys across restarts.
+- **ADB device** – adbhoney introduces itself as one Android 8 phone picked per
+  instance (Pixel 2, Mi A1, Galaxy S9, …) in the form a real adbd uses, instead
+  of the stock `device::http://ro.product.name =starltexx` banner every ADBHoney
+  install sends. Files pushed with `adb push` are kept in its `dl` directory.
+  Fetching URLs from attacker commands is off: the image's downloader would
+  request any address, including ones on your own network.
 - **HiFi credential personas** – the real-OpenSSH backends of HiFi mode accept a
   persona's believable weak passwords (30 personas: corporate Ubuntu, DB
   server, Proxmox host, …) under a matching host name. Pin one with the
   ssh-proxy's `credential_template`.
-- **No giveaways** – generated configs and container environments contain no
-  `qpot`/`tpot`/`honeypot` strings, and no stealth knobs: an intruder who reads
-  `/proc/1/environ` finds nothing that names a honeypot.
+- **No giveaways** – container environments contain no `qpot`/`tpot`/`honeypot`
+  strings and no stealth knobs: an intruder who reads `/proc/1/environ` finds
+  nothing that names a honeypot. The config files QPot mounts are the images'
+  own formats and are not reachable from an attacker's session.
 
 **Limitation:** cowrie's cipher and MAC lists and its packet handling come from
 its Python SSH stack, so a determined packet-level fingerprinter can still tell
