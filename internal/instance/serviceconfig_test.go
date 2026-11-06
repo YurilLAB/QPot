@@ -37,11 +37,6 @@ func TestInitializeWritesServiceConfigs(t *testing.T) {
 		filepath.Join(dir, "docker-compose.yml"),
 		filepath.Join(dir, "vector.yaml"),
 	}
-	if _, ok := cfg.Honeypots["cowrie"]; ok && cfg.Honeypots["cowrie"].Enabled {
-		// cowrie.cfg lands in the etc/ subdir (the cowrie deployment profile's
-		// ConfigSubdir) so it's inside the directory the container mounts.
-		mustExist = append(mustExist, filepath.Join(dir, "honeypots", "cowrie", "etc", "cowrie.cfg"))
-	}
 
 	for _, p := range mustExist {
 		info, err := os.Stat(p)
@@ -51,6 +46,18 @@ func TestInitializeWritesServiceConfigs(t *testing.T) {
 		}
 		if info.Size() == 0 {
 			t.Errorf("file %s is empty", p)
+		}
+	}
+
+	// Cowrie renders its own config from its persona, so QPot writes none;
+	// it only needs the ttylog dir its log mount would otherwise hide.
+	cowrie := filepath.Join(dir, "honeypots", "cowrie")
+	if info, err := os.Stat(filepath.Join(cowrie, "logs", "tty")); err != nil || !info.IsDir() {
+		t.Errorf("cowrie logs/tty dir missing: %v", err)
+	}
+	for _, stale := range []string{"etc/cowrie.cfg", "etc/userdb.txt", "honeyfs", "qpot_patch_fs.py"} {
+		if _, err := os.Stat(filepath.Join(cowrie, stale)); err == nil {
+			t.Errorf("Initialize still writes cowrie %s", stale)
 		}
 	}
 }

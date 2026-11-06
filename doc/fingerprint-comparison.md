@@ -11,7 +11,7 @@ and what QPot does about it.
 | Endpoint | `hasshServer` | Verdict |
 |---|---|---|
 | **Stock T-Pot Cowrie** | `b74b3746d7c1b9944b2e8db18f062e6f` | Fixed on *every* default Cowrie → trivially blocklisted |
-| **QPot Cowrie** (normalized) | `297dcb0fa400afa1aecc6b5008354515` | Off the stock value; legacy/malformed tells removed |
+| **QPot Cowrie** (T-Pot persona) | per persona, e.g. `613e5828d2701cb7d653a126e5920e2f` (Debian 12) | Key exchange and host keys follow the advertised OpenSSH release |
 | **QPot HiFi** (real OpenSSH) | `425d29fe50d8e4f5e37efb6e24bcf660` | A genuine OpenSSH 9.2 fingerprint — it *is* OpenSSH |
 
 ---
@@ -46,27 +46,31 @@ and what QPot does about it.
 Cowrie, so a one-line HASSH match (or just "does it offer `blowfish-cbc` /
 `hmac-sha2-56`?") flags it instantly and the attacker leaves.
 
-## 2. QPot Cowrie (config-level normalization)
+## 2. QPot Cowrie (T-Pot persona engine)
+
+QPot runs the T-Pot 24.04.2 cowrie image's persona engine, which sets the
+`KEXINIT` from the advertised OpenSSH release. Read off the wire for the
+`debian-bookworm` persona:
 
 ```
-2402/tcp open  ssh  OpenSSH 8.2p1 Ubuntu 4ubuntu0.11 (protocol 2.0)
-| ssh2-enum-algos:
-|   server_host_key_algorithms: (3)
-|       ssh-rsa / ecdsa-sha2-nistp256 / ssh-ed25519   (ssh-dss gone)
-|   encryption_algorithms: (3)
-|       aes128-ctr / aes192-ctr / aes256-ctr          (legacy ciphers gone)
-|   mac_algorithms: (3)
-|       hmac-sha2-256 / hmac-sha2-512 / hmac-sha1      (malformed/md5 gone)
-|   compression_algorithms: (2)
-|       none / zlib@openssh.com                        (OpenSSH order)
+banner: SSH-2.0-OpenSSH_9.2p1 Debian-2+deb12u10
+kex      curve25519-sha256,curve25519-sha256@libssh.org,ecdh-sha2-nistp256,
+         ecdh-sha2-nistp384,ecdh-sha2-nistp521,ext-info-s
+hostkey  rsa-sha2-512,rsa-sha2-256,ecdsa-sha2-nistp256,ssh-ed25519
+enc      aes128-ctr,aes192-ctr,aes256-ctr
+mac      hmac-sha2-256,hmac-sha2-512,hmac-sha1
+comp     none,zlib@openssh.com
 ```
 
-`hasshServer = 297dcb0fa400afa1aecc6b5008354515` — a different value from the
-blocklisted stock one, and the obvious "this is an emulator" tells are gone.
-**Honest limit:** the `kex_algorithms` (`…diffie-hellman-group14-sha1,
-ext-info-s`) and `ssh-rsa` host key still come from Cowrie's Python transport
-and are not config-controllable, so a determined fingerprinter can still tell
-this from real OpenSSH. That's what HiFi mode is for.
+`hasshServer = 613e5828d2701cb7d653a126e5920e2f`. The `centos-7` persona
+(OpenSSH 7.4) offers `diffie-hellman-group14-sha1` and `ssh-rsa` the way 7.4
+does. There is no `ssh-dss`, no legacy CBC ciphers, no malformed MAC, and the
+host-key list matches the release (`rsa-sha2-*` for 7.2 and later, no `ssh-rsa`
+for 8.8 and later). **Honest limit:** the cipher and MAC lists are what
+Cowrie's Twisted transport implements (no `chacha20-poly1305`, AES-GCM or
+ETM/umac MACs), and the post-quantum and `kex-strict` key exchanges are missing,
+so a determined fingerprinter can still tell this from real OpenSSH. That's what
+HiFi mode is for.
 
 ## 3. QPot HiFi — real OpenSSH (gap closed)
 
@@ -99,8 +103,9 @@ real OpenSSH daemon, so there is nothing of ours on the wire to fingerprint.
 ### How this was produced
 
 ```sh
-# stock Cowrie, QPot Cowrie, and the HiFi broker on three ports, then:
+# stock Cowrie and the HiFi broker on two ports, then:
 nmap -p <port> -sV --script ssh2-enum-algos 127.0.0.1
+# the QPot Cowrie lists above were read from the server KEXINIT packet
 # hasshServer = md5(kex_algos ; enc_s2c ; mac_s2c ; comp_s2c)
 ```
 

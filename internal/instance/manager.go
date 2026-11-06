@@ -610,15 +610,9 @@ func (m *Manager) generateServiceConfigs() error {
 		if err != nil {
 			return fmt.Errorf("failed to generate config for honeypot %q: %w", name, err)
 		}
-		// Config files must land inside the subdir the container mounts (e.g.
-		// cowrie reads cowrie.cfg/userdb.txt from etc/, which is bind-mounted),
-		// so honor the deployment profile's ConfigSubdir.
 		prof := deployProfileFor(name)
 		hpDir := filepath.Join(m.config.DataPath, "honeypots", name)
 		cfgDir := hpDir
-		if prof.ConfigSubdir != "" {
-			cfgDir = filepath.Join(hpDir, prof.ConfigSubdir)
-		}
 		// Ensure all profile volume subdirs (and the config dir) exist so the
 		// bind mounts resolve to real directories. They must be writable by the
 		// honeypot's in-container non-root user (e.g. uid 2000), which is not
@@ -659,38 +653,19 @@ func (m *Manager) generateServiceConfigs() error {
 			}
 		}
 
-		// Cowrie gets a per-instance honeyfs layer so post-login recon is
-		// consistent with the login persona / distro identity (see honeyfs.go).
 		if name == "cowrie" {
-			// Cowrie writes a per-session ttylog to log/tty/ (ttylog_path in
-			// cowrie.cfg) but does NOT create that directory itself, and our
-			// logs bind mount shadows whatever the image shipped. Without it
-			// cowrie crashes the shell channel on every login (the recon shell
-			// dies the instant an attacker connects) - a broken honeypot that
-			// the port-only healthcheck never catches. Pre-create it, writable
-			// by cowrie's in-container uid 2000.
+			// Cowrie writes a per-session ttylog to log/tty/ but does NOT create
+			// that directory itself, and our logs bind mount shadows whatever the
+			// image shipped. Without it cowrie crashes the shell channel on every
+			// login (the recon shell dies the instant an attacker connects) - a
+			// broken honeypot that the port-only healthcheck never catches.
+			// Pre-create it, writable by cowrie's in-container uid 2000.
 			ttyDir := filepath.Join(hpDir, "logs", "tty")
 			if err := os.MkdirAll(ttyDir, 0750); err != nil {
 				return fmt.Errorf("failed to create cowrie log/tty dir: %w", err)
 			}
 			if err := os.Chmod(ttyDir, 0777); err != nil {
 				return fmt.Errorf("failed to chmod cowrie log/tty dir: %w", err)
-			}
-			for rel, content := range generator.generateCowrieHoneyfs() {
-				dest := filepath.Join(hpDir, "honeyfs", rel)
-				if err := os.MkdirAll(filepath.Dir(dest), 0755); err != nil {
-					return fmt.Errorf("failed to create honeyfs dir for cowrie: %w", err)
-				}
-				if err := os.WriteFile(dest, []byte(content), 0644); err != nil {
-					return fmt.Errorf("failed to write honeyfs/%s for cowrie: %w", rel, err)
-				}
-			}
-			// The fake-fs patch script (cowriefs.go) runs at container start to add
-			// the persona home directories to Cowrie's filesystem. The deploy
-			// profile mounts it at /home/cowrie/cowrie/qpot_patch_fs.py.
-			if err := os.WriteFile(filepath.Join(hpDir, "qpot_patch_fs.py"),
-				[]byte(generator.generateCowrieFsPatch()), 0644); err != nil {
-				return fmt.Errorf("failed to write cowrie fs patch script: %w", err)
 			}
 		}
 
@@ -940,6 +915,15 @@ func LLMConfigKeys(name string) []string {
 	for k := range deployProfileFor(name).LLMEnv {
 		keys = append(keys, k)
 	}
+	slices.Sort(keys)
+	return keys
+}
+
+// SettingKeys returns every custom_config key `qpot honeypot set` accepts for
+// a honeypot: its LLM settings and its other settings (cowrie's persona,
+// ssh-proxy's backend count, ...).
+func SettingKeys(name string) []string {
+	keys := append(LLMConfigKeys(name), deployProfileFor(name).Settings...)
 	slices.Sort(keys)
 	return keys
 }

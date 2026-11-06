@@ -1,6 +1,10 @@
 package instance
 
-import "testing"
+import (
+	"testing"
+
+	"github.com/qpot/qpot/internal/config"
+)
 
 // FuzzDeceptionSeed ensures per-instance identity derivation never panics or
 // returns an out-of-range selection for any seed (incl. empty / binary).
@@ -9,9 +13,17 @@ func FuzzDeceptionSeed(f *testing.F) {
 		f.Add(s)
 	}
 	f.Fuzz(func(t *testing.T, seed string) {
-		p := profileForSeed(seed) // must not panic / index out of range
-		if p.SSHVersion == "" {
-			t.Errorf("empty SSHVersion for seed %q", seed)
+		cfg := config.Default("seed-fuzz")
+		cfg.QPotID = seed
+		p := cowriePersona(cfg) // must not panic / index out of range
+		var server bool
+		for _, c := range tpotCowriePersonas {
+			if c.ID == p {
+				server = c.Server
+			}
+		}
+		if !server {
+			t.Errorf("seed %q picked %q, want a server persona", seed, p)
 		}
 		h := hostnameForSeed(seed)
 		if h == "" {

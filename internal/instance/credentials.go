@@ -3,7 +3,7 @@ package instance
 import "strings"
 
 // credentials.go provides realistic, per-instance login credential sets
-// ("personas") for honeypots that authenticate users (Cowrie).
+// ("personas") for the HiFi ssh-proxy's real-OpenSSH backends (BACKEND_USERS).
 //
 // Research basis (SANS ISC "Common usernames"/"origin of passwords"; F5 Labs
 // "Top Attacked Usernames and Passwords"; cryptax "Customizing Cowrie"): the
@@ -14,11 +14,9 @@ import "strings"
 // (vendor defaults, Season/Company+Year!, sequential digits). Pitfalls avoided:
 // no Cowrie phil/richard/pi:raspberry defaults, no obvious bait
 // (hacker/test123), no "every password works", no persona/host mismatch, and a
-// realistic count (~4-6 accounts) per box.
-//
-// Cowrie reads these from etc/userdb.txt ("username:x:password"); listing exact
-// passwords (no '*' wildcard) means only those credentials succeed — so a human
-// who tries the "right" password and then garbage sees consistent behavior.
+// realistic count (~4-6 accounts) per box. Only the listed passwords work, so a
+// human who tries the "right" password and then garbage sees consistent
+// behavior.
 
 // credUser is one account and the exact passwords it accepts.
 type credUser struct {
@@ -37,11 +35,9 @@ type credentialTemplate struct {
 // from real attacker credential studies (see file header). Each is a plausible
 // internet-exposed box with a handful of working accounts.
 //
-// NOTE on the "legacy-centos" persona: the emulated OS is always Debian-family
-// (Cowrie's fake fs ships apt/dpkg/debian_version and no /etc/redhat-release, so
-// a RHEL identity would contradict the on-disk evidence - see deception.go). Its
+// NOTE on the "legacy-centos" persona: the HiFi backend is a Debian box, so its
 // centos/redhat account names reflect the accounts an operator might carry onto a
-// migrated box; the box still presents a Debian/Ubuntu /etc/os-release.
+// migrated box; the box still presents a Debian /etc/os-release.
 var credentialTemplates = []credentialTemplate{
 	{
 		Name: "corp-ubuntu", Description: "Corporate Ubuntu application server",
@@ -354,8 +350,8 @@ func selectCredentialTemplate(explicit, seed string) credentialTemplate {
 	if !embeddedHardwarePersonas[t.Name] {
 		return t // unchanged for every seed that already drew a server persona
 	}
-	// Every distro profile and CPU model is an x86_64 server, so an embedded
-	// device persona (hostname "rpi-home" on a Xeon) contradicts uname and
+	// The HiFi backend is an x86_64 Debian server, so an embedded device
+	// persona (hostname "rpi-home" on a Xeon) contradicts uname and
 	// /proc/cpuinfo. Re-draw among the server personas.
 	var servers []credentialTemplate
 	for _, c := range credentialTemplates {
@@ -373,31 +369,10 @@ var embeddedHardwarePersonas = map[string]bool{
 	"soho-router": true, "edge-router": true,
 }
 
-// renderCowrieUserDB renders a credential template into Cowrie userdb.txt
-// format. Only the listed passwords are accepted for each account.
-func renderCowrieUserDB(t credentialTemplate) string {
-	var b strings.Builder
-	// ASCII only: cowrie reads userdb.txt as ASCII and a non-ASCII byte aborts
-	// parsing (the whole userdb is then ignored), so never use em-dashes etc.
-	b.WriteString("# QPot-generated Cowrie userdb - persona: " + t.Name + "\n")
-	b.WriteString("# " + t.Description + "\n")
-	b.WriteString("# format: username:x:password   ('*' = any, '!x' = deny x)\n")
-	for _, u := range t.Users {
-		user := sanitizeConfigValue(u.Username)
-		if user == "" {
-			continue
-		}
-		for _, p := range u.Passwords {
-			b.WriteString(user + ":x:" + sanitizeConfigValue(p) + "\n")
-		}
-	}
-	return b.String()
-}
-
 // sanitizeConfigValue strips control characters/newlines and caps length on a
 // value that will be interpolated into a single line of a generated config
-// (cowrie.cfg, userdb.txt). This prevents a stray newline in operator-supplied
-// stealth/credential strings from injecting extra config directives.
+// (conpot.cfg). This prevents a stray newline in an operator-supplied or derived
+// string from injecting extra config directives.
 func sanitizeConfigValue(s string) string {
 	// Keep only printable ASCII. Control chars/newlines could inject config
 	// directives, and non-ASCII bytes abort cowrie's ASCII parse of

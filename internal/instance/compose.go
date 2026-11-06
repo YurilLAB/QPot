@@ -12,7 +12,6 @@ import (
 	"strconv"
 	"strings"
 	"text/template"
-	"time"
 
 	"github.com/qpot/qpot/internal/config"
 	"github.com/qpot/qpot/internal/security"
@@ -677,15 +676,6 @@ services:
     {{end}}
     {{- $d := deployFor .Name}}
     {{- $hpName := .Name}}
-    {{- if $d.Command}}
-    # Run the service directly instead of the image's default entrypoint; see the
-    # deploy profile (deploy.go) for why - e.g. cowrie's launcher would otherwise
-    # override QPot's generated config with a random built-in persona.
-    command: [{{range $i, $c := $d.Command}}{{if $i}}, {{end}}"{{$c}}"{{end}}]
-    {{- end}}
-    {{- if $d.WorkingDir}}
-    working_dir: {{$d.WorkingDir}}
-    {{- end}}
     {{- if not $d.Internal}}
     ports:
     {{- if or $d.Ports $d.UDPPorts}}
@@ -735,15 +725,17 @@ services:
       # attacker who got a real shell and ran env immediately learned it was a
       # honeypot. None were needed: the log pipeline derives the honeypot from
       # the bind-mounted log path and QPot's own metadata now lives in the
-      # host-side labels above. Only innocuous, commonly-present values and the
-      # per-honeypot stealth/profile knobs (set only when configured) remain.
+      # host-side labels above. The stealth knobs (FAKE_OS, BANNER_STRING,
+      # RANDOMIZE_SSH_VERSION, ...) went the same way: no image reads them, so
+      # all they did was spell out "honeypot" in /proc/1/environ. Only values an
+      # image actually reads remain.
       - LOG_LEVEL=info
-      {{if hostnameSafe .HP.Stealth.FakeHostname}}- {{envEntry "FAKE_HOSTNAME" (hostnameSafe .HP.Stealth.FakeHostname)}}{{end}}
-      {{if .HP.Stealth.FakeOS}}- {{envEntry "FAKE_OS" .HP.Stealth.FakeOS}}{{end}}
-      {{if .HP.Stealth.FakeKernel}}- {{envEntry "FAKE_KERNEL" .HP.Stealth.FakeKernel}}{{end}}
-      {{if .HP.Stealth.BannerString}}- {{envEntry "BANNER_STRING" .HP.Stealth.BannerString}}{{end}}
-      {{if .HP.Stealth.RandomizeSSHVersion}}- RANDOMIZE_SSH_VERSION=1{{end}}
-      {{if .HP.Stealth.AddArtificialDelay}}- {{envEntry "ARTIFICIAL_DELAY" (printf "%v" .HP.Stealth.DelayRangeMs)}}{{end}}
+      {{- if eq .Name "cowrie"}}
+      # The persona the image's launcher renders Cowrie as (see deception.go),
+      # and how many days it keeps the identity it drew across restarts.
+      - COWRIE_PERSONA={{cowriePersona $.Config}}
+      - COWRIE_PERSONA_ROTATION={{cowriePersonaRotation $.Config}}
+      {{- end}}
       {{- if eq .Name "ssh-proxy"}}
       # HiFi broker: the operator-fixed backend pool (never attacker-derived, so
       # no SSRF) and the logical name used in the broker's session events.
@@ -961,9 +953,12 @@ services:
 		"sshProxyBackends":   sshProxyBackends,
 		"sshBackendCSV":      sshBackendCSV,
 		"sshBackendHostname": sshBackendHostname,
+		// Cowrie's persona and identity lifetime (see deception.go).
+		"cowriePersona":         cowriePersona,
+		"cowriePersonaRotation": cowriePersonaRotation,
 		// hostnameSafe reduces an operator-set fake hostname to valid hostname
-		// characters before it is interpolated into the YAML `hostname:` field /
-		// FAKE_HOSTNAME env, so a stray quote/newline can never break the compose.
+		// characters before it is interpolated into the YAML `hostname:` field,
+		// so a stray quote/newline can never break the compose.
 		"hostnameSafe": sanitizeHostname,
 		"envEntry":     composeEnvEntry,
 		// hostPort resolves the collision-free host port assigned to a
@@ -1779,228 +1774,13 @@ func (g *ComposeGenerator) GenerateTPOTConfig(honeypot string) (map[string]strin
 		return configs, fmt.Errorf("honeypot not found: %s", honeypot)
 	}
 
-	switch honeypot {
-	case "cowrie":
-		configs["cowrie.cfg"] = g.generateCowrieConfig(hp)
-		configs["userdb.txt"] = g.generateCowrieUserDB()
-	case "conpot":
+	// Only conpot takes a generated config file. Cowrie renders its own config
+	// from the persona QPot passes in its environment (see deception.go).
+	if honeypot == "conpot" {
 		configs["conpot.cfg"] = g.generateConpotConfig(hp)
 	}
 
 	return configs, nil
-}
-
-// generateCowrieUserDB builds a per-instance Cowrie userdb.txt from a realistic
-// system persona (see credentials.go).
-//
-// Research basis (cryptax "Customizing Cowrie"; Cowrie #1102; SANS ISC / F5 Labs
-// credential studies): the most-cited Cowrie tell is its default userdb
-// (phil/richard/pi:raspberry accept any password). QPot never emits those.
-// Instead each instance is assigned a believable persona (corporate Ubuntu, IoT
-// camera, DB server, ...) — explicitly via stealth.credential_template, else
-// auto-selected per instance from the seed — and only that persona's exact
-// credentials succeed. Cowrie reads this from etc/userdb.txt.
-func (g *ComposeGenerator) generateCowrieUserDB() string {
-	seed := deceptionSeed(g.Config)
-	explicit := ""
-	if hp, ok := g.Config.Honeypots["cowrie"]; ok {
-		explicit = hp.Stealth.CredentialTemplate
-	}
-	return renderCowrieUserDB(selectCredentialTemplate(explicit, seed))
-}
-
-// generateCowrieHoneyfs returns the per-instance honeyfs files (etc/passwd,
-// group, hostname, os-release, issue) keyed by their path under honeyfs/,
-// consistent with this instance's credential persona, distro profile, and
-// hostname. See honeyfs.go for the research basis.
-func (g *ComposeGenerator) generateCowrieHoneyfs() map[string]string {
-	seed := deceptionSeed(g.Config)
-	hp := g.Config.Honeypots["cowrie"]
-	persona := selectCredentialTemplate(hp.Stealth.CredentialTemplate, seed)
-	hostname := hp.Stealth.FakeHostname
-	if hostname == "" {
-		// Coherent with the persona's role (a db-server box gets a db-style
-		// name, not an unrelated one) so /etc/hostname, /etc/hosts and the shell
-		// prompt match the accounts in /etc/passwd.
-		hostname = hostnameForPersona(persona, seed)
-	}
-	return generateHoneyfs(persona, cowrieProfile(hp, seed), hostname, seed)
-}
-
-// cowrieProfile is the instance's distro profile with the operator's
-// stealth.fake_kernel applied. Every Cowrie artifact (cowrie.cfg's uname,
-// /proc/version, /proc/sys/kernel/osrelease, the MOTD) must be built from this
-// one profile; overriding only cowrie.cfg made `uname -r` contradict them.
-func cowrieProfile(hp config.HoneypotConfig, seed string) distroProfile {
-	p := profileForSeed(seed)
-	if k := sanitizeConfigValue(hp.Stealth.FakeKernel); k != "" {
-		p.KernelVersion = k
-	}
-	return p
-}
-
-// generateCowrieFsPatch returns the Python script that, run at container start,
-// builds the persona home directories AND the per-instance system files
-// (machine-id, shadow, lsb-release, /proc/sys/kernel/*, ...) in Cowrie's fake
-// filesystem, and removes any stock home absent from /etc/passwd (see
-// cowriefs.go / honeyfs.go). The persona, distro profile, hostname and uids all
-// mirror generateCowrieHoneyfs/generateCowrieConfig so every artifact stays
-// consistent.
-func (g *ComposeGenerator) generateCowrieFsPatch() string {
-	seed := deceptionSeed(g.Config)
-	hp := g.Config.Honeypots["cowrie"]
-	persona := selectCredentialTemplate(hp.Stealth.CredentialTemplate, seed)
-	profile := cowrieProfile(hp, seed)
-	hostname := hp.Stealth.FakeHostname
-	if hostname == "" {
-		hostname = hostnameForPersona(persona, seed)
-	}
-	files := append(cowrieHomeFiles(persona, seed),
-		embeddedSystemFiles(persona, profile, hostname, seed)...)
-	files = append(files, embeddedNetworkFiles(persona, profile, seed)...)
-	stampFileTimes(files, profile, seed, time.Now())
-	return cowrieFsPatchScript(files, personaHomeNames(persona, seed))
-}
-
-// generateCowrieConfig generates TPOT-compatible Cowrie config.
-//
-// The system identity (hostname, advertised SSH version, kernel/uname fields)
-// is derived per-instance from a stable seed (the QPot ID) so it is unique to
-// this deployment and internally consistent, rather than the static defaults
-// every T-Pot Cowrie shares (which are themselves a fingerprint). Explicit
-// stealth overrides take precedence. See deception.go for the research basis.
-func (g *ComposeGenerator) generateCowrieConfig(hp config.HoneypotConfig) string {
-	seed := deceptionSeed(g.Config)
-	profile := cowrieProfile(hp, seed)
-
-	hostname := hp.Stealth.FakeHostname
-	if hostname == "" {
-		// Derive a hostname coherent with the credential persona Cowrie will
-		// enforce (see generateCowrieUserDB), so the prompt the attacker sees
-		// matches the accounts that actually work - not an unrelated name from a
-		// separate salt (the old "db-prod" + voip-pbx tell).
-		persona := selectCredentialTemplate(hp.Stealth.CredentialTemplate, seed)
-		hostname = hostnameForPersona(persona, seed)
-	}
-
-	kernel := profile.KernelVersion
-
-	// A non-empty BannerString explicitly overrides the advertised SSH
-	// version; otherwise use the per-instance profile's version (never the
-	// static T-Pot default). RandomizeSSHVersion remains honored as an
-	// explicit opt-in but per-instance derivation is the safe default.
-	sshVersion := hp.Stealth.BannerString
-	if sshVersion == "" {
-		sshVersion = profile.SSHVersion
-	}
-
-	// These values are interpolated into a single line each of an INI-style
-	// config. Strip control characters/newlines (and cap length) so a stealth
-	// value can't inject extra config directives or break the file.
-	hostname = sanitizeConfigValue(hostname)
-	kernel = sanitizeConfigValue(kernel)
-	sshVersion = sanitizeConfigValue(sshVersion)
-
-	// logtype must be "plain" (or "rotating"): Cowrie's jsonlog output raises
-	// ValueError on any other value, so with "json" Cowrie never wrote
-	// log/cowrie.json and no Cowrie event ever reached the collector.
-	return fmt.Sprintf(`[honeypot]
-hostname = %s
-log_path = log
-logtype = plain
-download_path = dl
-share_path = share/cowrie
-state_path = /tmp/cowrie/data
-contents_path = honeyfs
-ttylog = true
-ttylog_path = log/tty
-# Cowrie's default 180s (3 min) idle timeout disconnects an attacker who pauses
-# to think or paste - a tell (real sshd does not kick idle sessions by default,
-# ClientAliveInterval=0) AND it cuts data collection short. 1800s (30 min) is
-# long enough to be invisible and to capture more of the session, while still
-# bounding resources. authentication_timeout stays at 120s = OpenSSH's default
-# LoginGraceTime, so the pre-auth window matches a real server.
-interactive_timeout = 1800
-authentication_timeout = 120
-backend = shell
-timezone = UTC
-# Enforce the generated credential persona (etc/userdb.txt). The T-Pot image
-# defaults to AuthRandom (accept after a random number of tries), which ignores
-# userdb and makes credential behavior inconsistent - a honeypot tell and it
-# means our personas would not actually be enforced. etc_path pins where
-# UserDB reads userdb.txt from (the mounted etc dir).
-auth_class = UserDB
-etc_path = etc
-
-[shell]
-# Path to the pickled fake filesystem. QPot patches the image's base pickle at
-# container start to add the persona's home directories (see cowriefs.go) and
-# writes the result to the writable tmpfs /tmp/cowrie/fs.pickle, so point Cowrie
-# there. The startup script always produces this file (the unchanged base pickle
-# on any patch error), so the path is guaranteed populated before twistd starts;
-# a missing/wrong path would make Cowrie fail to load the fs and kill the shell
-# on every login - a broken honeypot the port-only healthcheck would not catch.
-filesystem = /tmp/cowrie/fs.pickle
-kernel_version = %s
-kernel_build_string = %s
-hardware_platform = %s
-operating_system = %s
-ssh_version = %s
-
-[ssh]
-enabled = true
-# Advertise the per-instance OpenSSH banner. This is the single most-scanned
-# fingerprint (Shodan/zgrab key on the SSH version string), so it MUST be the
-# derived identity, not Cowrie's hardcoded default
-# ("SSH-2.0-OpenSSH_6.0p1 Debian-4+deb7u2"), which every stock Cowrie advertises.
-# The [shell] ssh_version above only changes the in-shell 'ssh -V' output; this
-# [ssh] version is what a remote scanner actually sees during version exchange.
-version = SSH-2.0-%s
-# Normalize the SSH algorithm negotiation so the KEXINIT looks like a real modern
-# OpenSSH instead of stock Cowrie. Cowrie's default lists are themselves a
-# fingerprint: they advertise legacy blowfish-cbc / cast128-cbc / 3des-cbc (which
-# OpenSSH has not offered by default since 7.0), a MALFORMED "hmac-sha2-56" MAC
-# name (a dead giveaway - no real server sends that), and list compression with
-# zlib before none. Restricting to the modern CTR ciphers + SHA-2 MACs that
-# Cowrie's Twisted-conch transport actually implements (a strict subset of
-# Cowrie's own supported set, so this never breaks negotiation) both removes those
-# tells and shifts the server's HASSH off the well-known, widely-blocklisted
-# stock-Cowrie value. NOTE: this normalizes the cipher/MAC/compression components
-# of the KEXINIT; the key-exchange list and the Python transport's deeper
-# packet-level behavior still differ from OpenSSH, so this RAISES the bar against
-# HASSH / algorithm-list fingerprinting but does not fully defeat single-packet
-# protocol fingerprinting - only HiFi proxy mode does (see doc/ssh-hifi-proxy.md).
-ciphers = aes128-ctr,aes192-ctr,aes256-ctr
-macs = hmac-sha2-256,hmac-sha2-512,hmac-sha1
-compression = none,zlib@openssh.com
-# Persist the SSH host keys in the writable, per-instance etc/ mount. Cowrie's
-# default key paths are relative to its working dir, which QPot mounts read-only,
-# so on first start key generation (and therefore the entire SSH service) died
-# with "Read-only file system: 'ssh_host_rsa_key.pub'" and only telnet came up.
-# Writing them under etc/ also keeps the host-key fingerprint STABLE across
-# restarts - a host key that changes every restart is itself a honeypot tell.
-rsa_public_key = etc/ssh_host_rsa_key.pub
-rsa_private_key = etc/ssh_host_rsa_key
-ecdsa_public_key = etc/ssh_host_ecdsa_key.pub
-ecdsa_private_key = etc/ssh_host_ecdsa_key
-ed25519_public_key = etc/ssh_host_ed25519_key.pub
-ed25519_private_key = etc/ssh_host_ed25519_key
-# Listen on the standard privileged ports (the deployment profile maps host
-# ports here and grants NET_BIND_SERVICE). A real server runs SSH on 22 /
-# Telnet on 23, so this is also more convincing than the 2222/2223 default.
-listen_endpoints = tcp:22:interface=0.0.0.0
-sftp_enabled = true
-forwarding = false
-auth_keyboard_interactive_enabled = false
-
-[telnet]
-enabled = true
-listen_endpoints = tcp:23:interface=0.0.0.0
-
-[output_jsonlog]
-enabled = true
-logfile = log/cowrie.json
-`, hostname, kernel, profile.KernelBuildString, profile.HardwarePlatform, profile.OperatingSystem, sshVersion, sshVersion)
 }
 
 // generateConpotConfig generates TPOT-compatible Conpot config

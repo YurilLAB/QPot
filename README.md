@@ -146,41 +146,39 @@ qpot honeypot enable galah
 ![QPot anti-fingerprint demo](doc/qpot-fingerprint-demo.gif)
 
 A stock T-Pot install is recognisable because every install is identical. QPot
-derives a distinct, self-consistent identity for each instance:
+gives each instance a distinct, self-consistent identity:
 
-- **Identity** – a realistic distro profile (SSH banner, kernel, `uname`) and
-  hostname per instance; the banner is the real protocol banner, not just
-  `ssh -V`.
-- **Credential personas** – 30 personas (corporate Ubuntu, IoT camera, DB
-  server, Proxmox host, CCTV/NVR, …) with believable users and weak-but-real
-  passwords. Only that persona's credentials work; cowrie's well-known
-  `phil`/`richard` accounts are gone. Pin one with `credential_template`.
-- **Matching filesystem** – `/etc/passwd`, `/etc/shadow`, `os-release`,
-  `/proc/cpuinfo`, `/proc/version`, `motd`, shell history, SSH config and
-  per-file timestamps all agree with the persona and banner.
-- **Protocol** – cowrie's legacy ciphers and malformed MAC (the blocklisted
-  "stock cowrie" HASSH) are replaced with an OpenSSH-like set; host keys are
-  stable; the idle timeout matches a real `sshd`.
+- **Cowrie personas** – cowrie runs as one of the persona engine's machines in
+  the T-Pot cowrie image (Ubuntu 24.04/22.04, Debian 13/12, RHEL 9, CentOS 7,
+  Raspberry Pi OS, a GPU server, and routers, NAS boxes and an IP camera). The
+  engine builds the whole box from the persona: the OpenSSH release with that
+  release's key-exchange and host-key lists, `uname` and `/proc`, a process
+  table whose start times match the uptime, `lscpu`/`lspci`/`mount`/`df`, the
+  network behind `ip`/`ss`/`netstat`, the packages behind `dpkg`/`rpm`, the
+  units behind `systemctl` and the `sudo` rules. QPot picks a server persona per
+  instance and keeps the identity it draws (host name, patch level, boot time,
+  addresses) for a year across restarts, so a returning attacker meets the same
+  box. Pin one with `qpot honeypot set cowrie persona=<id>`.
+- **HiFi credential personas** – the real-OpenSSH backends of HiFi mode accept a
+  persona's believable weak passwords (30 personas: corporate Ubuntu, DB
+  server, Proxmox host, …) under a matching host name. Pin one with the
+  ssh-proxy's `credential_template`.
 - **No giveaways** – generated configs and container environments contain no
-  `qpot`/`tpot`/`honeypot` strings.
+  `qpot`/`tpot`/`honeypot` strings, and no stealth knobs: an intruder who reads
+  `/proc/1/environ` finds nothing that names a honeypot.
 
-**Limitation:** cowrie's key-exchange behaviour is baked into its Python SSH
-stack, so a determined packet-level fingerprinter can still tell it from real
-OpenSSH. **HiFi mode** closes that gap: a transparent TCP broker (`ssh-proxy`)
+**Limitation:** cowrie's cipher and MAC lists and its packet handling come from
+its Python SSH stack, so a determined packet-level fingerprinter can still tell
+it from real OpenSSH. **HiFi mode** closes that gap: a transparent TCP broker (`ssh-proxy`)
 passes the attacker straight to real OpenSSH backends on an egress-blocked
 network, and each backend is recreated after every session. Enable it with
 `qpot setup --profile hifi` or `qpot honeypot enable ssh-proxy`. Details:
 [doc/ssh-hifi-proxy.md](doc/ssh-hifi-proxy.md) and
 [doc/fingerprint-comparison.md](doc/fingerprint-comparison.md).
 
-```yaml
-honeypots:
-  cowrie:
-    stealth:
-      enabled: true
-      credential_template: "web-hosting"   # optional; derived per instance if unset
-      add_artificial_delay: true
-      delay_range_ms: 50
+```bash
+qpot honeypot set cowrie persona=debian-bookworm   # optional; picked per instance if unset
+qpot honeypot set cowrie persona_rotation=30       # days to keep the drawn identity (0-365, default 365)
 ```
 
 ---

@@ -234,16 +234,34 @@ func TestComposeCollectorBackupWritable(t *testing.T) {
 	}
 }
 
-// Operator stealth strings often contain ": ", "#" or "$". Each environment
-// entry must still parse as one string with the exact value.
-func TestComposeStealthEnvIsQuoted(t *testing.T) {
+// Operator values often contain ": ", "#" or "$" (an LLM model name, a URL with
+// a fragment). Each environment entry must still parse as one string with the
+// exact value. The stealth knobs, which no image reads, must not reach any
+// container environment at all: there they only spelled out "honeypot" in
+// /proc/1/environ for an attacker who got code execution.
+func TestComposeEnvIsQuotedAndStealthKnobsStayOut(t *testing.T) {
 	cfg := config.Default("env-quote-test")
 	cfg.QPotID = "qp_envquotetest00000000001"
-	hp := cfg.Honeypots["dionaea"]
+	hp := cfg.Honeypots["galah"]
 	hp.Enabled = true
-	hp.Stealth.BannerString = "220 Microsoft FTP Service: ready # $HOME"
-	hp.Stealth.FakeOS = `Windows "Server" 2019`
-	cfg.Honeypots["dionaea"] = hp
+	hp.CustomConfig = map[string]string{
+		"llm_provider":   "ollama",
+		"llm_model":      "llama3.1: test # $HOME",
+		"llm_server_url": `http://10.0.0.5:11434/"x"`,
+	}
+	cfg.Honeypots["galah"] = hp
+	for name, h := range cfg.Honeypots {
+		h.Enabled = true
+		h.Stealth.Enabled = true
+		h.Stealth.BannerString = "220 Microsoft FTP Service: ready # $HOME"
+		h.Stealth.FakeOS = `Windows "Server" 2019`
+		h.Stealth.FakeKernel = "5.4.0"
+		h.Stealth.FakeHostname = "web01"
+		h.Stealth.RandomizeSSHVersion = true
+		h.Stealth.AddArtificialDelay = true
+		h.Stealth.DelayRangeMs = 50
+		cfg.Honeypots[name] = h
+	}
 	out := renderComposeCfg(t, cfg)
 	var doc struct {
 		Services map[string]struct {
@@ -254,26 +272,31 @@ func TestComposeStealthEnvIsQuoted(t *testing.T) {
 		t.Fatalf("compose does not parse: %v", err)
 	}
 	want := map[string]bool{
-		"BANNER_STRING=220 Microsoft FTP Service: ready # $$HOME": false,
-		`FAKE_OS=Windows "Server" 2019`:                           false,
+		"LLM_MODEL=llama3.1: test # $$HOME":        false,
+		`LLM_SERVER_URL=http://10.0.0.5:11434/"x"`: false,
 	}
-	env, ok := doc.Services["dionaea"].Environment.([]interface{})
-	if !ok {
-		t.Fatalf("dionaea environment is not a list: %#v", doc.Services["dionaea"].Environment)
-	}
-	for _, e := range env {
-		s, ok := e.(string)
-		if !ok {
-			t.Errorf("environment entry is not a string: %#v", e)
-			continue
-		}
-		if _, ok := want[s]; ok {
-			want[s] = true
+	for name, svc := range doc.Services {
+		env, _ := svc.Environment.([]interface{})
+		for _, e := range env {
+			s, ok := e.(string)
+			if !ok {
+				t.Errorf("%s: environment entry is not a string: %#v", name, e)
+				continue
+			}
+			if _, ok := want[s]; ok && name == "galah" {
+				want[s] = true
+			}
+			key, _, _ := strings.Cut(s, "=")
+			switch key {
+			case "FAKE_HOSTNAME", "FAKE_OS", "FAKE_KERNEL", "BANNER_STRING", "RANDOMIZE_SSH_VERSION",
+				"ARTIFICIAL_DELAY", "DELAY_RANGE_MS", "STEALTH_ENABLED":
+				t.Errorf("%s: stealth knob %q in the container environment", name, s)
+			}
 		}
 	}
 	for k, seen := range want {
 		if !seen {
-			t.Errorf("environment entry %q missing", k)
+			t.Errorf("galah environment entry %q missing", k)
 		}
 	}
 }

@@ -577,6 +577,12 @@ The LLM-backed honeypots need a provider before they can be enabled:
   qpot honeypot set galah llm_provider=ollama llm_server_url=http://10.0.0.5:11434 llm_model=llama3.1
   qpot honeypot set beelzebub llm_provider=ollama llm_model=llama3.1 llm_host=http://10.0.0.5:11434/api/chat
 
+Cowrie presents one of the Cowrie image's personas, picked per instance. Pin
+one, or set how many days (0-365, default 365) it keeps the identity it drew:
+
+  qpot honeypot set cowrie persona=debian-bookworm
+  qpot honeypot set cowrie persona_rotation=30
+
 An empty value (key=) removes a setting. If the honeypot is enabled and the
 instance is running, it is recreated with the new settings.`,
 		Args: cobra.MinimumNArgs(2),
@@ -590,10 +596,7 @@ instance is running, it is recreated with the new settings.`,
 			if !ok {
 				return fmt.Errorf("unknown honeypot %q (see: qpot honeypot list)", hpName)
 			}
-			allowed := instance.LLMConfigKeys(hpName)
-			if hpName == "ssh-proxy" {
-				allowed = append(allowed, "backends")
-			}
+			allowed := instance.SettingKeys(hpName)
 			if len(allowed) == 0 {
 				return fmt.Errorf("%s has no settings to set", hpName)
 			}
@@ -609,7 +612,7 @@ instance is running, it is recreated with the new settings.`,
 				if strings.ContainsAny(v, "\r\n") {
 					return fmt.Errorf("%s: value must be a single line", k)
 				}
-				if err := instance.CheckLLMSetting(hpName, k, v); err != nil {
+				if err := instance.CheckSetting(hpName, k, v); err != nil {
 					return err
 				}
 				if v == "" {

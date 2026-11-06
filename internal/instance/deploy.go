@@ -46,10 +46,6 @@ type honeypotDeploy struct {
 	// UDPPorts are the UDP container ports to publish (e.g. ddospot, conpot
 	// SNMP/BACnet). Rendered with a /udp suffix.
 	UDPPorts []int
-	// ConfigSubdir is the host subdir into which generated config files
-	// (cowrie.cfg, userdb.txt, ...) are written. It must be one of the Volumes'
-	// HostSubdir so the files land inside a mounted directory.
-	ConfigSubdir string
 	// Env are image-specific environment variables the honeypot's entrypoint
 	// requires (e.g. conpot's CONPOT_* args). Keys are sorted for deterministic
 	// output.
@@ -62,17 +58,6 @@ type honeypotDeploy struct {
 	// log4pot's /usr/bin/python3 has cap_net_bind_service=ep but binds only 8080,
 	// so without NET_BIND_SERVICE in the bounding set the interpreter cannot start.
 	ExtraCaps []string
-	// Command overrides the image's default CMD. Set only when the image's own
-	// entrypoint would defeat QPot's generated config (e.g. cowrie:24.04.1 ships
-	// a start-cowrie-persona launcher that copies a RANDOM built-in persona's
-	// cowrie.cfg into a runtime dir and runs from there, overriding the config
-	// QPot mounts - so QPot's credential personas, hostname and SSH-algorithm
-	// settings never take effect). Empty means "use the image default".
-	Command []string
-	// WorkingDir overrides the container working directory. Paired with Command
-	// when QPot must run the service from a specific CWD so its relative config
-	// paths (etc/cowrie.cfg, etc/userdb.txt, honeyfs/) resolve to QPot's mounts.
-	WorkingDir string
 	// NoShell marks images without /bin/sh (static Go binaries on scratch /
 	// distroless). The /proc/net healthcheck runs through a shell, so it can
 	// never succeed there; such honeypots get no in-container healthcheck and
@@ -96,8 +81,11 @@ type honeypotDeploy struct {
 	// be set (the image refuses to start without a provider).
 	LLMEnv      map[string]string
 	LLMRequired []string
-	// LLMValues restricts settings to the values the image accepts.
-	LLMValues map[string][]string
+	// Settings are the other custom_config keys the honeypot reads (set with
+	// `qpot honeypot set`), e.g. cowrie's persona or ssh-proxy's backends.
+	Settings []string
+	// Values restricts settings to the values the image accepts.
+	Values map[string][]string
 }
 
 // NeedsNetBind reports whether the honeypot binds a privileged port (<1024)
@@ -120,10 +108,15 @@ func (d honeypotDeploy) NeedsNetBind() bool {
 func deployProfileFor(name string) honeypotDeploy {
 	switch name {
 	case "cowrie":
-		// Verified by running ghcr.io/telekom-security/cowrie:24.04.1: needs a
-		// writable etc (cowrie auto-generates SSH host keys there and reads
-		// cowrie.cfg/userdb.txt from it), tmpfs /tmp/cowrie for its pidfile, and
-		// listens on 22 (SSH) + 23 (telnet).
+		// The image's own launcher (start-cowrie-persona) renders Cowrie as the
+		// persona in COWRIE_PERSONA (see deception.go and the compose template)
+		// into the tmpfs /tmp/cowrie/runtime and runs twistd from there. It
+		// needs: a writable etc (the persona's SSH host keys in etc/<persona>/
+		// and persona-state.json, which keeps the drawn identity across
+		// restarts), the log and download dirs, and tmpfs /tmp/cowrie plus
+		// /tmp/cowrie/data for the rendered runtime, pidfile and state. It
+		// listens on 22 (SSH) and 23 (telnet). Verified by running
+		// ghcr.io/telekom-security/cowrie:24.04.2 this way and logging in.
 		return honeypotDeploy{
 			Tmpfs: []string{
 				"/tmp/cowrie:uid=2000,gid=2000",
@@ -133,77 +126,10 @@ func deployProfileFor(name string) honeypotDeploy {
 				{HostSubdir: "etc", ContainerPath: "/home/cowrie/cowrie/etc"},
 				{HostSubdir: "logs", ContainerPath: "/home/cowrie/cowrie/log"},
 				{HostSubdir: "dl", ContainerPath: "/home/cowrie/cowrie/dl"},
-				// The image bakes cowrie.cfg in the working dir, which cowrie
-				// reads LAST and thus takes precedence over etc/cowrie.cfg.
-				// Mount our generated config there too so our settings (incl.
-				// auth_class=UserDB, which enforces the credential persona) win.
-				{HostSubdir: "etc/cowrie.cfg", ContainerPath: "/home/cowrie/cowrie/cowrie.cfg", File: true},
-				// Persona-consistent fake-filesystem files, mounted over the
-				// image's honeyfs so post-login recon (cat /etc/passwd, hostname,
-				// cat /etc/os-release) matches the login persona and distro.
-				{HostSubdir: "honeyfs/etc/passwd", ContainerPath: "/home/cowrie/cowrie/honeyfs/etc/passwd", File: true},
-				{HostSubdir: "honeyfs/etc/group", ContainerPath: "/home/cowrie/cowrie/honeyfs/etc/group", File: true},
-				{HostSubdir: "honeyfs/etc/hostname", ContainerPath: "/home/cowrie/cowrie/honeyfs/etc/hostname", File: true},
-				{HostSubdir: "honeyfs/etc/hosts", ContainerPath: "/home/cowrie/cowrie/honeyfs/etc/hosts", File: true},
-				{HostSubdir: "honeyfs/etc/os-release", ContainerPath: "/home/cowrie/cowrie/honeyfs/etc/os-release", File: true},
-				{HostSubdir: "honeyfs/etc/issue", ContainerPath: "/home/cowrie/cowrie/honeyfs/etc/issue", File: true},
-				// Per-distro /etc/motd: overrides cowrie's stock Debian-boilerplate
-				// motd, which is a global fingerprint and a tell on a non-Debian
-				// profile.
-				{HostSubdir: "honeyfs/etc/motd", ContainerPath: "/home/cowrie/cowrie/honeyfs/etc/motd", File: true},
-				// A /proc/version consistent with the advertised kernel, and an
-				// /etc/timezone matching the shell clock. (Both paths exist in
-				// Cowrie's fake fs, so overriding them is actually served.)
-				{HostSubdir: "honeyfs/proc/version", ContainerPath: "/home/cowrie/cowrie/honeyfs/proc/version", File: true},
-				{HostSubdir: "honeyfs/etc/timezone", ContainerPath: "/home/cowrie/cowrie/honeyfs/etc/timezone", File: true},
-				// A per-instance, realistic /proc/cpuinfo (2 CPUs). Overrides the
-				// stock globally-identical cpuinfo, which is a cross-deployment
-				// fingerprint.
-				{HostSubdir: "honeyfs/proc/cpuinfo", ContainerPath: "/home/cowrie/cowrie/honeyfs/proc/cpuinfo", File: true},
-				// Additional recon files the stock honeyfs leaves empty or wrong, so
-				// `cat` on a box that obviously has DNS / a running sshd / a mounted
-				// root / RAM does not betray the honeypot. All exist in cowrie's fake
-				// fs (verified against fs.pickle), so these overrides are actually
-				// served. See honeyfs.go for the per-file rationale.
-				{HostSubdir: "honeyfs/usr/lib/os-release", ContainerPath: "/home/cowrie/cowrie/honeyfs/usr/lib/os-release", File: true},
-				{HostSubdir: "honeyfs/etc/debian_version", ContainerPath: "/home/cowrie/cowrie/honeyfs/etc/debian_version", File: true},
-				{HostSubdir: "honeyfs/etc/resolv.conf", ContainerPath: "/home/cowrie/cowrie/honeyfs/etc/resolv.conf", File: true},
-				{HostSubdir: "honeyfs/etc/ssh/sshd_config", ContainerPath: "/home/cowrie/cowrie/honeyfs/etc/ssh/sshd_config", File: true},
-				{HostSubdir: "honeyfs/etc/fstab", ContainerPath: "/home/cowrie/cowrie/honeyfs/etc/fstab", File: true},
-				{HostSubdir: "honeyfs/proc/meminfo", ContainerPath: "/home/cowrie/cowrie/honeyfs/proc/meminfo", File: true},
-				{HostSubdir: "honeyfs/proc/swaps", ContainerPath: "/home/cowrie/cowrie/honeyfs/proc/swaps", File: true},
-				{HostSubdir: "honeyfs/proc/mounts", ContainerPath: "/home/cowrie/cowrie/honeyfs/proc/mounts", File: true},
-				// Bind the SAME generated meminfo over the REAL /proc/meminfo too:
-				// cowrie's `free` builtin does open("/proc/meminfo") against the
-				// container's real proc (not honeyfs), so without this it leaks the
-				// Docker host's true RAM and disagrees with `cat /proc/meminfo`. With
-				// it, `free` and `cat` report the same believable per-instance size.
-				{HostSubdir: "honeyfs/proc/meminfo", ContainerPath: "/proc/meminfo", File: true},
-				// The generated fake-fs patch script (cowriefs.go), run at startup
-				// before twistd to add the persona home directories.
-				{HostSubdir: "qpot_patch_fs.py", ContainerPath: "/home/cowrie/cowrie/qpot_patch_fs.py", File: true},
 			},
-			Ports:        []int{22, 23},
-			ConfigSubdir: "etc",
-			// Bypass the image's start-cowrie-persona launcher and run cowrie
-			// directly from /home/cowrie/cowrie. That launcher picks a RANDOM
-			// built-in persona, copies its cowrie.cfg into /tmp/cowrie/runtime and
-			// execs twistd from there - so cowrie reads the persona's config
-			// (auth_class=AuthRandom, the image's identity) and QPot's mounted
-			// cowrie.cfg/userdb.txt/honeyfs are silently ignored. Running twistd
-			// ourselves with WorkingDir=/home/cowrie/cowrie makes cowrie read
-			// etc/cowrie.cfg + etc/userdb.txt + honeyfs from QPot's mounts, so the
-			// curated credential persona, coherent hostname and SSH-algorithm
-			// normalization actually take effect. PYTHONPATH is baked into the image
-			// env. We first run qpot_patch_fs.py, which writes the persona-patched
-			// fake filesystem to /tmp/cowrie/fs.pickle (the path cowrie.cfg's
-			// `filesystem` points at), then exec twistd. The script always produces
-			// that file - the unchanged base pickle on any error - so cowrie's shell
-			// never starts without a valid filesystem.
-			Command: []string{"/bin/sh", "-c",
-				"python3 /home/cowrie/cowrie/qpot_patch_fs.py 2>>/tmp/cowrie/patch.log; " +
-					"exec /usr/bin/twistd --nodaemon --pidfile /tmp/cowrie/cowrie.pid cowrie"},
-			WorkingDir: "/home/cowrie/cowrie",
+			Ports:    []int{22, 23},
+			Settings: []string{"persona", "persona_rotation"},
+			Values:   map[string][]string{"persona": CowriePersonaIDs()},
 		}
 	case "endlessh":
 		// Verified: endlessh redirects its log to /var/log/endlessh and listens
@@ -228,7 +154,8 @@ func deployProfileFor(name string) honeypotDeploy {
 				// proxy.GenerationGate.
 				{HostSubdir: "generations", ContainerPath: sshProxyGenerationsPath, ReadOnly: true},
 			},
-			Ports: []int{2222},
+			Ports:    []int{2222},
+			Settings: []string{"backends"},
 		}
 	case "redishoneypot":
 		// Redis honeypot: single TCP port 6379, logs to /var/log/redishoneypot.
@@ -384,7 +311,7 @@ func deployProfileFor(name string) honeypotDeploy {
 				"llm_host":     "LLM_HOST",
 			},
 			LLMRequired: []string{"llm_provider", "llm_model"},
-			LLMValues:   map[string][]string{"llm_provider": {"ollama", "openai"}},
+			Values:      map[string][]string{"llm_provider": {"ollama", "openai"}},
 		}
 	case "galah":
 		// LLM-backed dynamic web honeypot; exits without a provider, so
@@ -490,11 +417,20 @@ func MissingLLMConfig(name string, custom map[string]string) []string {
 	return missing
 }
 
-// CheckLLMSetting reports whether value is accepted for the honeypot's LLM
-// setting key (an empty value, which removes the setting, always is).
-func CheckLLMSetting(name, key, value string) error {
-	allowed := deployProfileFor(name).LLMValues[key]
-	if value == "" || len(allowed) == 0 || slices.Contains(allowed, value) {
+// CheckSetting reports whether value is accepted for the honeypot's setting
+// key (an empty value, which removes the setting, always is).
+func CheckSetting(name, key, value string) error {
+	if value == "" {
+		return nil
+	}
+	if name == "cowrie" && key == "persona_rotation" {
+		if _, ok := parsePersonaRotation(value); !ok {
+			return fmt.Errorf("%s: %s must be a number of days from 0 to %d", name, key, cowriePersonaMaxRotation)
+		}
+		return nil
+	}
+	allowed := deployProfileFor(name).Values[key]
+	if len(allowed) == 0 || slices.Contains(allowed, value) {
 		return nil
 	}
 	return fmt.Errorf("%s: %s must be one of: %s", name, key, strings.Join(allowed, ", "))

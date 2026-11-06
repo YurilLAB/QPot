@@ -9,8 +9,8 @@ import (
 )
 
 // FuzzGenerators feeds arbitrary values into the config fields that flow into
-// generated artifacts (compose YAML, vector.yaml, cowrie.cfg, userdb.txt) and
-// asserts the generators never panic. Config is operator-controlled, but odd
+// generated artifacts (compose YAML, vector.yaml, conpot.cfg) and asserts the
+// generators never panic. Config is operator-controlled, but odd
 // values (newlines, quotes, template metacharacters, huge strings) must not
 // crash generation or be silently dropped.
 func FuzzGenerators(f *testing.F) {
@@ -48,18 +48,13 @@ func FuzzGenerators(f *testing.F) {
 		if _, err := g.GenerateVectorConfig(); err != nil {
 			_ = err
 		}
-		ccfg := g.generateCowrieConfig(hp)
-		udb := g.generateCowrieUserDB()
-
-		// cowrie.cfg must always contain exactly one of each core section even
-		// when fed hostile stealth strings — a hostname with an embedded newline
-		// must not be able to inject a second [ssh]/[telnet] section.
-		if n := strings.Count(ccfg, "\n[ssh]\n"); n != 1 {
-			t.Errorf("cowrie.cfg has %d [ssh] sections (config injection via stealth string?), hostname=%q", n, hostname)
+		// conpot.cfg must keep exactly one sensor_id whatever the instance
+		// identity is: it is derived from the seed and interpolated into an
+		// INI line.
+		hpc := cfg.Honeypots["conpot"]
+		ccfg := g.generateConpotConfig(hpc)
+		if n := strings.Count(ccfg, "sensor_id ="); n != 1 {
+			t.Errorf("conpot.cfg has %d sensor_id lines, qpotID=%q", n, qpotID)
 		}
-		if n := strings.Count(ccfg, "\n[telnet]\n"); n != 1 {
-			t.Errorf("cowrie.cfg has %d [telnet] sections, hostname=%q", n, hostname)
-		}
-		_ = udb
 	})
 }

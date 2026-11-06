@@ -16,18 +16,13 @@ reaction to malformed packets — **differently from OpenSSH**. A *single* craft
 packet, sent before authentication, reliably classifies the box as a honeypot,
 no matter how convincing the post-login shell, filesystem, or credentials are.
 
-QPot’s config-level deception (per-instance identity, credential personas,
-consistent fake filesystem, realistic `/proc`, timeouts — see the README’s
-*Deception & Anti-Fingerprinting* section) raises the bar against keyword/Shodan/
-script detection. QPot also **normalizes the SSH algorithm negotiation** it *can*
-reach via `cowrie.cfg` — overriding Cowrie’s tell-tale default cipher/MAC/
-compression lists (legacy `blowfish-cbc`/`cast128-cbc`, the malformed
-`hmac-sha2-56`, `zlib`-first) with a modern OpenSSH-like set, which removes those
-obvious tells and shifts the server HASSH off the blocklisted stock-Cowrie value
-(verified live against the Cowrie 24.04 image). **But that is only a partial
-mitigation:** the `KEXINIT` **key-exchange** and **host-key-algorithm** lists and
-the deeper packet-level behavior live in Cowrie’s Twisted/`conch` transport, are
-not config-controllable, and still differ from OpenSSH. So config-level work
+Cowrie's persona engine (a per-instance persona, a consistent fake machine, see
+the README's *Deception* section) raises the bar against keyword/Shodan/script
+detection, and it sets the `KEXINIT` key-exchange and host-key lists from the
+advertised OpenSSH release. **But that is only a partial mitigation:** the
+cipher and MAC lists and the deeper packet-level behavior live in Cowrie's
+Twisted/`conch` transport and still differ from OpenSSH (no
+`chacha20-poly1305`, AES-GCM, ETM/umac MACs or `kex-strict`). So emulation
 **cannot** fully defeat this class — the tell is ultimately in the transport
 library, not the content.
 
@@ -422,8 +417,8 @@ through it:
   (`sntrup761x25519-sha512`, `chacha20-poly1305@openssh.com`, ETM/umac MACs,
   `rsa-sha2-512` host keys — none of which Cowrie's conch can emit), and the
   **same `hasshServer`**. The splice is perfectly transparent and the attacker
-  sees a genuine OpenSSH fingerprint, not an emulator's. (Contrast: a normalized
-  Cowrie still emits a conch `KEXINIT` / different HASSH.)
+  sees a genuine OpenSSH fingerprint, not an emulator's. (Contrast: Cowrie still
+  emits a conch `KEXINIT` / different HASSH.)
 * **A real interactive shell.** A genuine SSH client logs in and runs commands
   (`uname -a`, `cat /etc/os-release`, `id`) against real bash on a real Debian 12
   backend.

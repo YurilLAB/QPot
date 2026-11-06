@@ -1,79 +1,121 @@
 package instance
 
 import (
+	"strconv"
 	"strings"
 	"testing"
 
 	"github.com/qpot/qpot/internal/config"
+	"github.com/qpot/qpot/internal/security"
 )
 
-// FuzzCowrieConfigStealth drives the cowrie.cfg + userdb generators with
-// attacker-/typo-controlled stealth strings (fake hostname/kernel, advertised
-// banner, credential persona name). These are interpolated into an INI-style
-// config and a line-oriented userdb, so the security invariant is that no value
-// can inject an extra config directive or break the format: sanitizeConfigValue
-// must keep every value on one printable-ASCII line.
-func FuzzCowrieConfigStealth(f *testing.F) {
-	f.Add("web01", "5.10.0-27-amd64", "OpenSSH_8.4p1", "web-hosting")
-	f.Add("x\nauth_class = none", "k\n[ssh]\nenabled = false", "b\"; rm -rf", "evil\npersona")
-	f.Add("\x00\x07ctrl", "héllo-ünïcode", "", "")
-	f.Add(strings.Repeat("A", 5000), "", "", "doesnotexist")
+// FuzzCowriePersonaSettings drives Cowrie's persona settings (custom_config
+// persona / persona_rotation, which `qpot honeypot set` validates but a
+// hand-edited config does not) and hostile stealth strings through the compose
+// generator. The image's launcher refuses to start on a persona it does not
+// know or a rotation outside 0-365 days, so whatever the config holds, the
+// rendered cowrie service must carry exactly one known COWRIE_PERSONA and one
+// in-range COWRIE_PERSONA_ROTATION, and none of the stealth knobs may reach the
+// container environment.
+func FuzzCowriePersonaSettings(f *testing.F) {
+	f.Add("debian-bookworm", "30", "web01", "Windows Server 2019")
+	f.Add("ubuntu-noble\nCOWRIE_PERSONA=evil", "365\n- X=1", "x\nauth_class = none", "")
+	f.Add("doesnotexist", "-1", "", "")
+	f.Add("", "1000", "", "")
+	f.Add("ipcam", " 7 ", "\x00\x07ctrl", "héllo")
+	f.Add(strings.Repeat("A", 5000), "0x10", "", "")
 
-	f.Fuzz(func(t *testing.T, host, kernel, banner, persona string) {
-		cfg := config.Default("cowrie-stealth-fuzz")
-		cfg.QPotID = "qp_cowriestealthfuzz0000001"
+	f.Fuzz(func(t *testing.T, persona, rotation, host, fakeOS string) {
+		cfg := config.Default("cowrie-persona-fuzz")
+		cfg.QPotID = "qp_cowriepersonafuzz0000001"
 		hp := cfg.Honeypots["cowrie"]
 		hp.Enabled = true
 		hp.Stealth.Enabled = true
 		hp.Stealth.FakeHostname = host
-		hp.Stealth.FakeKernel = kernel
-		hp.Stealth.BannerString = banner
-		hp.Stealth.CredentialTemplate = persona
+		hp.Stealth.FakeOS = fakeOS
+		hp.Stealth.BannerString = fakeOS
+		hp.CustomConfig = map[string]string{"persona": persona, "persona_rotation": rotation}
 		cfg.Honeypots["cowrie"] = hp
 
-		g := &ComposeGenerator{Config: cfg}
-		cfgOut := g.generateCowrieConfig(hp) // must not panic
-		userdb := g.generateCowrieUserDB()
+		sb, err := security.NewSandbox(&cfg.Security)
+		if err != nil {
+			t.Skip()
+		}
+		out, err := (&ComposeGenerator{Config: cfg, Sandbox: sb}).Generate()
+		if err != nil {
+			t.Fatalf("Generate: %v", err)
+		}
+		svc := composeService(t, out, "cowrie")
 
-		// (1) Exactly one auth_class line, and it must stay UserDB - a stealth
-		// value that injected a newline + directive would add or change this.
-		if n := countLinesWithPrefix(cfgOut, "auth_class ="); n != 1 {
-			t.Fatalf("cowrie.cfg has %d auth_class lines (want 1) - directive injection? host=%q", n, host)
+		var personas, rotations []string
+		for _, ln := range strings.Split(svc, "\n") {
+			ln = strings.TrimSpace(ln)
+			if v, ok := strings.CutPrefix(ln, "- COWRIE_PERSONA="); ok {
+				personas = append(personas, v)
+			}
+			if v, ok := strings.CutPrefix(ln, "- COWRIE_PERSONA_ROTATION="); ok {
+				rotations = append(rotations, v)
+			}
 		}
-		if !strings.Contains(cfgOut, "auth_class = UserDB") {
-			t.Fatalf("auth_class is no longer UserDB; a stealth field overrode it")
+		if len(personas) != 1 || !containsString(CowriePersonaIDs(), personas[0]) {
+			t.Fatalf("COWRIE_PERSONA lines %q: want exactly one known persona (config persona=%q)", personas, persona)
 		}
-		// (2) Exactly one hostname directive.
-		if n := countLinesWithPrefix(cfgOut, "hostname ="); n != 1 {
-			t.Fatalf("cowrie.cfg has %d hostname lines (want 1); host=%q", n, host)
+		if len(rotations) != 1 {
+			t.Fatalf("COWRIE_PERSONA_ROTATION lines %q: want exactly one", rotations)
 		}
-		// (3) Every line of both files must be printable ASCII (sanitize strips
-		// the rest). A non-ASCII byte would otherwise abort cowrie's ASCII parse
-		// of the whole file, silently disabling it.
-		assertPrintableASCIILines(t, "cowrie.cfg", cfgOut)
-		assertPrintableASCIILines(t, "userdb.txt", userdb)
+		days, err := strconv.Atoi(rotations[0])
+		if err != nil || days < 0 || days > cowriePersonaMaxRotation {
+			t.Fatalf("COWRIE_PERSONA_ROTATION=%q is outside 0-%d (config %q)", rotations[0], cowriePersonaMaxRotation, rotation)
+		}
+		// A valid configured persona is used as given; anything else falls back
+		// to the seed pick (a server persona).
+		if containsString(CowriePersonaIDs(), persona) && personas[0] != persona {
+			t.Fatalf("configured persona %q ignored, got %q", persona, personas[0])
+		}
+		if want, ok := parsePersonaRotation(rotation); ok && want != days {
+			t.Fatalf("configured rotation %q ignored, got %d", rotation, days)
+		}
+		// CheckSetting (what the CLI enforces) must agree with what compose
+		// accepts, or `qpot honeypot set` could store a value that is then
+		// silently replaced.
+		_, rotOK := parsePersonaRotation(rotation)
+		if (CheckSetting("cowrie", "persona_rotation", rotation) == nil) != (rotOK || rotation == "") {
+			t.Fatalf("CheckSetting and parsePersonaRotation disagree on %q", rotation)
+		}
+		for _, leak := range []string{"FAKE_HOSTNAME", "FAKE_OS", "FAKE_KERNEL", "BANNER_STRING", "RANDOMIZE_SSH_VERSION", "ARTIFICIAL_DELAY"} {
+			if strings.Contains(out, "- "+leak+"=") {
+				t.Fatalf("compose leaks %s into a container environment", leak)
+			}
+		}
 	})
 }
 
-func countLinesWithPrefix(s, prefix string) int {
-	n := 0
-	for _, ln := range strings.Split(s, "\n") {
-		if strings.HasPrefix(strings.TrimSpace(ln), prefix) {
-			n++
-		}
+// composeService returns the text of one service block of a generated compose
+// (from its "  name:" line to the next top-level service).
+func composeService(t *testing.T, compose, name string) string {
+	t.Helper()
+	start := strings.Index(compose, "\n  "+name+":\n")
+	if start < 0 {
+		t.Fatalf("service %q not in compose", name)
 	}
-	return n
+	rest := compose[start+1:]
+	lines := strings.Split(rest, "\n")
+	var b strings.Builder
+	for i, ln := range lines {
+		if i > 0 && len(ln) > 2 && ln[:2] == "  " && ln[2] != ' ' && ln[2] != '#' && strings.HasSuffix(ln, ":") {
+			break
+		}
+		b.WriteString(ln)
+		b.WriteString("\n")
+	}
+	return b.String()
 }
 
-func assertPrintableASCIILines(t *testing.T, name, s string) {
-	t.Helper()
-	for i := 0; i < len(s); i++ {
-		c := s[i]
-		if c == '\n' {
-			continue
-		}
-		if c < 0x20 || c > 0x7e {
-			t.Fatalf("%s contains a non-printable-ASCII byte 0x%02x (config injection / parse-abort risk)", name, c)
+func containsString(xs []string, x string) bool {
+	for _, v := range xs {
+		if v == x {
+			return true
 		}
 	}
+	return false
 }

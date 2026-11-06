@@ -3,24 +3,16 @@
 //
 // Research basis: the dominant weakness of a stock T-Pot deployment is that
 // every instance ships globally-identical static identity strings — the same
-// Cowrie hostname, the same advertised SSH version
-// ("SSH-2.0-OpenSSH_8.9p1 Ubuntu-3ubuntu0.10"), the same kernel/uname output.
+// hostname, the same advertised SSH version, the same kernel/uname output.
 // Those constants are themselves the fingerprint, and internet-scale scanners
 // (Shodan Honeyscore, "Gotta Catch 'em All", and default-config probes) key on
 // them. The literature's central recommendation is per-deployment randomization
-// of all identity strings, kept INTERNALLY CONSISTENT (e.g. the advertised SSH
-// version's distro must match the uname/kernel output, or the mismatch is
-// itself a tell — Vetterl & Clayton, USENIX WOOT '18; "Gotta Catch 'em All",
-// ACM DTRAP 2023; SANS ISC diary 31064; Cowrie issue #1102).
+// of all identity strings, kept INTERNALLY CONSISTENT (Vetterl & Clayton, USENIX
+// WOOT '18; "Gotta Catch 'em All", ACM DTRAP 2023; SANS ISC diary 31064).
 //
 // QPot derives a deterministic-but-unique identity per instance from a stable
-// seed (the QPot ID). Deterministic so a regenerated compose keeps a stable
-// identity; unique so no two QPot instances — and no QPot-vs-T-Pot — share a
-// signature. Operators can still override any field explicitly via the stealth
-// config. NOTE: this raises the bar against keyword/Shodan/script detection and
-// default-config tells; it does NOT defeat single-packet protocol-level
-// fingerprinting (Vetterl), which is rooted in the honeypot's Python transport
-// libraries and requires a high-interaction/proxy mode.
+// seed. Deterministic so a regenerated compose keeps a stable identity; unique
+// so no two QPot instances share a signature.
 package instance
 
 import (
@@ -28,159 +20,123 @@ import (
 	"encoding/hex"
 	"fmt"
 	"hash/fnv"
+	"strconv"
 	"strings"
 
 	"github.com/qpot/qpot/internal/config"
 )
 
-// distroProfile bundles a self-consistent Linux identity: the advertised SSH
-// version string and the matching uname/kernel fields. Keeping these together
-// guarantees the emulated system is internally consistent (the SSH banner's
-// distro matches what `uname -a` / `/proc/version` report).
-type distroProfile struct {
-	// SSHVersion is the OpenSSH version token (without the "SSH-2.0-" prefix),
-	// matching the strings real distros advertise.
-	SSHVersion string
-	// KernelVersion is `uname -r`.
-	KernelVersion string
-	// KernelBuildString is the build tag shown in `uname -v`.
-	KernelBuildString string
-	// HardwarePlatform is `uname -i`/`-m` (architecture).
-	HardwarePlatform string
-	// OperatingSystem is `uname -o`.
-	OperatingSystem string
-	// OSPretty is the human distro string (e.g. /etc/os-release PRETTY_NAME).
-	OSPretty string
-	// Codename is the release codename (/etc/os-release VERSION_CODENAME), e.g.
-	// "bookworm" or "jammy".
-	Codename string
-	// IDLike is the /etc/os-release ID_LIKE value, e.g. "debian" for Ubuntu.
-	// Empty for Debian itself (which has no ID_LIKE).
-	IDLike string
-	// DebianVersion is the contents of /etc/debian_version. Cowrie's bundled fake
-	// filesystem is a Debian box (it ships /etc/debian_version and apt, and has no
-	// /etc/redhat-release), so every profile here MUST be Debian-family - a RHEL/
-	// CentOS identity would contradict the on-disk apt/dpkg/debian_version and is
-	// an immediate tell. Debian releases report a point version ("12.5"); Ubuntu,
-	// being derived from Debian testing, reports the matching "<codename>/sid".
-	DebianVersion string
+// tpotCowriePersona is one persona of the Cowrie image's own persona engine.
+type tpotCowriePersona struct {
+	ID string
+	// Server personas are full Linux servers with an OpenSSH service; the others
+	// are embedded devices (routers, NAS, cameras), some with no SSH server at
+	// all (Cowrie then drops every SSH connection before its banner).
+	Server bool
 }
 
-// distroProfiles are realistic, internally-consistent identities drawn from
-// common real-world Linux servers. Each pairs an OpenSSH version actually
-// shipped by that distro release with that release's kernel. None of these is
-// the static value T-Pot's Cowrie advertises by default.
+// tpotCowriePersonas are the personas of the Cowrie image at TPotVersion
+// (personas/personas.json in ghcr.io/telekom-security/cowrie). Check them again
+// when TPotVersion changes: an ID the image does not know stops the container.
 //
-// All profiles are Debian-family (Debian or its Ubuntu derivative) on purpose:
-// Cowrie's bundled fake filesystem is a Debian install (apt, dpkg,
-// /etc/debian_version, no /etc/redhat-release), so a RHEL/CentOS identity would
-// contradict the on-disk evidence the moment an attacker runs `apt`, `dpkg -l`,
-// or `cat /etc/debian_version`. Ubuntu is itself Debian-derived and shares that
-// layout, so it stays coherent.
-var distroProfiles = []distroProfile{
-	{
-		SSHVersion:        "OpenSSH_8.2p1 Ubuntu-4ubuntu0.11",
-		KernelVersion:     "5.4.0-169-generic",
-		KernelBuildString: "#187-Ubuntu SMP Thu Nov 23 14:52:28 UTC 2023",
-		HardwarePlatform:  "x86_64",
-		OperatingSystem:   "GNU/Linux",
-		OSPretty:          "Ubuntu 20.04.6 LTS",
-		Codename:          "focal",
-		IDLike:            "debian",
-		DebianVersion:     "bullseye/sid",
-	},
-	{
-		SSHVersion:        "OpenSSH_8.4p1 Debian-5+deb11u3",
-		KernelVersion:     "5.10.0-27-amd64",
-		KernelBuildString: "#1 SMP Debian 5.10.205-2 (2023-12-31)",
-		HardwarePlatform:  "x86_64",
-		OperatingSystem:   "GNU/Linux",
-		OSPretty:          "Debian GNU/Linux 11 (bullseye)",
-		Codename:          "bullseye",
-		DebianVersion:     "11.9",
-	},
-	{
-		SSHVersion:        "OpenSSH_8.9p1 Ubuntu-3ubuntu0.6",
-		KernelVersion:     "5.15.0-91-generic",
-		KernelBuildString: "#101-Ubuntu SMP Tue Nov 14 13:30:08 UTC 2023",
-		HardwarePlatform:  "x86_64",
-		OperatingSystem:   "GNU/Linux",
-		OSPretty:          "Ubuntu 22.04.3 LTS",
-		Codename:          "jammy",
-		IDLike:            "debian",
-		DebianVersion:     "bookworm/sid",
-	},
-	{
-		SSHVersion:        "OpenSSH_9.2p1 Debian-2+deb12u3",
-		KernelVersion:     "6.1.0-18-amd64",
-		KernelBuildString: "#1 SMP PREEMPT_DYNAMIC Debian 6.1.76-1 (2024-02-01)",
-		HardwarePlatform:  "x86_64",
-		OperatingSystem:   "GNU/Linux",
-		OSPretty:          "Debian GNU/Linux 12 (bookworm)",
-		Codename:          "bookworm",
-		DebianVersion:     "12.5",
-	},
-	{
-		SSHVersion:        "OpenSSH_9.6p1 Ubuntu-3ubuntu13.4",
-		KernelVersion:     "6.8.0-31-generic",
-		KernelBuildString: "#31-Ubuntu SMP PREEMPT_DYNAMIC Sat Apr 20 00:40:06 UTC 2024",
-		HardwarePlatform:  "x86_64",
-		OperatingSystem:   "GNU/Linux",
-		OSPretty:          "Ubuntu 24.04 LTS",
-		Codename:          "noble",
-		IDLike:            "debian",
-		DebianVersion:     "trixie/sid",
-	},
+// Cowrie runs as each persona through the image's start-cowrie-persona
+// launcher, which renders the whole machine from it: the advertised OpenSSH
+// release with that release's key exchange, host-key and server-sig-algs
+// lists; uname, /proc, the process table and its start times, lscpu, lspci,
+// mounts, df, the network state behind ip and ss, the packages behind dpkg/apt,
+// the systemd units behind systemctl, sudo rules and per-user history settings.
+// QPot's earlier approach - running twistd directly with its own cowrie.cfg and
+// a patched fake filesystem - bypassed all of that, and on this image left an
+// attacker with /.dockerenv, no /etc/os-release, "Exec format error" from
+// mount/dmesg/lsblk, an lscpu that contradicted /proc/cpuinfo, empty package
+// and unit lists and `python3 -V` printing Python 2.7.
+var tpotCowriePersonas = []tpotCowriePersona{
+	{"ubuntu-noble", true},
+	{"ubuntu-jammy", true},
+	{"debian-trixie", true},
+	{"debian-bookworm", true},
+	{"rhel-9", true},
+	{"centos-7", true},
+	{"raspios", true},
+	{"gpu-ubuntu", true},
+	{"dlink-dir859", false},
+	{"tplink-archer-c7", false},
+	{"zyxel-nas326", false},
+	{"openwrt", false},
+	{"qnap-qts", false},
+	{"synology-dsm", false},
+	{"ubiquiti-edgerouter-x", false},
+	{"ipcam", false},
 }
 
-// memProfile is a realistic total-RAM size (in kB) for the emulated box. Cowrie's
-// `free` builtin reads /proc/meminfo directly, and the stock honeyfs ships a
-// 256 MB MemTotal while `free` actually opens the REAL container /proc/meminfo
-// (leaking the Docker host's true RAM and disagreeing with `cat /proc/meminfo`).
-// We pin a believable server size per instance and render it into BOTH the
-// honeyfs /proc/meminfo (the `cat` path) and a bind mount over the real
-// /proc/meminfo (the `free` path) so the two agree and never leak the host.
-type memProfile struct {
-	TotalKB int
-	SwapKB  int
-}
-
-// memProfiles are common dedicated/VPS memory sizes. The seed selects one so two
-// QPot deployments do not report an identical /proc/meminfo.
-var memProfiles = []memProfile{
-	{TotalKB: 4 * 1024 * 1024, SwapKB: 2 * 1024 * 1024},
-	{TotalKB: 8 * 1024 * 1024, SwapKB: 2 * 1024 * 1024},
-	{TotalKB: 16 * 1024 * 1024, SwapKB: 4 * 1024 * 1024},
-	{TotalKB: 32 * 1024 * 1024, SwapKB: 8 * 1024 * 1024},
-}
-
-// memForSeed returns a per-instance memory size. A distinct salt keeps it
-// uncorrelated with the distro/CPU choice.
-func memForSeed(seed string) memProfile {
-	return memProfiles[seededIndex("mem:"+seed, len(memProfiles))]
-}
-
-// memTotalKB returns the realistic MemTotal a real machine reports for a nominal
-// RAM size. A real box NEVER reports an exact power-of-two MemTotal: firmware,
-// the kernel image and reserved regions carve out a few percent, so a nominal
-// 4 GiB VM reports something like 4025480 kB, not 4194304. We subtract a
-// seed-derived reservation in [2.5%, 5%) of nominal, which also makes two
-// same-size deployments report DIFFERENT (non-identical) meminfo. /proc/meminfo
-// and the /proc/mounts tmpfs sizes both derive from this so they agree.
-func memTotalKB(mem memProfile, seed string) int64 {
-	nominal := int64(mem.TotalKB)
-	band := nominal / 40 // 2.5% of nominal
-	if band <= 0 {
-		return nominal
+// CowriePersonaIDs returns every persona ID the Cowrie image accepts.
+func CowriePersonaIDs() []string {
+	ids := make([]string, len(tpotCowriePersonas))
+	for i, p := range tpotCowriePersonas {
+		ids[i] = p.ID
 	}
-	h := fnv.New64a()
-	_, _ = h.Write([]byte("memresv:" + seed))
-	resv := band + int64(h.Sum64()%uint64(band)) // [2.5%, 5%) of nominal
-	return nominal - resv
+	return ids
+}
+
+// cowriePersonaMaxRotation is the longest COWRIE_PERSONA_ROTATION the image
+// accepts (days); the launcher refuses to start on a larger value.
+const cowriePersonaMaxRotation = 365
+
+// cowriePersona returns the persona this instance's Cowrie presents: the
+// operator's custom_config "persona" when the image knows it, otherwise one
+// server persona picked from the instance seed. The seed pick is stable, so a
+// restart or a regenerated compose never turns the box into a different kind
+// of machine, and different instances get different personas.
+func cowriePersona(cfg *config.Config) string {
+	if hp, ok := cfg.GetHoneypotConfig("cowrie"); ok {
+		want := strings.TrimSpace(hp.CustomConfig["persona"])
+		for _, p := range tpotCowriePersonas {
+			if p.ID == want {
+				return want
+			}
+		}
+	}
+	var servers []string
+	for _, p := range tpotCowriePersonas {
+		if p.Server {
+			servers = append(servers, p.ID)
+		}
+	}
+	return servers[seededIndex("tpot-persona:"+deceptionSeed(cfg), len(servers))]
+}
+
+// cowriePersonaRotation returns COWRIE_PERSONA_ROTATION: how many days the
+// launcher keeps the identity it drew (host name, OpenSSH patch level, boot
+// time, addresses) across restarts. The image's own default, 0, draws a new
+// identity on every start, so an attacker coming back after a restart would
+// meet a different host name and uptime on the same IP. QPot keeps it for the
+// longest time the image allows unless custom_config "persona_rotation" says
+// otherwise.
+func cowriePersonaRotation(cfg *config.Config) int {
+	if hp, ok := cfg.GetHoneypotConfig("cowrie"); ok {
+		if days, ok := parsePersonaRotation(hp.CustomConfig["persona_rotation"]); ok {
+			return days
+		}
+	}
+	return cowriePersonaMaxRotation
+}
+
+// parsePersonaRotation accepts what the launcher accepts: plain decimal days
+// from 0 to cowriePersonaMaxRotation.
+func parsePersonaRotation(v string) (int, bool) {
+	v = strings.TrimSpace(v)
+	if v == "" || len(v) > 3 || strings.Trim(v, "0123456789") != "" {
+		return 0, false
+	}
+	days, err := strconv.Atoi(v)
+	if err != nil || days > cowriePersonaMaxRotation {
+		return 0, false
+	}
+	return days, true
 }
 
 // realisticHostnames is a pool of plausible production-server hostnames. None is
-// Cowrie's default "svr04" or T-Pot's "srv01".
+// Cowrie's old default "svr04" or T-Pot's "srv01".
 var realisticHostnames = []string{
 	"web01", "web-prod-02", "app-server-1", "db-prod", "db01", "mail",
 	"ns1", "gw-01", "vps-3", "srv-app-04", "backend-2", "edge-01",
@@ -199,12 +155,13 @@ func seededIndex(seed string, n int) int {
 }
 
 // deceptionSeed is the per-instance seed for every attacker-visible generated
-// artifact (persona, hostname, distro, CPU, network identity, UUIDs, ...).
+// artifact (Cowrie persona, HiFi credential persona and hostname, Conpot sensor
+// id, ...).
 //
 // It must NOT be the QPot ID itself: that ID is the web UI/API credential, and
 // the artifacts are derived with fast non-cryptographic hashes (FNV-1a) whose
-// outputs an attacker can read inside the honeypot (fstab UUIDs, MACs, /proc
-// values), giving them material to reconstruct the credential. A SHA-256
+// outputs an attacker can observe, giving them material to reconstruct the
+// credential. A SHA-256
 // derivation is one-way yet stays stable and unique per instance.
 func deceptionSeed(cfg *config.Config) string {
 	id := cfg.QPotID
@@ -215,23 +172,17 @@ func deceptionSeed(cfg *config.Config) string {
 	return "ds_" + hex.EncodeToString(sum[:16])
 }
 
-// profileForSeed returns the internally-consistent distro identity for a seed.
-func profileForSeed(seed string) distroProfile {
-	return distroProfiles[seededIndex(seed, len(distroProfiles))]
-}
-
-// hostnameForSeed returns a per-instance hostname from the generic pool. A
-// second, differently-salted index keeps the hostname uncorrelated with the
-// distro choice. This is the fallback used when no credential persona is in
-// play (or a persona defines no role-specific names); persona-driven honeypots
-// should prefer hostnameForPersona so the name matches the accepted accounts.
+// hostnameForSeed returns a per-instance hostname from the generic pool. This
+// is the fallback when a credential persona defines no role-specific names;
+// persona-driven honeypots should prefer hostnameForPersona so the name matches
+// the accepted accounts.
 func hostnameForSeed(seed string) string {
 	return realisticHostnames[seededIndex("host:"+seed, len(realisticHostnames))]
 }
 
 // personaHostnames maps each credential persona to role-appropriate hostnames.
-// When a honeypot derives its identity from a persona (Cowrie, the HiFi
-// ssh-proxy), the per-instance hostname is drawn from THIS pool rather than the
+// When a honeypot derives its identity from a persona (the HiFi ssh-proxy
+// backends), the per-instance hostname is drawn from THIS pool rather than the
 // generic one, so the shell prompt, /etc/hostname and /etc/hosts match the kind
 // of box the accepted credentials imply. Without this, the hostname and persona
 // were chosen from independent salts, so a "voip-pbx" persona (asterisk/freepbx
@@ -284,112 +235,6 @@ func hostnameForPersona(t credentialTemplate, seed string) string {
 		return hostnameForSeed(seed)
 	}
 	return pool[seededIndex("host:"+seed, len(pool))]
-}
-
-// cpuModel bundles the fields a realistic /proc/cpuinfo reports for one CPU
-// type, kept internally consistent (vendor_id ↔ model name ↔ family/model/
-// stepping ↔ flags). These are real, common cloud/server CPUs so the emulated
-// box looks like an ordinary VPS/dedicated server rather than a honeypot.
-type cpuModel struct {
-	VendorID  string // vendor_id, e.g. "GenuineIntel" / "AuthenticAMD"
-	ModelName string // "model name", e.g. "Intel(R) Xeon(R) ... @ 2.80GHz"
-	Family    int    // cpu family
-	Model     int    // model
-	Stepping  int    // stepping
-	Microcode string // microcode revision
-	MHz       string // cpu MHz (string so we can keep the ".000" form)
-	CacheKB   int    // cache size in KB ("cache size")
-	Flags     string // the CPU flags line (per-vendor, KVM-guest typical)
-	// Bugs is the `bugs:` line every kernel since ~2018 prints (all advertised
-	// distro kernels are 5.4+). It MUST be microarchitecture-correct: AMD parts
-	// are not affected by Meltdown/L1TF/MDS so they never list cpu_meltdown/l1tf/
-	// mds, whereas Intel Haswell/Broadwell carry the full set. A cpuinfo with a
-	// modern flags line but no `bugs:` line at all is anomalous on a 6.x kernel.
-	Bugs string
-	// CPUIDLevel is the max CPUID leaf (`cpuid level`). Varies by microarch;
-	// hardcoding a Haswell-era 13 for an AMD EPYC or an Ice Lake Xeon is a tell.
-	CPUIDLevel int
-	// AddressSizes is the `address sizes` line. Intel server parts report
-	// "46 bits physical, 48 bits virtual"; AMD EPYC reports "48 bits physical".
-	AddressSizes string
-}
-
-// Vendor-representative `bugs:` lines, keyed by the microarchitecture's real
-// vulnerability exposure so each block is internally consistent with its
-// vendor_id/family/model. Sourced from real /proc/cpuinfo of these parts.
-const (
-	// Haswell/Broadwell (Xeon v3/v4): the full pre-mitigation Intel set.
-	bugsIntelHaswell = "cpu_meltdown spectre_v1 spectre_v2 spec_store_bypass l1tf mds swapgs itlb_multihit srbds mmio_stale_data retbleed"
-	// Cascade Lake (Xeon Gold 62xxR): Meltdown/L1TF fixed in silicon, adds TAA/GDS.
-	bugsIntelCascade = "spectre_v1 spectre_v2 spec_store_bypass swapgs taa itlb_multihit mmio_stale_data retbleed gds"
-	// Ice Lake-SP (Xeon Platinum 83xxC): MDS/TAA fixed in silicon.
-	bugsIntelIceLake = "spectre_v1 spectre_v2 spec_store_bypass swapgs mmio_stale_data retbleed eibrs_pbrsb gds"
-	// AMD Zen1 (EPYC 74xx): no Meltdown; sysret quirk + Spectre family + SSB.
-	bugsAMDZen1 = "sysret_ss_attrs spectre_v1 spectre_v2 spec_store_bypass"
-	// AMD Zen2 (EPYC 73xx): adds Retbleed + SRSO exposure.
-	bugsAMDZen2 = "sysret_ss_attrs spectre_v1 spectre_v2 spec_store_bypass retbleed srso"
-	// AMD Zen3 (EPYC 77xx): Retbleed not applicable; carries SRSO.
-	bugsAMDZen3 = "sysret_ss_attrs spectre_v1 spectre_v2 spec_store_bypass srso"
-)
-
-const (
-	addrIntelServer = "46 bits physical, 48 bits virtual"
-	addrAMDServer   = "48 bits physical, 48 bits virtual"
-)
-
-// intelKVMFlags / amdKVMFlags are the CPU flag sets a typical KVM guest exposes
-// for that vendor — long, real, and a strong realism signal (a too-short or
-// vendor-mismatched flags line is a tell). Kept as constants so every Intel
-// model shares Intel-consistent flags and likewise for AMD.
-const intelKVMFlags = "fpu vme de pse tsc msr pae mce cx8 apic sep mtrr pge mca cmov pat pse36 clflush mmx fxsr sse sse2 ss ht syscall nx pdpe1gb rdtscp lm constant_tsc arch_perfmon rep_good nopl xtopology cpuid tsc_known_freq pni pclmulqdq ssse3 fma cx16 pcid sse4_1 sse4_2 x2apic movbe popcnt tsc_deadline_timer aes xsave avx f16c rdrand hypervisor lahf_lm abm 3dnowprefetch invpcid_single ssbd ibrs ibpb stibp fsgsbase tsc_adjust bmi1 hle avx2 smep bmi2 erms invpcid rtm avx512f avx512dq rdseed adx smap clflushopt clwb avx512cd avx512bw avx512vl xsaveopt xsavec xgetbv1 xsaves arat avx512_vnni md_clear arch_capabilities"
-
-const amdKVMFlags = "fpu vme de pse tsc msr pae mce cx8 apic sep mtrr pge mca cmov pat pse36 clflush mmx fxsr sse sse2 ht syscall nx mmxext fxsr_opt pdpe1gb rdtscp lm constant_tsc rep_good nopl tsc_reliable nonstop_tsc cpuid extd_apicid pni pclmulqdq ssse3 fma cx16 sse4_1 sse4_2 movbe popcnt aes xsave avx f16c rdrand hypervisor lahf_lm cmp_legacy svm cr8_legacy abm sse4a misalignsse 3dnowprefetch osvw topoext perfctr_core ssbd ibrs ibpb stibp vmmcall fsgsbase tsc_adjust bmi1 avx2 smep bmi2 rdseed adx smap clflushopt clwb sha_ni xsaveopt xsavec xgetbv1 xsaves clzero xsaveerptr arat npt nrip_save umip rdpid"
-
-// Older microarchitectures expose fewer flags: advertising AVX-512, CLWB or
-// XSAVEC on a Haswell/Broadwell Xeon, or CLWB/UMIP/RDPID on a Zen 1 EPYC, is
-// a /proc/cpuinfo contradiction anyone who knows the parts can spot.
-var (
-	intelBroadwellFlags = withoutFlags(intelKVMFlags,
-		"avx512f", "avx512dq", "avx512cd", "avx512bw", "avx512vl", "avx512_vnni",
-		"clflushopt", "clwb", "xsavec", "xgetbv1", "xsaves")
-	intelHaswellFlags = withoutFlags(intelBroadwellFlags, "rdseed", "adx", "smap")
-	amdZen1Flags      = withoutFlags(amdKVMFlags, "clwb", "umip", "rdpid")
-)
-
-// withoutFlags returns the space-separated flag list minus the given flags.
-func withoutFlags(flags string, drop ...string) string {
-	skip := map[string]bool{}
-	for _, d := range drop {
-		skip[d] = true
-	}
-	var out []string
-	for _, f := range strings.Fields(flags) {
-		if !skip[f] {
-			out = append(out, f)
-		}
-	}
-	return strings.Join(out, " ")
-}
-
-// cpuModels is a pool of realistic 64-bit server/cloud CPUs. The seed selects
-// one per instance so two QPot deployments do not report an identical
-// /proc/cpuinfo, while each block stays internally consistent. (The CPU *count*
-// is fixed at 2 elsewhere to match Cowrie's hard-coded `nproc`/`free` builtins —
-// see procCPUInfo — so only the model varies, not the core count.)
-var cpuModels = []cpuModel{
-	{VendorID: "GenuineIntel", ModelName: "Intel(R) Xeon(R) Platinum 8370C CPU @ 2.80GHz", Family: 6, Model: 106, Stepping: 6, Microcode: "0xd0003d1", MHz: "2793.436", CacheKB: 49152, Flags: intelKVMFlags, Bugs: bugsIntelIceLake, CPUIDLevel: 27, AddressSizes: addrIntelServer},
-	{VendorID: "GenuineIntel", ModelName: "Intel(R) Xeon(R) CPU E5-2680 v4 @ 2.40GHz", Family: 6, Model: 79, Stepping: 1, Microcode: "0xb000040", MHz: "2399.996", CacheKB: 35840, Flags: intelBroadwellFlags, Bugs: bugsIntelHaswell, CPUIDLevel: 20, AddressSizes: addrIntelServer},
-	{VendorID: "GenuineIntel", ModelName: "Intel(R) Xeon(R) Gold 6248R CPU @ 3.00GHz", Family: 6, Model: 85, Stepping: 7, Microcode: "0x5003604", MHz: "2999.998", CacheKB: 36608, Flags: intelKVMFlags, Bugs: bugsIntelCascade, CPUIDLevel: 22, AddressSizes: addrIntelServer},
-	{VendorID: "GenuineIntel", ModelName: "Intel(R) Xeon(R) CPU E5-2650 v3 @ 2.30GHz", Family: 6, Model: 63, Stepping: 2, Microcode: "0x43", MHz: "2299.998", CacheKB: 25600, Flags: intelHaswellFlags, Bugs: bugsIntelHaswell, CPUIDLevel: 15, AddressSizes: addrIntelServer},
-	{VendorID: "AuthenticAMD", ModelName: "AMD EPYC 7401P 24-Core Processor", Family: 23, Model: 1, Stepping: 2, Microcode: "0x8001250", MHz: "1996.250", CacheKB: 512, Flags: amdZen1Flags, Bugs: bugsAMDZen1, CPUIDLevel: 13, AddressSizes: addrAMDServer},
-	{VendorID: "AuthenticAMD", ModelName: "AMD EPYC 7763 64-Core Processor", Family: 25, Model: 1, Stepping: 1, Microcode: "0xa001144", MHz: "2445.406", CacheKB: 512, Flags: amdKVMFlags, Bugs: bugsAMDZen3, CPUIDLevel: 16, AddressSizes: addrAMDServer},
-	{VendorID: "AuthenticAMD", ModelName: "AMD EPYC 7302P 16-Core Processor", Family: 23, Model: 49, Stepping: 0, Microcode: "0x830104d", MHz: "2994.374", CacheKB: 512, Flags: amdKVMFlags, Bugs: bugsAMDZen2, CPUIDLevel: 16, AddressSizes: addrAMDServer},
-}
-
-// cpuModelForSeed returns a per-instance CPU model. A distinct salt keeps the
-// CPU choice uncorrelated with the distro/hostname selection.
-func cpuModelForSeed(seed string) cpuModel {
-	return cpuModels[seededIndex("cpu:"+seed, len(cpuModels))]
 }
 
 // icsStationPrefixes are believable industrial device/station tag prefixes used

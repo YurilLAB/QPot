@@ -255,11 +255,25 @@ start without a provider, so `enable` asks for these first:
 |----------|------|----------|
 | `beelzebub` | `llm_provider` (`ollama` or `openai`), `llm_model`, `llm_host` | `llm_provider`, `llm_model` |
 | `galah` | `llm_provider`, `llm_server_url`, `llm_model`, `llm_temperature`, `llm_api_key`, `llm_cloud_location`, `llm_cloud_project` | `llm_provider`, `llm_model` |
+| `cowrie` | `persona` (one of the image's persona IDs), `persona_rotation` (days, 0-365) | – |
 | `ssh-proxy` | `backends` | – |
 
 ```bash
 qpot honeypot set beelzebub llm_provider=ollama llm_model=llama3.1 llm_host=http://10.0.0.5:11434/api/chat
 qpot honeypot enable beelzebub
+```
+
+Cowrie presents one persona of its image: `ubuntu-noble`, `ubuntu-jammy`,
+`debian-trixie`, `debian-bookworm`, `rhel-9`, `centos-7`, `raspios`,
+`gpu-ubuntu` (servers, one of which is picked per instance when `persona` is
+unset), or `dlink-dir859`, `tplink-archer-c7`, `zyxel-nas326`, `openwrt`,
+`qnap-qts`, `synology-dsm`, `ubiquiti-edgerouter-x`, `ipcam` (devices;
+`dlink-dir859` runs no SSH server, so it closes every SSH connection). The
+identity drawn for the persona is kept for `persona_rotation` days across
+restarts:
+
+```bash
+qpot honeypot set cowrie persona=centos-7 persona_rotation=365
 ```
 
 ---

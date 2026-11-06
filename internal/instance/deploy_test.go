@@ -13,7 +13,8 @@ func TestDeployProfileCowrie(t *testing.T) {
 	if !d.NeedsNetBind() {
 		t.Error("cowrie binds 22/23 internally and must need NET_BIND_SERVICE")
 	}
-	// Must have an etc volume (host keys + cowrie.cfg) and a logs volume.
+	// Must have an etc volume (the persona's host keys and persona-state.json,
+	// which keeps the drawn identity across restarts) and a logs volume.
 	var hasEtc, hasLogs bool
 	for _, v := range d.Volumes {
 		if v.ContainerPath == "/home/cowrie/cowrie/etc" {
@@ -28,9 +29,6 @@ func TestDeployProfileCowrie(t *testing.T) {
 	}
 	if len(d.Tmpfs) == 0 {
 		t.Error("cowrie needs tmpfs /tmp/cowrie")
-	}
-	if d.ConfigSubdir != "etc" {
-		t.Errorf("cowrie config must land in etc, got %q", d.ConfigSubdir)
 	}
 }
 
@@ -421,79 +419,6 @@ func TestComposeHealthcheckRendersInternalPort(t *testing.T) {
 	// The cowrie healthcheck must probe 0016 (port 22), not 08AE (port 2222).
 	if !strings.Contains(out, ":(0016") && !strings.Contains(out, "0016|") && !strings.Contains(out, "|0016") {
 		t.Errorf("cowrie healthcheck does not probe internal port 22 (0016)")
-	}
-}
-
-// TestCowrieBypassesImagePersonaLauncher guards the bug where cowrie:24.04.1's
-// start-cowrie-persona launcher copied a RANDOM built-in persona's cowrie.cfg
-// into a runtime dir and ran from there, silently overriding QPot's mounted
-// config - so the curated credential personas (auth_class=UserDB), the
-// coherent hostname and the SSH-algorithm normalization never took effect.
-// QPot must run cowrie itself from /home/cowrie/cowrie with its own config.
-func TestCowrieBypassesImagePersonaLauncher(t *testing.T) {
-	d := deployProfileFor("cowrie")
-	if len(d.Command) == 0 {
-		t.Fatal("cowrie must override the image command to bypass start-cowrie-persona")
-	}
-	// The command runs the fake-fs patch script then execs twistd cowrie; it must
-	// not invoke the image's start-cowrie-persona launcher.
-	joined := strings.Join(d.Command, " ")
-	for _, want := range []string{"qpot_patch_fs.py", "exec /usr/bin/twistd", "cowrie"} {
-		if !strings.Contains(joined, want) {
-			t.Errorf("cowrie command missing %q, got %v", want, d.Command)
-		}
-	}
-	if strings.Contains(joined, "start-cowrie-persona") {
-		t.Error("cowrie command must not use the image's start-cowrie-persona launcher")
-	}
-	if d.WorkingDir != "/home/cowrie/cowrie" {
-		t.Errorf("cowrie working_dir must be /home/cowrie/cowrie so etc/cowrie.cfg + etc/userdb.txt + honeyfs resolve to QPot's mounts, got %q", d.WorkingDir)
-	}
-
-	// And it must actually render into the compose.
-	cfg := config.Default("cowrie-cmd")
-	cfg.QPotID = "qp_cowriecmdcowriecmdcmd01"
-	sb, _ := security.NewSandbox(&cfg.Security)
-	g := &ComposeGenerator{Config: cfg, Sandbox: sb}
-	out, err := g.Generate()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !strings.Contains(out, "exec /usr/bin/twistd --nodaemon") {
-		t.Error("compose did not render the cowrie twistd command")
-	}
-	if !strings.Contains(out, "qpot_patch_fs.py") {
-		t.Error("compose did not render the cowrie fs-patch startup step")
-	}
-	if !strings.Contains(out, "working_dir: /home/cowrie/cowrie") {
-		t.Error("compose did not render the cowrie working_dir")
-	}
-	// The twistd-cowrie command must appear exactly once (only the cowrie service);
-	// a stock honeypot like endlessh (also enabled by default, no Command) must not.
-	if n := strings.Count(out, "exec /usr/bin/twistd"); n != 1 {
-		t.Errorf("the cowrie twistd command should render exactly once, got %d", n)
-	}
-}
-
-// TestConfigSubdirIsMounted guards that any ConfigSubdir (where generated
-// configs like cowrie.cfg are written) is itself under a mounted volume,
-// otherwise the honeypot can't read its generated config.
-func TestConfigSubdirIsMounted(t *testing.T) {
-	cfg := config.Default("cfg-audit")
-	for name := range cfg.Honeypots {
-		d := deployProfileFor(name)
-		if d.ConfigSubdir == "" {
-			continue
-		}
-		mounted := false
-		for _, v := range d.Volumes {
-			if v.HostSubdir == d.ConfigSubdir || strings.HasPrefix(d.ConfigSubdir, v.HostSubdir+"/") {
-				mounted = true
-			}
-		}
-		if !mounted {
-			t.Errorf("honeypot %q: ConfigSubdir %q is not under any mounted volume", name, d.ConfigSubdir)
-		}
 	}
 }
 
