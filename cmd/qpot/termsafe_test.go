@@ -133,12 +133,12 @@ func TestClusterRequestsEscapeJoinerNames(t *testing.T) {
 
 // FuzzTermSafe: nothing a terminal acts on survives, and plain text is kept.
 func FuzzTermSafe(f *testing.F) {
-	for _, s := range []string{hostileText, "plain text", "tab\tok", "\xff\xfe", "é ü 漢字", "‮evil", "\r\n"} {
+	for _, s := range []string{hostileText, "plain text", "tab\tok", "\xff\xfe", "é ü 漢字", "\xe2\x80\xaeevil" /* U+202E */, "\r\n"} {
 		f.Add(s)
 	}
 	f.Fuzz(func(t *testing.T, s string) {
 		got := termSafe(s)
-		if hasControl(got) || strings.ContainsAny(got, "\r\n\x00‮") {
+		if hasControl(got) || strings.ContainsAny(got, "\r\n\x00\xe2\x80\xae") {
 			t.Fatalf("termSafe(%q) = %q", s, got)
 		}
 		for _, r := range got {
