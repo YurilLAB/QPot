@@ -994,6 +994,17 @@ a.navbar-brand:hover {
     }
 }
 
+/* Bootstrap gives .modal-content its light-theme text colour (#212529): plain text in a dialog
+   (the confirm question) inherited it and was near black on the dark dialog */
+.modal .modal-content {
+    --bs-modal-color: var(--text-primary);
+    color: var(--text-primary);
+}
+
+#confirm-text {
+    margin: 0;
+}
+
 /* a modal that fades out no longer takes the click meant for the page under it */
 .modal:not(.active) {
     pointer-events: none;
