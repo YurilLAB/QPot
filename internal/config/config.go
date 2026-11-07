@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -1042,14 +1043,64 @@ func (c *Config) AllocatePortFor(honeypot string, basePort int) int {
 	return base + int(h%HostPortSpread)
 }
 
-// DatabaseHostPort is the 127.0.0.1 port the instance's database container is
-// published on (the native protocol port: 9000 for ClickHouse, 5432 for
-// TimescaleDB), derived per instance so several instances don't collide.
-func (c *Config) DatabaseHostPort() int {
+// DatabaseContainerPort is the database container's native protocol port:
+// 5432 for TimescaleDB, 9000 for ClickHouse.
+func (c *Config) DatabaseContainerPort() int {
 	if c.Database.Type == "timescaledb" {
-		return c.AllocatePort(5432)
+		return 5432
 	}
-	return c.AllocatePort(9000)
+	return 9000
+}
+
+// DefaultDatabaseHostPort is the 127.0.0.1 port derived for the instance's
+// database container from its name. The compose generator moves it off ports
+// other instances publish, so the port in use is DatabaseHostPort.
+func (c *Config) DefaultDatabaseHostPort() int {
+	return c.AllocatePort(c.DatabaseContainerPort())
+}
+
+// DatabaseHostPort is the 127.0.0.1 port the instance's database container is
+// published on: the one its compose file publishes, else the default. Only the
+// compose file knows it once the default was taken by another instance.
+func (c *Config) DatabaseHostPort() int {
+	if p := c.composeDatabaseHostPort(); p > 0 {
+		return p
+	}
+	return c.DefaultDatabaseHostPort()
+}
+
+// composeDatabaseHostPort returns the host port the instance's compose file
+// publishes the database service's container port on, 0 if there is none.
+func (c *Config) composeDatabaseHostPort() int {
+	if c.DataPath == "" {
+		return 0
+	}
+	data, err := os.ReadFile(c.GetDockerComposePath())
+	if err != nil {
+		return 0
+	}
+	var doc struct {
+		Services map[string]struct {
+			Ports []string `yaml:"ports"`
+		} `yaml:"services"`
+	}
+	if yaml.Unmarshal(data, &doc) != nil {
+		return 0
+	}
+	suffix := ":" + strconv.Itoa(c.DatabaseContainerPort())
+	for _, spec := range doc.Services["database"].Ports {
+		rest, ok := strings.CutSuffix(spec, suffix)
+		if !ok {
+			continue
+		}
+		if i := strings.LastIndexByte(rest, ':'); i >= 0 {
+			rest = rest[i+1:]
+		}
+		if p, err := strconv.Atoi(rest); err == nil && p > 0 && p <= 65535 {
+			return p
+		}
+	}
+	return 0
 }
 
 // DatabaseClient returns the settings the host-side qpot process uses to reach

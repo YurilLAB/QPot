@@ -103,6 +103,7 @@ func (g *ComposeGenerator) buildHostPortMap() map[string]int {
 		for _, infra := range []int{9000, 8123, 5432} {
 			used[g.Config.AllocatePort(infra)] = true
 		}
+		used[g.databaseHostPort()] = true
 	}
 
 	names := make([]string, 0, len(g.Config.Honeypots))
@@ -162,6 +163,26 @@ func (g *ComposeGenerator) buildHostPortMap() map[string]int {
 		}
 	}
 	return assign
+}
+
+// databaseHostPort is the host port the database is published on: the one
+// the compose file in use gives it (KeepPorts), else the instance's default,
+// moved up past the ports other instances publish (ReservedPorts). The
+// default alone is a hash of the instance name, so a sibling whose name
+// hashed alike, or whose honeypot sat on it, made the second `qpot up` fail
+// to bind it. config.DatabaseHostPort reads the port back from the file.
+func (g *ComposeGenerator) databaseHostPort() int {
+	p := g.Config.DefaultDatabaseHostPort()
+	if !g.Config.Ports.AutoAllocate {
+		return p
+	}
+	if kept := g.KeepPorts[portKey("database", g.Config.DatabaseContainerPort())]; kept > 0 && !g.ReservedPorts[kept] {
+		return kept
+	}
+	for g.ReservedPorts[p] && p < 65535 {
+		p++
+	}
+	return p
 }
 
 // ComposeGenerator generates Docker Compose files
@@ -472,7 +493,7 @@ services:
       - {{.Config.DataPath}}/clickhouse-config:/etc/clickhouse-server/conf.d
       - {{.Config.DataPath}}/qpot.id:/run/secrets/qpot_id:ro
     ports:
-      - "127.0.0.1:{{.Config.DatabaseHostPort}}:9000"
+      - "127.0.0.1:{{databaseHostPort}}:9000"
     networks:
       - qpot_internal
       - qpot_dbhost
@@ -501,7 +522,7 @@ services:
       - {{.Config.GetDatabasePath}}:/var/lib/postgresql/data
       - {{.Config.DataPath}}/qpot.id:/run/secrets/qpot_id:ro
     ports:
-      - "127.0.0.1:{{.Config.DatabaseHostPort}}:5432"
+      - "127.0.0.1:{{databaseHostPort}}:5432"
     networks:
       - qpot_internal
       - qpot_dbhost
@@ -995,9 +1016,11 @@ services:
 	// before rendering, so no two honeypots clash on a host port or a /24.
 	hostPortMap := g.buildHostPortMap()
 	subnetMap := g.buildSubnetMap()
+	dbHostPort := g.databaseHostPort()
 
 	funcMap := template.FuncMap{
 		"yamlStr":                 yamlInterpolatedStr,
+		"databaseHostPort":        func() int { return dbHostPort },
 		"sshProxyGenerationsPath": func() string { return sshProxyGenerationsPath },
 		"pgReadyCmd":              pgReadyCommand,
 		"dict": func(values ...interface{}) (map[string]interface{}, error) {
