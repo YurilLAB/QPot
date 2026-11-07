@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
@@ -17,8 +18,8 @@ import (
 
 // TestAlertWebhookPayload verifies the alert webhook POST carries the fields a
 // SIEM/chat integration needs: a parseable RFC3339 timestamp (for ordering and
-// correlation) and the top honeypot under attack, alongside the existing
-// qpot_id/instance/counters.
+// correlation) and the top honeypot under attack, alongside the instance
+// and the counters.
 func TestAlertWebhookPayload(t *testing.T) {
 	var got map[string]interface{}
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -51,8 +52,40 @@ func TestAlertWebhookPayload(t *testing.T) {
 	if got["top_honeypot"] != "cowrie" {
 		t.Errorf("alert payload top_honeypot = %v, want cowrie", got["top_honeypot"])
 	}
-	if got["qpot_id"] != validTestID || got["instance"] != "edge-1" {
-		t.Errorf("alert payload missing/incorrect qpot_id/instance: %v / %v", got["qpot_id"], got["instance"])
+	if got["instance"] != "edge-1" {
+		t.Errorf("alert payload instance = %v, want edge-1", got["instance"])
+	}
+}
+
+// TestAlertWebhookCarriesNoQPotID: the QPot ID is the web API's credential
+// and a webhook hands its payload to a third party (a Slack or Discord
+// channel), so the payload names the instance instead.
+func TestAlertWebhookCarriesNoQPotID(t *testing.T) {
+	var raw []byte
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		raw, _ = io.ReadAll(r.Body)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer ts.Close()
+
+	s := newTestServer(false)
+	s.config.InstanceName = "edge-1"
+	s.config.Alerts.WebhookURL = ts.URL
+	s.fireWebhook(context.Background(), &database.Stats{TotalEvents: 42, UniqueIPs: 7})
+
+	if len(raw) == 0 {
+		t.Fatal("the webhook received nothing")
+	}
+	if s.config.QPotID == "" || strings.Contains(string(raw), s.config.QPotID) || strings.Contains(string(raw), "qpot_id") {
+		t.Fatalf("the alert carries the QPot ID (%q): %s", s.config.QPotID, raw)
+	}
+	var got map[string]interface{}
+	if err := json.Unmarshal(raw, &got); err != nil {
+		t.Fatalf("payload is not JSON: %v", err)
+	}
+	if got["instance"] != "edge-1" || got["total_events"] != float64(42) || got["timestamp"] == nil ||
+		!strings.Contains(fmt.Sprint(got["message"]), "42 events") {
+		t.Fatalf("payload lost a field: %s", raw)
 	}
 }
 

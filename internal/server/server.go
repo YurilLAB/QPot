@@ -598,8 +598,9 @@ func (s *Server) responseEnv(ctx context.Context, stats *database.Stats) []strin
 
 // fireWebhook sends a JSON POST to the configured webhook URL.
 func (s *Server) fireWebhook(ctx context.Context, stats *database.Stats) {
+	// No QPot ID: it is the web API's credential, and a webhook hands the
+	// payload to a third party (a chat channel). "instance" names the sender.
 	payload := map[string]interface{}{
-		"qpot_id":  s.config.QPotID,
 		"instance": s.config.InstanceName,
 		// RFC3339/UTC timestamp so SIEM and chat integrations can order and
 		// correlate alerts (most webhook consumers require a timestamp field).
@@ -754,9 +755,9 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Add QPot ID to status
+	// The QPot ID is the API credential: the caller has it already, and an
+	// answer that repeats it puts it on screen. No reply carries it.
 	response := map[string]interface{}{
-		"qpot_id":   s.config.QPotID,
 		"instance":  s.config.InstanceName,
 		"overall":   status.Overall,
 		"honeypots": status.Honeypots,
@@ -859,9 +860,7 @@ func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
 		stats = &database.Stats{}
 	}
 
-	// Add QPot ID to stats
 	response := map[string]interface{}{
-		"qpot_id":       s.config.QPotID,
 		"total_events":  stats.TotalEvents,
 		"unique_ips":    stats.UniqueIPs,
 		"top_countries": stats.TopCountries,
@@ -960,7 +959,6 @@ func (s *Server) handleIOC(w http.ResponseWriter, r *http.Request) {
 	}
 
 	response := map[string]interface{}{
-		"qpot_id":   s.config.QPotID,
 		"generated": time.Now().UTC().Format(time.RFC3339),
 		"count":     len(entries),
 		"ioc_list":  entries,

@@ -248,7 +248,7 @@ func (s *Server) handleCanaries(w http.ResponseWriter, r *http.Request) {
 		for _, c := range list {
 			out = append(out, s.canaryView(c))
 		}
-		s.sendJSON(w, map[string]interface{}{"qpot_id": s.config.QPotID, "canaries": out})
+		s.sendJSON(w, map[string]interface{}{"canaries": out})
 
 	case http.MethodPost:
 		var req struct {
@@ -314,10 +314,7 @@ func (s *Server) handleCanaryTrips(w http.ResponseWriter, r *http.Request) {
 			limit = n
 		}
 	}
-	s.sendJSON(w, map[string]interface{}{
-		"qpot_id": s.config.QPotID,
-		"trips":   s.canaries.Trips(limit),
-	})
+	s.sendJSON(w, map[string]interface{}{"trips": s.canaries.Trips(limit)})
 }
 
 // handleCanaryArtifact downloads the document artifact for a file canary
