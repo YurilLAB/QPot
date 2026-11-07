@@ -232,7 +232,7 @@ func (in *Installer) Execute(ctx context.Context, p *Plan) *Error {
 					return E("QP-INT-001").WithWhy("Setup was stopped while it ran: %s", ShellJoin(in.R.Argv(c))).
 						WithFix("Run qpot setup again; it checks what is already done. If it reports an interrupted installation, run: sudo dpkg --configure -a")
 				}
-				return ClassifyFailure(st.Kind, ShellJoin(in.R.Argv(c)), res)
+				return in.staleLock(ClassifyFailure(st.Kind, ShellJoin(in.R.Argv(c)), res), c)
 			}
 		}
 		if st.After != nil {
@@ -242,4 +242,22 @@ func (in *Installer) Execute(ctx context.Context, p *Plan) *Error {
 		}
 	}
 	return nil
+}
+
+// staleLock refines a "lock held" failure of pacman. pacman's lock is a
+// file, so one left behind by a pacman that stopped blocks every later run
+// even though nothing is installing; waiting does not help then.
+func (in *Installer) staleLock(e *Error, c Command) *Error {
+	if e.Code != "QP-PKG-001" || len(c.Args) == 0 || filepath.Base(c.Args[0]) != "pacman" {
+		return e
+	}
+	if name, _ := PackageManagerHolder(in.P, "pacman"); name != "" {
+		return e
+	}
+	lock := "/var/lib/pacman/db.lck"
+	if !isFile(in.P.Path("var", "lib", "pacman", "db.lck")) {
+		return e
+	}
+	return e.WithWhy("pacman's lock file %s is left over from a pacman that stopped; no pacman is running now.", lock).
+		WithFix("Check that no pacman is running (pgrep -a pacman). If none is, remove the stale lock: sudo rm %s, then run qpot setup again.", lock)
 }

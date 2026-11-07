@@ -805,3 +805,66 @@ func TestRunnerTimeoutAndArgv(t *testing.T) {
 		t.Fatalf("missing program = %s", e.Code)
 	}
 }
+
+const archOSRelease = "ID=arch\nPRETTY_NAME=\"Arch Linux\"\n"
+
+// TestStalePacmanLock: pacman's lock is a file, so one left behind by a
+// pacman that stopped blocks every later run although nothing installs:
+// the error then says so and how to remove it, instead of telling the user
+// to wait. While a pacman runs, or for another package manager, the error
+// stays the plain "another program is installing" one.
+func TestStalePacmanLock(t *testing.T) {
+	run := func(t *testing.T, osr string, lockFile bool) *Error {
+		h := newFakeHost(t, osr)
+		locked := `echo "error: failed to init transaction (unable to lock database)" >&2
+echo "error: could not lock database: File exists" >&2
+echo "  if you're sure a package manager is not already" >&2
+echo "  running, you can remove /var/lib/pacman/db.lck" >&2
+exit 1`
+		h.script("pacman", locked)
+		h.script("zypper", `echo "System management is locked by the application with pid 4242 (zypper)." >&2; exit 7`)
+		if lockFile {
+			h.write("var/lib/pacman/db.lck", "")
+		}
+		in := h.installer(nil, osr, 1000)
+		plan, err := in.Plan(context.Background(), Need{Engine: true})
+		if err != nil {
+			t.Fatal(err)
+		}
+		e := in.Execute(context.Background(), plan)
+		if e == nil {
+			t.Fatal("Execute succeeded with the lock held")
+		}
+		return e
+	}
+	t.Run("stale", func(t *testing.T) {
+		e := run(t, archOSRelease, true)
+		if e.Code != "QP-PKG-001" || !strings.Contains(e.Cause(), "left over") || !strings.Contains(e.Remedy(), "sudo rm /var/lib/pacman/db.lck") {
+			t.Fatalf("stale lock: %s\nwhy: %s\nfix: %s", e.Code, e.Cause(), e.Remedy())
+		}
+	})
+	t.Run("no lock file", func(t *testing.T) {
+		e := run(t, archOSRelease, false)
+		if e.Code != "QP-PKG-001" || strings.Contains(e.Remedy(), "sudo rm") {
+			t.Fatalf("pacman locked without a lock file: %s\nfix: %s", e.Code, e.Remedy())
+		}
+	})
+	// A pacman that started after setup's wait (it holds the lock now): the
+	// lock file is not stale, so it is not called left over.
+	t.Run("pacman running", func(t *testing.T) {
+		h := newFakeHost(t, archOSRelease)
+		h.write("var/lib/pacman/db.lck", "")
+		h.write("proc/4242/comm", "pacman\n")
+		in := h.installer(nil, archOSRelease, 1000)
+		e := in.staleLock(E("QP-PKG-001"), Command{Args: []string{"pacman", "-Syu"}})
+		if strings.Contains(e.Cause(), "left over") || strings.Contains(e.Remedy(), "sudo rm") {
+			t.Fatalf("a running pacman's lock called stale:\nwhy: %s\nfix: %s", e.Cause(), e.Remedy())
+		}
+	})
+	t.Run("other package manager", func(t *testing.T) {
+		e := run(t, "ID=\"opensuse-tumbleweed\"\nPRETTY_NAME=\"openSUSE Tumbleweed\"\n", true)
+		if e.Code != "QP-PKG-001" || strings.Contains(e.Remedy(), "db.lck") {
+			t.Fatalf("zypper lock: %s\nfix: %s", e.Code, e.Remedy())
+		}
+	})
+}

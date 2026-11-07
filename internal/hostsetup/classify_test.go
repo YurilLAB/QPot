@@ -220,3 +220,31 @@ func TestClassifyNetError(t *testing.T) {
 		t.Errorf("DNS message: %q / %q", e.Cause(), e.Remedy())
 	}
 }
+
+// TestClassifyDamagedDownload: a download whose checksum did not match is
+// "damaged on the way" (QP-NET-006), not an unreachable server or a broken
+// package. The zypper texts are from real runs on openSUSE Leap 16 and
+// Tumbleweed; the others are the messages apt, librepo (dnf) and pacman
+// print for the same failure.
+func TestClassifyDamagedDownload(t *testing.T) {
+	for _, c := range []struct {
+		kind StepKind
+		out  string
+	}{
+		{KindInstall, "Repository 'repo-oss (16.0)' is invalid.\n[openSUSE:repo-oss|http://cdn.opensuse.org/distribution/leap/16.0/repo/oss/x86_64] Failed to retrieve new repository metadata.\nHistory:\n - b2079ef5-updateinfo.xml.zst has wrong checksum\nPlease check if the URIs defined for this repository are pointing to a valid repository."},
+		{KindInstall, "  expected dee4bedf\n  but got  4de0cba1\nAccepting packages with wrong checksums can lead to a corrupted system and in extreme cases even to a system compromise.\nAbort, retry, ignore? [a/r/i] (a): a\nPackage docker-29.7.2_ce-41.1.x86_64 (openSUSE-Tumbleweed-Oss) seems to be corrupted during transfer. Do you want to retry retrieval?\nInstallation has been aborted as directed."},
+		{KindUpdate, "E: Failed to fetch http://archive.ubuntu.com/ubuntu/dists/noble/main/binary-amd64/by-hash/SHA256/0d5f  Hash Sum mismatch\n   Hashes of expected file:\n    - SHA256:0d5f\nE: Some index files failed to download. They have been ignored, or old ones used instead."},
+		{KindInstall, "[MIRROR] docker-ce-27.3.1-1.el9.x86_64.rpm: Downloading successful, but checksum doesn't match. Calculated: 1f2e Expected: 9a8b\nError: Error downloading packages:\n  docker-ce-3:27.3.1-1.el9.x86_64: Cannot download, all mirrors were already tried without success"},
+		{KindInstall, "error: docker: signature from \"Arch\" is valid\n(1/1) checking package integrity\nerror: failed to commit transaction (invalid or corrupted package (checksum))\nErrors occurred, no packages were upgraded."},
+	} {
+		e := ClassifyFailure(c.kind, "zypper --non-interactive install docker", Result{Exit: 8, Stdout: []byte(c.out)})
+		if e.Code != "QP-NET-006" || !strings.Contains(e.Cause(), "damaged on the way") {
+			t.Errorf("%q -> %s (%s), want QP-NET-006 damaged on the way", firstLineOf(c.out), e.Code, e.Cause())
+		}
+	}
+	// A plain unreachable server keeps its own explanation.
+	e := ClassifyFailure(KindUpdate, "apt-get update", Result{Exit: 100, Stderr: []byte("E: Failed to fetch https://download.docker.com/linux/ubuntu/dists/noble/InRelease  Could not connect to download.docker.com:443")})
+	if e.Code != "QP-NET-006" || strings.Contains(e.Cause(), "damaged") {
+		t.Errorf("unreachable server -> %s (%s)", e.Code, e.Cause())
+	}
+}
