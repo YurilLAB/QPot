@@ -1,33 +1,10 @@
 package main
 
 import (
-	"os"
-	"path/filepath"
 	"testing"
 
 	"github.com/qpot/qpot/internal/config"
 )
-
-func TestGeoIPCheck(t *testing.T) {
-	dir := t.TempDir()
-	cfg := &config.Config{InstanceName: "t", DataPath: dir}
-	if c := geoIPCheck(cfg); c.Name != "" {
-		t.Errorf("no database configured: want no check, got %+v", c)
-	}
-	cfg.Collector.GeoIPDBPath = "/data/geoip/db.mmdb"
-	if c := geoIPCheck(cfg); c.Level != "fail" {
-		t.Errorf("missing file: %+v", c)
-	}
-	if err := os.MkdirAll(filepath.Join(dir, "geoip"), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(dir, "geoip", "db.mmdb"), []byte("x"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	if c := geoIPCheck(cfg); c.Level != "ok" {
-		t.Errorf("present file: %+v", c)
-	}
-}
 
 func TestSetMapCountry(t *testing.T) {
 	cfg := &config.Config{}

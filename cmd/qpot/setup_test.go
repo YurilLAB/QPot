@@ -1,9 +1,7 @@
 package main
 
 import (
-	"context"
 	"net"
-	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
@@ -65,44 +63,6 @@ func TestFreeWebPortSkipsBusyPort(t *testing.T) {
 	}
 	if err := webPortFree(cfg); err == nil || !strings.Contains(err.Error(), "web_ui.port") {
 		t.Fatalf("webPortFree on a busy port = %v", err)
-	}
-}
-
-// A web UI held by something else (e.g. another instance) must not pass the
-// health check.
-func TestWebUICheckRequiresThisInstance(t *testing.T) {
-	cfg := config.Default("mine")
-	cfg.QPotID = "qp_aaaaaaaaaaaaaaaaaaaaaaaa"
-	cfg.WebUI.BindAddr = "127.0.0.1"
-
-	serve := func(h http.HandlerFunc) {
-		ln, port := listenLocal(t)
-		srv := &http.Server{Handler: h}
-		go srv.Serve(ln)
-		t.Cleanup(func() { srv.Close() })
-		cfg.WebUI.Port = port
-	}
-
-	serve(func(w http.ResponseWriter, r *http.Request) {
-		if r.Header.Get("X-QPot-ID") != cfg.QPotID {
-			w.WriteHeader(http.StatusUnauthorized)
-			return
-		}
-		w.Write([]byte(`{"instance":"mine"}`))
-	})
-	if c := webUICheck(context.Background(), cfg); c.Level != "ok" {
-		t.Fatalf("own web UI: %+v", c)
-	}
-
-	// Another instance: rejects our QPot ID.
-	serve(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusUnauthorized) })
-	if c := webUICheck(context.Background(), cfg); c.Level != "fail" {
-		t.Fatalf("foreign web UI passed: %+v", c)
-	}
-	// Some other HTTP service entirely.
-	serve(func(w http.ResponseWriter, r *http.Request) { w.Write([]byte("<html>hi</html>")) })
-	if c := webUICheck(context.Background(), cfg); c.Level != "fail" {
-		t.Fatalf("unrelated HTTP service passed: %+v", c)
 	}
 }
 

@@ -2,22 +2,19 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"io"
 	"net"
-	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
 	"sort"
-	"strconv"
 	"strings"
 	"time"
 
 	"github.com/qpot/qpot/internal/config"
-	"github.com/qpot/qpot/internal/database"
+	"github.com/qpot/qpot/internal/doctor"
 	"github.com/qpot/qpot/internal/hostsetup"
 	"github.com/qpot/qpot/internal/instance"
 	"github.com/spf13/cobra"
@@ -33,14 +30,11 @@ var setupProfiles = map[string][]string{
 	"hifi": {"cowrie", "endlessh", "ssh-proxy"},
 }
 
-// check is one line of a setup/doctor report. A failed or warning check
-// carries the error code that explains it (qpot doctor --explain <code>).
-type check struct {
-	Name   string
-	Level  string // "ok", "warn", "fail"
-	Detail string
-	Code   string
-}
+// check is one line of a setup/doctor report (see internal/doctor).
+type check = doctor.Check
+
+// totalMemoryBytes is the host's physical memory, or 0 when unknown.
+func totalMemoryBytes() int64 { return doctor.TotalMemoryBytes() }
 
 // printChecksTo prints a report; details can carry text from the system
 // (docker, ports, paths), so they go through termSafe.
@@ -58,84 +52,6 @@ func printChecksTo(w io.Writer, title string, cs []check) (failed bool) {
 		}
 	}
 	return failed
-}
-
-// firstFailCode returns the code of the first failed check, or "".
-func firstFailCode(cs []check) string {
-	for _, c := range cs {
-		if c.Level == "fail" {
-			if c.Code == "" {
-				return "QP-BUG-001"
-			}
-			return c.Code
-		}
-	}
-	return ""
-}
-
-// preflightChecks verifies the host can run QPot before anything is changed.
-func preflightChecks(ctx context.Context) []check {
-	r := &hostsetup.ExecRunner{EUID: os.Geteuid()}
-	return dockerChecks(hostsetup.DetectDocker(ctx, r, exec.LookPath), totalMemoryBytes, hostsetup.FreeBytes)
-}
-
-// dockerChecks turns what DetectDocker found into report lines.
-func dockerChecks(st hostsetup.DockerState, mem func() int64, free func(string) int64) []check {
-	var cs []check
-	switch {
-	case !st.CLI:
-		return append(cs, check{"docker", "fail", "not installed - run 'qpot setup' to install it", "QP-DOCKER-001"})
-	case st.Podman:
-		return append(cs, check{"docker", "fail", "the docker command is Podman, which QPot does not support", "QP-DOCKER-004"})
-	}
-	cs = append(cs, check{Name: "docker", Level: "ok", Detail: "installed"})
-	switch {
-	case st.PermissionDenied:
-		return append(cs, check{"docker daemon", "fail",
-			"your user may not use Docker - 'qpot setup' can add you to the docker group (root-equivalent)", "QP-PERM-004"})
-	case !st.DaemonUp:
-		return append(cs, check{"docker daemon", "fail", "not running - start it (sudo systemctl start docker, or open Docker Desktop)", "QP-DOCKER-002"})
-	case st.Server.Less(hostsetup.MinEngine):
-		cs = append(cs, check{"docker daemon", "fail", fmt.Sprintf("version %s is too old (QPot needs %s+)", st.Server, hostsetup.MinEngine), "QP-DOCKER-005"})
-	default:
-		cs = append(cs, check{Name: "docker daemon", Level: "ok", Detail: "version " + st.Server.String()})
-	}
-	switch {
-	case !st.Compose && st.ComposeV1:
-		cs = append(cs, check{"docker compose", "fail", "only docker-compose v1 found; QPot needs the Compose v2 plugin", "QP-COMPOSE-002"})
-	case !st.Compose:
-		cs = append(cs, check{"docker compose", "fail", "Compose v2 plugin missing (install docker-compose-plugin, or run 'qpot setup')", "QP-COMPOSE-001"})
-	case st.ComposeVersion.Less(hostsetup.MinCompose):
-		cs = append(cs, check{"docker compose", "fail", "version " + st.ComposeVersion.String() + " is too old", "QP-COMPOSE-002"})
-	default:
-		cs = append(cs, check{Name: "docker compose", Level: "ok", Detail: "version " + st.ComposeVersion.String()})
-	}
-
-	if m := mem(); m > 0 {
-		gibs := float64(m) / (1 << 30)
-		c := check{Name: "memory", Level: "ok", Detail: fmt.Sprintf("%.1f GiB (2 GiB+ recommended)", gibs)}
-		switch {
-		case gibs < 1:
-			c.Level, c.Code = "fail", "QP-RES-001"
-		case gibs < 2:
-			c.Level, c.Code = "warn", "QP-RES-001"
-		}
-		cs = append(cs, c)
-	}
-	if home, err := os.UserHomeDir(); err == nil {
-		if f := free(home); f > 0 {
-			gibs := float64(f) / (1 << 30)
-			c := check{Name: "disk", Level: "ok", Detail: fmt.Sprintf("%.1f GiB free in %s (5 GiB+ recommended)", gibs, home)}
-			switch {
-			case gibs < 2:
-				c.Level, c.Code = "fail", "QP-RES-002"
-			case gibs < 5:
-				c.Level, c.Code = "warn", "QP-RES-002"
-			}
-			cs = append(cs, c)
-		}
-	}
-	return cs
 }
 
 // portChecks reports host ports the instance needs that something else holds.
@@ -156,119 +72,19 @@ func portChecks(cfg *config.Config) []check {
 		_ = ln.Close()
 	}
 	if len(busy) > 0 {
-		return []check{{"host ports", "fail", "already in use: " + strings.Join(busy, ", "), "QP-PORT-002"}}
+		return []check{{Name: "host ports", Level: "fail", Detail: "already in use: " + strings.Join(busy, ", "), Code: "QP-PORT-002"}}
 	}
 	return []check{{Name: "host ports", Level: "ok", Detail: fmt.Sprintf("%d free", len(ports))}}
 }
 
 // healthChecks inspects a started instance: containers, database schema,
-// control plane and web UI.
+// control plane (when wantControlPlane) and web UI.
 func healthChecks(ctx context.Context, cfg *config.Config, mgr *instance.Manager, wantControlPlane bool) []check {
-	var cs []check
-	// First: a missing database file is why a collector crash-loops.
-	if c := geoIPCheck(cfg); c.Name != "" {
-		cs = append(cs, c)
-	}
-	states, err := mgr.ServiceStates(ctx)
-	if err != nil {
-		return append(cs, check{"containers", "fail", firstLine(err.Error()), "QP-INST-007"})
-	}
-	svcCheck := func(name, svc string) {
-		st, ok := states[svc]
-		code := "QP-INST-008"
-		if svc == "database" {
-			code = "QP-INST-005"
-		}
-		switch {
-		case !ok:
-			cs = append(cs, check{name, "fail", "not created", code})
-		case st.State != "running":
-			cs = append(cs, check{name, "fail", st.State, code})
-		case st.Health == "unhealthy":
-			cs = append(cs, check{name, "fail", "unhealthy", code})
-		case st.Health == "starting":
-			cs = append(cs, check{name, "warn", "starting", "QP-INST-004"})
-		default:
-			detail := "running"
-			if st.Health != "" {
-				detail += " (" + st.Health + ")"
-			}
-			cs = append(cs, check{Name: name, Level: "ok", Detail: detail})
-		}
-	}
-	svcCheck("database", "database")
-	svcCheck("collector", "collector")
-	for _, hp := range cfg.GetEnabledHoneypots() {
-		svcCheck("honeypot "+hp, hp)
-		// Images without a shell carry no in-container healthcheck, so
-		// "running" says nothing about whether they serve: probe their
-		// published TCP ports from the host instead.
-		if st, ok := states[hp]; ok && st.State == "running" {
-			if ports := instance.HostProbePorts(cfg, hp); len(ports) > 0 {
-				if !anyPortAccepts(ports) {
-					cs[len(cs)-1] = check{"honeypot " + hp, "fail", fmt.Sprintf("running, but not accepting connections on port %v", ports), "QP-INST-008"}
-				} else {
-					cs[len(cs)-1].Detail = "running (accepting connections)"
-				}
-			}
-		}
-	}
-
-	// The schema must exist or the collector drops every event.
-	db, err := database.New(cfg.DatabaseClient())
-	if err == nil {
-		dctx, cancel := context.WithTimeout(ctx, 10*time.Second)
-		err = db.Connect(dctx)
-		if err == nil {
-			_, err = db.GetStats(dctx, time.Now().Add(-time.Hour))
-			_ = db.Close()
-		}
-		cancel()
-	}
-	if err != nil {
-		cs = append(cs, check{"database schema", "fail", "not ready: " + firstLine(err.Error()), "QP-INST-005"})
-	} else {
-		cs = append(cs, check{Name: "database schema", Level: "ok", Detail: "events table present"})
-	}
-
+	var controlPlane func(*config.Config) int
 	if wantControlPlane {
-		if pid := runningServePID(cfg); pid != 0 {
-			cs = append(cs, check{Name: "control plane", Level: "ok", Detail: fmt.Sprintf("running (pid %d)", pid)})
-		} else {
-			cs = append(cs, check{"control plane", "fail",
-				"not running - web UI, intelligence and HiFi resets are off (qpot up -d / qpot serve)", "QP-WEB-003"})
-		}
+		controlPlane = runningServePID
 	}
-	if cfg.WebUI.Enabled {
-		cs = append(cs, webUICheck(ctx, cfg))
-	}
-	return cs
-}
-
-// webUICheck confirms the web UI answering on the configured port is THIS
-// instance's: a bare "something answered" passed while another instance's UI
-// held the port and this one's control plane had failed to bind.
-func webUICheck(ctx context.Context, cfg *config.Config) check {
-	base := fmt.Sprintf("http://%s/", net.JoinHostPort(webHost(cfg.WebUI.BindAddr), fmt.Sprint(cfg.WebUI.Port)))
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, base+"api/status", nil)
-	if err != nil {
-		return check{"web UI", "fail", err.Error(), "QP-WEB-002"}
-	}
-	// Only ever sent to this host's own address for the instance's web UI.
-	req.Header.Set("X-QPot-ID", cfg.QPotID)
-	resp, err := (&http.Client{Timeout: 5 * time.Second}).Do(req)
-	if err != nil {
-		return check{"web UI", "fail", "no answer on " + base, "QP-WEB-002"}
-	}
-	defer resp.Body.Close()
-	var st struct {
-		Instance string `json:"instance"`
-	}
-	if resp.StatusCode != http.StatusOK || json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&st) != nil ||
-		st.Instance != cfg.InstanceName {
-		return check{"web UI", "fail", fmt.Sprintf("%s answers, but not as instance %q (port taken by something else?)", base, cfg.InstanceName), "QP-WEB-002"}
-	}
-	return check{Name: "web UI", Level: "ok", Detail: base}
+	return doctor.HealthChecks(ctx, cfg, mgr, controlPlane)
 }
 
 // freeWebPort returns the configured web UI port if it is usable, else the
@@ -298,13 +114,6 @@ func freeWebPort(cfg *config.Config) (int, bool) {
 		}
 	}
 	return 0, false
-}
-
-func webHost(bind string) string {
-	if bind == "" || bind == "0.0.0.0" || bind == "::" {
-		return "127.0.0.1"
-	}
-	return bind
 }
 
 func firstLine(s string) string {
@@ -540,7 +349,7 @@ func newDoctorCommand() *cobra.Command {
 
 // runDoctor runs the checks; its error carries the first failure's code.
 func runDoctor(ctx context.Context, w io.Writer, instanceName string) error {
-	host := preflightChecks(ctx)
+	host := doctor.HostChecks(ctx)
 	hostFailed := printChecksTo(w, "Host checks", host)
 	cfg, _, err := loadInstance(instanceName)
 	if err != nil {
@@ -551,9 +360,9 @@ func runDoctor(ctx context.Context, w io.Writer, instanceName string) error {
 		return hostsetup.E("QP-INST-001").Wrap(err)
 	}
 	if !mgr.IsRunning(ctx) {
-		cs := []check{{"containers", "fail", "not running (qpot up -d" + iflagFor(instanceName) + ")", "QP-INST-007"}}
+		cs := []check{{Name: "containers", Level: "fail", Detail: "not running (qpot up -d" + iflagFor(instanceName) + ")", Code: "QP-INST-007"}}
 		printChecksTo(w, "Instance "+instanceName, cs)
-		code := firstFailCode(host)
+		code := doctor.FirstFailCode(host)
 		if code == "" {
 			code = "QP-INST-007"
 		}
@@ -561,9 +370,9 @@ func runDoctor(ctx context.Context, w io.Writer, instanceName string) error {
 	}
 	cs := healthChecks(ctx, cfg, mgr, !systemdManaged(cfg))
 	if printChecksTo(w, "Instance "+instanceName, cs) || hostFailed {
-		code := firstFailCode(host)
+		code := doctor.FirstFailCode(host)
 		if code == "" {
-			code = firstFailCode(cs)
+			code = doctor.FirstFailCode(cs)
 		}
 		return hostsetup.E(code).WithWhy("Some checks failed (see above).")
 	}
@@ -675,34 +484,4 @@ PrivateTmp=yes
 	}
 	fmt.Fprintf(&b, "\n[Install]\nWantedBy=%s\n", target)
 	return b.String()
-}
-
-// anyPortAccepts reports whether a TCP connection to any of the host ports on
-// loopback succeeds.
-func anyPortAccepts(ports []int) bool {
-	for _, p := range ports {
-		c, err := net.DialTimeout("tcp", net.JoinHostPort("127.0.0.1", strconv.Itoa(p)), 2*time.Second)
-		if err == nil {
-			c.Close()
-			return true
-		}
-	}
-	return false
-}
-
-// geoIPCheck reports a configured GeoIP database the collector cannot open
-// (it then refuses to start). Paths under /data are the instance data dir.
-func geoIPCheck(cfg *config.Config) check {
-	p := cfg.Collector.GeoIPDBPath
-	if p == "" {
-		return check{}
-	}
-	host := p
-	if rest, ok := strings.CutPrefix(p, "/data/"); ok {
-		host = filepath.Join(cfg.DataPath, filepath.FromSlash(rest))
-	}
-	if _, err := os.Stat(host); err != nil {
-		return check{"geoip database", "fail", fmt.Sprintf("%s missing (the collector cannot start); run: qpot geoip update -i %s", host, cfg.InstanceName), "QP-INST-006"}
-	}
-	return check{Name: "geoip database", Level: "ok", Detail: filepath.Base(host)}
 }

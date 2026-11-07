@@ -45,5 +45,3 @@ func terminateProcess(pid int) {
 		_ = p.Kill()
 	}
 }
-
-func totalMemoryBytes() int64 { return 0 }
