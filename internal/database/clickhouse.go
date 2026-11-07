@@ -293,13 +293,15 @@ func (ch *ClickHouse) GetEvents(ctx context.Context, filter EventFilter) ([]*Eve
 	FROM events WHERE 1=1`
 	var args []interface{}
 
+	// The bounds go as milliseconds: the driver sends a time.Time parameter
+	// in whole seconds, which would widen since and narrow until.
 	if !filter.StartTime.IsZero() {
-		query += " AND timestamp >= ?"
-		args = append(args, filter.StartTime)
+		query += " AND timestamp >= fromUnixTimestamp64Milli(toInt64(?))"
+		args = append(args, filter.StartTime.UnixMilli())
 	}
 	if !filter.EndTime.IsZero() {
-		query += " AND timestamp <= ?"
-		args = append(args, filter.EndTime)
+		query += " AND timestamp <= fromUnixTimestamp64Milli(toInt64(?))"
+		args = append(args, filter.EndTime.UnixMilli())
 	}
 	if len(filter.Honeypots) > 0 {
 		query += " AND honeypot IN ?"
