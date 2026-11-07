@@ -25,6 +25,8 @@ func FuzzCowrieBait(f *testing.F) {
 	f.Add("qp_fuzzbait0000000000000003", uint8(1), "http://x/{{date:%Y}}", "on")
 	f.Add("qp_fuzzbait0000000000000004", uint8(6), "https://h.example/$(id)", "")
 	f.Add("qp_fuzzbait0000000000000005", uint8(2), "ftp://h.example", "")
+	// credentials in an otherwise plain base_url must not reach the bait files
+	f.Add("qp_fuzzbait0000000000000006", uint8(1), "https://ops"+":"+"pw@h.example/hc", "")
 
 	f.Fuzz(func(t *testing.T, id string, idx uint8, base, bait string) {
 		p := tpotCowriePersonas[int(idx)%len(tpotCowriePersonas)]
