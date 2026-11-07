@@ -62,8 +62,10 @@ func TestRecreateHoneypotForcesANewContainer(t *testing.T) {
 		t.Fatal(err)
 	}
 	ups := composeUps(t, log)
-	if len(ups) != 1 || !strings.HasSuffix(ups[0], " up -d --force-recreate --no-deps cowrie") {
-		t.Fatalf("recreate ran %q, want one `up -d --force-recreate --no-deps cowrie`", ups)
+	// Without --no-deps: compose must still start the egress guard the
+	// honeypot depends on, if it is not running, and wait for it.
+	if len(ups) != 1 || !strings.HasSuffix(ups[0], " up -d --force-recreate cowrie") {
+		t.Fatalf("recreate ran %q, want one `up -d --force-recreate cowrie`", ups)
 	}
 
 	// A honeypot with companions recreates them with it, by name.
@@ -72,7 +74,7 @@ func TestRecreateHoneypotForcesANewContainer(t *testing.T) {
 		t.Fatal(err)
 	}
 	ups = composeUps(t, log)
-	if len(ups) != 1 || !strings.Contains(ups[0], " up -d --force-recreate --no-deps tanner ") ||
+	if len(ups) != 1 || !strings.Contains(ups[0], " up -d --force-recreate tanner ") ||
 		!strings.Contains(ups[0], "snare") {
 		t.Fatalf("recreate of tanner ran %q, want its companions recreated with it", ups)
 	}

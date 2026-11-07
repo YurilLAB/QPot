@@ -458,8 +458,10 @@ func (m *Manager) StartHoneypot(ctx context.Context, name string) error {
 // but its container (and its companions') is always recreated. Some settings
 // live only in files the honeypot reads when it starts, such as Cowrie's bait
 // plan: they leave the compose service as it was, and `compose up -d` alone
-// kept the old container serving the old files. Its dependencies (database,
-// egress guard) are left running as they are.
+// kept the old container serving the old files. Only the named services are
+// forced: compose still starts a stopped dependency and waits for it, so a
+// public honeypot never runs without its egress guard, and leaves running
+// ones (database, egress guard) as they are.
 func (m *Manager) RecreateHoneypot(ctx context.Context, name string) error {
 	return m.startHoneypot(ctx, name, true)
 }
@@ -488,7 +490,8 @@ func (m *Manager) startHoneypot(ctx context.Context, name string, recreate bool)
 	// to the argv is injection-safe.
 	args := []string{"compose", "-f", composeFile, "up", "-d"}
 	if recreate {
-		args = append(args, "--force-recreate", "--no-deps")
+		// Not --no-deps: that would skip the wait on the egress guard.
+		args = append(args, "--force-recreate")
 	}
 	args = append(append(args, name), m.companionServices(name)...)
 	cmd := exec.CommandContext(ctx, "docker", args...)
