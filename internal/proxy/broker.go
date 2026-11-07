@@ -253,6 +253,9 @@ func (b *Broker) splice(ctx context.Context, client, upstream net.Conn) (in, out
 	var (
 		wg           sync.WaitGroup
 		idleA, idleB atomic.Bool // a direction hit its OWN idle deadline
+		// endAfterBackend ends the session a short while after the backend
+		// closed (set by the backend->attacker goroutine, read after Wait).
+		endAfterBackend *time.Timer
 	)
 	// hardClose tears the whole session down (both halves); used for idle/error
 	// outcomes. A clean EOF instead propagates a half-close so the peer direction
@@ -260,6 +263,10 @@ func (b *Broker) splice(ctx context.Context, client, upstream net.Conn) (in, out
 	hardClose := func() {
 		_ = client.Close()
 		_ = upstream.Close()
+	}
+	grace := backendCloseGrace
+	if grace > b.cfg.IdleTimeout {
+		grace = b.cfg.IdleTimeout
 	}
 	wg.Add(2)
 	go func() {
@@ -284,7 +291,12 @@ func (b *Broker) splice(ctx context.Context, client, upstream net.Conn) (in, out
 		out = n
 		switch oc {
 		case outcomeEOF:
-			halfCloseWrite(client) // FIN to attacker; let attacker->backend drain
+			// FIN to the attacker, who gets a short while to finish. The
+			// backend is sshd, which closes its whole socket: an attacker
+			// that ignores the FIN otherwise held the session, the backend
+			// lease and its limiter slots until its own idle timeout.
+			halfCloseWrite(client)
+			endAfterBackend = time.AfterFunc(grace, hardClose)
 		case outcomeIdle:
 			idleB.Store(true)
 			hardClose()
@@ -293,6 +305,9 @@ func (b *Broker) splice(ctx context.Context, client, upstream net.Conn) (in, out
 		}
 	}()
 	wg.Wait()
+	if endAfterBackend != nil {
+		endAfterBackend.Stop()
+	}
 
 	switch {
 	case sessCtx.Err() == context.DeadlineExceeded:
@@ -305,6 +320,10 @@ func (b *Broker) splice(ctx context.Context, client, upstream net.Conn) (in, out
 		return in, out, ReasonClosed
 	}
 }
+
+// backendCloseGrace is how long the attacker may keep its half of a session
+// open once the backend closed (the session's IdleTimeout when shorter).
+var backendCloseGrace = 5 * time.Second
 
 // outcome explains why a copy direction stopped, so splice can decide whether to
 // half-close (clean EOF) or hard-close (idle/error) and how to label the session.
