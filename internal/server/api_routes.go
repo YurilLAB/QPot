@@ -11,4 +11,5 @@ func (s *Server) setupAPIRoutes() {
 	s.mux.HandleFunc("/api/doctor/explain", s.withQPotAuth(s.handleDoctorExplain))
 	s.mux.HandleFunc("/api/doctor/codes", s.withQPotAuth(s.handleDoctorCodes))
 	s.mux.HandleFunc("/api/cluster/requests", s.withQPotAuth(s.handleClusterRequests))
+	s.mux.HandleFunc("/api/pulse", s.withQPotAuth(s.handlePulse))
 }

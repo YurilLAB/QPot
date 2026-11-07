@@ -48,6 +48,9 @@ type apiState struct {
 	// (SetCluster); nil when it runs none.
 	liveCluster atomic.Pointer[cluster.Manager]
 
+	// pulse keeps GET /api/pulse's last answer per range.
+	pulse pulseCache
+
 	// cfgMu guards the parsed config file cache readConfig keeps.
 	cfgMu  sync.Mutex
 	cfgSum [sha256.Size]byte

@@ -17,3 +17,12 @@ func TestESEventTextAndTypeFilters(t *testing.T) {
 	es := connectES(t)
 	checkEventTextAndTypeFilters(t, es, func() { esRefresh(t, es) }, false)
 }
+
+func TestClickHouseCountSlots(t *testing.T) { checkCountSlots(t, connectCH(t), nil) }
+
+func TestPGCountSlots(t *testing.T) { checkCountSlots(t, connectPG(t), nil) }
+
+func TestESCountSlots(t *testing.T) {
+	es := connectES(t)
+	checkCountSlots(t, es, func() { esRefresh(t, es) })
+}

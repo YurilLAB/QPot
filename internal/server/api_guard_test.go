@@ -58,6 +58,7 @@ var apiRoutes = []apiRoute{
 	{method: http.MethodGet, path: "/api/doctor/explain?code=QP-INST-005"},
 	{method: http.MethodGet, path: "/api/doctor/codes"},
 	{method: http.MethodGet, path: "/api/cluster/requests"},
+	{method: http.MethodGet, path: "/api/pulse?range=1h"},
 }
 
 func routePath(p string) string {
@@ -242,6 +243,9 @@ func (l *leakyDB) GetTTPSessions(context.Context, int) ([]*database.TTPSession, 
 	return nil, l.err
 }
 func (l *leakyDB) GetSchemaVersion(context.Context) (int, error) { return 0, l.err }
+func (l *leakyDB) CountSlots(context.Context, database.SlotQuery) ([]database.SlotCount, error) {
+	return nil, l.err
+}
 
 // No answer of any endpoint carries a secret from the config (the QPot ID,
 // database and web UI passwords, webhook URL, LLM key, response hook
@@ -252,7 +256,7 @@ func TestAPIAnswersCarryNoSecrets(t *testing.T) {
 		name string
 		db   database.Database
 	}{
-		{"working database", &fakeDB{}},
+		{"working database", &slotDB{}},
 		{"failing database", &leakyDB{err: errors.New("dial tcp 127.0.0.1:9000: auth failed for qpot:" + g.secrets["database password"])}},
 	} {
 		g.s.database = dbCase.db
