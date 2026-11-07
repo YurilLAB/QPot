@@ -122,20 +122,30 @@ type Canary struct {
 
 // Trip is a single recorded interaction with a canary. Trips are the alert.
 type Trip struct {
-	ID        string    `json:"id"`        // trip_<hex>
-	CanaryID  string    `json:"canary_id"` // cnry_… that fired
-	Token     string    `json:"token"`
-	Kind      Kind      `json:"kind"`
-	Name      string    `json:"name"`
-	Memo      string    `json:"memo"`
-	Channel   string    `json:"channel"` // "http" | "honeypot"
-	Time      time.Time `json:"time"`    // UTC
-	SourceIP  string    `json:"source_ip,omitempty"`
-	UserAgent string    `json:"user_agent,omitempty"`
-	Detail    string    `json:"detail,omitempty"` // e.g. "matched in cowrie session"
+	ID       string    `json:"id"`        // trip_<hex>
+	CanaryID string    `json:"canary_id"` // cnry_… that fired
+	Token    string    `json:"token"`
+	Kind     Kind      `json:"kind"`
+	Name     string    `json:"name"`
+	Memo     string    `json:"memo"`
+	Channel  string    `json:"channel"` // "http" | "honeypot"
+	Time     time.Time `json:"time"`    // UTC
+	SourceIP string    `json:"source_ip,omitempty"`
+	// Country (ISO code), City and ASN place the source, when known.
+	Country   string `json:"country,omitempty"`
+	City      string `json:"city,omitempty"`
+	ASN       string `json:"asn,omitempty"`
+	UserAgent string `json:"user_agent,omitempty"`
+	Detail    string `json:"detail,omitempty"` // e.g. "matched in cowrie session"
 	// Repeats counts further hits of the same canary from the same source on
 	// the same channel within TripDedupeWindow, folded into this trip.
 	Repeats int `json:"repeats,omitempty"`
+}
+
+// Origin is where a tripping source is: its country's ISO code, city and AS
+// number, as far as the GeoIP database knows. Empty when it does not.
+type Origin struct {
+	Country, City, ASN string
 }
 
 // b32 is RawStdEncoding lowercased at use; tokens are URL-path-safe.
@@ -416,6 +426,9 @@ func (t *Trip) ToEvent() *database.Event {
 		Timestamp:     t.Time,
 		Honeypot:      "canary",
 		SourceIP:      t.SourceIP,
+		Country:       t.Country,
+		City:          t.City,
+		ASN:           t.ASN,
 		Protocol:      proto,
 		EventType:     "canary_trip",
 		Command:       cmd,

@@ -142,7 +142,7 @@ func TestTripByToken(t *testing.T) {
 	s, _ := NewStore(t.TempDir(), 0)
 	c, _ := s.Create(KindWeb, "x", "")
 
-	tr, ok, err := s.TripByToken(c.Token, "198.51.100.9", "curl/8", "GET /c/")
+	tr, ok, err := s.TripByToken(c.Token, "198.51.100.9", "curl/8", "GET /c/", Origin{})
 	if err != nil || !ok || tr == nil {
 		t.Fatalf("TripByToken: ok=%v err=%v", ok, err)
 	}
@@ -150,7 +150,7 @@ func TestTripByToken(t *testing.T) {
 		t.Fatalf("channel = %q", tr.Channel)
 	}
 	// Unknown token: no trip, no error (caller serves identical decoy).
-	if _, ok, err := s.TripByToken("nope", "1.2.3.4", "", ""); ok || err != nil {
+	if _, ok, err := s.TripByToken("nope", "1.2.3.4", "", "", Origin{}); ok || err != nil {
 		t.Fatalf("unknown token tripped: ok=%v err=%v", ok, err)
 	}
 	// Counter incremented and a trip is retained.
@@ -166,7 +166,7 @@ func TestTripByToken(t *testing.T) {
 	if _, err := s.SetEnabled(c.ID, false); err != nil {
 		t.Fatalf("SetEnabled: %v", err)
 	}
-	if _, ok, _ := s.TripByToken(c.Token, "1.1.1.1", "", ""); ok {
+	if _, ok, _ := s.TripByToken(c.Token, "1.1.1.1", "", "", Origin{}); ok {
 		t.Fatal("disabled canary tripped")
 	}
 }
@@ -196,7 +196,7 @@ func TestTripHistoryCap(t *testing.T) {
 	s, _ := NewStore(t.TempDir(), 5)
 	c, _ := s.Create(KindWeb, "x", "")
 	for i := 0; i < 20; i++ {
-		if _, _, err := s.TripByToken(c.Token, fmt.Sprintf("10.0.0.%d", i), "", ""); err != nil {
+		if _, _, err := s.TripByToken(c.Token, fmt.Sprintf("10.0.0.%d", i), "", "", Origin{}); err != nil {
 			t.Fatalf("trip %d: %v", i, err)
 		}
 	}
@@ -226,7 +226,7 @@ func TestRepeatTripsAreFolded(t *testing.T) {
 	c, _ := s.Create(KindWeb, "x", "")
 	alerts := 0
 	for i := 0; i < 500; i++ {
-		if _, ok, err := s.TripByToken(c.Token, "203.0.113.9", "curl", ""); err != nil {
+		if _, ok, err := s.TripByToken(c.Token, "203.0.113.9", "curl", "", Origin{}); err != nil {
 			t.Fatal(err)
 		} else if ok {
 			alerts++
@@ -243,13 +243,13 @@ func TestRepeatTripsAreFolded(t *testing.T) {
 		t.Fatalf("lifetime trips = %d, want 500", got.Trips)
 	}
 	// A different source is a new trip; so is the same source after the window.
-	if _, ok, _ := s.TripByToken(c.Token, "198.51.100.7", "", ""); !ok {
+	if _, ok, _ := s.TripByToken(c.Token, "198.51.100.7", "", "", Origin{}); !ok {
 		t.Fatal("hit from a new source was folded")
 	}
 	old := TripDedupeWindow
 	TripDedupeWindow = 0
 	defer func() { TripDedupeWindow = old }()
-	if _, ok, _ := s.TripByToken(c.Token, "203.0.113.9", "", ""); !ok {
+	if _, ok, _ := s.TripByToken(c.Token, "203.0.113.9", "", "", Origin{}); !ok {
 		t.Fatal("hit after the dedupe window was folded")
 	}
 }
@@ -266,14 +266,14 @@ func TestTripsAreCopies(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, ok, err := s.TripByToken(c.Token, "203.0.113.9", "ua", ""); !ok || err != nil {
+	if _, ok, err := s.TripByToken(c.Token, "203.0.113.9", "ua", "", Origin{}); !ok || err != nil {
 		t.Fatalf("first trip: %v %v", ok, err)
 	}
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
 		for i := 0; i < 200; i++ {
-			_, _, _ = s.TripByToken(c.Token, "203.0.113.9", "ua", "") // repeats
+			_, _, _ = s.TripByToken(c.Token, "203.0.113.9", "ua", "", Origin{}) // repeats
 		}
 	}()
 	for i := 0; i < 200; i++ {

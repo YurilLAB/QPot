@@ -12,6 +12,7 @@ require (
 	github.com/aws/aws-sdk-go-v2/service/s3 v1.114.6
 	github.com/google/nftables v0.3.0
 	github.com/jackc/pgx/v5 v5.12.0
+	github.com/oschwald/maxminddb-golang v1.13.1
 	github.com/spf13/cobra v1.8.1
 	golang.org/x/crypto v0.58.0
 	golang.org/x/sys v0.49.0

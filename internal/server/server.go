@@ -397,6 +397,13 @@ func (s *Server) Start(ctx context.Context) error {
 	s.startedAt = time.Now()
 	go s.nodeStatsLoop(ctx)
 
+	// Canary values used inside a honeypot trip within seconds. The
+	// intelligence worker scans every event it classifies as well, so it
+	// matches what this misses; without it the honeypot channel is off.
+	if s.canaries != nil && s.database != nil && s.worker != nil {
+		go s.canaryScanLoop(ctx)
+	}
+
 	// Start intelligence worker goroutine when enabled.
 	workerDone := make(chan struct{})
 	if s.worker != nil {

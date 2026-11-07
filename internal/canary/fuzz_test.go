@@ -35,7 +35,7 @@ func FuzzStoreLoad(f *testing.F) {
 		_ = s.List()
 		_ = s.Trips(0)
 		_ = s.HasWatchValues()
-		_, _, _ = s.TripByToken("t", "203.0.113.1", "ua", "GET /c/t")
+		_, _, _ = s.TripByToken("t", "203.0.113.1", "ua", "GET /c/t", Origin{})
 		_, _, _ = s.Match("AKIAX AKIA", "203.0.113.1", "matched")
 		if len(s.Trips(0)) > 5 {
 			t.Fatalf("trip history exceeds the cap: %d", len(s.Trips(0)))

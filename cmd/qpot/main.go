@@ -2221,7 +2221,8 @@ Kinds:
 
 Reading a credential or file alone need not alert. Direct use against real AWS
 is not monitored. All kinds can also trip on watched values in captured events;
-this needs intelligence.enabled and runs on the worker's processing cadence.
+this needs intelligence.enabled and is checked every 10 seconds, with the
+worker matching anything that check missed.
 No recorded trips does not prove no access occurred.
 
 Canaries are runtime objects owned by a running instance, so 'qpot up' must be

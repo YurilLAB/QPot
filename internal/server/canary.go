@@ -20,6 +20,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -28,6 +29,7 @@ import (
 	"github.com/qpot/qpot/internal/canary"
 	"github.com/qpot/qpot/internal/config"
 	"github.com/qpot/qpot/internal/database"
+	"github.com/qpot/qpot/internal/geo"
 	"github.com/qpot/qpot/internal/instance"
 )
 
@@ -146,7 +148,13 @@ func (s *Server) handleCanaryBeacon(w http.ResponseWriter, r *http.Request) {
 		// A persistence error does not undo the in-memory trip, so still alert.
 		// Detach from the request context: a client that hangs up right away
 		// must not cancel the alert's DB insert.
-		trip, ok, err := s.canaries.TripByToken(token, clientIP(r), ua, detail)
+		// Only a canary's own token is looked up in the GeoIP database: a
+		// stranger's guesses never make the server open it.
+		var origin canary.Origin
+		if s.canaries.KnowsToken(token) {
+			origin = s.originOf(clientIP(r))
+		}
+		trip, ok, err := s.canaries.TripByToken(token, clientIP(r), ua, detail, origin)
 		if err != nil {
 			slog.Error("canary: failed to persist trip to store", "error", err)
 		}
@@ -371,8 +379,15 @@ func (m *canaryMatcher) MatchEvent(ctx context.Context, event *database.Event) b
 		b.WriteByte('\n')
 		b.WriteString(v)
 	}
-	detail := "matched in " + event.Honeypot + " session"
-	trips, err := m.s.canaries.MatchAll(b.String(), event.SourceIP, detail)
+	trips, err := m.s.canaries.MatchObservation(canary.Observation{
+		Text:     b.String(),
+		SourceIP: event.SourceIP,
+		Detail:   "matched in " + event.Honeypot + " session",
+		EventKey: canaryEventKey(event),
+		// The collector placed the event's source already (or wrote
+		// "unknown" when its GeoIP database did not know it).
+		Origin: canary.Origin{Country: known(event.Country), City: known(event.City), ASN: known(event.ASN)},
+	})
 	if err != nil {
 		slog.Error("canary: failed to persist matched trip", "error", err)
 	}
@@ -380,4 +395,110 @@ func (m *canaryMatcher) MatchEvent(ctx context.Context, event *database.Event) b
 		m.s.onCanaryTrip(ctx, trip)
 	}
 	return len(trips) > 0
+}
+
+// canaryEventKey identifies a captured event for the canary store, so an
+// event that tripped a canary does not trip it again when it is scanned a
+// second time: by the quick scan and later by the intelligence worker, which
+// read the same row through different queries (only the worker's carries the
+// row's ID).
+func canaryEventKey(e *database.Event) string {
+	h := sha256.New()
+	fmt.Fprintf(h, "%d\x00%s\x00%s\x00%d\x00%d\x00%s\x00%s\x00%s\x00%s\x00%s\x00",
+		e.Timestamp.UnixNano(), e.Honeypot, e.SourceIP, e.SourcePort, e.DestPort,
+		e.Protocol, e.EventType, e.Username, e.Password, e.Command)
+	h.Write(e.Payload)
+	return fmt.Sprintf("%x", h.Sum(nil)[:16])
+}
+
+// known is a GeoIP value the collector stored, or "" for its "unknown".
+func known(v string) string {
+	if v == "unknown" {
+		return ""
+	}
+	return v
+}
+
+// originOf places ip with the instance's GeoIP database, the one the
+// collector uses for every event, so canary trips are placed as events are.
+func (s *Server) originOf(ip string) canary.Origin {
+	path := s.geoIPPath()
+	if path == "" || ip == "" {
+		return canary.Origin{}
+	}
+	p, err := geo.LookupIP(path, ip)
+	if err != nil {
+		slog.Debug("canary: GeoIP lookup failed", "error", err)
+		return canary.Origin{}
+	}
+	return canary.Origin{Country: p.Country, City: p.City, ASN: p.ASN}
+}
+
+// geoIPPath is the GeoIP database on this host, or "" when there is none. The
+// setting is the collector's path: it sees the instance's folder at /data.
+func (s *Server) geoIPPath() string {
+	p := s.config.Collector.GeoIPDBPath
+	if p == "" {
+		return ""
+	}
+	if rest, ok := strings.CutPrefix(p, "/data/"); ok {
+		return filepath.Join(s.config.DataPath, filepath.FromSlash(rest))
+	}
+	return p
+}
+
+// The quick canary scan: how often it runs, how far back each run reaches
+// (events reach the database a little after they happen, so runs overlap),
+// and the most events one run reads.
+const (
+	canaryScanInterval = 10 * time.Second
+	canaryScanLookback = 2 * time.Minute
+	canaryScanLimit    = 5000
+)
+
+// canaryScanLoop runs the quick canary scan until ctx ends.
+func (s *Server) canaryScanLoop(ctx context.Context) {
+	t := time.NewTicker(canaryScanInterval)
+	defer t.Stop()
+	m := &canaryMatcher{s: s}
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+			s.scanRecentForCanaries(ctx, m)
+		}
+	}
+}
+
+// scanRecentForCanaries checks the last canaryScanLookback of events for
+// canary values, so a canary used inside a honeypot trips within seconds,
+// not at the intelligence worker's next run (15 minutes by default). The
+// worker still scans every event, also those this misses (a backlog over
+// canaryScanLimit, or a stop); the store's event keys keep an event from
+// tripping a canary twice.
+func (s *Server) scanRecentForCanaries(ctx context.Context, m *canaryMatcher) {
+	if s.database == nil || s.canaries == nil {
+		return
+	}
+	s.followPlanted()
+	if !s.canaries.HasWatchValues() {
+		return
+	}
+	qctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	events, err := s.database.GetEvents(qctx, database.EventFilter{
+		StartTime: time.Now().Add(-canaryScanLookback),
+		Limit:     canaryScanLimit,
+	})
+	if err != nil {
+		slog.Debug("canary: quick scan failed to read events", "error", err)
+		return
+	}
+	for _, e := range events {
+		if e.Honeypot == "canary" {
+			continue // a trip's own event
+		}
+		m.MatchEvent(ctx, e)
+	}
 }

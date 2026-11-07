@@ -37,12 +37,15 @@ local overview — with no special-casing downstream.
 | `credential` | A password or token (planted by QPot only) | The value appears in a captured honeypot session | see [Canaries planted in the honeypots](#canaries-planted-in-the-honeypots) |
 | `ssh-key` | An SSH key pair (planted by QPot only) | The public key or its fingerprint appears in a captured session: the key offered in a login | see below |
 
-`web` and `file` can trip via the **public beacon endpoint**. The
-**intelligence worker** also matches watched values for all kinds in the
-`command`, `username`, `password`, `payload` and metadata values of captured
-honeypot events. It does not monitor arbitrary filesystem reads or real AWS
-API calls. Matching requires `intelligence.enabled: true` (the default), event
-collection and successful processing; a match alone does not establish how the
+`web` and `file` can trip via the **public beacon endpoint**. QPot also
+matches watched values for all kinds in the `command`, `username`, `password`,
+`payload` and metadata values of captured honeypot events. The control plane
+checks the events stored in the last two minutes every 10 seconds, and the
+**intelligence worker** checks every event it classifies, so an event the quick
+check missed is still matched. One event trips a canary once, however often it
+is checked. QPot does not monitor arbitrary filesystem reads or real AWS API
+calls. Matching requires `intelligence.enabled: true` (the default), event
+collection and a reachable database; a match alone does not establish how the
 value was obtained or whether its use was unauthorized.
 
 Each kind is pre-mapped to an ATT&CK technique so trips classify
@@ -133,6 +136,11 @@ enumeration oracle (and tokens carry ~160 bits of entropy regardless). The
 attacker-controlled `X-Forwarded-For` is recorded for context but never trusted
 as the source IP; the real TCP peer is.
 
+Each trip records where its source is (country, city and AS number). A beacon
+hit is looked up in the instance's GeoIP database (`collector.geoip_db_path`);
+a honeypot match takes the place the collector gave the event. A source the
+database does not know is left blank.
+
 ## CLI
 
 Canaries are runtime objects owned by a running instance, so `qpot up` must be
@@ -196,10 +204,12 @@ instance reloads it.
   to real AWS. Direct use against real AWS is not monitored. QPot watches for
   their values in captured honeypot event fields; there is no AWS-side audit
   integration in this subsystem.
-- **The matcher runs on the intelligence worker's cadence** (`worker_interval`,
-  default 15m) for stored-but-unclassified events. Beacon requests are handled
-  as they arrive; captured-value matches wait for collection and processing.
-  Backlogs, stopped workers or database failures can delay or prevent alerts.
+- **Captured-value matches wait for the event to be stored.** The quick check
+  reads at most 5,000 events from the last two minutes on each run; an event
+  it misses (a larger burst, or a stopped control plane) is matched when the
+  intelligence worker classifies it (`worker_interval`, default 15m). Beacon
+  requests are handled as they arrive. Backlogs, stopped workers or database
+  failures can delay or prevent alerts.
 - **False positives are possible.** A scanner or authorized user can fetch a
   beacon or submit a watched value. No measured false-positive rate is
   established here; test the placement and assess the event context before

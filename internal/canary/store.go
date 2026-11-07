@@ -38,7 +38,21 @@ type Store struct {
 	byToken  map[string]string  // beacon token -> id
 	byValue  map[string]string  // watched credential value -> id
 	trips    []*Trip            // oldest first, newest last; capped at maxTrips
+
+	// eventHits are the captured events that already tripped a canary, by
+	// canary ID and event key (see Observation.EventKey), with when. The same
+	// event is scanned more than once - by the quick scan and again by the
+	// intelligence worker - and must trip a canary only once. Kept in memory:
+	// after a restart an event may trip again (at-least-once).
+	eventHits map[string]time.Time
 }
+
+// eventHitRetention is how long an event's trip is remembered; maxEventHits
+// bounds how many are, dropping those past the retention first.
+const (
+	eventHitRetention = 7 * 24 * time.Hour
+	maxEventHits      = 20000
+)
 
 // NewStore opens (or initializes) the canary store under dataPath. A missing
 // file is not an error — it yields an empty store. A corrupt file is reported
@@ -53,6 +67,8 @@ func NewStore(dataPath string, maxTrips int) (*Store, error) {
 		canaries: make(map[string]*Canary),
 		byToken:  make(map[string]string),
 		byValue:  make(map[string]string),
+
+		eventHits: make(map[string]time.Time),
 	}
 	data, err := os.ReadFile(s.path)
 	if err != nil {
@@ -296,7 +312,7 @@ func (s *Store) recentTripLocked(c *Canary, channel, srcIP string, now time.Time
 
 // recordTripLocked records a trip, or returns nil when it repeats a recent one
 // (counted in that trip's Repeats; persisted with the next save).
-func (s *Store) recordTripLocked(c *Canary, channel, srcIP, ua, detail string) (*Trip, error) {
+func (s *Store) recordTripLocked(c *Canary, channel, srcIP, ua, detail string, origin Origin) (*Trip, error) {
 	now := time.Now().UTC()
 	if prev := s.recentTripLocked(c, channel, srcIP, now); prev != nil {
 		prev.Repeats++
@@ -314,6 +330,9 @@ func (s *Store) recordTripLocked(c *Canary, channel, srcIP, ua, detail string) (
 		Channel:   channel,
 		Time:      now,
 		SourceIP:  srcIP,
+		Country:   origin.Country,
+		City:      origin.City,
+		ASN:       origin.ASN,
 		UserAgent: ua,
 		Detail:    detail,
 	}
@@ -330,7 +349,7 @@ func (s *Store) recordTripLocked(c *Canary, channel, srcIP, ua, detail string) (
 // TripByToken records an HTTP-channel trip for the canary owning token. Returns
 // (nil, false, nil) when the token is unknown or its canary is disabled — the
 // caller still serves an identical decoy so the endpoint reveals nothing.
-func (s *Store) TripByToken(token, srcIP, ua, detail string) (*Trip, bool, error) {
+func (s *Store) TripByToken(token, srcIP, ua, detail string, origin Origin) (*Trip, bool, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	id, ok := s.byToken[token]
@@ -341,12 +360,24 @@ func (s *Store) TripByToken(token, srcIP, ua, detail string) (*Trip, bool, error
 	if c == nil || !c.Enabled {
 		return nil, false, nil
 	}
-	t, err := s.recordTripLocked(c, "http", srcIP, ua, detail)
+	t, err := s.recordTripLocked(c, "http", srcIP, ua, detail, origin)
 	if t == nil {
 		return nil, false, nil // a repeat within the dedupe window: no new alert
 	}
 	cp := *t // the stored trip keeps changing (Repeats) after we unlock
 	return &cp, true, err
+}
+
+// KnowsToken reports whether token is the beacon token of an enabled canary.
+func (s *Store) KnowsToken(token string) bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	id, ok := s.byToken[token]
+	if !ok {
+		return false
+	}
+	c := s.canaries[id]
+	return c != nil && c.Enabled
 }
 
 // Match scans text for any watched credential value and records a
@@ -368,7 +399,28 @@ func (s *Store) Match(text, srcIP, detail string) (*Trip, bool, error) {
 // canary that tripped a moment ago from the same source (folded into that
 // trip) must not hide another one. Returns the new trips (copies).
 func (s *Store) MatchAll(text, srcIP, detail string) ([]*Trip, error) {
-	if text == "" {
+	return s.MatchObservation(Observation{Text: text, SourceIP: srcIP, Detail: detail})
+}
+
+// Observation is a captured event to scan for watched values.
+type Observation struct {
+	// Text is what the attacker sent: command, credentials, payload.
+	Text     string
+	SourceIP string
+	// Detail says where it was seen, such as "matched in cowrie session".
+	Detail string
+	// EventKey identifies the captured event (empty when there is none). A
+	// canary trips once per event however often the event is scanned.
+	EventKey string
+	// Origin is the source's place as the collector recorded it.
+	Origin Origin
+}
+
+// MatchObservation is MatchAll for a captured event: the trips carry the
+// event's origin, and an event that already tripped a canary does not trip
+// it again (nor count as a repeat) when it is scanned a second time.
+func (s *Store) MatchObservation(o Observation) ([]*Trip, error) {
+	if o.Text == "" {
 		return nil, nil
 	}
 	s.mu.Lock()
@@ -379,7 +431,7 @@ func (s *Store) MatchAll(text, srcIP, detail string) ([]*Trip, error) {
 	var found []*Canary
 	seen := map[string]bool{}
 	for value, id := range s.byValue {
-		if seen[id] || !strings.Contains(text, value) {
+		if seen[id] || !strings.Contains(o.Text, value) {
 			continue
 		}
 		if c := s.canaries[id]; c != nil && c.Enabled {
@@ -390,8 +442,16 @@ func (s *Store) MatchAll(text, srcIP, detail string) ([]*Trip, error) {
 	sort.Slice(found, func(i, j int) bool { return found[i].ID < found[j].ID })
 	var trips []*Trip
 	var firstErr error
+	now := time.Now()
 	for _, c := range found {
-		t, err := s.recordTripLocked(c, "honeypot", srcIP, "", detail)
+		if o.EventKey != "" {
+			hit := c.ID + "\x00" + o.EventKey
+			if _, done := s.eventHits[hit]; done {
+				continue // this event already tripped this canary
+			}
+			s.rememberEventHitLocked(hit, now)
+		}
+		t, err := s.recordTripLocked(c, "honeypot", o.SourceIP, "", o.Detail, o.Origin)
 		if err != nil && firstErr == nil {
 			firstErr = err
 		}
@@ -402,6 +462,32 @@ func (s *Store) MatchAll(text, srcIP, detail string) ([]*Trip, error) {
 		trips = append(trips, &cp)
 	}
 	return trips, firstErr
+}
+
+// rememberEventHitLocked records that an event tripped a canary, first making
+// room: hits past eventHitRetention go, then, if still full, the oldest.
+// Caller holds s.mu.
+func (s *Store) rememberEventHitLocked(hit string, now time.Time) {
+	if s.eventHits == nil {
+		s.eventHits = make(map[string]time.Time)
+	}
+	if len(s.eventHits) >= maxEventHits {
+		for k, at := range s.eventHits {
+			if now.Sub(at) > eventHitRetention {
+				delete(s.eventHits, k)
+			}
+		}
+		for len(s.eventHits) >= maxEventHits {
+			oldest, oldestAt := "", now
+			for k, at := range s.eventHits {
+				if !at.After(oldestAt) {
+					oldest, oldestAt = k, at
+				}
+			}
+			delete(s.eventHits, oldest)
+		}
+	}
+	s.eventHits[hit] = now
 }
 
 // HasWatchValues reports whether any enabled credential canary is being watched
