@@ -41,7 +41,10 @@ func DownloadDBIPCountry(ctx context.Context, client *http.Client, dest string, 
 		client = &http.Client{Timeout: 2 * time.Minute}
 	}
 	var lastErr error
-	for _, month := range []time.Time{now, now.AddDate(0, -1, 0)} {
+	// The month before is counted from the 1st: now.AddDate(0, -1, 0) on
+	// March 31 is "February 31", which Go normalises to March 3.
+	prev := time.Date(now.Year(), now.Month()-1, 1, 0, 0, 0, 0, now.Location())
+	for _, month := range []time.Time{now, prev} {
 		data, err := fetchGzip(ctx, client, dbipURL(month))
 		if err != nil {
 			lastErr = err
