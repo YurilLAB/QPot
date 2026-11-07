@@ -182,15 +182,53 @@ def qpot_own_address(protocol, name: str) -> str | None:
     return None
 
 
+# addresses the honeypot never contacts beyond Cowrie's blocklist: Azure's WireServer (a public address
+#   that answers only the VM itself, with its configuration)
+QPOT_BLOCKED_EXTRA = (ipaddress.ip_network("168.63.129.16/32"),)
+
+
 def qpot_blocked(address: str) -> bool:
-    """Whether the honeypot never contacts address (private, loopback, link-local, multicast ...): Cowrie's
-    own blocklist, which its downloads apply."""
+    """Whether the honeypot never contacts address (private, loopback, link-local, multicast, CGNAT,
+    metadata, IPv6 wrappers of those ...): Cowrie's own blocklist, which its downloads apply
+    (resolve_allowed), and QPOT_BLOCKED_EXTRA."""
     try:
         from cowrie.core.network import _is_blocked
 
-        return bool(_is_blocked(ipaddress.ip_address(address)))
+        ip = ipaddress.ip_address(address)
+        mapped = getattr(ip, "ipv4_mapped", None)
+        if any(ip in net or mapped is not None and mapped in net for net in QPOT_BLOCKED_EXTRA
+               if ip.version == net.version or mapped is not None):
+            return True
+        return bool(_is_blocked(ip))
     except Exception:  # noqa: BLE001 - no address: nothing to contact
         return True
+
+
+def qpot_fetch(url: str, address: str, method: str = "get", headers=None, timeout: int = 10):
+    """One request of url (no redirect followed) to address, the very address the caller checked
+    (qpot_route, or the one lookup of a name, then qpot_classify): upstream's fetch looks the URL's name
+    up again and connects to that answer, so a name /etc/hosts gave a public address reached whatever
+    the real DNS said, and a second answer could differ from the first. The name stays the Host header's
+    and TLS's (SNI, the certificate check); the outbound address stays [honeypot] out_addr's. Raises
+    BlockedAddress for an address that is not "network" (checked again here), UnreachableAddress for IPv6
+    (as upstream: the outbound address is an IPv4 one)."""
+    import treq
+    from twisted.internet import reactor
+    from urllib.parse import urlparse
+
+    from cowrie.core.download import BlockedAddress, UnreachableAddress, pinned_agent
+
+    host = urlparse(url).hostname or ""
+    try:
+        ip = ipaddress.ip_address(address)
+    except ValueError:
+        raise BlockedAddress(host) from None
+    if qpot_classify(str(ip)) != "network":
+        raise BlockedAddress(host)
+    if ip.version == 6:
+        raise UnreachableAddress(host)
+    return getattr(treq, method)(url=url, agent=pinned_agent(reactor, str(ip)), allow_redirects=False,
+                                 headers=headers, timeout=timeout)
 
 
 def qpot_route(fs, protocol, host: str) -> tuple[str, str | None]:

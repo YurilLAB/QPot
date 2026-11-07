@@ -5,14 +5,17 @@ Cowrie's nodes built from the case, the network answers as the case says (and re
 and fetch, so a test can tell what would have reached it), and callLater runs on a virtual clock.
 
 usage: cowrie_stub.py <patch dir> <cases.json>; prints one JSON result per case:
-  {"stdout", "stderr", "code", "seconds" (virtual), "events", "lookups", "fetches", "files", "cpu"}
+  {"stdout", "stderr", "code", "seconds" (virtual), "events", "lookups", "fetches" (each with the address it
+  went to), "connects" (every TCP connection: HTTP, FTP control and data), "files", "cpu"}
 
 A case: {"argv": [...], "persona": "ubuntu-24.04", "machine": "x86_64", "files": {path: text or
 {"b64": .., "mode": .., "uid": .., "mtime": ..} or {"link": target} or {"dir": true}}, "config":
 {"section.key": value}, "dns": {name: address or null}, "http": {url: {"code": .., "body": ..}},
 "terminal": true, "columns": terminal width, "stdin": text, "lines": [typed lines, with "@SECONDS"
 waits], "env": {...}, "installed": epoch, "packages": {name: version}, "plan": {bait plan}, "now": the
-wall clock ls compares with, "probe": "bash_variables" (the variables the login shell gets, no command),
+wall clock ls compares with, "probe": "bash_variables" (the variables the login shell gets, no command) or
+"classify" (qpot_classify and the image's blocklist for each of "addresses") or "qpot_fetch" (qpot_fetch of each
+of "fetch_calls": [url, address]),
 "memory": true (report the peak of the bytes the command allocates as "peak")}.
 """
 
@@ -20,6 +23,7 @@ from __future__ import annotations
 
 import base64
 import heapq
+import ipaddress
 import importlib.util
 import json
 import os
@@ -109,6 +113,9 @@ class Reactor:
     def resolve(self, name):
         return Done(STATE["dns"].get(name))
 
+    def connectTCP(self, host, port, factory, timeout=30, bindAddress=None):
+        connect_tcp(host, port)
+
 
 reactor = Reactor()
 
@@ -119,10 +126,17 @@ class Done:
     def __init__(self, result=None, failure=None):
         self.result, self.failure = result, failure
 
+    def adopt(self, value):
+        # a callback that returns a Deferred: the chain goes on with that one's outcome, as Twisted's does
+        if isinstance(value, Done):
+            self.result, self.failure = value.result, value.failure
+        else:
+            self.result = value
+
     def addCallback(self, fn, *a):
         if self.failure is None:
             try:
-                self.result = fn(self.result, *a)
+                self.adopt(fn(self.result, *a))
             except Exception as err:  # noqa: BLE001
                 self.failure = Failure(err)
         return self
@@ -130,7 +144,10 @@ class Done:
     def addErrback(self, fn, *a):
         if self.failure is not None:
             failure, self.failure = self.failure, None
-            self.result = fn(failure, *a)
+            try:
+                self.adopt(fn(failure, *a))
+            except Exception as err:  # noqa: BLE001
+                self.failure = Failure(err)
         return self
 
     def addCallbacks(self, cb, eb):
@@ -179,10 +196,54 @@ defer.succeed = lambda value=None: Done(value)
 module("twisted.python.failure").Failure = Failure
 module("twisted.python").failure = sys.modules["twisted.python.failure"]
 module("twisted.web.iweb").UNKNOWN_LENGTH = object()
-module("twisted.internet.protocol").ClientCreator = object
 module("twisted.internet.protocol").Protocol = object
 module("twisted.protocols.ftp").CommandFailed = type("CommandFailed", (Exception,), {})
-module("twisted.protocols.ftp").FTPClient = object
+
+
+def connect_tcp(host, port):
+    """A TCP connection the command opens: recorded; a name (not an address) is looked up by the
+    system's resolver first, which is recorded as a lookup too."""
+    import ipaddress
+
+    try:
+        ipaddress.ip_address(host)
+    except ValueError:
+        STATE["lookups"].append(host)
+    STATE["connects"].append({"host": host, "port": port})
+
+
+class FTPClient:
+    """Twisted's FTP client as far as wget uses it. The server's PASV answer names a link-local host (an
+    FTP server of the attacker's): Twisted's own connectFactory connects to it."""
+
+    def __init__(self, *args, **kwargs):
+        pass
+
+    def connectFactory(self, host, port, factory):
+        connect_tcp(host, port)
+
+    def cwd(self, path):
+        return Done(None)
+
+    def retrieveFile(self, name, receiver):
+        self.connectFactory("169.254.169.254", 2121, receiver)
+        return Done(failure=Failure(module("twisted.protocols.ftp").CommandFailed(["550 Failed to open file."])))
+
+    def quit(self):
+        return Done(None)
+
+
+class ClientCreator:
+    def __init__(self, _reactor, cls, *args, **kwargs):
+        self.cls, self.args, self.kwargs = cls, args, kwargs
+
+    def connectTCP(self, host, port, timeout=30, bindAddress=None):
+        connect_tcp(host, port)
+        return Done(self.cls(*self.args, **self.kwargs))
+
+
+module("twisted.internet.protocol").ClientCreator = ClientCreator
+module("twisted.protocols.ftp").FTPClient = FTPClient
 
 # --- the network: lookups and fetches recorded ------------------------------------------------
 STATE: dict = {}
@@ -211,23 +272,65 @@ class Headers:
         return list(self.raw.items())
 
 
-def fetch(_reactor, url, method="get", headers=None, timeout=10, max_redirects=5):
+def respond(url, method, headers, timeout, max_redirects, address):
+    """A request of url to address: recorded, answered as the case's "http" says (refused if not)."""
     STATE["fetches"].append({"url": url, "method": method, "headers": {k: list(v) for k, v in (headers or {}).items()},
-                             "timeout": timeout, "max_redirects": max_redirects})
+                             "timeout": timeout, "max_redirects": max_redirects, "address": address})
+    connect_tcp(address, 0)
     spec = STATE["http"].get(url)
     if spec is None:
         return Done(failure=Failure(errmod.ConnectionRefusedError()))
     return Done(Response(spec))
 
 
+def fetch(_reactor, url, method="get", headers=None, timeout=10, max_redirects=5):
+    """cowrie.core.download.fetch: the URL's name resolved and checked again (resolve_allowed), the
+    request sent to that answer."""
+    from urllib.parse import urlparse
+
+    host = urlparse(url).hostname or ""
+    address = resolve_allowed(host).result
+    if address is None:
+        return Done(failure=Failure(download.BlockedAddress(host)))
+    if ipaddress.ip_address(address).version == 6:
+        return Done(failure=Failure(download.UnreachableAddress(host)))
+    return respond(url, method, headers, timeout, max_redirects, address)
+
+
+class PinnedAgent:
+    """cowrie.core.download.pinned_agent: connects to its address, whatever the URL names."""
+
+    def __init__(self, address):
+        self.address = address
+
+
+def treq_request(method):
+    def request(url, agent=None, allow_redirects=True, headers=None, timeout=None, **_):
+        from urllib.parse import urlparse
+
+        if agent is None:
+            # treq's own agent: the system's resolver looks the name up
+            host = urlparse(url).hostname or ""
+            return respond(url, method, headers, timeout, 5 if allow_redirects else 0, host)
+        return respond(url, method, headers, timeout, 5 if allow_redirects else 0, agent.address)
+    return request
+
+
+module("treq").get, module("treq").head = treq_request("get"), treq_request("head")
+
+
 def resolve_cname(name, visited):
+    """The persona's DNS: the case's "dns" answer for name (a list: one answer per lookup, the last one
+    repeated, as a rebinding server gives them)."""
     STATE["lookups"].append(name)
-    return Done(STATE["dns"].get(name))
+    answer = STATE["dns"].get(name)
+    if isinstance(answer, list):
+        count = STATE["dns_asked"][name] = STATE["dns_asked"].get(name, 0) + 1
+        answer = answer[min(count, len(answer)) - 1]
+    return Done(answer)
 
 
 def resolve_allowed(name):
-    import ipaddress
-
     try:
         address = str(ipaddress.ip_address(name))
     except ValueError:
@@ -239,8 +342,79 @@ def communication_allowed(name):
     return Done(resolve_allowed(name).result is not None)
 
 
-def _is_blocked(ip):
-    return not ip.is_global
+# cowrie/core/network.py of the image (ghcr.io/telekom-security/cowrie:24.04.2), verbatim: the blocklist
+#   resolve_allowed and communication_allowed apply
+BLOCKED_IPS = [
+    "0.0.0.0/8",  # Current IP range 0.0.0.0 - 10.255.255.255
+    "10.0.0.0/8",  # Private IP range 10.0.0.0 - 10.255.255.255
+    "172.16.0.0/12",  # Private IP range 172.16.0.0 - 172.31.255.255
+    "192.168.0.0/16",  # Private IP range 192.168.0.0 - 192.168.255.255
+    "169.254.0.0/16",  # Cloud metadata IP (usually for AWS, GCP, etc.)
+    "100.100.100.200",  # Alibaba Cloud metadata IP
+    "127.0.0.0/8",  # Loopback addresses (localhost)
+    "0.0.0.0/8",  # This is a reserved IP range
+    "224.0.0.0/4",  # Multicast addresses
+    "240.0.0.0/4",  # Reserved addresses
+    "255.255.255.255",  # Limited broadcast address
+    "::1",  # IPv6 loopback
+    "fe80::/10",  # IPv6 link-local
+    "fc00::/7",  # IPv6 unique-local (private)
+    "ff00::/8",  # IPv6 multicast
+]
+
+# NAT64 well-known prefix (RFC 6052): 64:ff9b::/96 embeds an IPv4 address in
+# its low 32 bits, just like an IPv4-mapped address does.
+_NAT64_PREFIX = ipaddress.ip_network("64:ff9b::/96")
+
+# IPv4-compatible prefix (::a.b.c.d, deprecated by RFC 4291): also embeds an
+# IPv4 address in its low 32 bits. ::/96 also contains ::1 and ::, whose
+# embedded 0.0.0.x values are non-global and stay blocked.
+_IPV4_COMPATIBLE_PREFIX = ipaddress.ip_network("::/96")
+
+
+def _embedded_ipv4(
+    ip: ipaddress.IPv6Address,
+) -> ipaddress.IPv4Address | None:
+    """
+    Return the IPv4 address embedded in an IPv6 address, or None if there is
+    none. Covers IPv4-mapped (``::ffff:0:0/96``), 6to4 (``2002::/16``), NAT64
+    (``64:ff9b::/96``), and IPv4-compatible (``::/96``) forms, all of which can
+    reach an IPv4 target through an IPv6 wrapper.
+    """
+    if ip.ipv4_mapped is not None:
+        return ip.ipv4_mapped
+    if ip.sixtofour is not None:
+        return ip.sixtofour
+    if ip in _NAT64_PREFIX or ip in _IPV4_COMPATIBLE_PREFIX:
+        return ipaddress.IPv4Address(int(ip) & 0xFFFFFFFF)
+    return None
+
+
+def _is_blocked(ip: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
+    """
+    Return True if the address must not be contacted. An IPv6 address that
+    embeds an IPv4 address is also checked as that IPv4 address, so a private
+    or metadata target cannot be reached through an IPv6 wrapper.
+
+    A candidate is blocked if it is not globally routable or if it falls
+    within an explicit blocked range. The explicit list stays authoritative
+    for targets that are not globally routable yet not covered by is_global
+    (e.g. the Alibaba metadata IP) and guards against interpreter versions
+    whose is_global misclassifies IPv4-mapped addresses.
+    """
+    candidates: list[ipaddress.IPv4Address | ipaddress.IPv6Address] = [ip]
+    if isinstance(ip, ipaddress.IPv6Address):
+        embedded = _embedded_ipv4(ip)
+        if embedded is not None:
+            candidates.append(embedded)
+
+    for candidate in candidates:
+        if not candidate.is_global:
+            return True
+        for blocked in BLOCKED_IPS:
+            if candidate in ipaddress.ip_network(blocked, strict=False):
+                return True
+    return False
 
 
 network = module("cowrie.core.network")
@@ -266,6 +440,7 @@ download = module("cowrie.core.download")
 download.BlockedAddress = type("BlockedAddress", (Exception,), {})
 download.UnreachableAddress = type("UnreachableAddress", (Exception,), {})
 download.fetch = fetch
+download.pinned_agent = lambda _reactor, address, policy=None: PinnedAgent(address)
 
 
 class Limiter:
@@ -617,7 +792,8 @@ PERSONAS = {"ubuntu-24.04": ("ubuntu", "24.04"), "ubuntu-22.04": ("ubuntu", "22.
 def run(case):
     global CLOCK
     CLOCK = Clock()
-    STATE.update(out=[], code=None, events=[], lookups=[], fetches=[], typeahead=[], exec=[],
+    STATE.update(out=[], code=None, events=[], lookups=[], fetches=[], connects=[], dns_asked={}, typeahead=[],
+                 exec=[],
                  dns=case.get("dns", {}), http=case.get("http", {}), machine=case.get("machine", "x86_64"),
                  config=dict(case.get("config", {})), limit_ok=case.get("limit_ok", True),
                  now=case.get("now", time.time()))
@@ -660,6 +836,32 @@ def run(case):
         stdin=case["stdin"].encode() if "stdin" in case else None, events=Events(), password_input=False,
         user=types.SimpleNamespace(username="root", uid=0, gid=0, windowSize=(24, case.get("columns", 80))))
     protocol.getCommand = lambda name, paths, cwd: TABLE.get(name)
+    if case.get("probe") == "classify":
+        # where the patch layer sends a connection to each of "addresses" (qpot_classify) and whether the
+        #   image's own blocklist (resolve_allowed's) blocks it, as JSON on stdout
+        table = {}
+        for text in case.get("addresses", []):
+            try:
+                upstream = _is_blocked(ipaddress.ip_address(text))
+            except ValueError:
+                upstream = None
+            table[text] = {"kind": coreutils.qpot_classify(text), "upstream_blocked": upstream}
+        return {"stdout": json.dumps(table), "stderr": "", "code": 0, "seconds": 0, "events": [], "lookups": [],
+                "fetches": [], "files": {}, "cpu": 0, "typeahead": [], "exec": [], "exited": True,
+                "password_input": False}
+    if case.get("probe") == "qpot_fetch":
+        # qpot_fetch(url, address) for each of "fetch_calls": the exception it raises, or the address the
+        #   request went to
+        outcomes = []
+        for url, address in case.get("fetch_calls", []):
+            try:
+                coreutils.qpot_fetch(url, address)
+                outcomes.append("sent " + STATE["fetches"][-1]["address"])
+            except Exception as err:  # noqa: BLE001 - the outcome under test
+                outcomes.append(type(err).__name__)
+        return {"stdout": json.dumps(outcomes), "stderr": "", "code": 0, "seconds": 0, "events": [], "lookups": STATE["lookups"],
+                "fetches": STATE["fetches"], "connects": STATE["connects"], "files": {}, "cpu": 0, "typeahead": [],
+                "exec": [], "exited": True, "password_input": False}
     if case.get("probe") == "bash_variables":
         # what protocol.py sets in the login shell: its environment afterwards, as JSON on stdout
         shell = types.SimpleNamespace(protocol=protocol, environ=dict(protocol.environ))
@@ -705,7 +907,8 @@ def run(case):
 
     walk(fs.root, "")
     return {"stdout": out, "stderr": err, "code": STATE["code"], "seconds": CLOCK.now, "events": STATE["events"],
-            "lookups": STATE["lookups"], "fetches": STATE["fetches"], "files": listing, "cpu": cpu,
+            "lookups": STATE["lookups"], "fetches": STATE["fetches"], "connects": STATE["connects"], "files": listing,
+            "cpu": cpu,
             "peak": peak, "typeahead": STATE["typeahead"], "exec": STATE["exec"], "exited": cmd.exited,
             "password_input": protocol.password_input}
 

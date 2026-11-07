@@ -27,7 +27,6 @@ from cowrie.core.download import (
     BlockedAddress,
     UnreachableAddress,
     capture_download,
-    fetch,
     outbound_rate_limiter,
     report_download_failure,
 )
@@ -341,6 +340,8 @@ class Command_wget(HoneyPotCommand):
         #   address); a name is looked up once, as before, and the download (or not) is upstream's
         if self.qpot_busybox():
             allowed = yield communication_allowed(self.host)
+            # the address T-Pot's check resolved and let through (resolve_allowed): the one connected to
+            self.qpot_checked = (self.tpot_ip or "") if allowed else ""
         else:
             from cowrie.commands.coreutils import qpot_classify, qpot_route
             from cowrie.core.network import resolve_cname
@@ -357,6 +358,8 @@ class Command_wget(HoneyPotCommand):
                 self.qpot_unreachable(url, kind, address if named else None)
                 return
             allowed = kind == "network"
+            # QPot: the download goes to this address, the one checked (see qpot_fetch)
+            self.qpot_checked = address or ""
         if not allowed:
             self._log.info("Attempt to access blocked network address")
             if not self.quiet:
@@ -416,6 +419,9 @@ class Command_wget(HoneyPotCommand):
         except Exception:
             self.error(failure.Failure())
             return
+
+    # QPot: the address the download connects to, the one start() checked
+    qpot_checked: str = ""
 
     def qpot_busybox(self) -> bool:
         """Whether this is BusyBox's wget (Command_tpot_wget on a persona with BusyBox's)."""
@@ -491,7 +497,10 @@ class Command_wget(HoneyPotCommand):
             "User-Agent": [f"Wget/{self.wget_version} (linux-gnu)"]
         }
 
-        return fetch(reactor, url, headers=headers, timeout=10)
+        # QPot: to the address start() checked, never to a second lookup of the name (qpot_fetch)
+        from cowrie.commands.coreutils import qpot_fetch
+
+        return qpot_fetch(url, self.qpot_checked, headers=headers, timeout=10)
 
     def ftpDownload(self, urldata: parse.ParseResult) -> Any:
         """
@@ -518,8 +527,13 @@ class Command_wget(HoneyPotCommand):
             self.exit(1)
             return None
 
-        ip = is_ip_address(self.host)
-        if ip is not None and ip.version == 6:
+        # QPot: the address start() checked, not the name (connectTCP would look it up again)
+        from cowrie.commands.coreutils import qpot_classify
+
+        ip = is_ip_address(self.qpot_checked)
+        if ip is None or qpot_classify(str(ip)) != "network":
+            raise BlockedAddress(self.host)
+        if ip.version == 6:
             # The outbound source address is an IPv4 one, so an IPv6 server is
             # as unreachable here as it is on the HTTP path.
             self.errorWrite("failed: Network is unreachable.\n")
@@ -530,7 +544,7 @@ class Command_wget(HoneyPotCommand):
 
         creator = ClientCreator(reactor, FTPClient, username, password, passive=True)
         deferred = creator.connectTCP(
-            self.host,
+            str(ip),
             self.port,
             timeout=30,
             bindAddress=(outbound_bind_address(), 0),
@@ -543,6 +557,18 @@ class Command_wget(HoneyPotCommand):
         Handle established FTP connection
         """
         self.ftp_client = client
+        # QPot: the data connection goes to the control connection's checked address on the port PASV
+        #   names, never to the host PASV names (Twisted's client connected to any address the server
+        #   gave, from no bound address); as curl does by default (--ftp-skip-pasv-ip)
+        address = str(ip_address) if (ip_address := is_ip_address(self.qpot_checked)) is not None else None
+
+        def pinned_data_connection(_host, port, factory):
+            if address is None:
+                raise BlockedAddress(self.host)
+            return reactor.connectTCP(address, port, factory, timeout=30,
+                                      bindAddress=(outbound_bind_address(), 0))
+
+        client.connectFactory = pinned_data_connection
 
         if self.ftp_remote_dir and self.ftp_remote_dir not in (".", "./"):
             d: defer.Deferred[Any] = client.cwd(self.ftp_remote_dir)

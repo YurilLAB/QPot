@@ -1,6 +1,8 @@
 package instance
 
 import (
+	"encoding/json"
+	"fmt"
 	"math/rand"
 	"net"
 	"regexp"
@@ -391,4 +393,174 @@ func TestCurlWgetNoNewEgress(t *testing.T) {
 		t.Errorf("one command line took %.3f s of CPU", worst)
 	}
 	t.Logf("300 command lines in %v, worst %.4f s CPU", elapsed, worst)
+}
+
+// egressCase is a curl or wget command line whose names the persona's
+// /etc/hosts and its DNS answer differently: evil.example is public in
+// /etc/hosts and link-local in the DNS; rebind.example's DNS answers public,
+// then link-local (a rebinding server).
+func egressCase(argv ...string) stubCase {
+	c := curlCase(argv...)
+	c["files"].(map[string]any)["/etc/hosts"] = "127.0.0.1 localhost\n93.184.215.20 evil.example\n"
+	c["dns"] = map[string]any{"evil.example": "169.254.169.254", "rebind.example": []string{"93.184.215.21", "169.254.169.254"},
+		"example.com": "93.184.215.14"}
+	page := map[string]any{"code": 200, "phrase": "OK", "body": "hi\n"}
+	c["http"] = map[string]any{"http://evil.example/x": page, "http://rebind.example/x": page, "http://example.com/x": page}
+	return c
+}
+
+// busybox makes a case BusyBox's wget (an ash persona).
+func busybox(c stubCase) stubCase {
+	c["config"] = map[string]any{"shell.wget_style": "busybox", "shell.text_version": "1.36.1", "shell.not_found_style": "ash"}
+	return c
+}
+
+// TestCurlWgetConnectOnlyToChecked: curl and wget connect to the very
+// address they checked, never to what a second lookup of the name answers:
+// a name of /etc/hosts goes to its address there and is never looked up; a
+// name the DNS answers is looked up once and connected to at that answer,
+// whatever a later lookup says; FTP's control and data connections both go
+// there, whatever host the server's PASV answer names.
+func TestCurlWgetConnectOnlyToChecked(t *testing.T) {
+	cases := []struct {
+		c       stubCase
+		address string
+		lookups int
+		ports   []int
+	}{
+		{egressCase("curl", "-s", "http://evil.example/x"), "93.184.215.20", 0, []int{0}},
+		{egressCase("curl", "-sI", "http://evil.example/x"), "93.184.215.20", 0, []int{0}},
+		{egressCase("wget", "-q", "-O-", "http://evil.example/x"), "93.184.215.20", 0, []int{0}},
+		{egressCase("curl", "-s", "http://rebind.example/x"), "93.184.215.21", 1, []int{0}},
+		{egressCase("wget", "-q", "-O-", "http://rebind.example/x"), "93.184.215.21", 1, []int{0}},
+		{busybox(egressCase("wget", "-O-", "http://rebind.example/x")), "93.184.215.21", 1, []int{0}},
+		{egressCase("curl", "-s", "http://example.com/x"), "93.184.215.14", 1, []int{0}},
+		{egressCase("wget", "ftp://evil.example/pub/f"), "93.184.215.20", 0, []int{21, 2121}},
+		{egressCase("wget", "ftp://rebind.example/pub/f"), "93.184.215.21", 1, []int{21, 2121}},
+		{busybox(egressCase("wget", "ftp://rebind.example/f")), "93.184.215.21", 1, []int{21, 2121}},
+	}
+	var all []stubCase
+	for _, c := range cases {
+		all = append(all, c.c)
+	}
+	got := runCowrieStub(t, all)
+	for i, c := range cases {
+		r, label := got[i], argvLabel(c.c)
+		if len(r.Lookups) != c.lookups {
+			t.Errorf("%s: looked up %v, want %d lookup(s)", label, r.Lookups, c.lookups)
+		}
+		var ports []int
+		for _, conn := range r.Connects {
+			if conn.Host != c.address {
+				t.Errorf("%s: connected to %s:%d, want only %s", label, conn.Host, conn.Port, c.address)
+			}
+			ports = append(ports, conn.Port)
+		}
+		if fmt.Sprint(ports) != fmt.Sprint(c.ports) {
+			t.Errorf("%s: connections on ports %v, want %v (out %q err %q)", label, ports, c.ports, r.Stdout, r.Stderr)
+		}
+		for _, f := range r.Fetches {
+			if f.Address != c.address || f.MaxRedirects != 0 {
+				t.Errorf("%s: fetch %+v", label, f)
+			}
+		}
+		if !r.Exited {
+			t.Errorf("%s: never exited", label)
+		}
+	}
+}
+
+// TestClassifyCoversCowriesBlocklist: an address the patch layer connects to
+// ("network") is one the image's own blocklist (resolve_allowed's, the stub's
+// verbatim copy) lets through, for the metadata, private, CGNAT, loopback and
+// IPv6 wrapper addresses and thousands of random ones; Azure's WireServer is
+// blocked as well.
+func TestClassifyCoversCowriesBlocklist(t *testing.T) {
+	want := map[string]string{
+		"169.254.169.254": "timeout", "169.254.170.2": "timeout", "100.100.100.200": "timeout", "168.63.129.16": "timeout",
+		"::ffff:168.63.129.16": "timeout", "fd00:ec2::254": "timeout", "fe80::a9fe:a9fe": "timeout",
+		"::ffff:169.254.169.254": "timeout", "::ffff:10.0.0.1": "timeout", "64:ff9b::a9fe:a9fe": "timeout",
+		"2002:a9fe:a9fe::1": "timeout", "::a9fe:a9fe": "timeout", "10.1.2.3": "timeout", "172.17.0.1": "timeout",
+		"192.168.1.1": "timeout", "100.64.0.1": "timeout", "100.127.255.254": "timeout", "224.0.0.251": "timeout",
+		"255.255.255.255": "timeout", "240.0.0.1": "timeout", "192.0.2.1": "timeout", "198.18.0.1": "timeout",
+		"ff02::1": "timeout", "127.0.0.1": "refused", "127.1.2.3": "refused", "::1": "refused", "0.0.0.0": "refused",
+		"::": "refused", "93.184.215.14": "network", "8.8.8.8": "network", "1.1.1.1": "network",
+		"2606:4700:4700::1111": "network", "168.63.129.17": "network",
+	}
+	rng := rand.New(rand.NewSource(5))
+	var addresses []string
+	for a := range want {
+		addresses = append(addresses, a)
+	}
+	addresses = append(addresses, "::ffff:127.0.0.1")
+	for i := 0; i < 3000; i++ {
+		b := make([]byte, 16)
+		for j := range b {
+			b[j] = byte(rng.Intn(256))
+		}
+		v4 := net.IP(b[:4]).String()
+		switch i % 4 {
+		case 0:
+			addresses = append(addresses, v4)
+		case 1:
+			addresses = append(addresses, "::ffff:"+v4)
+		case 2:
+			addresses = append(addresses, net.IP(b).String())
+		default:
+			addresses = append(addresses, "64:ff9b::"+v4)
+		}
+	}
+	r := runCowrieStub(t, []stubCase{{"probe": "classify", "addresses": addresses, "persona": "debian-13"}})[0]
+	var table map[string]struct {
+		Kind            string `json:"kind"`
+		UpstreamBlocked *bool  `json:"upstream_blocked"`
+	}
+	if err := json.Unmarshal([]byte(r.Stdout), &table); err != nil {
+		t.Fatal(err)
+	}
+	network := 0
+	for _, a := range addresses {
+		e, ok := table[a]
+		if !ok || e.UpstreamBlocked == nil {
+			t.Fatalf("%s: no answer", a)
+		}
+		if w, ok := want[a]; ok && e.Kind != w {
+			t.Errorf("%s: %s, want %s", a, e.Kind, w)
+		}
+		if e.Kind == "network" {
+			network++
+			if *e.UpstreamBlocked {
+				t.Errorf("%s: connected to, though Cowrie's blocklist blocks it", a)
+			}
+		}
+		if *e.UpstreamBlocked && e.Kind == "network" || e.Kind == "" {
+			t.Errorf("%s: %+v", a, e)
+		}
+	}
+	if network < 500 {
+		t.Errorf("only %d of %d addresses public: the random ones are not random", network, len(addresses))
+	}
+}
+
+// TestFetchChecksItsAddress: qpot_fetch sends nothing to an address the
+// honeypot does not contact, whatever its caller passes, and nothing to IPv6
+// (the outbound address is an IPv4 one); a public address gets the request,
+// to that address and not to the URL's name.
+func TestFetchChecksItsAddress(t *testing.T) {
+	calls := [][]string{
+		{"http://evil.example/x", "169.254.169.254"}, {"http://evil.example/x", "127.0.0.1"},
+		{"http://evil.example/x", "::ffff:10.0.0.1"}, {"http://evil.example/x", "168.63.129.16"},
+		{"http://evil.example/x", "evil.example"}, {"http://evil.example/x", ""},
+		{"http://evil.example/x", "2606:4700:4700::1111"}, {"https://evil.example/x", "93.184.215.20"},
+	}
+	r := runCowrieStub(t, []stubCase{{"probe": "qpot_fetch", "fetch_calls": calls, "persona": "debian-13"}})[0]
+	var outcomes []string
+	if err := json.Unmarshal([]byte(r.Stdout), &outcomes); err != nil {
+		t.Fatal(err)
+	}
+	want := "BlockedAddress BlockedAddress BlockedAddress BlockedAddress BlockedAddress BlockedAddress " +
+		"UnreachableAddress sent 93.184.215.20"
+	if strings.Join(outcomes, " ") != want || len(r.Lookups) != 0 || len(r.Connects) != 1 || r.Connects[0].Host != "93.184.215.20" {
+		t.Errorf("qpot_fetch: %v, lookups %v, connects %v", outcomes, r.Lookups, r.Connects)
+	}
 }

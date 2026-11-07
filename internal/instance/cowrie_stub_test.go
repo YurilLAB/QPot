@@ -28,7 +28,12 @@ type stubResult struct {
 		Headers      map[string][]string `json:"headers"`
 		Timeout      float64             `json:"timeout"`
 		MaxRedirects int                 `json:"max_redirects"`
+		Address      string              `json:"address"`
 	} `json:"fetches"`
+	Connects []struct {
+		Host string `json:"host"`
+		Port int    `json:"port"`
+	} `json:"connects"`
 	Files map[string]struct {
 		Size  int64   `json:"size"`
 		Mode  int     `json:"mode"`

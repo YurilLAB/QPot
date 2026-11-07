@@ -101,7 +101,11 @@ const cowriePatchVersion = "24.04.2"
 // curl's options and said "Could not resolve host" for an address. A refused
 // address is refused, an internal or private one times out as the kernel
 // gives up, and nothing reaches the network that did not before: one name
-// lookup, one GET or HEAD, no redirect followed, retries simulated.
+// lookup (none for a name of /etc/hosts), one GET or HEAD, no redirect
+// followed, retries simulated. Every connection goes to the address that was
+// checked (coreutils.py's qpot_fetch, and FTP's control and data connections),
+// never to a second lookup of the name: upstream's fetch looked the name up
+// again, and Twisted's FTP client connected to any host a PASV answer named.
 var (
 	//go:embed honeypotfiles/cowrie/protocol.py
 	cowrieProtocolPy []byte

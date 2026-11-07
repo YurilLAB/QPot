@@ -13,7 +13,7 @@ from http.client import responses
 from urllib import parse
 
 import treq
-from twisted.internet import error, reactor
+from twisted.internet import error
 from twisted.internet.defer import inlineCallbacks
 from twisted.logger import Logger
 from twisted.python import failure
@@ -25,7 +25,6 @@ from cowrie.core.download import (
     BlockedAddress,
     UnreachableAddress,
     capture_download,
-    fetch,
     outbound_rate_limiter,
     report_download_failure,
 )
@@ -571,6 +570,7 @@ class Command_curl(HoneyPotCommand):
     qpot_values: dict = {}
     qpot_bad_outfile: bool = False
     qpot_started: float = 0.0
+    qpot_checked: str = ""
 
     def qpot_version(self) -> tuple:
         from cowrie.commands.coreutils import qpot_os_release
@@ -702,6 +702,8 @@ class Command_curl(HoneyPotCommand):
             self.qpot_fail("refused" if kind == "refused" else "connect")
             return
         self.qpot_values.update(remote_ip=address, remote_port=self.port)
+        # QPot: the request goes to this address, the one checked (see qpot_fetch)
+        self.qpot_checked = address
 
         self.artifact = Artifact("curl-download")
 
@@ -874,15 +876,17 @@ class Command_curl(HoneyPotCommand):
 
         # curl reports a redirect rather than following it unless -L is given,
         # which cowrie does not implement, so stop at the first response.
-        # QPot: -m shortens the wait (never lengthens it)
+        # QPot: -m shortens the wait (never lengthens it); the connection goes to the address start()
+        #   checked, never to a second lookup of the name (qpot_fetch)
+        from cowrie.commands.coreutils import qpot_fetch
+
         limit = self.qpot_opts.get("max-time")
-        return fetch(
-            reactor,
+        return qpot_fetch(
             url,
+            self.qpot_checked,
             method="head" if self.head_request else "get",
             headers=headers,
             timeout=max(1, min(10, int(limit))) if limit else 10,
-            max_redirects=0,
         )
 
     def handle_CTRL_C(self) -> None:
