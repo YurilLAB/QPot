@@ -811,7 +811,8 @@ func Remove(ctx context.Context, name string) error {
 	// auto-creates a default config (and dir), so without this guard
 	// `remove <typo>` would create-then-delete an empty instance and report
 	// success, masking the typo.
-	if _, err := os.Stat(config.Default(name).DataPath); os.IsNotExist(err) {
+	dir := config.Default(name).DataPath
+	if _, err := os.Stat(dir); os.IsNotExist(err) {
 		return fmt.Errorf("instance %q does not exist", name)
 	}
 
@@ -832,13 +833,29 @@ func Remove(ctx context.Context, name string) error {
 		}
 	}
 
-	// Remove data directory
-	if err := os.RemoveAll(cfg.DataPath); err != nil {
+	// Remove the instance's own directory, not the data_path its config.yaml
+	// names: that comes from a file a hand edit or a restored backup can point
+	// anywhere (another user's instance, a home folder), and deleting it took
+	// a directory that was never the instance's while leaving the instance
+	// behind. A data_path elsewhere is left in place.
+	if !samePath(cfg.DataPath, dir) {
+		slog.Warn("The instance's data_path is outside its directory; left in place",
+			"data_path", cfg.DataPath, "instance_dir", dir)
+	}
+	if err := os.RemoveAll(dir); err != nil {
 		return fmt.Errorf("failed to remove data directory: %w", err)
 	}
 
 	slog.Info("Instance removed", "name", name)
 	return nil
+}
+
+// samePath reports whether a and b name the same directory once cleaned and
+// made absolute.
+func samePath(a, b string) bool {
+	aa, err1 := filepath.Abs(a)
+	bb, err2 := filepath.Abs(b)
+	return err1 == nil && err2 == nil && aa == bb
 }
 
 // ServiceState is one compose service's container state, e.g. State "running"
