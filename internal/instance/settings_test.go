@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -17,6 +18,7 @@ type fakeRunner struct {
 	startErr  error
 	stopErr   error
 	started   []string
+	recreated []string
 	stopped   []string
 	restarted []string
 }
@@ -24,6 +26,10 @@ type fakeRunner struct {
 func (f *fakeRunner) IsRunning(context.Context) bool { return f.running }
 func (f *fakeRunner) StartHoneypot(_ context.Context, name string) error {
 	f.started = append(f.started, name)
+	return f.startErr
+}
+func (f *fakeRunner) RecreateHoneypot(_ context.Context, name string) error {
+	f.recreated = append(f.recreated, name)
 	return f.startErr
 }
 func (f *fakeRunner) StopHoneypot(_ context.Context, name string) error {
@@ -61,7 +67,8 @@ func TestValidateSettingsRefuses(t *testing.T) {
 		{"cowrie", ParseSettingArgs([]string{"persona=rhel-9\nx"}), ErrInvalidSetting, "persona: value must be a single line"},
 		{"cowrie", ParseSettingArgs([]string{"persona=<script>alert(1)</script>"}), ErrInvalidSetting, "persona must be one of"},
 		{"cowrie", ParseSettingArgs([]string{"bait=maybe"}), ErrInvalidSetting, "bait must be one of: on, off"},
-		{"cowrie", ParseSettingArgs([]string{"persona_rotation=366"}), ErrInvalidSetting, "persona_rotation must be a number of days"},
+		{"cowrie", ParseSettingArgs([]string{"persona_rotation=366"}), ErrInvalidSetting, "persona_rotation must be a whole number of days"},
+		{"cowrie", ParseSettingArgs([]string{"persona_rotation=1.5"}), ErrInvalidSetting, "persona_rotation must be a whole number of days"},
 		{"cowrie", ParseSettingArgs([]string{"persona_rotation= 30"}), ErrInvalidSetting, "persona_rotation"},
 		{"conpot", ParseSettingArgs([]string{"template=default"}), ErrInvalidSetting, "template must be one of"},
 		{"ssh-proxy", ParseSettingArgs([]string{"backends=17"}), ErrInvalidSetting, "backends must be a whole number from 1 to 16"},
@@ -144,7 +151,7 @@ func TestApplySettings(t *testing.T) {
 		cfg := settingsTestConfig(t, "apply-off")
 		r := &fakeRunner{running: true}
 		res, err := ApplySettings(ctx, cfg, "conpot", ParseSettingArgs([]string{"template=iccp"}), r)
-		if err != nil || !res.Saved || res.Enabled || res.Recreated || len(r.started) != 0 {
+		if err != nil || !res.Saved || res.Enabled || res.Recreated || len(r.started)+len(r.recreated) != 0 {
 			t.Fatalf("res %+v err %v started %v", res, err, r.started)
 		}
 		data, _ := os.ReadFile(cfg.ConfigPath)
@@ -158,8 +165,10 @@ func TestApplySettings(t *testing.T) {
 		cfg.EnableHoneypot("cowrie")
 		r := &fakeRunner{running: true}
 		res, err := ApplySettings(ctx, cfg, "cowrie", ParseSettingArgs([]string{"bait=off"}), r)
-		if err != nil || !res.Recreated || !res.InstanceRunning || len(r.started) != 1 || r.started[0] != "cowrie" {
-			t.Fatalf("res %+v err %v started %v", res, err, r.started)
+		if err != nil || !res.Recreated || !res.InstanceRunning || !slices.Equal(r.recreated, []string{"cowrie"}) || len(r.started) != 0 {
+			// Recreated, not just started: bait lives in a file Cowrie reads at
+			// start, and `compose up -d` kept the old container serving it.
+			t.Fatalf("res %+v err %v recreated %v started %v", res, err, r.recreated, r.started)
 		}
 	})
 
@@ -168,7 +177,7 @@ func TestApplySettings(t *testing.T) {
 		cfg.EnableHoneypot("cowrie")
 		r := &fakeRunner{}
 		res, err := ApplySettings(ctx, cfg, "cowrie", ParseSettingArgs([]string{"bait=off"}), r)
-		if err != nil || res.Recreated || res.InstanceRunning || len(r.started) != 0 {
+		if err != nil || res.Recreated || res.InstanceRunning || len(r.started)+len(r.recreated) != 0 {
 			t.Fatalf("res %+v err %v started %v", res, err, r.started)
 		}
 	})
@@ -178,7 +187,7 @@ func TestApplySettings(t *testing.T) {
 		cfg.EnableHoneypot("galah")
 		r := &fakeRunner{running: true}
 		res, err := ApplySettings(ctx, cfg, "galah", ParseSettingArgs([]string{"llm_provider=ollama"}), r)
-		if err != nil || len(res.Missing) != 1 || res.Missing[0] != "llm_model" || len(r.started) != 0 {
+		if err != nil || len(res.Missing) != 1 || res.Missing[0] != "llm_model" || len(r.started)+len(r.recreated) != 0 {
 			t.Fatalf("res %+v err %v started %v", res, err, r.started)
 		}
 	})

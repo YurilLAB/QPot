@@ -822,7 +822,7 @@ func CheckSetting(name, key, value string) error {
 	}
 	if name == "cowrie" && key == "persona_rotation" {
 		if _, ok := parsePersonaRotation(value); !ok {
-			return fmt.Errorf("%s: %s must be a number of days from 0 to %d", name, key, cowriePersonaMaxRotation)
+			return fmt.Errorf("%s: %s must be a whole number of days from 0 to %d", name, key, cowriePersonaMaxRotation)
 		}
 		return nil
 	}

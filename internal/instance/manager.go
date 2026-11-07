@@ -451,6 +451,20 @@ func (m *Manager) isConfiguredHoneypot(name string) bool {
 }
 
 func (m *Manager) StartHoneypot(ctx context.Context, name string) error {
+	return m.startHoneypot(ctx, name, false)
+}
+
+// RecreateHoneypot runs a honeypot with changed settings: as StartHoneypot,
+// but its container (and its companions') is always recreated. Some settings
+// live only in files the honeypot reads when it starts, such as Cowrie's bait
+// plan: they leave the compose service as it was, and `compose up -d` alone
+// kept the old container serving the old files. Its dependencies (database,
+// egress guard) are left running as they are.
+func (m *Manager) RecreateHoneypot(ctx context.Context, name string) error {
+	return m.startHoneypot(ctx, name, true)
+}
+
+func (m *Manager) startHoneypot(ctx context.Context, name string, recreate bool) error {
 	if !m.isConfiguredHoneypot(name) {
 		return fmt.Errorf("unknown honeypot: %q", name)
 	}
@@ -472,7 +486,11 @@ func (m *Manager) StartHoneypot(ctx context.Context, name string) error {
 	// or the broker has nothing to forward to. The service names are generated
 	// by us (fixed "ssh-backend-N" pattern), never user input, so appending them
 	// to the argv is injection-safe.
-	args := append([]string{"compose", "-f", composeFile, "up", "-d", name}, m.companionServices(name)...)
+	args := []string{"compose", "-f", composeFile, "up", "-d"}
+	if recreate {
+		args = append(args, "--force-recreate", "--no-deps")
+	}
+	args = append(append(args, name), m.companionServices(name)...)
 	cmd := exec.CommandContext(ctx, "docker", args...)
 	cmd.Dir = m.config.DataPath
 

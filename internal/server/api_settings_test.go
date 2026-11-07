@@ -10,6 +10,7 @@ import (
 	"net/netip"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -25,6 +26,7 @@ type fakeHPRunner struct {
 	running   bool
 	startErr  error
 	started   []string
+	recreated []string
 	stopped   []string
 	restarted []string
 	// cfgs are the configs the server asked for a runner for.
@@ -49,6 +51,12 @@ func (f *fakeHPRunner) StartHoneypot(_ context.Context, name string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.started = append(f.started, name)
+	return f.startErr
+}
+func (f *fakeHPRunner) RecreateHoneypot(_ context.Context, name string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.recreated = append(f.recreated, name)
 	return f.startErr
 }
 func (f *fakeHPRunner) StopHoneypot(_ context.Context, name string) error {
@@ -326,16 +334,16 @@ func TestSettingsPutRecreates(t *testing.T) {
 	rec := a.do(http.MethodPut, "/api/honeypots/settings", `{"name":"cowrie","settings":{"bait":"off"}}`)
 	var resp settingsChangeResponse
 	if rec.Code != http.StatusOK || json.Unmarshal(rec.Body.Bytes(), &resp) != nil || resp.Recreated || resp.InstanceRunning ||
-		!strings.Contains(resp.Message, "not running") || len(a.runner.started) != 0 {
-		t.Fatalf("stopped: %d %s started %v", rec.Code, rec.Body.String(), a.runner.started)
+		!strings.Contains(resp.Message, "not running") || len(a.runner.started)+len(a.runner.recreated) != 0 {
+		t.Fatalf("stopped: %d %s started %v recreated %v", rec.Code, rec.Body.String(), a.runner.started, a.runner.recreated)
 	}
 
 	// Running: recreated, through a manager for the config just saved.
 	a.runner.running = true
 	rec = a.do(http.MethodPut, "/api/honeypots/settings", `{"name":"cowrie","settings":{"bait":"on"}}`)
 	if rec.Code != http.StatusOK || json.Unmarshal(rec.Body.Bytes(), &resp) != nil || !resp.Recreated ||
-		len(a.runner.started) != 1 || a.runner.started[0] != "cowrie" {
-		t.Fatalf("running: %d %s started %v", rec.Code, rec.Body.String(), a.runner.started)
+		!slices.Equal(a.runner.recreated, []string{"cowrie"}) || len(a.runner.started) != 0 {
+		t.Fatalf("running: %d %s recreated %v started %v", rec.Code, rec.Body.String(), a.runner.recreated, a.runner.started)
 	}
 	last := a.runner.cfgs[len(a.runner.cfgs)-1]
 	if hp, _ := last.GetHoneypotConfig("cowrie"); hp.CustomConfig["bait"] != "on" || last == a.s.config {
@@ -400,7 +408,7 @@ func TestSettingsPutRefusesHostileInput(t *testing.T) {
 			}
 		}
 	}
-	if !bytes.Equal(before, a.configFile(t)) || len(a.runner.started) != 0 {
+	if !bytes.Equal(before, a.configFile(t)) || len(a.runner.started)+len(a.runner.recreated) != 0 {
 		t.Fatal("a refused PUT changed the config or touched the containers")
 	}
 }

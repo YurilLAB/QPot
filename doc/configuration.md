@@ -53,8 +53,9 @@ qpot honeypot set conpot template=plc_modbus
 ```
 
 Unknown keys and values outside their allowed range are refused with a plain
-explanation. The dashboard's settings dialog offers the same settings, with
-the allowed values listed.
+explanation. A running honeypot is then recreated in a new container, so the
+change takes effect at once. The dashboard's settings dialog offers the same
+settings, with the allowed values listed.
 
 ## Other sections
 

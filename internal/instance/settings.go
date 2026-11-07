@@ -76,6 +76,9 @@ func ParseSettingArgs(args []string) []SettingChange {
 type HoneypotRunner interface {
 	IsRunning(ctx context.Context) bool
 	StartHoneypot(ctx context.Context, name string) error
+	// RecreateHoneypot starts the honeypot in a new container, so settings it
+	// reads only at start (files, not the compose service) take effect.
+	RecreateHoneypot(ctx context.Context, name string) error
 	StopHoneypot(ctx context.Context, name string) error
 	RestartHoneypot(ctx context.Context, name string) error
 }
@@ -176,7 +179,7 @@ func ApplySettings(ctx context.Context, cfg *config.Config, name string, changes
 		return res, nil
 	}
 	res.InstanceRunning = true
-	if err := runner.StartHoneypot(ctx, name); err != nil {
+	if err := runner.RecreateHoneypot(ctx, name); err != nil {
 		return res, &SettingsError{Kind: ErrRecreateFailed, Msg: fmt.Sprintf("settings saved, but %s did not restart: %v", name, err), Err: err}
 	}
 	res.Recreated = true

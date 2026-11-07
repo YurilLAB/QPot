@@ -57,8 +57,8 @@ func TestSettingsPutEndpointNeedsKeyAgain(t *testing.T) {
 			t.Fatalf("refusal carries the key: %s", rec.Body.String())
 		}
 	}
-	if len(a.runner.started) != 0 {
-		t.Fatalf("galah recreated on a refused change: %v", a.runner.started)
+	if len(a.runner.started)+len(a.runner.recreated) != 0 {
+		t.Fatalf("galah recreated on a refused change: %v %v", a.runner.started, a.runner.recreated)
 	}
 
 	// Not a change of where the key goes: the same URL, or the model alone.
