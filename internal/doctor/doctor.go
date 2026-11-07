@@ -265,16 +265,25 @@ func anyPortAccepts(ports []int) bool {
 // (it then refuses to start). Paths under /data are the instance data dir.
 // It returns the zero Check when no database is configured.
 func GeoIPCheck(cfg *config.Config) Check {
-	p := cfg.Collector.GeoIPDBPath
-	if p == "" {
+	host := GeoIPFile(cfg)
+	if host == "" {
 		return Check{}
-	}
-	host := p
-	if rest, ok := strings.CutPrefix(p, "/data/"); ok {
-		host = filepath.Join(cfg.DataPath, filepath.FromSlash(rest))
 	}
 	if _, err := os.Stat(host); err != nil {
 		return Check{"geoip database", "fail", fmt.Sprintf("%s missing (the collector cannot start); run: qpot geoip update -i %s", host, cfg.InstanceName), "QP-INST-006"}
 	}
 	return Check{Name: "geoip database", Level: "ok", Detail: filepath.Base(host)}
+}
+
+// GeoIPFile returns where on the host the instance's GeoIP database is (the
+// collector sees the data path at /data), or "" when none is configured.
+func GeoIPFile(cfg *config.Config) string {
+	p := cfg.Collector.GeoIPDBPath
+	if p == "" {
+		return ""
+	}
+	if rest, ok := strings.CutPrefix(p, "/data/"); ok {
+		return filepath.Join(cfg.DataPath, filepath.FromSlash(rest))
+	}
+	return p
 }
