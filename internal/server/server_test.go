@@ -3,9 +3,11 @@ package server
 import (
 	"encoding/json"
 	"io"
+	"io/fs"
 	"net/http"
 	"net/http/httptest"
 	"regexp"
+	"sort"
 	"strings"
 	"testing"
 
@@ -69,9 +71,9 @@ func TestStaticServesRealDashboard(t *testing.T) {
 
 	// The dashboard must wire up the credential-based auth the API enforces.
 	for _, marker := range []string{
-		"X-QPot-ID",                      // the header withQPotAuth checks
-		"localStorage.getItem('qpot_id'", // credential persisted client-side
-		"const API_BASE = '/api'",        // base path for every API call
+		"X-QPot-ID",                  // the header withQPotAuth checks
+		"'" + qpotIDStorageKey + "'", // the shared storage key (TestPagesShareTheQPotIDKey)
+		"const API_BASE = '/api'",    // base path for every API call
 	} {
 		if !strings.Contains(body, marker) {
 			t.Errorf("served dashboard missing auth/wiring marker %q (serving a stub?)", marker)
@@ -90,6 +92,100 @@ func TestStaticServesRealDashboard(t *testing.T) {
 	if len(body) < 2000 {
 		t.Errorf("served dashboard is only %d bytes; looks like a placeholder, not the real UI", len(body))
 	}
+}
+
+// qpotIDStorageKey is the browser storage key every page keeps the QPot ID
+// under, so one sign-in serves the landing page, the dashboard and the map.
+const qpotIDStorageKey = "qpot_id"
+
+// qpotIDPages are the embedded pages that sign in with the QPot ID.
+var qpotIDPages = []string{"static/dashboard.html", "static/assets/js/landing.js", "static/map/static/qpot-feed.js"}
+
+// qpotIDKeyUse is the key where a page uses it - a KEY constant or a
+// localStorage call, not a comment that names it.
+var qpotIDKeyUse = regexp.MustCompile(`(?:\bKEY\s*=\s*|localStorage\.(?:get|set|remove)Item\(\s*)'` + qpotIDStorageKey + `'`)
+
+// qpotIDPageProblems checks embedded files (path -> content): every sign-in
+// page names the shared storage key, and no .html or .js file puts the QPot
+// ID in a URL (the API takes it from the X-QPot-ID header only).
+func qpotIDPageProblems(files map[string]string) []string {
+	var problems []string
+	for _, p := range qpotIDPages {
+		body, ok := files[p]
+		if !ok {
+			problems = append(problems, p+": not embedded")
+			continue
+		}
+		if !qpotIDKeyUse.MatchString(body) {
+			problems = append(problems, p+": does not keep the QPot ID under '"+qpotIDStorageKey+"'")
+		}
+	}
+	for p, body := range files {
+		if !strings.HasSuffix(p, ".html") && !strings.HasSuffix(p, ".js") {
+			continue
+		}
+		for _, q := range []string{"?" + qpotIDStorageKey + "=", "&" + qpotIDStorageKey + "="} {
+			if strings.Contains(body, q) {
+				problems = append(problems, p+": puts the QPot ID in a URL ("+q+")")
+			}
+		}
+	}
+	sort.Strings(problems)
+	return problems
+}
+
+// embeddedPages reads every embedded .html and .js file.
+func embeddedPages(t *testing.T) map[string]string {
+	t.Helper()
+	files := map[string]string{}
+	err := fs.WalkDir(staticFS, "static", func(p string, d fs.DirEntry, err error) error {
+		if err != nil || d.IsDir() || !(strings.HasSuffix(p, ".html") || strings.HasSuffix(p, ".js")) {
+			return err
+		}
+		b, err := staticFS.ReadFile(p)
+		files[p] = string(b)
+		return err
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return files
+}
+
+// TestPagesShareTheQPotIDKey: the landing page, the dashboard and the map
+// keep the QPot ID under one storage key, so one sign-in serves all three,
+// and no page sends the ID in a URL.
+func TestPagesShareTheQPotIDKey(t *testing.T) {
+	files := embeddedPages(t)
+	for _, p := range qpotIDPageProblems(files) {
+		t.Error(p)
+	}
+
+	// Negative controls: a page that renames the key, and one that puts the
+	// ID in a query string, are both caught.
+	t.Run("controls", func(t *testing.T) {
+		for _, c := range []struct {
+			page, from, to, want string
+		}{
+			{"static/assets/js/landing.js", "'" + qpotIDStorageKey + "'", "'qpot_key'", "does not keep the QPot ID"},
+			{"static/map/static/qpot-feed.js", "'" + qpotIDStorageKey + "'", "'qpot_key'", "does not keep the QPot ID"},
+			{"static/dashboard.html", "</body>", "<a href=\"/map/?" + qpotIDStorageKey + "=x\"></a></body>", "in a URL"},
+			{"static/map/static/qpot-feed.js", "'use strict';", "'use strict'; var u = '/api/map/stream?x=1&" + qpotIDStorageKey + "=';", "in a URL"},
+		} {
+			changed := map[string]string{}
+			for k, v := range files {
+				changed[k] = v
+			}
+			if !strings.Contains(changed[c.page], c.from) {
+				t.Fatalf("%s has no %q to change", c.page, c.from)
+			}
+			changed[c.page] = strings.ReplaceAll(changed[c.page], c.from, c.to)
+			got := qpotIDPageProblems(changed)
+			if len(got) != 1 || !strings.Contains(got[0], c.page) || !strings.Contains(got[0], c.want) {
+				t.Errorf("%s changed: problems %q", c.page, got)
+			}
+		}
+	})
 }
 
 // unrouted reports whether an answer is the mux's own 404 - no route took
