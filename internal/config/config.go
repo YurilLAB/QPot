@@ -727,9 +727,17 @@ func Load(instanceName string) (*Config, error) {
 // reads what the file says now with it.
 func Parse(data []byte, configPath string) (*Config, error) {
 	instanceName := filepath.Base(filepath.Dir(configPath))
-	var cfg Config
+	// yaml.Unmarshal leaves what the file omits as it finds it, so the QPot ID
+	// check starts on: a file without qpot_id_auth (hand-written, or trimmed
+	// to the settings that matter) otherwise served the API with no
+	// credential, and with no bind_addr on every interface. A file that sets
+	// them is honoured; an empty bind address means loopback.
+	cfg := Config{WebUI: WebUIConfig{QPotIDAuth: true}}
 	if err := yaml.Unmarshal(data, &cfg); err != nil {
 		return nil, fmt.Errorf("failed to parse config file: %w", err)
+	}
+	if strings.TrimSpace(cfg.WebUI.BindAddr) == "" {
+		cfg.WebUI.BindAddr = "127.0.0.1"
 	}
 
 	// Ensure paths are set
