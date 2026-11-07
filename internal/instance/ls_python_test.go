@@ -138,9 +138,7 @@ func TestStatAgreesWithLs(t *testing.T) {
 			names = append(names, p)
 		}
 	}
-	for _, p := range []string{"/w/d00", "/w/d05", "/w/d10", "/w/d15", "/w/d20", "/w/d25", "/w/d30", "/w/d35"} {
-		names = append(names, p)
-	}
+	names = append(names, "/w/d00", "/w/d05", "/w/d10", "/w/d15", "/w/d20", "/w/d25", "/w/d30", "/w/d35")
 	st["argv"] = append(st["argv"].([]string), names...)
 	got := runCowrieStub(t, []stubCase{ls, st})
 	byName := map[string][]string{}
