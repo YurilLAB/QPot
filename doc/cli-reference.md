@@ -578,6 +578,29 @@ qpot cluster leave [flags]
 |------|-------------|
 | `-f, --force` | Skip the confirmation prompt. |
 
+The node tells every member it can reach that it left, then removes its
+`cluster.json`; a `qpot serve` still running for it stops its cluster
+membership at its next gossip round instead of carrying on. Members that got
+the leave keep the node as *left* for 30 days, so no other member's gossip can
+bring it back. A member that was offline still lists it, as failed once it
+cannot reach it.
+To come back, the node joins again and is approved like a new one; it gets a
+new node ID.
+
+### Who is trusted with membership
+
+Every admitted member holds the cluster password and the member key, and
+receives the cluster CA's key, so the cluster trusts every member with its
+membership: any member can add nodes through gossip, and nothing in a
+request proves which member sent it. Approve only nodes you control. A node's
+departure is the exception, taken only from the node itself as far as its
+address shows: a leave request counts only when it comes from the address the
+node is registered with, gossip pushed to a member never marks a node as
+left, and the only gossip that does is a node's own answer when a member
+contacts it. A node that leaves from behind NAT is refused; it has stopped,
+so the members mark it failed when they cannot reach it. Clusters created
+before the member key existed rely on the password alone.
+
 ### `qpot cluster nodes` / `qpot cluster status`
 
 Both take no flags beyond the global ones.

@@ -3,6 +3,7 @@ package cluster
 
 import (
 	"bytes"
+	"context"
 	"crypto/rand"
 	"crypto/subtle"
 	"crypto/tls"
@@ -17,6 +18,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -326,6 +328,8 @@ type Manager struct {
 	// probedFailed is when gossip last tried each failed peer (see gossip).
 	probeMu      sync.Mutex
 	probedFailed map[string]time.Time
+	// refusedLeaves are the nodes a leave was refused for (logged once each).
+	refusedLeaves map[string]bool
 }
 
 // NewManager creates a new cluster manager
@@ -920,7 +924,7 @@ func (m *Manager) GetNodes() []*Node {
 	}
 
 	// Nodes that left are kept only to stop them coming back (see
-	// mergeDigestNodeLocked); they are not members.
+	// mergeDigestLocked); they are not members.
 	nodes := m.snapshotNodesLocked()
 	members := nodes[:0]
 	for _, n := range nodes {
@@ -1112,7 +1116,7 @@ func (m *Manager) HandleJoinRequest(req *JoinRequest, sourceIP string) *JoinResp
 func (m *Manager) admitNodeLocked(req *JoinRequest) (*JoinResponse, error) {
 	// The same bound gossip keeps: a full cluster admits no one, open or
 	// host-approved, so a password holder cannot grow it without limit.
-	if len(m.cluster.Nodes) >= maxClusterNodes {
+	if m.memberCountLocked() >= maxClusterNodes {
 		return nil, fmt.Errorf("cluster is full (%d members)", maxClusterNodes)
 	}
 	nodeID, err := generateNodeID()
@@ -1532,16 +1536,43 @@ func (m *Manager) handleLeaveHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	m.mu.Lock()
-	// The node is kept, marked left, and saved: deleted from memory only, it
-	// came back from cluster.json at the next start, and a member that missed
-	// the leave gossiped it straight back in. A node leaves by itself: this
-	// one is never marked left on another's word.
+	// A node leaves by itself: this one is never marked left on another's
+	// word, and another is only when the request comes from its registered
+	// address (leaveFromTheNode). Every member holds the member key, so any
+	// of them could otherwise evict any node. A node leaving from behind NAT
+	// is refused here; it has stopped anyway, and failed probes mark it
+	// failed, so nothing is lost.
+	m.mu.RLock()
+	var addr string
+	known := false
 	if m.cluster != nil && (m.cluster.LocalNode == nil || req.NodeID != m.cluster.LocalNode.ID) {
 		if node, ok := m.cluster.Nodes[req.NodeID]; ok && node.Status != NodeStatusLeft {
-			node.Status = NodeStatusLeft
-			node.LastSeen = time.Now()
-			m.pruneLeftLocked(node.LastSeen)
+			addr, known = node.Address, true
+		}
+	}
+	m.mu.RUnlock()
+	if known && !leaveFromTheNode(r, addr) {
+		m.mu.Lock()
+		if !m.refusedLeaves[req.NodeID] {
+			if m.refusedLeaves == nil {
+				m.refusedLeaves = make(map[string]bool)
+			}
+			m.refusedLeaves[req.NodeID] = true
+			slog.Warn("Refused a leave not sent from the node that leaves", "node_id", req.NodeID,
+				"node_address", addr, "source", r.RemoteAddr)
+		}
+		m.mu.Unlock()
+		http.Error(w, "a node's leave is taken only from the node itself", http.StatusForbidden)
+		return
+	}
+
+	// The node is kept, marked left, and saved: deleted from memory only, it
+	// came back from cluster.json at the next start, and a member that missed
+	// the leave gossiped it straight back in.
+	m.mu.Lock()
+	if known && m.cluster != nil {
+		if node, ok := m.cluster.Nodes[req.NodeID]; ok && node.Status != NodeStatusLeft {
+			m.markLeftLocked(node, time.Now())
 			if err := m.saveClusterLocked(); err != nil {
 				slog.Warn("Failed to persist cluster membership", "error", err)
 			}
@@ -1553,6 +1584,51 @@ func (m *Manager) handleLeaveHTTP(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
 	json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
+}
+
+// leaveFromTheNode reports whether r, a leave request, came from the node
+// registered at addr: its source IP is that address (a host name is looked
+// up), or the node is on this host and the request came over loopback.
+func leaveFromTheNode(r *http.Request, addr string) bool {
+	host, _, err := net.SplitHostPort(r.RemoteAddr)
+	src := net.ParseIP(host)
+	if err != nil || src == nil {
+		return false
+	}
+	var ips []net.IP
+	if ip := net.ParseIP(addr); ip != nil {
+		ips = []net.IP{ip}
+	} else {
+		ctx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
+		defer cancel()
+		found, _ := net.DefaultResolver.LookupIPAddr(ctx, addr)
+		for _, a := range found {
+			ips = append(ips, a.IP)
+		}
+	}
+	for _, ip := range ips {
+		if ip.Equal(src) || (src.IsLoopback() && isThisHost(ip)) {
+			return true
+		}
+	}
+	return false
+}
+
+// isThisHost reports whether ip is a loopback address or one of this host's.
+func isThisHost(ip net.IP) bool {
+	if ip.IsLoopback() {
+		return true
+	}
+	addrs, err := net.InterfaceAddrs()
+	if err != nil {
+		return false
+	}
+	for _, a := range addrs {
+		if n, ok := a.(*net.IPNet); ok && n.IP.Equal(ip) {
+			return true
+		}
+	}
+	return false
 }
 
 // gossipLoop periodically gossips with other nodes. It is handed the stop
@@ -1697,12 +1773,7 @@ func (m *Manager) gossip() {
 			m.mu.Unlock()
 			return
 		}
-		discovered := false
-		for _, peerNode := range peerMsg.NodeDigest {
-			if m.mergeDigestNodeLocked(peerNode, localID, now) {
-				discovered = true
-			}
-		}
+		discovered := m.mergeDigestLocked(peerMsg.NodeDigest, localID, peer.id, now)
 		// Mark the responding peer as healthy and update its last-seen time.
 		if node, ok := m.cluster.Nodes[peer.id]; ok && node.Status != NodeStatusLeft {
 			node.Status = NodeStatusHealthy
@@ -1767,54 +1838,101 @@ func validPeerNode(n *Node) bool {
 }
 
 // leftRetention is how long a node that left is remembered as left (see
-// mergeDigestNodeLocked) before its record is dropped.
-const leftRetention = 30 * 24 * time.Hour
+// mergeDigestLocked) before its record is dropped; at most maxLeftNodes such
+// records are kept, the oldest dropped first.
+const (
+	leftRetention = 30 * 24 * time.Hour
+	maxLeftNodes  = maxClusterNodes
+)
 
-// mergeDigestNodeLocked merges one record of a peer's gossip digest into the
-// member map and reports whether the map gained or changed a record to save.
-// Records that cannot yield a usable peer URL (nil, empty ID, bad address or
-// port) are skipped, as is this node's own. A node that left stays left: its
-// record is kept as a tombstone, so a member that missed the leave, or the
-// node itself still running, cannot gossip it back in; a peer's left record
-// marks it left here too. Caller holds m.mu.
-func (m *Manager) mergeDigestNodeLocked(n *Node, localID string, now time.Time) bool {
-	if !validPeerNode(n) || n.ID == localID {
-		return false
-	}
-	existing, ok := m.cluster.Nodes[n.ID]
-	switch {
-	case !ok:
-		if len(m.cluster.Nodes) >= maxClusterNodes {
-			return false
+// mergeDigestLocked merges a peer's gossip digest into the member map and
+// reports whether the map gained or changed a record to save. from is the
+// node the digest came from when that is known: the peer this node dialled
+// for a gossip round (a pushed digest's sender ID is only its own claim, so
+// a push passes ""). Records that cannot yield a usable peer URL (nil,
+// empty ID, bad address or port) are skipped, as is this node's own.
+//
+// A node that left stays left: its record is kept, so a member that missed
+// the leave, or the node itself still running, cannot gossip it back in. Only
+// the node itself marks itself left (its leave request from its address, or
+// its own record when it answers this node's gossip round): every member
+// holds the member key, so any of them could otherwise evict any node for
+// leftRetention with one record, and a left record of a node never seen
+// creates nothing. Caller holds m.mu.
+func (m *Manager) mergeDigestLocked(digest []*Node, localID, from string, now time.Time) bool {
+	members := m.memberCountLocked()
+	changed := false
+	for _, n := range digest {
+		if !validPeerNode(n) || n.ID == localID {
+			continue
 		}
-		if n.Status == NodeStatusLeft {
-			n.LastSeen = now
+		existing, ok := m.cluster.Nodes[n.ID]
+		switch {
+		case !ok:
+			if n.Status == NodeStatusLeft || members >= maxClusterNodes {
+				continue
+			}
+			m.cluster.Nodes[n.ID] = n
+			members++
+			changed = true
+			slog.Info("Gossip: discovered node", "node_id", n.ID, "name", n.Name)
+		case existing.Status == NodeStatusLeft:
+			// Final until it is dropped.
+		case n.Status == NodeStatusLeft:
+			if n.ID == from {
+				m.markLeftLocked(existing, now)
+				members--
+				changed = true
+			}
+		case n.LastSeen.After(existing.LastSeen):
+			existing.Status = n.Status
+			existing.LastSeen = n.LastSeen
+			existing.Stats = n.Stats
 		}
-		m.cluster.Nodes[n.ID] = n
-		slog.Info("Gossip: discovered node", "node_id", n.ID, "name", n.Name, "status", n.Status)
-		return true
-	case existing.Status == NodeStatusLeft:
-		return false
-	case n.Status == NodeStatusLeft:
-		existing.Status = NodeStatusLeft
-		existing.LastSeen = now
-		m.pruneLeftLocked(now)
-		return true
-	case n.LastSeen.After(existing.LastSeen):
-		existing.Status = n.Status
-		existing.LastSeen = n.LastSeen
-		existing.Stats = n.Stats
 	}
-	return false
+	return changed
+}
+
+// memberCountLocked counts the nodes that have not left. Records of nodes
+// that left are bounded on their own (pruneLeftLocked), so they never keep a
+// node from being discovered or admitted. Caller holds m.mu.
+func (m *Manager) memberCountLocked() int {
+	n := 0
+	for _, node := range m.cluster.Nodes {
+		if node.Status != NodeStatusLeft {
+			n++
+		}
+	}
+	return n
+}
+
+// markLeftLocked records that node left, at now. Caller holds m.mu.
+func (m *Manager) markLeftLocked(node *Node, now time.Time) {
+	node.Status = NodeStatusLeft
+	node.LastSeen = now
+	m.pruneLeftLocked(now)
 }
 
 // pruneLeftLocked drops the records of nodes that left longer than
-// leftRetention ago. Caller holds m.mu.
+// leftRetention ago, then the oldest beyond maxLeftNodes. Caller holds m.mu.
 func (m *Manager) pruneLeftLocked(now time.Time) {
+	var left []*Node
 	for id, n := range m.cluster.Nodes {
-		if n.Status == NodeStatusLeft && now.Sub(n.LastSeen) > leftRetention {
-			delete(m.cluster.Nodes, id)
+		if n.Status != NodeStatusLeft {
+			continue
 		}
+		if now.Sub(n.LastSeen) > leftRetention {
+			delete(m.cluster.Nodes, id)
+			continue
+		}
+		left = append(left, n)
+	}
+	if len(left) <= maxLeftNodes {
+		return
+	}
+	sort.Slice(left, func(i, j int) bool { return left[i].LastSeen.Before(left[j].LastSeen) })
+	for _, n := range left[:len(left)-maxLeftNodes] {
+		delete(m.cluster.Nodes, n.ID)
 	}
 }
 
@@ -2017,18 +2135,15 @@ func (m *Manager) handleGossipHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	if m.cluster != nil {
-		// Merge the sender's node digest (see mergeDigestNodeLocked).
-		discovered := false
+		// Merge the sender's node digest (see mergeDigestLocked).
 		var localID string
 		if m.cluster.LocalNode != nil {
 			localID = m.cluster.LocalNode.ID
 		}
-		for _, node := range incoming.NodeDigest {
-			if m.mergeDigestNodeLocked(node, localID, now) {
-				discovered = true
-			}
-		}
-		// Update the sender's own record.
+		// The sender ID is the pusher's own claim: a pushed digest never
+		// marks a node left (from "").
+		discovered := m.mergeDigestLocked(incoming.NodeDigest, localID, "", now)
+		// Update the sender's own record (one that left was refused above).
 		if existing, ok := m.cluster.Nodes[incoming.SenderID]; ok {
 			existing.Status = NodeStatusHealthy
 			existing.LastSeen = now

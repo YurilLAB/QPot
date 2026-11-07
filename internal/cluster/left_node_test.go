@@ -24,6 +24,15 @@ func isMember(m *Manager, id string) bool {
 	return false
 }
 
+// leaveFrom sends m a leave request naming id from source (host:port).
+func leaveFrom(m *Manager, id, source string) *httptest.ResponseRecorder {
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/cluster/leave", strings.NewReader(`{"node_id":"`+id+`"}`))
+	req.RemoteAddr = source
+	rec := httptest.NewRecorder()
+	m.handleLeaveHTTP(rec, req)
+	return rec
+}
+
 func pushGossip(t *testing.T, m *Manager, msg GossipMessage) *httptest.ResponseRecorder {
 	t.Helper()
 	b, err := json.Marshal(msg)
@@ -62,8 +71,7 @@ func TestLeftNodeIsNotGossipedBackIn(t *testing.T) {
 	}
 	m.mu.Unlock()
 
-	rec := httptest.NewRecorder()
-	m.handleLeaveHTTP(rec, httptest.NewRequest(http.MethodPost, "/api/v1/cluster/leave", strings.NewReader(`{"node_id":"qn_x"}`)))
+	rec := leaveFrom(m, "qn_x", "127.0.0.1:40000")
 	if rec.Code != http.StatusOK || isMember(m, "qn_x") {
 		t.Fatalf("x is still a member right after leaving: %d", rec.Code)
 	}
@@ -84,16 +92,14 @@ func TestLeftNodeIsNotGossipedBackIn(t *testing.T) {
 	if !isMember(m, "qn_z") {
 		t.Error("a node new to the cluster was not discovered by gossip any more")
 	}
-	// y learnt that z left: so does this node.
+	// y says z left: only z's own word counts (TestLeftRecordOnlyFromTheNodeItself).
 	pushGossip(t, m, GossipMessage{SenderID: "qn_y", Timestamp: later, NodeDigest: []*Node{
 		{ID: "qn_z", Name: "z", Address: "127.0.0.1", Port: 7952, Status: NodeStatusLeft, LastSeen: later}}})
-	if isMember(m, "qn_z") {
-		t.Error("a member's record that z left was not taken")
+	if !isMember(m, "qn_z") {
+		t.Error("another member's record marked z as left")
 	}
 	// No member marks this node as left.
-	rec = httptest.NewRecorder()
-	m.handleLeaveHTTP(rec, httptest.NewRequest(http.MethodPost, "/api/v1/cluster/leave",
-		strings.NewReader(`{"node_id":"`+m.LocalNodeID()+`"}`)))
+	leaveFrom(m, m.LocalNodeID(), "127.0.0.1:40000")
 	if !isMember(m, m.LocalNodeID()) {
 		t.Error("another member's /leave marked this node as left")
 	}
@@ -235,8 +241,9 @@ func TestLeftRecordsArePruned(t *testing.T) {
 	m.cluster.Nodes["qn_recent"] = &Node{ID: "qn_recent", Address: "127.0.0.1", Port: 7955, Status: NodeStatusLeft, LastSeen: now.Add(-leftRetention + time.Hour)}
 	m.cluster.Nodes["qn_x"] = &Node{ID: "qn_x", Address: "127.0.0.1", Port: 7956, Status: NodeStatusHealthy, LastSeen: now}
 	m.mu.Unlock()
-	rec := httptest.NewRecorder()
-	m.handleLeaveHTTP(rec, httptest.NewRequest(http.MethodPost, "/api/v1/cluster/leave", strings.NewReader(`{"node_id":"qn_x"}`)))
+	if rec := leaveFrom(m, "qn_x", "127.0.0.1:40000"); rec.Code != http.StatusOK {
+		t.Fatalf("x's leave: %d", rec.Code)
+	}
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	if _, ok := m.cluster.Nodes["qn_old"]; ok {
@@ -247,4 +254,308 @@ func TestLeftRecordsArePruned(t *testing.T) {
 			t.Errorf("%s is no longer remembered as left", id)
 		}
 	}
+}
+
+// knownNodes returns how many records (members and nodes that left) m holds.
+func knownNodes(m *Manager) int {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return len(m.cluster.Nodes)
+}
+
+func leftNode(id string, port int, at time.Time) *Node {
+	return &Node{ID: id, Name: id, Address: "127.0.0.1", Port: port, Status: NodeStatusLeft, LastSeen: at}
+}
+
+// TestLeftRecordOnlyFromTheNodeItself: any member's digest could mark a node
+// as left, and create a left record for a node never seen; with left records
+// final for 30 days, one bad digest evicted a node cluster-wide and random IDs
+// filled the member cap. A node is marked left only on its own word: its
+// leave request, or its own answer when gossiped with.
+func TestLeftRecordOnlyFromTheNodeItself(t *testing.T) {
+	var zDigest []*Node
+	z := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(GossipMessage{SenderID: "qn_z", Timestamp: time.Now(), NodeDigest: zDigest})
+	}))
+	defer z.Close()
+	zHost, zPortStr, _ := net.SplitHostPort(strings.TrimPrefix(z.URL, "http://"))
+	zPort, _ := strconv.Atoi(zPortStr)
+
+	m := plainCluster(t)
+	now := time.Now()
+	m.mu.Lock()
+	for _, n := range []*Node{
+		{ID: "qn_x", Name: "x", Address: "127.0.0.1", Port: 7960, Status: NodeStatusFailed, LastSeen: now},
+		{ID: "qn_y", Name: "y", Address: "127.0.0.1", Port: 7961, Status: NodeStatusFailed, LastSeen: now},
+		{ID: "qn_z", Name: "z", Address: zHost, Port: zPort, Status: NodeStatusHealthy, LastSeen: now},
+	} {
+		m.cluster.Nodes[n.ID] = n
+	}
+	m.mu.Unlock()
+	later := now.Add(time.Second)
+
+	// y says x left: not taken.
+	pushGossip(t, m, GossipMessage{SenderID: "qn_y", Timestamp: later, NodeDigest: []*Node{leftNode("qn_x", 7960, later)}})
+	if !isMember(m, "qn_x") {
+		t.Error("another member's record marked x as left")
+	}
+	// y names nodes never seen as left: nothing is created.
+	before := knownNodes(m)
+	var unknown []*Node
+	for i := 0; i < 50; i++ {
+		unknown = append(unknown, leftNode("qn_unknown"+strconv.Itoa(i), 8000+i, later))
+	}
+	pushGossip(t, m, GossipMessage{SenderID: "qn_y", Timestamp: later, NodeDigest: unknown})
+	if got := knownNodes(m); got != before {
+		t.Errorf("left records of unknown nodes added %d records", got-before)
+	}
+	// z, answering this node's gossip round, says y left: not taken; that
+	// z itself left: taken.
+	zDigest = []*Node{leftNode("qn_y", 7961, later)}
+	m.gossip()
+	if !isMember(m, "qn_y") {
+		t.Error("the answering peer's record marked y as left")
+	}
+	zDigest = []*Node{leftNode("qn_z", zPort, later)}
+	m.gossip()
+	if isMember(m, "qn_z") {
+		t.Error("z's own answer that it left was not taken")
+	}
+	// A digest pushed as from x, saying x left: the sender ID is only the
+	// pusher's claim, so it is not taken either.
+	pushGossip(t, m, GossipMessage{SenderID: "qn_x", Timestamp: later, NodeDigest: []*Node{leftNode("qn_x", 7960, later)}})
+	if !isMember(m, "qn_x") {
+		t.Error("a pushed digest claiming to come from x marked x as left")
+	}
+}
+
+// TestLeaveTakenOnlyFromTheNode: any member could send a leave naming any
+// node. A leave is now taken only from the node's registered address.
+func TestLeaveTakenOnlyFromTheNode(t *testing.T) {
+	m := plainCluster(t)
+	now := time.Now()
+	m.mu.Lock()
+	for _, n := range []*Node{
+		{ID: "qn_x", Name: "x", Address: "10.1.1.1", Port: 7970, Status: NodeStatusHealthy, LastSeen: now},
+		{ID: "qn_y", Name: "y", Address: "10.1.1.2", Port: 7971, Status: NodeStatusHealthy, LastSeen: now},
+		{ID: "qn_h", Name: "h", Address: "localhost", Port: 7972, Status: NodeStatusHealthy, LastSeen: now},
+	} {
+		m.cluster.Nodes[n.ID] = n
+	}
+	m.mu.Unlock()
+
+	if rec := leaveFrom(m, "qn_x", "10.1.1.2:40000"); rec.Code != http.StatusForbidden || !isMember(m, "qn_x") {
+		t.Errorf("y's leave naming x: %d, x a member %v; want 403 and x kept", rec.Code, isMember(m, "qn_x"))
+	}
+	// Loopback is this host, and x is not on it.
+	if rec := leaveFrom(m, "qn_x", "127.0.0.1:40000"); rec.Code != http.StatusForbidden || !isMember(m, "qn_x") {
+		t.Errorf("a leave naming x from this host: %d, x a member %v; want 403 and x kept", rec.Code, isMember(m, "qn_x"))
+	}
+	if rec := leaveFrom(m, "qn_x", "10.1.1.1:40000"); rec.Code != http.StatusOK || isMember(m, "qn_x") {
+		t.Errorf("x's own leave: %d, x a member %v; want 200 and x gone", rec.Code, isMember(m, "qn_x"))
+	}
+	// A node registered by host name leaves from that name's address.
+	if rec := leaveFrom(m, "qn_h", "10.1.1.2:40000"); rec.Code != http.StatusForbidden || !isMember(m, "qn_h") {
+		t.Errorf("y's leave naming h: %d; want 403", rec.Code)
+	}
+	if rec := leaveFrom(m, "qn_h", "127.0.0.1:40000"); rec.Code != http.StatusOK || isMember(m, "qn_h") {
+		t.Errorf("h's own leave from localhost: %d, h a member %v", rec.Code, isMember(m, "qn_h"))
+	}
+	// A node on this host (registered at loopback or at one of this host's
+	// addresses) leaves over loopback.
+	local := "127.0.0.1"
+	if addrs, err := net.InterfaceAddrs(); err == nil {
+		for _, a := range addrs {
+			if n, ok := a.(*net.IPNet); ok && n.IP.To4() != nil && !n.IP.IsLoopback() {
+				local = n.IP.String()
+				break
+			}
+		}
+	}
+	m.mu.Lock()
+	m.cluster.Nodes["qn_lo"] = &Node{ID: "qn_lo", Name: "lo", Address: "127.0.0.1", Port: 7973, Status: NodeStatusHealthy, LastSeen: now}
+	m.cluster.Nodes["qn_here"] = &Node{ID: "qn_here", Name: "here", Address: local, Port: 7974, Status: NodeStatusHealthy, LastSeen: now}
+	m.mu.Unlock()
+	if rec := leaveFrom(m, "qn_lo", "[::1]:40000"); rec.Code != http.StatusOK || isMember(m, "qn_lo") {
+		t.Errorf("a leave naming a node at 127.0.0.1 over ::1: %d", rec.Code)
+	}
+	if rec := leaveFrom(m, "qn_here", "127.0.0.1:40000"); rec.Code != http.StatusOK || isMember(m, "qn_here") {
+		t.Errorf("a leave naming a node at this host's %s over loopback: %d", local, rec.Code)
+	}
+
+	// Unknown nodes and this node: nothing to refuse, nothing changes.
+	if rec := leaveFrom(m, "qn_unknown", "10.1.1.2:40000"); rec.Code != http.StatusOK {
+		t.Errorf("a leave naming an unknown node: %d", rec.Code)
+	}
+}
+
+// TestNodesThatLeftDoNotFillTheCluster: left records counted toward the
+// member cap, so enough of them stopped any node being discovered or admitted
+// for 30 days. They are bounded on their own, the oldest dropped first.
+func TestNodesThatLeftDoNotFillTheCluster(t *testing.T) {
+	m := plainCluster(t)
+	now := time.Now()
+	m.mu.Lock()
+	m.cluster.Config.RequireApproval = false
+	for i := 0; i < maxClusterNodes; i++ {
+		id := "qn_gone" + strconv.Itoa(i)
+		m.cluster.Nodes[id] = leftNode(id, 7000+i%1000, now.Add(-time.Hour+time.Duration(i)*time.Millisecond))
+	}
+	m.cluster.Nodes["qn_x"] = &Node{ID: "qn_x", Name: "x", Address: "127.0.0.1", Port: 7962, Status: NodeStatusHealthy, LastSeen: now}
+	m.mu.Unlock()
+
+	pushGossip(t, m, GossipMessage{SenderID: "qn_x", Timestamp: now, NodeDigest: []*Node{
+		{ID: "qn_new", Name: "new", Address: "127.0.0.1", Port: 7963, Status: NodeStatusHealthy, LastSeen: now}}})
+	if !isMember(m, "qn_new") {
+		t.Error("a new node was not discovered: the records of nodes that left filled the cluster")
+	}
+	if r := m.HandleJoinRequest(&JoinRequest{ClusterID: m.cluster.ID, Password: "password123", PollSecret: testPollSecret,
+		NodeName: "joiner", NodeAddress: "127.0.0.1", NodePort: 7964}, "127.0.0.1"); !r.Success {
+		t.Errorf("a join was refused: the records of nodes that left filled the cluster: %+v", r)
+	}
+
+	if rec := leaveFrom(m, "qn_x", "127.0.0.1:40000"); rec.Code != http.StatusOK {
+		t.Fatalf("x's leave: %d", rec.Code)
+	}
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	left := 0
+	for _, n := range m.cluster.Nodes {
+		if n.Status == NodeStatusLeft {
+			left++
+		}
+	}
+	if left > maxClusterNodes {
+		t.Errorf("%d records of nodes that left, want at most %d", left, maxClusterNodes)
+	}
+	if n, ok := m.cluster.Nodes["qn_x"]; !ok || n.Status != NodeStatusLeft {
+		t.Error("the node that just left is not remembered")
+	}
+	if _, ok := m.cluster.Nodes["qn_gone0"]; ok {
+		t.Error("the oldest record of a node that left was kept over the newest")
+	}
+}
+
+// TestLeaveWithAMemberOffline: with left records taken only from the node
+// itself, a member that was offline during a leave cannot gossip the node
+// back in where the leave arrived; it stops counting the node healthy once
+// it cannot reach it. Joining again, approved, makes the node a member again
+// everywhere.
+func TestLeaveWithAMemberOffline(t *testing.T) {
+	const password = "correct-horse-battery"
+	free := func() int {
+		ln, err := net.Listen("tcp", "127.0.0.1:0")
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer ln.Close()
+		return ln.Addr().(*net.TCPAddr).Port
+	}
+	hostPort := free()
+	host := NewManager(t.TempDir())
+	cfg := DefaultClusterConfig()
+	cfg.EnableEncryption = false
+	cfg.BindAddr, cfg.BindPort, cfg.AdvertiseAddr = "127.0.0.1", hostPort, "127.0.0.1"
+	cfg.GossipInterval = 50 * time.Millisecond
+	cl, err := host.InitCluster("prod", password, cfg) // joins need approval
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := host.Start(); err != nil {
+		t.Fatal(err)
+	}
+	defer host.Stop()
+	waitListening(t, hostPort)
+	seed := []string{"http://127.0.0.1:" + itoa(hostPort)}
+
+	// join admits a new node through the host's approval and starts it.
+	join := func(name string) (*Manager, string) {
+		t.Helper()
+		port := free()
+		m := NewManager(t.TempDir())
+		m.joinPollInterval = 20 * time.Millisecond
+		m.joinPollTimeout = 5 * time.Second
+		done := make(chan error, 1)
+		go func() {
+			_, err := m.JoinCluster(cl.ID, password, &Node{Name: name, Address: "127.0.0.1", Port: port}, seed)
+			done <- err
+		}()
+		deadline := time.Now().Add(3 * time.Second)
+		for len(host.ListPendingJoins()) == 0 {
+			if time.Now().After(deadline) {
+				t.Fatalf("%s's join never reached the host", name)
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+		if _, err := host.ApproveJoin(host.ListPendingJoins()[0].RequestID); err != nil {
+			t.Fatal(err)
+		}
+		if err := <-done; err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		m.mu.Lock()
+		m.cluster.Config.BindAddr = "127.0.0.1"
+		m.mu.Unlock()
+		if err := m.Start(); err != nil {
+			t.Fatal(err)
+		}
+		waitListening(t, port)
+		return m, m.LocalNodeID()
+	}
+	statusOf := func(m *Manager, id string) NodeStatus {
+		for _, n := range m.GetNodes() {
+			if n.ID == id {
+				return n.Status
+			}
+		}
+		return ""
+	}
+	eventually := func(what string, ok func() bool) {
+		t.Helper()
+		deadline := time.Now().Add(5 * time.Second)
+		for !ok() {
+			if time.Now().After(deadline) {
+				t.Fatal(what)
+			}
+			time.Sleep(20 * time.Millisecond)
+		}
+	}
+
+	b, bID := join("b")
+	defer b.Stop()
+	x, xID := join("x")
+	eventually("b never learnt of x", func() bool { return statusOf(b, xID) == NodeStatusHealthy })
+
+	// b goes offline; x leaves; b comes back.
+	if err := b.Stop(); err != nil {
+		t.Fatal(err)
+	}
+	_ = x.Stop()
+	if err := x.LeaveCluster(); err == nil {
+		t.Fatal("x's leave reached b, which was offline")
+	}
+	if isMember(host, xID) {
+		t.Fatal("x is still a member at the host after leaving")
+	}
+	if err := b.Start(); err != nil {
+		t.Fatal(err)
+	}
+	eventually("b is not back in touch with the host", func() bool { return statusOf(host, bID) == NodeStatusHealthy })
+	time.Sleep(300 * time.Millisecond) // several gossip rounds both ways
+	if isMember(host, xID) {
+		t.Error("b, offline during the leave, gossiped x back in at the host")
+	}
+	eventually("b still counts x healthy though it cannot reach it", func() bool {
+		s := statusOf(b, xID)
+		return s != NodeStatusHealthy
+	})
+
+	// x joins again: a member everywhere, under its new node ID.
+	x2, x2ID := join("x")
+	defer x2.Stop()
+	if x2ID == xID {
+		t.Fatal("the rejoined node has the old node ID")
+	}
+	eventually("the rejoined node is not a member at the host", func() bool { return statusOf(host, x2ID) == NodeStatusHealthy })
+	eventually("the rejoined node is not a member at b", func() bool { return statusOf(b, x2ID) == NodeStatusHealthy })
 }
