@@ -1250,11 +1250,7 @@ func (s *Server) handleCluster(w http.ResponseWriter, r *http.Request) {
 		IsLocal       bool   `json:"is_local"`
 	}
 	views := make([]nodeView, 0, len(nodes))
-	localID := ""
-	if status != nil {
-		localID = status.Leader // best-effort; local marking below uses QPotID match
-	}
-	_ = localID
+	localID := s.cluster.LocalNodeID()
 	for _, n := range nodes {
 		views = append(views, nodeView{
 			Name:          n.Name,
@@ -1264,7 +1260,7 @@ func (s *Server) handleCluster(w http.ResponseWriter, r *http.Request) {
 			UptimeSecs:    int64(n.Stats.Uptime.Seconds()),
 			TotalEvents:   n.Stats.TotalEvents,
 			ActiveAttacks: n.Stats.ActiveAttacks,
-			IsLocal:       n.QPotID == s.config.QPotID,
+			IsLocal:       localID != "" && n.ID == localID,
 		})
 	}
 
