@@ -430,23 +430,6 @@ func newHoneypotCommand() *cobra.Command {
 		Use:   "list",
 		Short: "List available honeypots",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			// Short descriptions for every supported honeypot.
-			desc := map[string]string{
-				"cowrie": "SSH/Telnet medium-interaction shell", "dionaea": "Malware capture (SMB/FTP/MSSQL/SIP)",
-				"conpot": "ICS/SCADA (Modbus/S7comm/BACnet)", "tanner": "Web application (multi-service)",
-				"adbhoney": "Android Debug Bridge", "endlessh": "SSH tarpit",
-				"heralding": "Credential catcher (12 protocols)", "honeyaml": "YAML-defined API honeypot",
-				"elasticpot": "Elasticsearch", "ciscoasa": "Cisco ASA (CVE-2018-0101)",
-				"citrixhoneypot": "Citrix NetScaler (CVE-2019-19781)", "ddospot": "UDP amplification (NTP/DNS/SSDP)",
-				"ipphoney": "IPP / network printer", "mailoney": "SMTP",
-				"medpot": "HL7 / medical", "redishoneypot": "Redis",
-				"dicompot":  "DICOM (medical imaging)",
-				"beelzebub": "LLM-backed SSH/HTTP (needs Ollama/API)", "galah": "LLM-backed web (needs Ollama/API)",
-				"go-pot": "HTTP tarpit", "h0neytr4p": "Web exploit trap", "hellpot": "HTTP tarpit",
-				"log4pot": "Log4Shell (CVE-2021-44228)", "miniprint": "Network printer (JetDirect)",
-				"sentrypeer": "SIP / VoIP", "wordpot": "WordPress",
-			}
-
 			// Source the actual config so ports/risk/enabled reflect this
 			// instance (falls back to defaults for an uncreated instance).
 			cfg, err := config.Load(instanceName)
@@ -469,7 +452,7 @@ func newHoneypotCommand() *cobra.Command {
 				if hp.Enabled {
 					on = "x"
 				}
-				fmt.Printf("%-16s %5d %-8s [%s] %s\n", n, hp.Port, hp.RiskLevel, on, desc[n])
+				fmt.Printf("%-16s %5d %-8s [%s] %s\n", n, hp.Port, hp.RiskLevel, on, instance.HoneypotDescription(n))
 			}
 			fmt.Printf("\n%d honeypots supported. Enable one with: qpot honeypot enable <name>\n", len(names))
 			return nil
