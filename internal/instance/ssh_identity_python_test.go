@@ -5,6 +5,7 @@ import (
 	"encoding/base64"
 	"encoding/binary"
 	"encoding/json"
+	"math"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -52,9 +53,19 @@ spec = json.load(open(spec_path))
 # the tail of a key file's armor lines (put together, so the source holds no key-shaped text)
 ARMOR = b" OPENSSH PRIVATE" + b" KEY-----"
 if mode == "fuzz":
+    import heapq
     rnd = random.Random(spec["seed"])
     seeds = [base64.b64decode(s) for s in spec["files"]]
-    worst, found = 0.0, 0
+    # each input timed once; the slowest kept to time again
+    slowest, found = [], 0
+    def best(data, runs=7):
+        # the fastest of several runs: what the input costs, without the time another process took
+        spent = []
+        for _ in range(runs):
+            t0 = time.perf_counter()
+            bait.public_key(data)
+            spent.append(time.perf_counter() - t0)
+        return min(spent)
     for i in range(spec["n"]):
         data = bytearray(rnd.choice(seeds))
         for _ in range(rnd.randint(1, 8)):
@@ -75,11 +86,18 @@ if mode == "fuzz":
         data = bytes(data)
         t0 = time.perf_counter()
         blob = bait.public_key(data)
-        worst = max(worst, time.perf_counter() - t0)
+        heapq.heappush(slowest, (time.perf_counter() - t0, i, data))
+        if len(slowest) > spec["keep"]:
+            heapq.heappop(slowest)
         if blob is not None:
             assert isinstance(blob, bytes) and bait.key_type(blob), blob
             found += 1
-    print(json.dumps({"worst": worst, "found": found}))
+    # a small file read in one pass (an armor line never closed, then a run), in this process and under
+    # this load, scaled to the largest file public_key reads: what a linear parser spends on that
+    reference = b"-----" + b"BEGIN" + ARMOR + b"\n" + b"A" * 1024
+    base = best(reference, 15) * bait.MAX_KEY_FILE / len(reference)
+    worst = max(best(data) for _, _, data in slowest)
+    print(json.dumps({"worst": worst, "base": base, "found": found}))
     sys.exit(0)
 ssh = load("ssh_cmd", ssh_path)
 files = {p: base64.b64decode(v) for p, v in spec["files"].items()}
@@ -328,22 +346,35 @@ func TestPublicKeyOfMutatedFiles(t *testing.T) {
 		base64.StdEncoding.EncodeToString([]byte(canary.AuthorizedKey(blob, "c") + "\n")),
 		base64.StdEncoding.EncodeToString([]byte("from=\"10.0.0.1\" " + canary.AuthorizedKey(blob, "x") + "\n")),
 	}
-	raw := runSSHHarness(t, py, "fuzz", map[string]any{"files": seeds, "seed": 7, "n": 3000})
+	raw := runSSHHarness(t, py, "fuzz", map[string]any{"files": seeds, "seed": 7, "n": 3000, "keep": 50})
 	var res struct {
 		Worst float64 `json:"worst"`
+		Base  float64 `json:"base"`
 		Found int     `json:"found"`
 	}
 	if err := json.Unmarshal(raw, &res); err != nil {
 		t.Fatalf("%v\n%s", err, raw)
 	}
-	if res.Worst > 0.05 {
-		t.Errorf("public_key took %.3f s on one input", res.Worst)
+	// The slowest inputs, timed again as the fastest of several runs, against one linear pass over the
+	// largest input in the same process: load slows both alike and a preempted run is not the fastest,
+	// so only a parser that is not linear goes past the ratio (and past the second, whatever the ratio).
+	ratio := res.Worst / math.Max(res.Base, 1e-6)
+	if ratio > publicKeyMaxRatio || res.Worst > 1 {
+		t.Errorf("public_key took %.4f s on one input, %.1f times one pass over the largest (%.4f s)",
+			res.Worst, ratio, res.Base)
 	}
 	if res.Found == 0 {
 		t.Error("no mutated file still read as a key: the mutations or the parser are off")
 	}
-	t.Logf("worst %.4f s, %d of 3000 still a key", res.Worst, res.Found)
+	t.Logf("worst %.4f s, %.1f times one pass (%.4f s); %d of 3000 still a key", res.Worst, ratio, res.Base,
+		res.Found)
 }
+
+// publicKeyMaxRatio is how many times one linear pass over the largest key
+// file the slowest mutated file may cost. Measured 1.0 to 2.3 alone and 1.3
+// to 1.9 in 60 runs beside eight processes burning the CPU; a parser that
+// is quadratic in the file comes near 64 (the cap over the 1 KiB file).
+const publicKeyMaxRatio = 8
 
 // TestSSHConnectTimeoutInLinearTime: ssh on the honeypot waits on a bait
 // host for the ConnectTimeout of -o, else of ~/.ssh/config, else the
