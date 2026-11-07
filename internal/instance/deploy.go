@@ -68,6 +68,8 @@ const cowriePatchVersion = "24.04.2"
 //	core/honeyfs.py        589d5dedf1473a0db69f443c53c836e711343e5bb6e30fd63033caa99cc53fc0
 //	commands/find.py       4f098f1066f471698f82f34380cf349706e416aa2219c935af185328dbb5420f
 //	shell/bashparse.py     f0fd17031828d3c98725cd461cc16986879c4bff7c632d8f76d36d2d6daba6e9
+//	commands/curl.py       d4e53f5bfc75eee50a3c69a6ca9998fa41631276ff373353dcacd8ff4d709417
+//	commands/wget.py       1fec4c13975c5827fe557a73fd547f27302af0e959ea1adfd7f1e1afe31191c1
 //
 // protocol.py: the line editor writes what bash's readline (or BusyBox's ash
 // on the firmware personas) writes, as recorded from bash 5.2.37 and BusyBox
@@ -92,6 +94,14 @@ const cowriePatchVersion = "24.04.2"
 // now walks as GNU find -P does, bounded. bashparse.py: pathname expansion,
 // which the image left to each command and almost none did, so `cat
 // /etc/cron.d/*` answered "No such file or directory" for listed files.
+//
+// curl.py and wget.py: curl's and GNU wget's options, exit codes and messages
+// as the persona's release has them (recorded from curl 8.14.1 and wget
+// 1.25.0, the older releases' from their sources), where Cowrie's took six of
+// curl's options and said "Could not resolve host" for an address. A refused
+// address is refused, an internal or private one times out as the kernel
+// gives up, and nothing reaches the network that did not before: one name
+// lookup, one GET or HEAD, no redirect followed, retries simulated.
 var (
 	//go:embed honeypotfiles/cowrie/protocol.py
 	cowrieProtocolPy []byte
@@ -113,6 +123,10 @@ var (
 	cowrieFindPy []byte
 	//go:embed honeypotfiles/cowrie/bashparse.py
 	cowrieBashparsePy []byte
+	//go:embed honeypotfiles/cowrie/curl.py
+	cowrieCurlPy []byte
+	//go:embed honeypotfiles/cowrie/wget.py
+	cowrieWgetPy []byte
 )
 
 // cowrieSource is where the image keeps Cowrie's Python package.
@@ -135,6 +149,8 @@ func cowriePatchVolumes() []deployVolume {
 		file("qpot_bait.py", "core/qpot_bait.py", cowrieQPotBaitPy),
 		file("find.py", "commands/find.py", cowrieFindPy),
 		file("bashparse.py", "shell/bashparse.py", cowrieBashparsePy),
+		file("curl.py", "commands/curl.py", cowrieCurlPy),
+		file("wget.py", "commands/wget.py", cowrieWgetPy),
 	}
 }
 

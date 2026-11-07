@@ -61,6 +61,33 @@ def qpot_os_release(tree) -> tuple[str, tuple[int, ...]]:
     return found
 
 
+qpot_packages_seen: list = []
+
+
+def qpot_package_version(name: str) -> str | None:
+    """The version the persona's package database (apt-packages.json beside its tree) gives an installed
+    package, read once per process; None for a persona without one."""
+    if not qpot_packages_seen:
+        installed: dict = {}
+        try:
+            import json
+            import os
+
+            from cowrie.core import qpot_bait
+
+            root = qpot_bait._contents_root()
+            data = qpot_bait._read_bounded(os.path.join(os.path.dirname(root.rstrip("/")), "apt-packages.json"),
+                                           16 << 20) if root else None
+            loaded = json.loads(data.decode("utf-8")) if data else {}
+            found = loaded.get("installed") if isinstance(loaded, dict) else None
+            if isinstance(found, dict):
+                installed = {k: v for k, v in found.items() if isinstance(k, str) and isinstance(v, str)}
+        except Exception:  # noqa: BLE001 - no database, a broken one: no versions
+            installed = {}
+        qpot_packages_seen.append(installed)
+    return qpot_packages_seen[0].get(name)
+
+
 def qpot_busybox_applet(tree, name: str) -> bool:
     """Whether the persona's program name is a link to BusyBox."""
     for directory in ("/bin", "/usr/bin", "/sbin", "/usr/sbin"):
@@ -153,6 +180,59 @@ def qpot_own_address(protocol, name: str) -> str | None:
         addresses = qpot_interface_addresses()
         return addresses[0] if addresses else "127.0.0.1"
     return None
+
+
+def qpot_blocked(address: str) -> bool:
+    """Whether the honeypot never contacts address (private, loopback, link-local, multicast ...): Cowrie's
+    own blocklist, which its downloads apply."""
+    try:
+        from cowrie.core.network import _is_blocked
+
+        return bool(_is_blocked(ipaddress.ip_address(address)))
+    except Exception:  # noqa: BLE001 - no address: nothing to contact
+        return True
+
+
+def qpot_route(fs, protocol, host: str) -> tuple[str, str | None]:
+    """Where a connection from the persona to host goes, worked out without the network:
+    ("refused", address) for the machine itself (loopback, its own addresses, 0.0.0.0), where nothing listens
+    on the port a client asks for; ("timeout", address) for an internal host of the bait files and any other
+    address the honeypot does not contact (private, link-local ...), which the persona's network drops, as
+    ssh's wait on the bait hosts has it; ("network", address) for a public address; ("name", None) for a
+    name the resolver has to answer (not in /etc/hosts nor the machine's own)."""
+    name = str(host or "").strip().lower().rstrip(".")
+    if name.startswith("[") and name.endswith("]"):
+        name = name[1:-1]
+    if not name or len(name) > 253:
+        return "name", None
+    try:
+        from cowrie.core import qpot_bait
+
+        internal = qpot_bait.internal_host(name)
+    except Exception:  # noqa: BLE001 - no bait module: no internal hosts
+        internal = None
+    if internal is not None:
+        return "timeout", internal
+    try:
+        address = str(ipaddress.ip_address(name))
+    except ValueError:
+        address = (qpot_hosts_lookup(fs, name, False) or qpot_hosts_lookup(fs, name, True)
+                   or qpot_own_address(protocol, name))
+        if address is None:
+            return "name", None
+    return qpot_classify(address), address
+
+
+def qpot_classify(address: str) -> str:
+    """refused, timeout or network for an address (see qpot_route)."""
+    try:
+        ip = ipaddress.ip_address(address)
+    except ValueError:
+        return "timeout"
+    local, _, _ = qpot_local_addresses()
+    if ip.is_loopback or ip.is_unspecified or str(ip) in local:
+        return "refused"
+    return "timeout" if qpot_blocked(str(ip)) else "network"
 
 
 QUOTE_ESCAPES = {"\\": "\\\\", "\a": "\\a", "\b": "\\b", "\f": "\\f", "\n": "\\n", "\r": "\\r",
