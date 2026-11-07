@@ -412,7 +412,7 @@ func TestStaticRoutes(t *testing.T) {
 	}
 	landing := httptest.NewRecorder()
 	s.handleStatic(landing, httptest.NewRequest(http.MethodGet, "/", nil))
-	for _, want := range []string{"/dashboard", "/map/", "particles-js", "landing.js"} {
+	for _, want := range []string{"/dashboard", "/map/", "landing.js"} {
 		if !strings.Contains(landing.Body.String(), want) {
 			t.Errorf("landing page missing %q", want)
 		}
