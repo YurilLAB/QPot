@@ -23,7 +23,9 @@ import math
 import posixpath
 import random
 import re
+import stat as stat_mod
 import string
+import time
 
 from cowrie.core.config import CowrieConfig
 from cowrie.shell import fs as tree_fs
@@ -674,7 +676,9 @@ class Command_zcat(QpotSum):
         import zlib
 
         busybox = self.busybox()
-        prog = "zcat" if busybox else "gzip"
+        applet = posixpath.basename(self.qpot_name)
+        # BusyBox names the applet it runs as (gzip -dc: "gzip: invalid magic"); GNU's zcat is gzip -cd
+        prog = applet if busybox else "gzip"
         files = []
         for arg in self.args:
             if arg in ("-f", "--force", "-q", "--quiet", "-v", "--verbose", "--"):
@@ -689,13 +693,21 @@ class Command_zcat(QpotSum):
             files.append(arg)  # patterns are the shell's (bashparse.py); a quoted one stays
         code, left = 0, self.QPOT_ZCAT_MAX
         for path in files or ["-"]:
-            data = self.contents(path, prog)
+            path = path if busybox else self.qpot_gz_name(path)
+            data, status = self.qpot_gz_read(path, prog, busybox)
             if data is None:
-                code = 1
+                code = qpot_gzip_status(code, status)
                 continue
             label = "stdin" if path == "-" else path
+            if len(data) < 2 and (not busybox or applet == "zcat"):
+                # gzip reads the magic with get_byte, whose end of file is an error; BusyBox's zcat
+                # (open_zipped) cannot read two bytes
+                self.errorWrite(f"{applet}: short read\n" if busybox else f"\ngzip: {label}: unexpected end of file\n")
+                code = 1
+                continue
             if data[:2] != b"\x1f\x8b":
-                self.errorWrite("zcat: invalid magic\n" if busybox else f"gzip: {label}: not in gzip format\n")
+                # QPot: gzip starts its error on a line of its own (get_method of gzip.c)
+                self.errorWrite(f"{prog}: invalid magic\n" if busybox else f"\ngzip: {label}: not in gzip format\n")
                 code = 1
                 continue
             out, members = [], 0
@@ -711,20 +723,57 @@ class Command_zcat(QpotSum):
                 try:
                     chunk = member.decompress(data, left)
                 except zlib.error:
-                    self.errorWrite("zcat: corrupted data\n" if busybox else f"gzip: {label}: invalid compressed data--format violated\n")
+                    self.errorWrite(f"{prog}: corrupted data\n" if busybox
+                                    else f"\ngzip: {label}: invalid compressed data--format violated\n")
                     code = 1
                     break
                 out.append(chunk)
                 left -= len(chunk)
                 if not member.eof:
                     if left > 0:
-                        self.errorWrite("zcat: unexpected end of file\n" if busybox
-                                        else f"gzip: {label}: unexpected end of file\n")
+                        self.errorWrite(f"{prog}: unexpected end of file\n" if busybox
+                                        else f"\ngzip: {label}: unexpected end of file\n")
                         code = 1
                     break
                 data = member.unused_data
             self.writeBytes(b"".join(out))
         return code
+
+    @staticmethod
+    def qpot_plain_name(name: str) -> str:
+        for suffix, plain in ((".tgz", ".tar"), (".taz", ".tar"), (".gz", ""), ("-gz", ""), (".z", ""), ("-z", ""),
+                              ("_z", "")):
+            if name.lower().endswith(suffix) and len(name) > len(suffix):
+                return name[: len(name) - len(suffix)] + plain
+        return name
+
+    def qpot_gz_name(self, name: str) -> str:
+        """The file GNU gzip decompresses for name (get_istat): name when it is there or has a gzip suffix,
+        else the first of name.gz, .z, -z, .Z that is there, else name.gz (the name its message gives)."""
+        if name == "-" or self.qpot_plain_name(name) != name or self.fs.exists(self.fs.resolve_path(name, self.cwd)):
+            return name
+        for suffix in (".gz", ".z", "-z", ".Z"):
+            if self.fs.exists(self.fs.resolve_path(name + suffix, self.cwd)):
+                return name + suffix
+        return name + ".gz"
+
+    def qpot_gz_read(self, path: str, prog: str, busybox: bool) -> tuple[bytes | None, int]:
+        """The bytes of path, or None and gzip's status: a directory is skipped with GNU's warning (status
+        2); BusyBox reads one as no bytes."""
+        if path != "-":
+            full = self.fs.resolve_path(path, self.cwd)
+            if self.fs.exists(full) and self.fs.isdir(full):
+                if busybox:
+                    return b"", 0
+                self.errorWrite(f"gzip: {path} is a directory -- ignored\n")
+                return None, 2
+        data = self.contents(path, prog)
+        return data, 0 if data is not None else 1
+
+
+def qpot_gzip_status(code: int, new: int) -> int:
+    """gzip's status after another file: an error (1) stays, a warning (2) only replaces success."""
+    return 1 if 1 in (code, new) else max(code, new)
 
 
 # --- mktemp ---------------------------------------------------------------------------------
@@ -1236,6 +1285,434 @@ class Command_expr(QpotCommand):
         return token
 
 
+# --- stat -----------------------------------------------------------------------------------
+
+# coreutils of each release
+QPOT_COREUTILS = {("ubuntu", 24): (9, 4), ("ubuntu", 22): (8, 32), ("debian", 13): (9, 7), ("debian", 12): (9, 1),
+                  ("rhel", 9): (8, 32), ("centos", 7): (8, 22)}
+# the default formats of GNU stat (9.x prints the device as major,minor; 8.x in hex and decimal) and
+#   BusyBox's; a device file adds its device type to the Links line
+QPOT_STAT_HEAD = "  File: %N\n  Size: %-10s\tBlocks: %-10b IO Block: %-6o %F\n"
+QPOT_STAT_TAIL = "Access: (%04a/%10.10A)  Uid: (%5u/%8U)   Gid: (%5g/%8G)\nAccess: %x\nModify: %y\nChange: %z\n"
+QPOT_STAT_FILE_TYPES = {stat_mod.S_IFREG: "regular file", stat_mod.S_IFDIR: "directory",
+                        stat_mod.S_IFLNK: "symbolic link", stat_mod.S_IFCHR: "character special file",
+                        stat_mod.S_IFBLK: "block special file", stat_mod.S_IFIFO: "fifo",
+                        stat_mod.S_IFSOCK: "socket"}
+QPOT_STAT_NODE_TYPES = {tree_fs.T_LINK: stat_mod.S_IFLNK, tree_fs.T_DIR: stat_mod.S_IFDIR,
+                        tree_fs.T_FILE: stat_mod.S_IFREG, tree_fs.T_BLK: stat_mod.S_IFBLK,
+                        tree_fs.T_CHR: stat_mod.S_IFCHR, tree_fs.T_SOCK: stat_mod.S_IFSOCK,
+                        tree_fs.T_FIFO: stat_mod.S_IFIFO}
+# the device numbers of the device files a persona has (major, minor)
+QPOT_DEVICES = {"/dev/null": (1, 3), "/dev/zero": (1, 5), "/dev/full": (1, 7), "/dev/random": (1, 8),
+                "/dev/urandom": (1, 9), "/dev/kmsg": (1, 11), "/dev/tty": (5, 0), "/dev/console": (5, 1),
+                "/dev/ptmx": (5, 2), "/dev/tty0": (4, 0), "/dev/tty1": (4, 1)}
+# the file systems that are no disk: their mount point and device
+QPOT_VIRTUAL_MOUNTS = (("/proc", (0, 22)), ("/sys", (0, 21)), ("/dev/pts", (0, 24)), ("/dev/shm", (0, 25)),
+                       ("/dev", (0, 5)), ("/run", (0, 26)))
+QPOT_STAT_DIRECTIVE = re.compile(r"([-#+ 0']*)([0-9]{0,9})(?:\.([0-9]{0,9}))?([HL]?)(.)", re.S)
+# operands, output and widths are the attacker's: so much is done at most per stat
+QPOT_STAT_MAX_FILES = 4096
+QPOT_STAT_MAX_OUTPUT = 1 << 20
+# the directives and runs of text one stat may fill in, over all its files (a format of 16384 empty
+#   directives given 4096 files held the reactor for minutes); a directive's value is worked out once per
+#   file
+QPOT_STAT_MAX_STEPS = 1 << 16
+QPOT_STAT_TEXT = re.compile(r"[^%]+")
+QPOT_STAT_TEXT_ESCAPES = re.compile(r"[^%\\]+")
+QPOT_STAT_MAX_WIDTH = 4096
+
+
+def qpot_coreutils_version(tree) -> tuple[int, int]:
+    """(major, minor) of the persona's GNU coreutils: the release the persona engine gives its other
+    coreutils ([shell] text_version of a GNU persona: wc, sort, df), else the one of its os-release."""
+    if CowrieConfig.get("shell", "text_style", fallback="") == "gnu":
+        found = re.fullmatch(r"([0-9]{1,2})\.([0-9]{1,3})", CowrieConfig.get("shell", "text_version", fallback="") or "")
+        if found:
+            return int(found.group(1)), int(found.group(2))
+    os_id, version = qpot_os_release(tree)
+    return QPOT_COREUTILS.get((os_id, version[0] if version else 0), (8, 32))
+
+
+# the copyright year of a coreutils release (as the persona engine's COREUTILS_YEARS)
+QPOT_COREUTILS_YEARS = {(8, 22): 2013, (8, 26): 2016, (8, 28): 2017, (8, 30): 2018, (8, 31): 2019, (8, 32): 2020,
+                        (9, 1): 2022, (9, 4): 2023, (9, 5): 2024, (9, 7): 2025}
+
+
+def qpot_coreutils_version_text(tree, program: str, authors: str) -> str:
+    """--version of a GNU coreutils program of the persona (as its wc and df print it): Debian's packager
+    line where the persona engine gives one, the http licence link before 8.29."""
+    version = qpot_coreutils_version(tree)
+    year = CowrieConfig.get("shell", "text_year", fallback="") or str(QPOT_COREUTILS_YEARS.get(version, 2022))
+    packager = CowrieConfig.get("shell", "text_packager", fallback="") \
+        if CowrieConfig.get("shell", "text_style", fallback="") == "gnu" else ""
+    scheme = "http" if version < (8, 29) else "https"
+    return (f"{program} (GNU coreutils) {version[0]}.{version[1]}\n" + (f"Packaged by {packager}\n" if packager else "")
+            + f"Copyright (C) {year} Free Software Foundation, Inc.\n"
+            f"License GPLv3+: GNU GPL version 3 or later <{scheme}://gnu.org/licenses/gpl.html>.\n"
+            "This is free software: you are free to change and redistribute it.\n"
+            "There is NO WARRANTY, to the extent permitted by law.\n\n"
+            f"Written by {authors}\n")
+
+
+def qpot_root_device(tree) -> tuple[int, int]:
+    """(major, minor) of the disk the persona's / is on (its /proc/mounts), sda1 where it does not say."""
+    for name in ("/proc/mounts", "/etc/mtab", "/etc/fstab"):
+        try:
+            text = tree.file_contents(name)[:65536].decode("utf-8", "replace")
+        except Exception:  # noqa: BLE001 - no such file
+            continue
+        for line in text.splitlines()[:512]:
+            words = line.split()
+            if len(words) >= 2 and words[1] == "/" and words[0].startswith("/dev/"):
+                dev = words[0][5:]
+                found = re.fullmatch(r"(sd|xvd|vd)([a-z])(\d*)", dev)
+                if found:
+                    major = {"sd": 8, "xvd": 202, "vd": 252}[found.group(1)]
+                    return major, (ord(found.group(2)) - 97) * 16 + int(found.group(3) or 0)
+                found = re.fullmatch(r"nvme\d+n\d+p(\d+)", dev) or re.fullmatch(r"mmcblk\d+p(\d+)", dev)
+                if found:
+                    return (259 if dev.startswith("nvme") else 179), int(found.group(1))
+                if dev.startswith(("mapper/", "dm-")):
+                    return 253, 0
+    return 8, 1
+
+
+def qpot_id_names(tree, path: str) -> dict[int, str]:
+    """id -> name of the persona's /etc/passwd or /etc/group."""
+    try:
+        text = tree.file_contents(path)[:1 << 20].decode("utf-8", "replace")
+    except Exception:  # noqa: BLE001
+        return {}
+    names: dict[int, str] = {}
+    for line in text.splitlines()[:8192]:
+        parts = line.split(":")
+        if len(parts) >= 3 and parts[2].isdigit():
+            names.setdefault(int(parts[2]), parts[0])
+    return names
+
+
+def qpot_shell_quote(name: str, always: bool) -> str:
+    """A name as GNU's shell-escape quoting writes it: in single quotes when it needs them (always)."""
+    if not always and name and re.fullmatch(r"[A-Za-z0-9_./:@%+,=^-]+", name):
+        return name
+    return "'" + name.replace("'", "'\\''") + "'"
+
+
+def qpot_mode_string(mode: int) -> str:
+    kind = {stat_mod.S_IFDIR: "d", stat_mod.S_IFLNK: "l", stat_mod.S_IFCHR: "c", stat_mod.S_IFBLK: "b",
+            stat_mod.S_IFIFO: "p", stat_mod.S_IFSOCK: "s"}.get(stat_mod.S_IFMT(mode), "-")
+    out = [kind]
+    for shift, special, letter in ((6, stat_mod.S_ISUID, "s"), (3, stat_mod.S_ISGID, "s"), (0, stat_mod.S_ISVTX, "t")):
+        bits = (mode >> shift) & 7
+        out.append("r" if bits & 4 else "-")
+        out.append("w" if bits & 2 else "-")
+        x = bits & 1
+        if mode & special:
+            out.append(letter if x else letter.upper())
+        else:
+            out.append("x" if x else "-")
+    return "".join(out)
+
+
+class Command_stat(QpotCommand):
+    """stat of GNU coreutils (the release's: 8.22 of CentOS 7 quotes in its locale and has no birth time,
+    8.x prints the device in hex, 9.x as major,minor) or of BusyBox: the default, -t, -c/--format and
+    --printf, -L. The values are the tree's (the size, owner, mode and time ls shows); the times of a
+    package's file are its mtime and the persona's installation, those of a file made later its own."""
+
+    qpot_name = "stat"
+    qpot_steps = QPOT_STAT_MAX_STEPS
+
+    def run(self) -> int | None:
+        busybox = self.busybox()
+        if busybox and self.usage_stop():
+            return self.exit_code
+        try:
+            if busybox:
+                options, rest = getopt.getopt(self.args, "c:fLt")
+            else:
+                options, rest = getopt.gnu_getopt(self.args, "c:Lt", ["dereference", "format=", "printf=",
+                                                                      "terse", "cached=", "version"])
+        except getopt.GetoptError as err:
+            opt = err.opt or ""
+            if busybox:
+                from cowrie.commands.uname import tpot_bb_usage_stop
+
+                tpot_bb_usage_stop(self, "stat", ["-" + opt[:1]])
+                return 1
+            if "requires" in err.msg:
+                text = (f"option '--{opt}' requires an argument" if len(opt) > 1
+                        else f"option requires an argument -- '{opt}'")
+            elif len(opt) > 1:
+                text = f"unrecognized option '--{opt}'"
+            else:
+                text = f"invalid option -- '{opt}'"
+            return self.try_help(f"stat: {text}\n")
+        if not busybox and any(o == "--version" for o, _ in options):
+            # QPot: as getopt_long hands it to stat, before any operand is looked at
+            self.write(qpot_coreutils_version_text(self.fs, "stat", "Michael Meskes."))
+            return 0
+        if not rest:
+            if busybox:
+                from cowrie.commands.uname import tpot_bb_usage_stop
+
+                tpot_bb_usage_stop(self, "stat", [])
+                return 1
+            return self.try_help("stat: missing operand\n")
+        self.qpot_busybox = busybox
+        self.qpot_version = qpot_coreutils_version(self.fs)
+        follow = any(o in ("-L", "--dereference") for o, _ in options)
+        fmt, printf = None, False
+        for opt, value in options:
+            if opt in ("-c", "--format"):
+                fmt, printf = value[:65536], False
+            elif opt == "--printf":
+                fmt, printf = value[:65536], True
+            elif opt in ("-t", "--terse") and fmt is None:
+                fmt = "%n %s %b %f %u %g %D %i %h %t %T %X %Y %Z %o\n" if busybox else \
+                    "%n %s %b %f %u %g %D %i %h %t %T %X %Y %Z %W %o\n"
+                printf = True
+        self.qpot_users, self.qpot_groups = qpot_id_names(self.fs, "/etc/passwd"), qpot_id_names(self.fs, "/etc/group")
+        self.qpot_root = qpot_root_device(self.fs)
+        from cowrie.core import qpot_bait
+
+        self.qpot_installed = qpot_bait._identity()[0]
+        code, left = 0, QPOT_STAT_MAX_OUTPUT
+        self.qpot_steps = QPOT_STAT_MAX_STEPS
+        for name in rest[:QPOT_STAT_MAX_FILES]:
+            if left <= 0 or self.qpot_steps <= 0:
+                break
+            path = self.fs.resolve_path(name, self.cwd)
+            node = self.fs.getfile(path, follow_symlinks=follow) if path != "/" else self.fs.getfile("/")
+            if node is None:
+                self.errorWrite(self.qpot_missing(name))
+                code = 1
+                continue
+            if fmt is None:
+                text = self.qpot_format(self.qpot_default(node), name, path, node, True)
+            else:
+                text = self.qpot_format(fmt, name, path, node, False, printf)
+                if not printf:
+                    text += "\n"
+            text = text[:left]
+            left -= len(text)
+            self.write(text)
+        return code
+
+    def qpot_missing(self, name: str) -> str:
+        if self.qpot_busybox:
+            return f"stat: can't stat '{name}': No such file or directory\n"
+        if self.qpot_version < (8, 31):
+            return f"stat: cannot stat {qpot_quote(name)}: No such file or directory\n"
+        return f"stat: cannot statx {qpot_shell_quote(name, True)}: No such file or directory\n"
+
+    def qpot_default(self, node) -> str:
+        device = stat_mod.S_IFMT(self.qpot_mode(node)) in (stat_mod.S_IFCHR, stat_mod.S_IFBLK)
+        if self.qpot_busybox:
+            return QPOT_STAT_HEAD + "Device: %Dh/%dd\tInode: %-10i  Links: %h\n" + QPOT_STAT_TAIL
+        if self.qpot_version >= (9, 0):
+            links = "Device: %Hd,%Ld\tInode: %-11i Links: " + ("%-5h Device type: %Hr,%Lr\n" if device else "%h\n")
+        else:
+            links = "Device: %Dh/%dd\tInode: %-10i  Links: " + ("%-5h Device type: %t,%T\n" if device else "%h\n")
+        return QPOT_STAT_HEAD + links + QPOT_STAT_TAIL + " Birth: %w\n"
+
+    @staticmethod
+    def qpot_mode(node) -> int:
+        mode = int(node[tree_fs.A_MODE] or 0)
+        if not stat_mod.S_IFMT(mode):
+            mode |= QPOT_STAT_NODE_TYPES.get(node[tree_fs.A_TYPE], stat_mod.S_IFREG)
+        return mode
+
+    def qpot_times(self, path: str, node) -> tuple[float, float, float, float]:
+        """(access, modify, change, birth): a file older than the installation came from a package (its
+        mtime kept, changed and born when it was unpacked), a later one was written then."""
+        mtime = float(node[tree_fs.A_CTIME] or 0)
+        seed = int(hashlib.sha256(f"{self.protocol.hostname}|{path}".encode()).hexdigest()[:12], 16)
+        if mtime < self.qpot_installed:
+            born = self.qpot_installed + (seed % 600) + (seed % 999999937) / 1e9
+            return born, mtime, born, born
+        if mtime == int(mtime):
+            mtime += (seed % 999999937) / 1e9
+        return mtime, mtime, mtime, mtime
+
+    def qpot_human_time(self, when: float) -> str:
+        clock = time.localtime(int(when))
+        fraction = int(round((when - int(when)) * 1e9)) % 1000000000
+        return time.strftime("%Y-%m-%d %H:%M:%S", clock) + f".{fraction:09d} " + time.strftime("%z", clock)
+
+    def qpot_value(self, letter: str, name: str, path: str, node, default: bool):
+        """The value of one directive (an int, a float time, or text), None for no directive of stat."""
+        mode = self.qpot_mode(node)
+        kind = stat_mod.S_IFMT(mode)
+        size = int(node[tree_fs.A_SIZE] or 0)
+        if path == "/" and kind == stat_mod.S_IFDIR and not size:
+            # the tree's / has no size; ext4's root folder takes a block, as ls shows it
+            size = 4096
+        major, minor = self.qpot_root
+        mount = "/"
+        for prefix, numbers in QPOT_VIRTUAL_MOUNTS:
+            if path == prefix or path.startswith(prefix + "/"):
+                (major, minor), mount = numbers, prefix
+                break
+        dev_type = QPOT_DEVICES.get(path, (0, 0)) if kind in (stat_mod.S_IFCHR, stat_mod.S_IFBLK) else (0, 0)
+        access, modify, change, birth = self.qpot_times(path, node)
+        old = self.qpot_version < (8, 31) and not self.qpot_busybox
+        if letter == "n":
+            return name
+        if letter == "N":
+            target = f" -> {node[tree_fs.A_TARGET]}" if kind == stat_mod.S_IFLNK else ""
+            if self.qpot_busybox:
+                # BusyBox's %N quotes a link and its target, nothing else
+                return f"'{name}' -> '{node[tree_fs.A_TARGET]}'" if target else name
+            if old:
+                return qpot_quote(name) + (f" -> {qpot_quote(str(node[tree_fs.A_TARGET]))}" if target else "")
+            quoted = qpot_shell_quote(name, not default)
+            return quoted + (f" -> {qpot_shell_quote(str(node[tree_fs.A_TARGET]), not default)}" if target else "")
+        if letter == "s":
+            return size
+        if letter == "b":
+            if kind == stat_mod.S_IFDIR:
+                return max(8, -(-size // 4096) * 8)
+            if kind == stat_mod.S_IFREG:
+                return -(-size // 4096) * 8
+            if kind == stat_mod.S_IFLNK:
+                return 0 if size < 60 else 8
+            return 0
+        if letter == "B":
+            return 512
+        if letter == "o":
+            return 4096
+        if letter == "F":
+            if kind == stat_mod.S_IFREG and size == 0:
+                return "regular empty file"
+            return QPOT_STAT_FILE_TYPES.get(kind, "unknown")
+        if letter == "f":
+            return f"{mode:x}"
+        if letter == "a":
+            return f"{mode & 0o7777:o}"
+        if letter == "A":
+            return qpot_mode_string(mode)
+        if letter in "uU":
+            uid = int(node[tree_fs.A_UID] or 0)
+            return uid if letter == "u" else self.qpot_users.get(uid, "UNKNOWN")
+        if letter in "gG":
+            gid = int(node[tree_fs.A_GID] or 0)
+            return gid if letter == "g" else self.qpot_groups.get(gid, "UNKNOWN")
+        if letter == "h":
+            if kind == stat_mod.S_IFDIR:
+                children = node[tree_fs.A_CONTENTS] if isinstance(node[tree_fs.A_CONTENTS], list) else []
+                return 2 + sum(1 for child in children if child[tree_fs.A_TYPE] == tree_fs.T_DIR)
+            return 1
+        if letter == "i":
+            return 2 if path == "/" else 131072 + int(hashlib.sha256(path.encode()).hexdigest()[:8], 16) % 2000000
+        if letter == "d":
+            return major * 256 + minor
+        if letter == "D":
+            return f"{major * 256 + minor:x}"
+        if letter in ("Hd", "Ld"):
+            return major if letter == "Hd" else minor
+        if letter in ("Hr", "Lr"):
+            return dev_type[0] if letter == "Hr" else dev_type[1]
+        if letter == "m":
+            return mount
+        if letter == "t":
+            return f"{dev_type[0]:x}"
+        if letter == "T":
+            return f"{dev_type[1]:x}"
+        if letter in "xyz":
+            return self.qpot_human_time({"x": access, "y": modify, "z": change}[letter])
+        if letter in "XYZ":
+            return ("time", {"X": access, "Y": modify, "Z": change}[letter])
+        if letter == "w":
+            return "-" if old or self.qpot_busybox else self.qpot_human_time(birth)
+        if letter == "W":
+            return 0 if old or self.qpot_busybox else ("time", birth)
+        return None
+
+    def qpot_format(self, fmt: str, name: str, path: str, node, default: bool, escapes: bool = False) -> str:
+        """fmt with its directives filled in: %[flags][width][.precision]X as stat's printf does (%Hd %Ld
+        %Hr %Lr the major and minor numbers); an unknown directive is ?, a % at the end a %. --printf
+        also reads the backslash escapes."""
+        out: list[str] = []
+        i, n, size = 0, len(fmt), 0
+        text = QPOT_STAT_TEXT_ESCAPES if escapes else QPOT_STAT_TEXT
+        values: dict = {}
+        while i < n and size < QPOT_STAT_MAX_OUTPUT and self.qpot_steps > 0:
+            self.qpot_steps -= 1
+            c = fmt[i]
+            if c == "\\" and escapes and i + 1 < n:
+                piece, i = self.qpot_escape(fmt, i)
+            elif c != "%":
+                run = text.match(fmt, i)
+                end = run.end() if run else i + 1
+                piece, i = fmt[i:end], end
+            elif i + 1 >= n:
+                piece, i = "%", i + 1
+            elif fmt[i + 1] == "%":
+                piece, i = "%", i + 2
+            else:
+                found = QPOT_STAT_DIRECTIVE.match(fmt, i + 1)
+                if not found:
+                    piece, i = "%", i + 1
+                else:
+                    spec, i = fmt[i:found.end()], found.end()
+                    piece = values.get(spec)
+                    if piece is None:
+                        flags, width, precision, half, letter = found.groups()
+                        key = half + letter if half and letter in "dr" else letter
+                        value = None if half and letter not in "dr" else self.qpot_value(key, name, path, node, default)
+                        # the same directive again (with its flags, width, precision) is the same text
+                        piece = values[spec] = self.qpot_pad(value, flags, width, precision)
+            out.append(piece)
+            size += len(piece)
+        return "".join(out)
+
+    @staticmethod
+    def qpot_escape(fmt: str, i: int) -> tuple[str, int]:
+        nxt = fmt[i + 1]
+        simple = {"n": "\n", "t": "\t", "\\": "\\", "\"": "\"", "a": "\a", "b": "\b", "f": "\f", "r": "\r",
+                  "v": "\v", "e": "\x1b"}
+        if nxt in simple:
+            return simple[nxt], i + 2
+        found = re.compile(r"[0-7]{1,3}").match(fmt, i + 1)
+        if found:
+            return chr(int(found.group(0), 8) & 0xFF), found.end()
+        found = re.compile(r"x([0-9A-Fa-f]{1,2})").match(fmt, i + 1)
+        if found:
+            return chr(int(found.group(1), 16)), found.end()
+        return "\\" + nxt, i + 2
+
+    @staticmethod
+    def qpot_pad(value, flags: str, width: str, precision: str | None) -> str:
+        """A value as stat's printf pads it: numbers (and the digits of %a %D %f) with 0 or blanks, a
+        precision their least digits; a time's precision its fraction; text cut to the precision."""
+        if value is None:
+            return "?"
+        width_n = min(int(width), QPOT_STAT_MAX_WIDTH) if width else 0
+        left = "-" in flags
+        numeric = False
+        if isinstance(value, tuple):  # a time in seconds: the precision shows its fraction
+            seconds = value[1]
+            digits = min(int(precision), 9) if precision else 0
+            text = str(int(seconds))
+            if digits:
+                text += "." + f"{int(round((seconds - int(seconds)) * 1e9)):09d}"[:digits]
+            numeric = True
+        elif isinstance(value, int):
+            text = str(value)
+            if precision:
+                text = text.zfill(min(int(precision), QPOT_STAT_MAX_WIDTH))
+            numeric = True
+        else:
+            text = str(value)
+            numeric = bool(re.fullmatch(r"[0-9a-f]+", text))
+            if precision is not None and not numeric:
+                text = text[:min(int(precision or 0), QPOT_STAT_MAX_WIDTH)]
+        if numeric and "0" in flags and not left:
+            return text.zfill(width_n)
+        return text.ljust(width_n) if left else text.rjust(width_n)
+
+
 # --- bash --version, exit at the login shell ------------------------------------------------
 
 # bash of each release: (version, copyright year) and the platform it was built for
@@ -1308,6 +1785,382 @@ if Command_exit is not None:
     commands["logout"] = Command_logout
 
 
+# --- gzip, gunzip ---------------------------------------------------------------------------
+
+# gzip of each release
+QPOT_GZIP = {("ubuntu", 24): (1, 12), ("ubuntu", 22): (1, 10), ("debian", 13): (1, 13), ("debian", 12): (1, 12),
+             ("rhel", 9): (1, 12), ("centos", 7): (1, 5)}
+QPOT_GZIP_YEARS = {(1, 13): 2023, (1, 12): 2022, (1, 10): 2018, (1, 5): 2012}
+QPOT_GZIP_LONG = ["stdout", "to-stdout", "decompress", "uncompress", "force", "help", "keep", "list", "license",
+                  "no-name", "name", "quiet", "recursive", "suffix=", "synchronous", "test", "verbose", "version",
+                  "fast", "best", "rsyncable"]
+QPOT_GZIP_LIST_HEAD = "         compressed        uncompressed  ratio uncompressed_name\n"
+QPOT_GZIP_VERBOSE_HEAD = ("method  crc     date  time           compressed        uncompressed  ratio "
+                          "uncompressed_name\n")
+# a file larger than this is not compressed in the reactor (gzip of the attacker's 1 GB file)
+QPOT_GZIP_MAX_INPUT = 8 << 20
+# the bytes one gzip reads and makes over all its files (4096 names of one 8 KiB file of zeros made
+#   gzip -t inflate 32 GiB)
+QPOT_GZIP_BUDGET = 64 << 20
+# the bytes one gzip compresses over all its files (deflate is the slow part: 4 MiB of random bytes take
+#   about 0.15 s): one file of the largest size
+QPOT_GZIP_DEFLATE = QPOT_GZIP_MAX_INPUT
+
+
+def qpot_gzip_header(data: bytes) -> int | None:
+    """The length of a gzip member's header (with its name, comment, extra field), None when cut short."""
+    if len(data) < 10:
+        return None
+    flags, pos = data[3], 10
+    if flags & 4:
+        if pos + 2 > len(data):
+            return None
+        pos += 2 + int.from_bytes(data[pos:pos + 2], "little")
+    for bit in (8, 16):
+        if flags & bit:
+            end = data.find(b"\0", pos)
+            if end < 0:
+                return None
+            pos = end + 1
+    if flags & 2:
+        pos += 2
+    return pos if pos <= len(data) else None
+
+
+class Command_gzip(Command_zcat):
+    """gzip of GNU (or of BusyBox, which has no -l): -l lists the sizes from each file's trailer as gzip
+    does (without decompressing it), -t tests, -d and -c decompress (as zcat) or compress, a file in its
+    place with its name and time in the header (BusyBox's keeps neither); gunzip is gzip -d."""
+
+    qpot_name = "gzip"
+    qpot_budget = QPOT_GZIP_BUDGET
+    qpot_bb = False
+
+    def qpot_spend(self, *pieces) -> None:
+        self.qpot_budget -= sum(len(piece) for piece in pieces if piece)
+
+    def run(self) -> int | None:
+        self.qpot_budget = QPOT_GZIP_BUDGET
+        self.qpot_deflate_left = QPOT_GZIP_DEFLATE
+        busybox = self.qpot_bb = self.busybox()
+        decompress = posixpath.basename(self.qpot_name) == "gunzip"
+        if busybox and self.usage_stop():
+            return self.exit_code
+        try:
+            if busybox:
+                options, files = getopt.gnu_getopt(self.args, "cdfkt123456789")
+            else:
+                options, files = getopt.gnu_getopt(self.args, "cdfhklLnNqrS:tvV123456789", QPOT_GZIP_LONG)
+        except getopt.GetoptError as err:
+            opt = err.opt or ""
+            if busybox:
+                from cowrie.commands.uname import tpot_bb_usage_stop
+
+                tpot_bb_usage_stop(self, posixpath.basename(self.qpot_name), ["-" + opt[:1]])
+                return 1
+            text = f"unrecognized option '--{opt}'" if len(opt) > 1 else f"invalid option -- '{opt}'"
+            self.errorWrite(f"gzip: {text}\nTry `gzip --help' for more information.\n")
+            return 1
+        keys = {o for o, _ in options}
+        if keys & {"-V", "--version"}:
+            self.write(self.qpot_version_text())
+            return 0
+        if keys & {"-d", "--decompress", "--uncompress"}:
+            decompress = True
+        to_stdout = bool(keys & {"-c", "--stdout", "--to-stdout"})
+        force = bool(keys & {"-f", "--force"})
+        keep = bool(keys & {"-k", "--keep"})
+        self.qpot_verbose = bool(keys & {"-v", "--verbose"})
+        files = files[:QPOT_STAT_MAX_FILES]
+        if keys & {"-l", "--list"}:
+            return self.qpot_list(files, bool(keys & {"-q", "--quiet"}), bool(keys & {"-N", "--name"}))
+        if keys & {"-t", "--test"}:
+            return self.qpot_test(files, busybox)
+        if decompress and (to_stdout or not files or files == ["-"]):
+            self.args = files
+            return Command_zcat.run(self)
+        code = 0
+        for name in files or ["-"]:
+            if self.qpot_budget <= 0:
+                break
+            if name == "-":
+                code = qpot_gzip_status(code, self.qpot_to_stdout(self.input_data or b"", "", 0, force))
+            elif decompress:
+                code = qpot_gzip_status(code, self.qpot_gunzip(name, keep, force))
+            else:
+                code = qpot_gzip_status(code, self.qpot_compress(name, to_stdout, keep, force))
+        return code
+
+    def qpot_version_text(self) -> str:
+        os_id, version = qpot_os_release(self.fs)
+        release = QPOT_GZIP.get((os_id, version[0] if version else 0), (1, 13))
+        scheme = "https" if release >= (1, 6) else "http"
+        return (f"gzip {release[0]}.{release[1]}\nCopyright (C) {QPOT_GZIP_YEARS[release]} Free Software Foundation, "
+                "Inc.\nCopyright (C) 1993 Jean-loup Gailly.\nThis is free software.  You may redistribute copies of "
+                f"it under the terms of\nthe GNU General Public License <{scheme}://www.gnu.org/licenses/gpl.html>.\n"
+                "There is NO WARRANTY, to the extent permitted by law.\n\nWritten by Jean-loup Gailly.\n")
+
+    def qpot_prog(self) -> str:
+        """The name gzip's messages start with: BusyBox's applet, else gzip (GNU's gunzip is a script)."""
+        return posixpath.basename(self.qpot_name) if self.qpot_bb else "gzip"
+
+    def qpot_list(self, files: list[str], quiet: bool = False, stored: bool = False) -> int:
+        """gzip -l: per file its size, the size its trailer gives, the ratio gzip computes (from the
+        compressed size less the header and trailer), the name without its suffix (-N: the one the header
+        keeps); totals for more than one file (whose ratio takes the last file's header, as gzip's does).
+        -q leaves out the heading and the totals."""
+        code, listed, total_in, total_out, header = 0, 0, 0, 0, 0
+        head = QPOT_GZIP_VERBOSE_HEAD if self.qpot_verbose else QPOT_GZIP_LIST_HEAD
+        for name in files or ["-"]:
+            if self.qpot_budget <= 0:
+                break
+            name = self.qpot_gz_name(name)
+            data, status = self.qpot_gz_read(name, "gzip", False)
+            if data is None:
+                code = qpot_gzip_status(code, status)
+                continue
+            self.qpot_spend(data)
+            label = "stdin" if name == "-" else name
+            if data[:2] != b"\x1f\x8b" and len(data) >= 2:
+                self.errorWrite(f"\ngzip: {label}: not in gzip format\n")
+                code = 1
+                continue
+            size = qpot_gzip_header(data)
+            if size is None or len(data) < size + 8:
+                self.errorWrite(f"\ngzip: {label}: unexpected end of file\n")
+                code = 1
+                continue
+            if not listed and (self.qpot_verbose or not quiet):
+                self.write(head)
+            header = size + 8
+            out = int.from_bytes(data[-4:], "little")
+            crc = int.from_bytes(data[-8:-4], "little")
+            ratio = 100.0 * (out - (len(data) - header)) / out if out else 0.0
+            plain = "stdout" if name == "-" else self.qpot_plain_name(name)
+            if stored and data[3] & 8:
+                kept = data[10 + (2 + int.from_bytes(data[10:12], "little") if data[3] & 4 else 0):size].split(b"\0")[0]
+                plain = kept.decode("latin-1") or plain
+            line = f"{len(data):19d} {out:19d} {ratio:5.1f}% {plain}\n"
+            if self.qpot_verbose:
+                stamp = int.from_bytes(data[4:8], "little")
+                if not stamp and name != "-":
+                    node = self.fs.getfile(self.fs.resolve_path(name, self.cwd))
+                    stamp = int(node[tree_fs.A_CTIME] or 0) if node else 0
+                when = time.strftime("%b %e %H:%M", time.localtime(stamp))
+                line = f"defla {crc:08x} {when} {line}"
+            self.write(line)
+            listed += 1
+            total_in += len(data)
+            total_out += out
+        if listed > 1 and (self.qpot_verbose or not quiet):
+            ratio = 100.0 * (total_out - (total_in - header)) / total_out if total_out else 0.0
+            line = f"{total_in:19d} {total_out:19d} {ratio:5.1f}% (totals)\n"
+            self.write((" " * 28 if self.qpot_verbose else "") + line)
+        return code
+
+    def qpot_inflate(self, data: bytes, label: str, busybox: bool) -> tuple[bytes | None, str | None]:
+        """data decompressed (bounded as zcat is), or the message gzip gives for it."""
+        import zlib
+
+        # BusyBox names the applet it runs as (gzip -t, gunzip: "gunzip: invalid magic", recorded from 1.37)
+        applet = posixpath.basename(self.qpot_name)
+        if len(data) < 2 and not busybox:
+            return None, f"\ngzip: {label}: unexpected end of file\n"
+        if data[:2] != b"\x1f\x8b":
+            return None, f"{applet}: invalid magic\n" if busybox else f"\ngzip: {label}: not in gzip format\n"
+        member = zlib.decompressobj(16 + zlib.MAX_WBITS)
+        try:
+            out = member.decompress(data, self.QPOT_ZCAT_MAX)
+        except zlib.error:
+            return None, f"{applet}: corrupted data\n" if busybox else \
+                f"\ngzip: {label}: invalid compressed data--format violated\n"
+        if not member.eof and len(out) < self.QPOT_ZCAT_MAX:
+            return None, f"{applet}: unexpected end of file\n" if busybox else \
+                f"\ngzip: {label}: unexpected end of file\n"
+        return out, None
+
+    def qpot_test(self, files: list[str], busybox: bool) -> int:
+        code = 0
+        for name in files or ["-"]:
+            if self.qpot_budget <= 0:
+                break
+            name = name if busybox else self.qpot_gz_name(name)
+            data, status = self.qpot_gz_read(name, self.qpot_prog(), busybox)
+            if data is None:
+                code = qpot_gzip_status(code, status)
+                continue
+            out, problem = self.qpot_inflate(data, "stdin" if name == "-" else name, busybox)
+            self.qpot_spend(data, out)
+            if problem:
+                self.errorWrite(problem)
+                code = 1
+            elif self.qpot_verbose:
+                self.errorWrite(f"{name}:\t OK\n")
+        return code
+
+    def qpot_to_stdout(self, data: bytes, name: str, stamp: int, force: bool) -> int:
+        targets = getattr(self.pp, "targets", None) or {}
+        # BusyBox writes to a terminal as well
+        if (targets.get(1) or ("terminal",))[0] == "terminal" and not force and not self.qpot_bb:
+            self.errorWrite("gzip: compressed data not written to a terminal. Use -f to force compression.\n"
+                            "For help, type: gzip -h\n")
+            return 1
+        data = data[:QPOT_GZIP_MAX_INPUT]
+        if not self.qpot_may_deflate(data):
+            return 0
+        packed = self.qpot_deflate(data, name, stamp)
+        self.qpot_spend(data, packed)
+        self.writeBytes(packed)
+        return 0
+
+    def qpot_may_deflate(self, data: bytes) -> bool:
+        """Whether data fits what this gzip may still compress (QPOT_GZIP_DEFLATE); when it does not, the
+        rest of the files are left alone."""
+        if len(data) > self.qpot_deflate_left:
+            self.qpot_budget = 0
+            return False
+        self.qpot_deflate_left -= len(data)
+        return True
+
+    @staticmethod
+    def qpot_deflate(data: bytes, name: str, stamp: int) -> bytes:
+        """data as GNU gzip writes it at its default level: the name and time of a file in the header."""
+        import struct
+        import zlib
+
+        compressor = zlib.compressobj(6, zlib.DEFLATED, -15)
+        body = compressor.compress(data) + compressor.flush()
+        flags = 8 if name else 0
+        head = b"\x1f\x8b\x08" + bytes([flags]) + struct.pack("<I", stamp & 0xFFFFFFFF) + b"\x00\x03"
+        if name:
+            head += name.encode("utf-8", "replace") + b"\x00"
+        return head + body + struct.pack("<II", zlib.crc32(data) & 0xFFFFFFFF, len(data) & 0xFFFFFFFF)
+
+    def qpot_node(self, name: str):
+        """(path, node, status) of name: no node after gzip's message when it is not there (status 1) or
+        is a directory (GNU skips one with a warning, status 2; BusyBox reads one as no bytes)."""
+        path = self.fs.resolve_path(name, self.cwd)
+        node = self.fs.getfile(path)
+        if node is None:
+            self.errorWrite(f"{self.qpot_prog()}: {name}: No such file or directory\n")
+            return path, None, 1
+        if node[tree_fs.A_TYPE] == tree_fs.T_DIR and not self.qpot_bb:
+            self.errorWrite(f"gzip: {name} is a directory -- ignored\n")
+            return path, None, 2
+        return path, node, 0
+
+    def qpot_place(self, path: str, node, data: bytes, stamp) -> bool:
+        """A new file at path with data and the permissions of node, made at stamp (None: now). GNU gzip
+        gives it node's owner too; BusyBox's is the user's."""
+        uid, gid = node[tree_fs.A_UID], node[tree_fs.A_GID]
+        if self.qpot_bb:
+            user = getattr(self.protocol, "user", None)
+            uid, gid = getattr(user, "uid", uid), getattr(user, "gid", gid)
+        mode = stat_mod.S_IFREG | (int(node[tree_fs.A_MODE] or 0) & 0o7777)
+        try:
+            self.fs.mkfile(path, uid, gid, len(data), mode, stamp)
+            made = self.fs.getfile(path)
+            made[tree_fs.A_CONTENTS] = data
+            return True
+        except Exception:  # noqa: BLE001 - a read-only place of the tree
+            return False
+
+    def qpot_compress(self, name: str, to_stdout: bool, keep: bool, force: bool) -> int:
+        path, node, status = self.qpot_node(name)
+        if node is None:
+            return status
+        bb, prog = self.qpot_bb, self.qpot_prog()
+        # GNU's make_ofname, which -c skips, leaves a .gz alone (without a warning status); BusyBox makes
+        # x.gz.gz
+        if not bb and not to_stdout and self.qpot_plain_name(name) != name and not force:
+            self.errorWrite(f"gzip: {name} already has .gz suffix -- unchanged\n")
+            return 0
+        size = int(node[tree_fs.A_SIZE] or 0)
+        if size > QPOT_GZIP_MAX_INPUT:
+            self.errorWrite(f"{prog}: {name}: File too large\n")
+            return 1
+        folder = node[tree_fs.A_TYPE] == tree_fs.T_DIR
+        data = b"" if folder else self.contents(name, prog)
+        if data is None:
+            return 1
+        # BusyBox keeps neither the name nor the time in the header
+        title, stamp = ("", 0) if bb else (posixpath.basename(path), int(node[tree_fs.A_CTIME] or 0))
+        if to_stdout:
+            return self.qpot_to_stdout(data, title, stamp, True)
+        target = path + ".gz"
+        if self.fs.exists(target) and not force:
+            if bb:
+                # BusyBox opens the new file O_EXCL
+                self.errorWrite(f"{prog}: can't open '{name}.gz': File exists\n")
+                return 1
+            self.errorWrite(f"gzip: {name}.gz already exists;\tnot overwritten\n")
+            return 2
+        if not self.qpot_may_deflate(data):
+            return 0
+        packed = self.qpot_deflate(data, title, stamp)
+        self.qpot_spend(data, packed)
+        # GNU gzip gives the new file the time of the old one; BusyBox's is made now
+        if not self.qpot_place(target, node, packed, None if bb else node[tree_fs.A_CTIME]):
+            self.errorWrite(f"{prog}: can't open '{name}.gz': Permission denied\n" if bb
+                            else f"gzip: {name}.gz: Permission denied\n")
+            return 1
+        if keep:
+            return 0
+        if folder:
+            # BusyBox read the directory as nothing, and dies when it cannot remove it
+            self.errorWrite(f"{prog}: can't remove file '{name}': Is a directory\n")
+            self.qpot_budget = 0
+            return 1
+        self.fs.remove(path)
+        return 0
+
+    def qpot_gunzip(self, name: str, keep: bool, force: bool) -> int:
+        bb, prog = self.qpot_bb, self.qpot_prog()
+        name = name if bb else self.qpot_gz_name(name)
+        path, node, status = self.qpot_node(name)
+        if node is None:
+            return status
+        if bb:
+            # BusyBox knows .gz, and .tgz for .tar, as written (make_new_name_gunzip); it opens the new
+            # file (O_EXCL) before it reads a byte
+            if name.endswith(".gz") and len(posixpath.basename(path)) > 3:
+                plain, shown = path[:-3], name[:-3]
+            elif name.endswith(".tgz") and len(posixpath.basename(path)) > 4:
+                plain, shown = path[:-4] + ".tar", name[:-4] + ".tar"
+            else:
+                self.errorWrite(f"{prog}: {name}: unknown suffix - ignored\n")
+                return 1
+            if self.fs.exists(plain) and not force:
+                self.errorWrite(f"{prog}: can't open '{shown}': File exists\n")
+                return 1
+        else:
+            plain, shown = self.qpot_plain_name(path), self.qpot_plain_name(name)
+            if plain == path:
+                self.errorWrite(f"gzip: {name}: unknown suffix -- ignored\n")
+                return 2
+        data = b"" if node[tree_fs.A_TYPE] == tree_fs.T_DIR else self.contents(name, prog)
+        if data is None:
+            return 1
+        out, problem = self.qpot_inflate(data, name, bb)
+        self.qpot_spend(data, out)
+        if problem:
+            self.errorWrite(problem)
+            return 1
+        if not bb and self.fs.exists(plain) and not force:
+            self.errorWrite(f"gzip: {shown} already exists;\tnot overwritten\n")
+            return 2
+        # GNU gzip gives the file the time of the .gz (the header's only with -N); BusyBox the header's
+        # when it has one, else now
+        stamp = (int.from_bytes(data[4:8], "little") or None) if bb else node[tree_fs.A_CTIME]
+        if not self.qpot_place(plain, node, out, stamp):
+            self.errorWrite(f"{prog}: can't open '{shown}': Permission denied\n" if bb
+                            else f"gzip: {shown}: Permission denied\n")
+            return 1
+        if not keep:
+            self.fs.remove(path)
+        return 0
+
+
 for qpot_cls, qpot_names in (
     (Command_arch, qpot_bin("arch")),
     (Command_sync, qpot_bin("sync")),
@@ -1325,5 +2178,8 @@ for qpot_cls, qpot_names in (
     (qpot_sum("sha256", "sha256sum"), qpot_bin("sha256sum")),
     (qpot_sum("sha512", "sha512sum"), qpot_bin("sha512sum")),
     (Command_zcat, qpot_bin("zcat")),
+    (Command_stat, qpot_bin("stat")),
+    (Command_gzip, qpot_bin("gzip")),
+    (type("Command_gunzip", (Command_gzip,), {"qpot_name": "gunzip"}), qpot_bin("gunzip")),
 ):
     qpot_register(qpot_cls, *qpot_names)

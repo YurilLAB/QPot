@@ -38,6 +38,7 @@ type stubResult struct {
 		Size  int64   `json:"size"`
 		Mode  int     `json:"mode"`
 		Mtime float64 `json:"mtime"`
+		UID   int     `json:"uid"`
 		B64   string  `json:"b64"`
 	} `json:"files"`
 	CPU           float64    `json:"cpu"`

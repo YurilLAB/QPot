@@ -511,17 +511,29 @@ fsmod.T_LINK, fsmod.T_DIR, fsmod.T_FILE, fsmod.T_BLK, fsmod.T_CHR, fsmod.T_SOCK,
 class FS:
     def __init__(self, files, mtime):
         self.root = ["", 1, 0, 0, 4096, 0o40755, mtime, [], None, None]
+        # each folder's children by name while the tree is built (a folder of many files stays linear); the
+        #   folder is kept with its index, so a replaced one's id never finds a stale index
+        kids = {}
         for path, spec in sorted(files.items()):
-            self.add(path, spec, mtime)
+            self.add(path, spec, mtime, kids)
 
-    def add(self, path, spec, mtime):
+    @staticmethod
+    def children(node, kids):
+        entry = kids.get(id(node))
+        if entry is None or entry[0] is not node:
+            entry = kids[id(node)] = (node, {c[0]: c for c in node[7]})
+        return entry[1]
+
+    def add(self, path, spec, mtime, kids):
         parts = [p for p in path.split("/") if p]
         node = self.root
         for part in parts[:-1]:
-            child = next((c for c in node[7] if c[0] == part), None)
+            index = self.children(node, kids)
+            child = index.get(part)
             if child is None:
                 child = [part, 1, 0, 0, 4096, 0o40755, mtime, [], None, None]
                 node[7].append(child)
+                index[part] = child
             node = child
         if isinstance(spec, str):
             spec = {"text": spec}
@@ -536,7 +548,11 @@ class FS:
             mode = spec.get("mode", 0o644)
             new = [parts[-1], 2, spec.get("uid", 0), spec.get("gid", 0), spec.get("size", len(data)),
                    0o100000 | mode, when, data, None, None]
-        node[7] = [c for c in node[7] if c[0] != parts[-1]] + [new]
+        index = self.children(node, kids)
+        if parts[-1] in index:
+            node[7].remove(index[parts[-1]])
+        node[7].append(new)
+        index[parts[-1]] = new
 
     def resolve_path(self, path, cwd):
         return posixpath.normpath(posixpath.join(cwd, path)) if path else cwd
@@ -685,7 +701,10 @@ uname.hardware_platform = lambda: STATE["machine"]
 
 
 def tpot_bb_usage_stop(command, name, args):
-    """uname.py's: BusyBox's usage for --help, no argument or an unknown option (here: -Z)."""
+    """uname.py's: BusyBox's usage for --help, no argument where the applet needs one (not the ones that read
+    stdin) or an unknown option (here: -Z)."""
+    if not args and name in ("gzip", "gunzip", "zcat"):
+        return False
     if args and "--help" not in args and "-Z" not in args:
         return False
     command.errorWrite(f"BusyBox usage of {name}\n")
@@ -900,7 +919,7 @@ def run(case):
         for child in node[7] if isinstance(node[7], list) else []:
             full = path + "/" + child[0]
             if child[1] == 2:
-                listing[full] = {"size": child[4], "mode": child[5], "mtime": child[6],
+                listing[full] = {"size": child[4], "mode": child[5], "mtime": child[6], "uid": child[2],
                                  "b64": base64.b64encode(child[7]).decode() if isinstance(child[7], bytes) else ""}
             elif child[1] == 1:
                 walk(child, full)

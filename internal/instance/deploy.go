@@ -112,6 +112,10 @@ const cowriePatchVersion = "24.04.2"
 // offer logged as ssh's is, and OpenSSH's messages and exit statuses for a
 // host that times out, refuses or asks for a password (recorded from OpenSSH
 // 10.0p2, the older releases' from their sources).
+//
+// coreutils.py: stat (GNU's of the release, or BusyBox's) and gzip -l, -t,
+// -d and compression (GNU's, or BusyBox's), with the values ls shows
+// (recorded from coreutils 9.7, gzip 1.13 and BusyBox 1.37).
 var (
 	//go:embed honeypotfiles/cowrie/protocol.py
 	cowrieProtocolPy []byte
