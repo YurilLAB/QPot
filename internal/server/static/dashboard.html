@@ -17,7 +17,7 @@
     <link href="/map/static/fonts/fonts.css" rel="stylesheet" integrity="sha384-WiEXL66/E+frAZqRB5+nO/MLUoXj+VrnKxXgvK33R87imSuzxukyaFlj5lnDHV80">
     <link href="/map/static/fontawesome/css/all.min.css" rel="stylesheet" integrity="sha384-qrALq7+6jBOZIQsNnT6xGkMDru64qD6uTlDra39xrt2SoXl4pO3FX6Roz/RpR/BS">
     <link href="/map/static/index.css?v=8" rel="stylesheet" integrity="sha384-J3WpBksXczdCwB46r7jmA3K7xrvGwd2I06NhAgrSFtE+v3UrLSm2iRa/4Ocub7A8">
-    <link href="/assets/css/dashboard.css" rel="stylesheet" integrity="sha384-lf6aWXdrfvfurdXkZYxIo9RlSVsJiYfc4ctUXeQUvqf5I/x0aEeHFADQp45u1BJV">
+    <link href="/assets/css/dashboard.css" rel="stylesheet" integrity="sha384-shgKy81d+aHqPgvhDmjCxJybAucpR9JPjbH5dnL+wdaHVvZ4uG9ylPCTJ1FT2RjW">
 </head>
 <body class="qpot-dashboard">
 
@@ -464,13 +464,19 @@
                         </table>
                     </div>
                 </div>
-                <div class="dash-card">
+                <div class="dash-card" id="requests-card">
                     <div class="card-header flex-between">
                         <h4 class="flex-center"><i class="fas fa-user-plus"></i> Join requests</h4>
-                        <span class="card-note">approved on the host</span>
+                        <span class="card-note" id="requests-note">approved on the host</span>
+                    </div>
+                    <div class="card-body hidden" id="requests-message-wrap"><div class="callout" id="requests-message"></div></div>
+                    <div class="table-wrapper" id="requests-table">
+                        <table class="data-table">
+                            <thead><tr><th>Node</th><th>From</th><th class="optional">Asked</th><th>Run on the host</th></tr></thead>
+                            <tbody id="requests-body"></tbody>
+                        </table>
                     </div>
                     <div class="card-body">
-                        <div class="callout warn" id="requests-unavailable"><i class="fas fa-circle-exclamation"></i><span>Pending join requests are not shown in the web UI yet: this qpot serve has no join request API. List and approve them on the first node:</span></div>
                         <ul class="step-list">
                             <li><span class="step-what">The requests waiting for approval, with the joining node's name and source address:</span><code class="cmd" id="requests-cmd">qpot cluster requests</code></li>
                             <li><span class="step-what">Admit one, or turn it away:</span><code class="cmd">qpot cluster approve &lt;request-id&gt;</code><code class="cmd">qpot cluster deny &lt;request-id&gt;</code></li>
@@ -1881,6 +1887,86 @@
                 h('td', {}, fmt(n.total_events)))));
         }
 
+        // ---------- join requests ----------
+
+        // GET /api/cluster/requests: read-only. The approve and deny commands are text to copy and run on
+        // the host; node_name and claimed_address come from the joining node, so they are text only.
+        function selectCommand(code) {
+            const range = document.createRange();
+            range.selectNodeContents(code);
+            const sel = getSelection();
+            sel.removeAllRanges();
+            sel.addRange(range);
+            toast('The command is selected: copy it with Ctrl+C, or from the menu of a long press.');
+        }
+
+        // the clipboard API needs a secure page (https or localhost): elsewhere the command is selected
+        function copyCommand(code, text) {
+            if (navigator.clipboard && window.isSecureContext) {
+                navigator.clipboard.writeText(text).then(() => toast('Copied: ' + text, 'ok'), () => selectCommand(code));
+            } else {
+                selectCommand(code);
+            }
+        }
+
+        // only a command of exactly the expected form is offered for the host's root shell (the server
+        // builds it from the request ID with the same rule; a hostile ID never becomes a command here)
+        const HOST_COMMAND = /^qpot cluster (approve|deny) [A-Za-z0-9][A-Za-z0-9_-]{0,63}$/;
+        function commandChip(text, what) {
+            const m = HOST_COMMAND.exec(String(text || ''));
+            if (!m || m[1] !== what) return null;
+            const code = h('code', { class: 'cmd' }, String(text));
+            return h('span', { class: 'cmd-copy' }, code,
+                h('button', { type: 'button', class: 'btn-base btn-secondary btn-icon hover-lift', title: `Copy the ${what} command`,
+                    'aria-label': `Copy the ${what} command`, onclick: () => copyCommand(code, String(text)) }, icon('fa-copy')));
+        }
+
+        function requestsMessage(kind, text) {
+            $('requests-message-wrap').classList.toggle('hidden', !text);
+            $('requests-table').classList.toggle('hidden', !!text);
+            callout($('requests-message'), kind, text);
+        }
+
+        async function loadJoinRequests() {
+            const body = $('requests-body'), note = $('requests-note');
+            let data;
+            try {
+                data = await api(`${API_BASE}/cluster/requests`);
+            } catch (e) {
+                if (e.status === 401 || e.status === 403) return;
+                const old = e.status === 404 && !e.code;
+                requestsMessage(old ? 'warn' : 'error', old ? 'Join requests need a newer qpot serve. List them on the first node with the commands below.'
+                    : 'The join requests could not be read: ' + errorText(e));
+                note.textContent = 'approved on the host';
+                lastData.delete(body);
+                return;
+            }
+            data = data || {};
+            const list = Array.isArray(data.requests) ? data.requests : [];
+            if (!data.clustered) {
+                requestsMessage('', 'This node is standalone, so no node can ask to join it. A group starts with qpot cluster init on the host.');
+                note.textContent = 'approved on the host';
+                return;
+            }
+            if (!data.live) {
+                requestsMessage('warn', String(data.message || 'This control plane does not run the cluster, so it cannot see join requests.'));
+                note.textContent = data.runs_on_instance ? 'shown by instance ' + String(data.runs_on_instance) : 'approved on the host';
+                return;
+            }
+            requestsMessage('', '');
+            note.textContent = list.length ? `${plural(list.length, 'request', 'requests')} waiting · approved on the host` : 'approved on the host';
+            if (unchanged(body, list)) return;
+            if (!list.length) { emptyRow(body, 4, 'No join requests are waiting.', 'fa-user-plus'); return; }
+            body.replaceChildren(...list.map((r) => {
+                const src = String(r.source_ip || ''), claimed = String(r.claimed_address || '');
+                return h('tr', {},
+                    h('td', { class: 'wrap' }, String(r.node_name || ''), h('div', { class: 'cell-sub' }, String(r.request_id || ''))),
+                    h('td', { class: 'wrap mono-accent' }, src, claimed && claimed !== src ? h('div', { class: 'cell-sub' }, 'says it is ' + claimed) : null),
+                    h('td', { class: 'optional' }, when(r.requested_at), h('div', { class: 'cell-sub' }, ago(r.requested_at))),
+                    h('td', {}, h('div', { class: 'cmd-pair' }, commandChip(r.approve_command, 'approve'), commandChip(r.deny_command, 'deny'))));
+            }));
+        }
+
         // ---------- Security ----------
 
         async function loadSecurity() {
@@ -1935,7 +2021,7 @@
                 else if (name === 'canaries') await loadCanaries();
                 else if (name === 'overview') await Promise.all([loadOverview(), loadInstance()]);
                 else if (name === 'doctor') await Promise.all([loadStatus(), loadDoctor(false), loadCodes()]);
-                else if (name === 'pairing') await loadPairing();
+                else if (name === 'pairing') await Promise.all([loadPairing(), loadJoinRequests()]);
                 else if (name === 'security') await loadSecurity();
             } catch (e) {
                 if (e.status !== 401 && e.status !== 403) toast(errorText(e), 'error');

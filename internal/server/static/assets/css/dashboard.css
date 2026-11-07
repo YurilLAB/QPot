@@ -916,6 +916,69 @@ a.navbar-brand:hover {
     margin-top: var(--spacing-md);
 }
 
+/* join requests: the host's approve and deny commands, as text to copy (never buttons that act) */
+.cmd-pair {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px var(--spacing-sm);
+}
+
+.cmd-copy {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    max-width: 100%;
+}
+
+.cmd-copy .cmd {
+    padding: 3px 8px;
+    border: 1px solid var(--border-secondary);
+    border-radius: var(--radius-sm);
+    background: var(--bg-tertiary);
+    font-size: var(--font-xs);
+    overflow-wrap: anywhere;
+    user-select: all;
+}
+
+.cmd-copy .btn-icon {
+    flex: none;
+    padding: 4px 8px;
+}
+
+#requests-message-wrap .callout {
+    margin: 0;
+}
+
+/* a phone has no room for four columns of long commands: one block per request */
+@media (max-width: 480px) {
+    #requests-table thead {
+        display: none;
+    }
+
+    #requests-table tr,
+    #requests-table td {
+        display: block;
+    }
+
+    #requests-table tr {
+        padding: var(--spacing-sm) var(--spacing-md);
+        border-bottom: 1px solid var(--border-primary);
+    }
+
+    #requests-table td {
+        padding: 2px 0;
+        border: 0;
+    }
+
+    #requests-table td.optional {
+        display: block;
+    }
+
+    #requests-table .cmd-pair {
+        margin-top: 6px;
+    }
+}
+
 /* Doctor: the result in its colour, the explain form on one line, QP codes link to their meaning */
 .stat-card .stat-value.good { color: var(--success-color); }
 .stat-card .stat-value.bad { color: #ff6b6b; }
