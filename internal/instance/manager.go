@@ -14,6 +14,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"slices"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -211,8 +212,10 @@ func (m *Manager) Initialize(ctx context.Context) error {
 func (m *Manager) Start(ctx context.Context, detach bool) error {
 	slog.Info("Starting QPot instance", "name", m.config.InstanceName)
 
-	// Check if already running
-	if m.IsRunning(ctx) {
+	// Refuse only when everything is up already: when only some containers
+	// run (docker restarted those whose policy says so after an unclean
+	// stop), `compose up -d` below starts the others and leaves those alone.
+	if m.AllRunning(ctx) {
 		return fmt.Errorf("instance is already running")
 	}
 
@@ -305,7 +308,56 @@ func (m *Manager) Stop(ctx context.Context) error {
 	return nil
 }
 
-// IsRunning checks if the instance is running
+// expectedServices are the compose services the instance runs once it is up,
+// as configured: the database (ClickHouse or TimescaleDB), the collector, the
+// egress guard when it is on, and every enabled honeypot with its companions.
+func (m *Manager) expectedServices() []string {
+	var out []string
+	if t := m.config.Database.Type; t == "clickhouse" || t == "timescaledb" {
+		out = append(out, "database")
+	}
+	out = append(out, "collector")
+	if eg, err := egressGuardFor(m.config); err == nil && eg.Enabled {
+		out = append(out, "netguard")
+	}
+	for name, hp := range m.config.SnapshotHoneypots() {
+		if hp.Enabled {
+			out = append(out, name)
+			out = append(out, m.companionServices(name)...)
+		}
+	}
+	sort.Strings(out)
+	return out
+}
+
+// StoppedServices returns the services the instance should run (see
+// expectedServices) that have no running container: exited, created, or
+// never created. It fails when docker cannot be asked.
+func (m *Manager) StoppedServices(ctx context.Context) ([]string, error) {
+	states, err := m.ServiceStates(ctx)
+	if err != nil {
+		return nil, err
+	}
+	var out []string
+	for _, svc := range m.expectedServices() {
+		if !strings.EqualFold(states[svc].State, "running") {
+			out = append(out, svc)
+		}
+	}
+	return out, nil
+}
+
+// AllRunning reports whether every service the instance should run is
+// running. IsRunning is true as soon as any one container runs: after an
+// unclean stop docker brings back only the containers its restart policy
+// covers, and the database or the honeypots can stay down next to them.
+func (m *Manager) AllRunning(ctx context.Context) bool {
+	stopped, err := m.StoppedServices(ctx)
+	return err == nil && len(stopped) == 0
+}
+
+// IsRunning reports whether any of the instance's containers is running (see
+// AllRunning for whether all of them are).
 func (m *Manager) IsRunning(ctx context.Context) bool {
 	composeFile := m.config.GetDockerComposePath()
 	cmd := exec.CommandContext(ctx, "docker", "compose", "-f", composeFile, "ps", "-q")

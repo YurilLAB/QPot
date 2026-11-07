@@ -140,6 +140,10 @@ Each QPot instance has a unique ID (qp_*) for tracking and authentication.`,
 	return rootCmd.ExecuteContext(ctx)
 }
 
+// backgroundServe starts the control plane in the background for `qpot up -d`
+// (startBackgroundServe; tests stand it in).
+var backgroundServe = startBackgroundServe
+
 func newUpCommand() *cobra.Command {
 	var (
 		instanceName string
@@ -182,18 +186,33 @@ func newUpCommand() *cobra.Command {
 			// An instance that is fully up already (containers + control plane)
 			// is left alone: starting a second control plane fails on the web UI
 			// port, and stopping afterwards would tear the running stack down.
-			if pid := runningServePID(cfg); pid != 0 && mgr.IsRunning(ctx) {
-				fmt.Printf("[OK] QPot instance '%s' is already running (control plane pid %d)\n", cfg.InstanceName, pid)
+			// "Fully" means every service it should run: after an unclean stop
+			// docker brings back only the containers whose restart policy says
+			// so, and attaching to those left the database and honeypots down.
+			allUp, anyUp := mgr.AllRunning(ctx), mgr.IsRunning(ctx)
+			servePID := runningServePID(cfg)
+			if servePID != 0 && allUp {
+				fmt.Printf("[OK] QPot instance '%s' is already running (control plane pid %d)\n", cfg.InstanceName, servePID)
 				fmt.Printf("[INFO] Web UI: %s   Stop it with: qpot down -i %s\n", localBaseURL(cfg), cfg.InstanceName)
 				return nil
 			}
 			startedContainers := false
-			if mgr.IsRunning(ctx) {
+			if allUp {
 				fmt.Println("[INFO] Containers are already running; attaching the control plane")
-			} else if err := mgr.Start(ctx, true); err != nil {
-				return fmt.Errorf("failed to start instance: %w", err)
 			} else {
-				startedContainers = true
+				if stopped, err := mgr.StoppedServices(ctx); err == nil && anyUp {
+					fmt.Printf("[INFO] Starting the parts that are not running: %s\n", strings.Join(stopped, ", "))
+				}
+				// compose up -d starts what is missing and leaves the rest.
+				if err := mgr.Start(ctx, true); err != nil {
+					return fmt.Errorf("failed to start instance: %w", err)
+				}
+				startedContainers = !anyUp
+			}
+			if servePID != 0 {
+				fmt.Printf("[OK] QPot instance '%s' is running (control plane pid %d)\n", cfg.InstanceName, servePID)
+				fmt.Printf("[INFO] Web UI: %s   Stop it with: qpot down -i %s\n", localBaseURL(cfg), cfg.InstanceName)
+				return nil
 			}
 
 			fmt.Printf("\n[OK] QPot instance '%s' started successfully\n", cfg.InstanceName)
@@ -202,7 +221,7 @@ func newUpCommand() *cobra.Command {
 			fmt.Println("\nUse this QPot ID to track your honeypot activity in the Web UI")
 
 			if detach {
-				pid, logPath, err := startBackgroundServe(cfg)
+				pid, logPath, err := backgroundServe(cfg)
 				if err != nil {
 					return fmt.Errorf("containers are up, but the control plane (web UI, intelligence) failed to start: %w", err)
 				}
