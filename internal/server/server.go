@@ -59,6 +59,9 @@ type Server struct {
 	// used to debounce alerting within Alerts.Cooldown. Touched only by the
 	// single alertLoop goroutine.
 	lastAlert time.Time
+
+	// api is the state of the web UI's api_*.go endpoints.
+	api apiState
 }
 
 // New creates a new web server.
@@ -226,6 +229,8 @@ func (s *Server) setupRoutes() {
 	// Attack map feed (T-Pot's map frontend at /map/, fed from QPot's events).
 	s.mux.HandleFunc("/api/map/stream", s.withQPotAuth(s.handleMapStream))
 
+	// The web UI's endpoints for the rest of QPot's features (api_routes.go).
+	s.setupAPIRoutes()
 }
 
 // withQPotAuth middleware checks QPot ID authentication

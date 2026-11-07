@@ -19,7 +19,6 @@ import (
 	"path/filepath"
 	"regexp"
 	"runtime"
-	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -606,59 +605,20 @@ instance is running, it is recreated with the new settings.`,
 			if err != nil {
 				return fmt.Errorf("failed to load config: %w", err)
 			}
-			hp, ok := cfg.GetHoneypotConfig(hpName)
-			if !ok {
-				return fmt.Errorf("unknown honeypot %q (see: qpot honeypot list)", hpName)
+			// Shared with PUT /api/honeypots/settings.
+			res, err := instance.ApplySettings(cmd.Context(), cfg, hpName, instance.ParseSettingArgs(args[1:]), nil)
+			if res != nil && res.Saved {
+				fmt.Printf("[OK] Updated %s settings for instance '%s'\n", hpName, instanceName)
 			}
-			allowed := instance.SettingKeys(hpName)
-			if len(allowed) == 0 {
-				return fmt.Errorf("%s has no settings to set", hpName)
-			}
-			custom := map[string]string{}
-			for k, v := range hp.CustomConfig {
-				custom[k] = v
-			}
-			for _, kv := range args[1:] {
-				k, v, found := strings.Cut(kv, "=")
-				if !found || !slices.Contains(allowed, k) {
-					return fmt.Errorf("invalid setting %q for %s (allowed: %s)", kv, hpName, strings.Join(allowed, ", "))
-				}
-				if strings.ContainsAny(v, "\r\n") {
-					return fmt.Errorf("%s: value must be a single line", k)
-				}
-				if err := instance.CheckSetting(hpName, k, v); err != nil {
-					return err
-				}
-				if v == "" {
-					delete(custom, k)
-				} else {
-					custom[k] = v
-				}
-			}
-			hp.CustomConfig = custom
-			cfg.Honeypots[hpName] = hp
-			if err := config.Save(cfg); err != nil {
-				return fmt.Errorf("failed to save config: %w", err)
-			}
-			fmt.Printf("[OK] Updated %s settings for instance '%s'\n", hpName, instanceName)
-			if !hp.Enabled {
-				return nil
-			}
-			if missing := instance.MissingLLMConfig(hpName, custom); len(missing) > 0 {
-				fmt.Printf("     %s still needs: %s\n", hpName, strings.Join(missing, ", "))
-				return nil
-			}
-			mgr, err := instance.NewManager(cfg)
 			if err != nil {
 				return err
 			}
-			if !mgr.IsRunning(cmd.Context()) {
-				return nil
+			if len(res.Missing) > 0 {
+				fmt.Printf("     %s still needs: %s\n", hpName, strings.Join(res.Missing, ", "))
 			}
-			if err := mgr.StartHoneypot(cmd.Context(), hpName); err != nil {
-				return fmt.Errorf("settings saved, but %s did not restart: %w", hpName, err)
+			if res.Recreated {
+				fmt.Printf("[OK] %s recreated with the new settings\n", hpName)
 			}
-			fmt.Printf("[OK] %s recreated with the new settings\n", hpName)
 			return nil
 		},
 	}
