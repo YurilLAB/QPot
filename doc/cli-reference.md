@@ -673,7 +673,7 @@ authorized tests can also trip a canary.
 Canaries are runtime objects owned by a **running** instance, so `qpot up` must
 be active; the CLI talks to the instance's local API (QPot-ID auth). Set
 `canary.base_url` in the instance config so minted URLs point at wherever this
-QPot is reachable. See [docs/canary.md](../docs/canary.md) for the full design.
+QPot is reachable. See [canary.md](canary.md) for the full design.
 
 Kinds: `web` (a beacon URL), `file` (an HTML document that attempts to fetch its
 beacon), `aws` (a fake AWS key pair watched in captured honeypot event fields).

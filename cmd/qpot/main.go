@@ -571,7 +571,7 @@ one, or set how many days (0-365, default 365) it keeps the identity it drew:
 
 On the server personas Cowrie also carries an ops box's files (SSH key, shell
 history, backup script, cloud credentials, a database dump) whose secrets are
-canaries (docs/canary.md). Turn them off:
+canaries (doc/canary.md). Turn them off:
 
   qpot honeypot set cowrie bait=off
 

@@ -1,562 +1,165 @@
 <p align="center">
-  <img src="https://raw.githubusercontent.com/YurilLAB/QPot/main/doc/qpot_wallpaper.png" alt="QPot Wallpaper" width="800">
+  <img src="doc/qpot_wallpaper.png" alt="QPot" width="800">
 </p>
 
 <h1 align="center">QPot</h1>
+
 <p align="center">
-  <strong>Honeypot platform built on T-Pot, made harder to recognise</strong><br>
-  <em>Developed by YurilLAB</em>
+  <strong>A honeypot platform built on T-Pot, made harder to recognise</strong>
 </p>
 
 <p align="center">
-  <a href="https://github.com/YurilLAB/QPot/releases"><img src="https://img.shields.io/github/v/release/YurilLAB/QPot?style=flat-square&color=blue" alt="Release"></a>
-  <a href="https://golang.org"><img src="https://img.shields.io/badge/Go-1.26+-00ADD8.svg?style=flat-square" alt="Go Version"></a>
-  <a href="https://docker.com"><img src="https://img.shields.io/badge/Docker-Required-2496ED.svg?style=flat-square" alt="Docker"></a>
-  <a href="LICENSE"><img src="https://img.shields.io/badge/License-GPLv3-blue.svg?style=flat-square" alt="License"></a>
+  <a href="https://github.com/YurilLAB/QPot/actions/workflows/ci.yml"><img src="https://github.com/YurilLAB/QPot/actions/workflows/ci.yml/badge.svg?branch=main" alt="CI"></a>
+  <a href="https://go.dev"><img src="https://img.shields.io/badge/Go-1.26+-00ADD8.svg?style=flat-square" alt="Go 1.26+"></a>
+  <a href="https://www.docker.com"><img src="https://img.shields.io/badge/Docker-required-2496ED.svg?style=flat-square" alt="Docker required"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/License-GPLv3-blue.svg?style=flat-square" alt="GPLv3"></a>
 </p>
 
-QPot runs the same proven honeypot images as [T-Pot CE](https://github.com/telekom-security/tpotce),
-driven by a single `qpot` binary. On top of T-Pot it adds:
+QPot runs the proven honeypot images of [T-Pot CE](https://github.com/telekom-security/tpotce)
+from a single `qpot` program. Where every T-Pot install looks the same to an
+attacker, every QPot instance is a believable machine of its own. QPot also
+keeps the honeypots away from your network, analyses what attackers do, and
+brings T-Pot's web interface with a dashboard for all of it.
 
-- **Per-instance deception** – every deployment gets its own believable identity
-  (SSH banner, kernel, hostname, users, filesystem) instead of T-Pot's
-  globally identical defaults, plus an optional high-interaction mode backed by
-  real OpenSSH.
-- **Hardened containers** – per-honeypot networks, dropped capabilities,
-  read-only filesystems, resource limits and gVisor/Kata when available.
-- **Built-in analysis** – Vector → ClickHouse (or TimescaleDB), automatic
-  MITRE ATT&CK tagging, IOC extraction, campaign (TTP) tracking and MISP export.
-- **Canaries, alerts and response hooks**, multi-node **clusters**, and a
-  built-in **web UI**: T-Pot's landing page and live attack map, restyled for
-  QPot and served from QPot's own API, plus a dashboard.
-- **One-command setup** that checks the host, starts everything and verifies it
-  is actually healthy.
+## Contents
 
----
+- [Features](#features)
+- [Screenshots](#screenshots)
+- [Requirements](#requirements)
+- [Quick start](#quick-start)
+- [Everyday use](#everyday-use)
+- [Documentation](#documentation)
+- [Disclaimer](#disclaimer)
+- [Credits and licence](#credits-and-licence)
+
+## Features
+
+- **27 honeypots** from T-Pot's upstream images, covering SSH, Telnet, web,
+  mail, databases, industrial control systems, medical systems and more.
+- **A believable identity per instance.** Each instance gets its own operating
+  system, SSH version, host name, users and files, kept across restarts. Shell
+  commands answer the way the real tools do. An optional high-interaction mode
+  puts attackers on real OpenSSH servers that are rebuilt after every session.
+- **Safe by default.** Every honeypot has its own network, no Linux
+  capabilities beyond what it needs, a read-only filesystem and resource
+  limits. An egress guard stops honeypots reaching your local network, the host
+  or cloud metadata. The web UI and database listen only on the local machine.
+- **Built-in analysis.** Events flow into ClickHouse or TimescaleDB, are tagged
+  with MITRE ATT&CK techniques, and yield indicators of compromise and attacker
+  campaigns, with a MISP export.
+- **T-Pot's web UI in QPot's colours.** The landing page and live attack map,
+  plus a dashboard for honeypot controls, events, intelligence, canaries and
+  health checks.
+- **Canaries.** Decoy credentials, files and links you plant in your own
+  environment, plus bait planted inside the honeypots. QPot raises a critical
+  alert when it observes one in use; [canary.md](doc/canary.md) explains what it
+  can and cannot detect.
+- **Guided setup.** `qpot setup` installs Docker from Docker's signed
+  repositories, starts everything and checks it is healthy. Every problem comes
+  with a plain-English explanation and a code such as `QP-PKG-001`.
+- **Clusters.** Several nodes can share health and attacker data over TLS, each
+  with its own certificate.
+
+## Screenshots
+
+<p align="center">
+  <img src="doc/images/web-ui-landing.png" alt="Landing page" width="800">
+</p>
+
+<p align="center">
+  <img src="doc/images/web-ui-map.png" alt="Live attack map" width="49%">
+  <img src="doc/images/web-ui-dashboard.png" alt="Dashboard" width="49%">
+</p>
+
+## Requirements
+
+| | |
+|---|---|
+| Operating system | Linux: Debian, Ubuntu, Raspberry Pi OS, Fedora, CentOS Stream, Rocky, AlmaLinux, RHEL, openSUSE or Arch. macOS and Windows work through Docker Desktop. |
+| Processor | amd64 or arm64 |
+| Memory | 2 GiB or more (1 GiB minimum) |
+| Disk | 5 GiB or more free |
+| Docker | Docker Engine with the Compose plugin. `qpot setup` can install it for you. |
+
+For a sensor exposed to the internet, use a dedicated Linux host or VM. More
+detail is in [installation.md](doc/installation.md#requirements).
 
 ## Quick start
 
-Install the `qpot` binary:
+Install the `qpot` program. The installers check the download's checksum and
+build provenance before installing anything.
 
 ```bash
-# Linux / macOS
+# Linux and macOS
 curl -fsSL https://raw.githubusercontent.com/YurilLAB/QPot/main/scripts/install.sh | bash
 
 # Windows (PowerShell)
 irm https://raw.githubusercontent.com/YurilLAB/QPot/main/scripts/install.ps1 | iex
-
-# Or from source (Go 1.26+)
-git clone https://github.com/YurilLAB/QPot.git && cd QPot && make build
 ```
 
-The installers offer to run `qpot setup` straight away (`QPOT_NO_SETUP=1`
-installs the program only; `QPOT_SETUP_ARGS="--yes --install-docker"` runs
-setup without questions).
-
-Before they install anything, the installers check what they downloaded: the
-release archive must match its line in the release's `SHA256SUMS`, downloads
-may only come from GitHub's release servers (a redirect elsewhere stops
-them), and with the [GitHub CLI](https://cli.github.com) installed they also
-verify the archive's build provenance (`QPOT_REQUIRE_PROVENANCE=1` makes that
-check mandatory). Until a release is published they build from source
-instead, but only the one commit they pin, which git checks by its hash; Go
-checks every dependency against that commit's `go.sum`. Any
-failed check stops with a coded error ([doc/setup-errors.md](doc/setup-errors.md))
-and installs nothing.
-
-Set up and start an instance:
+Set up and start an instance. Setup asks a few questions, each with a safe
+default, and prints how to reach the web UI when everything is healthy.
 
 ```bash
-qpot setup                          # guided: asks a few questions, every one has a safe default
-qpot setup --yes                    # no questions: flags and defaults (minimal: cowrie + endlessh)
-qpot setup --yes --install-docker --docker-group --profile standard
-qpot setup --profile hifi --service # real-OpenSSH HiFi mode, as a systemd service
-qpot setup --dry-run                # show what setup would do, change nothing
-qpot doctor                         # re-check health any time (non-zero on failure)
+qpot setup
 ```
 
-In a terminal, `qpot setup` asks for the instance name, the honeypots
-(`minimal`, `standard`, `hifi` or a list), the web UI address and port, the
-database, whether honeypots may connect out to the internet, the attack-map
-country, the GeoIP download and whether to start at boot. Enter takes the
-recommended answer, and a wrong answer is asked again. Without a terminal (or
-with `--yes`) nothing is asked: every question has a flag (`qpot setup --help`).
+Then open `http://127.0.0.1:8080` and sign in with the QPot ID that `qpot id`
+prints. From another computer, use an SSH tunnel:
+`ssh -L 8080:127.0.0.1:8080 <user>@<qpot-host>`.
 
-It then:
-
-- checks Docker Engine and the Compose plugin and, **only after showing the
-  exact commands and getting your yes** (or `--install-docker`), installs,
-  updates or starts them. On Debian, Ubuntu, Raspberry Pi OS, Fedora, CentOS
-  Stream, Rocky, AlmaLinux and RHEL it uses Docker's own signed repository and
-  checks the signing key's published fingerprint; where Docker has no packages
-  for the release (and on openSUSE and Arch) it uses the distribution's own.
-  Root commands run through `sudo`. On macOS (Homebrew) and Windows (winget) it
-  installs Docker Desktop; you accept Docker Desktop's licence yourself.
-- offers to add your user to the `docker` group (`--docker-group`); being in
-  it is the same as having root, so it asks first and defaults to no.
-- checks memory, disk space and the ports, creates the instance with a fresh
-  QPot ID and random database password, downloads the free
-  [DB-IP](https://db-ip.com) Lite country database (`--no-geoip` skips it;
-  `qpot geoip update` refreshes it monthly), starts the containers and the
-  control plane, and waits until everything is healthy.
-- prints the web UI address, how to log in (the QPot ID is shown only on your
-  own terminal, never written to a log), an `ssh -L` tunnel command for other
-  computers, the honeypots and their ports, where the files are, and the next
-  commands.
-
-Setup can be run again at any time: it checks what is already done and
-continues from there (after a failure it offers your previous answers). The web
-UI and database listen on `127.0.0.1` by default; choosing another address
-prints a warning, because the web UI uses plain HTTP.
-
-Every problem setup, `qpot doctor` and the installers report has a code such as
-`QP-PKG-001` with what went wrong, why, and what to do; the process exits with
-the code's category status. `qpot doctor --explain QP-PKG-001` explains a
-code, and [doc/setup-errors.md](doc/setup-errors.md) lists them all.
-
-The manual equivalent:
+## Everyday use
 
 ```bash
-qpot instance create production
-qpot up -d -i production    # containers + background control plane (qpot serve)
-qpot down -i production
+qpot status                        # what is running
+qpot doctor                        # check every part, with a fix for each problem
+qpot honeypot list                 # honeypots, ports and risk levels
+qpot honeypot enable dionaea       # turn a honeypot on
+qpot honeypot set cowrie persona=rhel-9
+qpot logs cowrie -f                # follow a honeypot's log
+qpot overview                      # activity and host load in the terminal
+qpot down                          # stop the instance
+qpot up -d                         # start it again
 ```
 
-The **control plane** (web UI/API, intelligence worker, alerts, cluster
-membership, HiFi backend recycler) runs inside `qpot up`, or in the background
-as `qpot serve` with `-d` (log: `<instance>/logs/qpot-serve.log`).
-
-### Web UI and API
-
-Served by the `qpot` process on `http://127.0.0.1:8080` (or the port `setup`
-chose), authenticated with the instance's **QPot ID** (`qpot id` shows it). From
-another machine use an SSH tunnel: `ssh -L 8080:127.0.0.1:8080 <host>`.
-
-| Page | What it is |
-|------|------------|
-| `/` | T-Pot's landing page in QPot's colours: live counts, the attack timeline, attacks per honeypot, top sources, links |
-| `/map/` | T-Pot's live attack map, fed by QPot's own database over an authenticated stream (`/api/map/stream`). The world is drawn locally (Natural Earth outlines), so the browser contacts no tile server. |
-| `/dashboard` | Honeypot controls and settings, events, intelligence, canaries, doctor checks, cluster pairing and the overview |
-
-Every API endpoint, with its answers and errors: [doc/api.md](doc/api.md).
-
-The QPot ID is entered once per browser, checked with the server, kept in that
-browser only and never shown on the page.
-
-The dashboard shows live stats, per-honeypot controls (on/off, logs, restart,
-settings), an event browser with filters and search, ATT&CK techniques / IOCs /
-campaigns (with a MISP export), canaries and their trips, `qpot doctor`'s checks
-with their fixes, cluster members and pending join requests (approved on the host
-with the command shown), and the security posture. Its **Overview** tab adds host CPU / memory / disk /
-process load, 24-hour activity per honeypot and the latest events with a
-severity. The same view is available from the terminal, for one instance or all
-of them on the host, and nothing is sent off the machine:
-
-```bash
-qpot overview          # this instance
-qpot overview --all    # every instance on the host
-```
-
----
-
-## Honeypots
-
-27 honeypots, using T-Pot's newest upstream images, `24.04.2` (there is no
-T-Pot 25 release; tanner, snare and phpox stay on `24.04.1`, the newest
-published for them). `qpot honeypot list` shows ports and risk levels:
-
-`adbhoney`, `beelzebub`, `ciscoasa`, `citrixhoneypot`, `conpot`, `cowrie`,
-`ddospot`, `dicompot`, `dionaea`, `elasticpot`, `endlessh`, `galah`, `go-pot`,
-`h0neytr4p`, `hellpot`, `heralding`, `honeyaml`, `ipphoney`, `log4pot`,
-`mailoney`, `medpot`, `miniprint`, `redishoneypot`, `sentrypeer`, `ssh-proxy`
-(HiFi), `tanner`, `wordpot`.
-
-`glutton` and `honeytrap` are left out on purpose: they need host networking and
-`NET_ADMIN`, which would break QPot's per-honeypot isolation.
-
-```bash
-qpot honeypot enable dionaea   # starts it right away if the instance is running
-```
-
-`tanner` runs as T-Pot does: the snare web front end plus the tanner, API, PHP
-sandbox and Redis containers on an internal network. `beelzebub` and `galah`
-answer attackers with an LLM and need one before they are enabled:
-
-```bash
-qpot honeypot set galah llm_provider=ollama llm_server_url=http://10.0.0.5:11434 llm_model=llama3.1
-qpot honeypot set beelzebub llm_provider=ollama llm_model=llama3.1 llm_host=http://10.0.0.5:11434/api/chat
-qpot honeypot enable galah
-```
-
----
-
-## Deception
-
-![QPot anti-fingerprint demo](doc/qpot-fingerprint-demo.gif)
-
-A stock T-Pot install is recognisable because every install is identical. QPot
-gives each instance a distinct, self-consistent identity:
-
-- **Cowrie personas** – cowrie runs as one of the persona engine's machines in
-  the T-Pot cowrie image (Ubuntu 24.04/22.04, Debian 13/12, RHEL 9, CentOS 7,
-  Raspberry Pi OS, a GPU server, and routers, NAS boxes and an IP camera). The
-  engine builds the whole box from the persona: the OpenSSH release with that
-  release's key-exchange and host-key lists, `uname` and `/proc`, a process
-  table whose start times match the uptime, `lscpu`/`lspci`/`mount`/`df`, the
-  network behind `ip`/`ss`/`netstat`, the packages behind `dpkg`/`rpm`, the
-  units behind `systemctl` and the `sudo` rules. QPot picks a server persona per
-  instance and keeps the identity it draws (host name, patch level, boot time,
-  addresses) for a year across restarts, so a returning attacker meets the same
-  box. Pin one with `qpot honeypot set cowrie persona=<id>`.
-- **Cowrie patch layer** – QPot mounts a few corrected Cowrie source files
-  read-only over the image. The terminal now writes what the persona's shell
-  writes (checked byte for byte against bash 5.2's readline and BusyBox's
-  `ash`). Before, the prompt came with the `ESC[4h` insert-mode switch, and
-  Ctrl-C printed no `^C`. `ping` is now the persona's iputils or BusyBox ping
-  with real statistics; before, `ping -c 4 host` failed. `hostname -f` no
-  longer renames the host. `bash --version` reports the persona's bash, and
-  `exit` says `logout`. Programs that ended in "Exec format error" now work:
-  `arch`, `timeout`, `setsid`, `nice`, `basename`, `dirname`, `md5sum`/`sha*sum`,
-  `mktemp`, `tty`, `sync`, `printenv` and `expr`.
-- **Dionaea machine name** – every T-Pot dionaea answered SMB as `ADFS` in
-  `DACH`, and its RPC and MSSQL services as `HOMEUSER-3AF6FE`. Each instance
-  now answers everywhere as one Windows 7 machine of its own (`<USER>-PC` or
-  `WIN-` and 11 characters) in `WORKGROUP`.
-- **Conpot devices** – conpot emulates one of the T-Pot conpot image's devices
-  (a Siemens substation RTU on IEC 104/DNP3/SNMP, a Veeder-Root tank gauge, a
-  Supermicro BMC, a Kamstrup meter, a Beckhoff PLC on ADS/OPC UA, a LOYTEC
-  building controller on BACnet/KNX, an Emerson HART gateway, an ICCP server or
-  a Modicon PLC on Modbus), picked per instance. It publishes only that
-  device's ports, and the address, MAC, serials and PINs the image draws for it
-  are kept across restarts. The image's multi-protocol `default` template, the
-  same on every install, is never used. Pin one with
-  `qpot honeypot set conpot template=<id>`.
-- **Heralding personas** – heralding answers every service as the machine its
-  persona describes (Ubuntu, Debian, RHEL or Windows Server): FTP, SSH, SMTP,
-  POP3 and IMAP greetings, web server header and certificate subject agree.
-  QPot runs it with the image's configuration minus the stock greetings that
-  overrode the persona (`OpenSSH_6.6.1p1 Ubuntu-2ubuntu2.8`, "Microsoft FTP
-  Server", Exchange SMTP), and keeps the persona, its certificates and SSH host
-  keys across restarts.
-- **ADB device** – adbhoney introduces itself as one Android 8 phone picked per
-  instance (Pixel 2, Mi A1, Galaxy S9, …) in the form a real adbd uses, instead
-  of the stock `device::http://ro.product.name =starltexx` banner every ADBHoney
-  install sends. Files pushed with `adb push` are kept in its `dl` directory.
-  Fetching URLs from attacker commands is off: the image's downloader would
-  request any address, including ones on your own network.
-- **HiFi credential personas** – the real-OpenSSH backends of HiFi mode accept a
-  persona's believable weak passwords (30 personas: corporate Ubuntu, DB
-  server, Proxmox host, …) under a matching host name. Pin one with the
-  ssh-proxy's `credential_template`.
-- **No giveaways** – container environments contain no `qpot`/`tpot`/`honeypot`
-  strings and no stealth knobs: an intruder who reads `/proc/1/environ` finds
-  nothing that names a honeypot. The config files QPot mounts are the images'
-  own formats and are not reachable from an attacker's session.
-
-**Limitation:** cowrie's cipher and MAC lists and its packet handling come from
-its Python SSH stack, so a determined packet-level fingerprinter can still tell
-it from real OpenSSH. **HiFi mode** closes that gap: a transparent TCP broker (`ssh-proxy`)
-passes the attacker straight to real OpenSSH backends on an egress-blocked
-network, and each backend is recreated after every session. Enable it with
-`qpot setup --profile hifi` or `qpot honeypot enable ssh-proxy`. Details:
-[doc/ssh-hifi-proxy.md](doc/ssh-hifi-proxy.md) and
-[doc/fingerprint-comparison.md](doc/fingerprint-comparison.md).
-
-```bash
-qpot honeypot set cowrie persona=debian-bookworm   # optional; picked per instance if unset
-qpot honeypot set cowrie persona_rotation=30       # days to keep the drawn identity (0-365, default 365)
-qpot honeypot set conpot template=plc_modbus       # optional; picked per instance if unset
-```
-
----
-
-## Data and threat intelligence
-
-Vector collects every honeypot's JSON log, normalises it (source IP/ports,
-protocol, event type, credentials, commands, download URLs; each honeypot's own
-field names are mapped as T-Pot's Logstash pipeline does), adds the attacker's
-country from the GeoIP database and writes it to the instance database. Lines
-without an attacker address (startup banners, errors) are dropped. Data is kept
-for 90 days.
-
-| Backend | Notes |
-|---------|-------|
-| `clickhouse` | Default. Runs as the instance's `database` container. |
-| `timescaledb` | Supported alternative (`database.type: timescaledb`). |
-
-The intelligence worker (every 15 minutes by default,
-`intelligence.worker_interval`) then:
-
-- **Classifies** each event with MITRE ATT&CK – 16 curated rules plus rules
-  generated from the ATT&CK dataset (fetched from MITRE, embedded fallback when
-  offline), each with a confidence score. Example: `uname -a` → T1082,
-  `wget …` → T1105, failed logins → T1110, Modbus probes → T0840.
-- **Extracts IOCs** – public attacker IPs, credential pairs, URLs and domains,
-  file hashes (including downloaded payloads), crypto wallets, commands and user
-  agents. Defanged indicators (`hxxp://`, `1.2.3[.]4`) are refanged first.
-- **Groups campaigns (TTP sessions)** by shared credentials, tooling, commands
-  and targeted services rather than IP alone.
-
-Before marking source events classified, the worker saves a database checkpoint
-and persists its IOC totals and active TTP sessions. Interrupted batches replay
-without adding their observations twice. Run one intelligence worker per database:
-a local OS-account lock prevents duplicate local workers, but separate hosts,
-accounts or database-host aliases still require coordinated ownership. Keep the
-`qpot/intelligence-locks` state under your OS user configuration directory; it
-reserves revisions across interrupted saves. Before moving ownership to another
-host or account, transfer that reservation state or verify all previous database
-requests have finished; stopping the old process alone does not settle requests
-already in flight. Canary notifications remain
-at-least-once across crashes and use their own direct IOC path. Recovery failures
-have `QP-INTEL-*` codes (`qpot doctor --explain <code>`).
-The authenticated intelligence summary also exposes `worker_status`
-(`disabled`, `not_started`, `running`, `retrying` or `stopped`) and
-`worker_healthy` (running without a recorded error). Failures include
-`worker_error_code` and catalog-only `worker_error_remedy`, without database
-error details. A retrying worker uses its normal processing cadence; a stopped
-worker needs the control plane restarted after its cause is resolved.
-
-| Endpoint | Description |
-|----------|-------------|
-| `GET /api/techniques` | Observed ATT&CK techniques with counts |
-| `GET /api/iocs` | IOCs, filterable by type and honeypot |
-| `GET /api/iocs/export?format=misp` | IOCs as a MISP event |
-| `GET /api/ioc` | Attacker IP blocklist |
-| `GET /api/ttps` | Campaign sessions |
-| `GET /api/intelligence` | Summary |
-
-Optional extras: Suricata/p0f/fatt sensor ingest (`collector.ingest_*`), a
-MaxMind database instead of DB-IP (`collector.geoip_db_path`, any MaxMind-format
-file), and Kibana on top of ClickHouse via the bundled connector in
-[docker/clickhouse-kibana](docker/clickhouse-kibana/README.md).
-
----
-
-## Canaries
-
-Canaries are decoy artifacts you plant inside your real environment – a fake AWS
-key in a CI runner, a document on a file share, a beacon URL in a config file.
-QPot marks observed trips as critical alerts for investigation. The false-positive
-rate has not been measured: previews, link scanners and authorized tests can
-also trigger a trip.
-
-```bash
-qpot canary create --kind aws  --name ci-runner --memo "planted in Jenkins"
-qpot canary create --kind file --name q4-salaries
-qpot canary trips
-```
-
-`web`/`file` canaries trip when their beacon URL (`/c/<token>`, set
-`canary.base_url` to where this QPot is reachable) receives a GET or HEAD;
-all kinds can also trip when a watched value appears in captured honeypot
-event fields. Reading a credential or file alone need not alert, and direct
-use against real AWS is not monitored. No recorded trips does not prove no
-access occurred. See
-[docs/canary.md](docs/canary.md).
-
----
-
-## Alerts and response hooks
-
-```yaml
-alerts:
-  enabled: true
-  webhook_url: https://hooks.slack.com/services/...   # Slack, Discord or any URL
-  threshold: 100      # events per minute
-  cooldown: 5m
-
-response:
-  enabled: true
-  on_attack_detected:
-    - name: block-top-attacker
-      command: 'iptables -I INPUT -s "$QPOT_TOP_SOURCE_IP" -j DROP'
-      timeout: 10s
-```
-
-Hooks get `QPOT_ID`, `QPOT_INSTANCE`, `QPOT_TOTAL_EVENTS`, `QPOT_UNIQUE_IPS`,
-`QPOT_THRESHOLD`, `QPOT_TIMESTAMP`, `QPOT_TOP_SOURCE_IP` and
-`QPOT_TOP_HONEYPOT` as environment variables (never interpolated into the
-command) and run with a timeout in their own process group.
-
----
-
-## Clusters
-
-Pair several QPot nodes into a group that shares health and attacker data:
-
-```bash
-qpot cluster init --name production                      # prompts for a password, prints the cluster ID
-qpot cluster join --id qc_... --password '...' --seed 10.0.0.10:7946   # on each sensor
-qpot cluster requests --password '...'                   # on the host: pending joiners
-qpot cluster approve <request-id> --password '...'       # (or deny)
-qpot cluster status
-```
-
-By default a joining node trusts only the cluster's own CA, which the cluster
-ID pins. If the seed serves a certificate from your own or a public CA
-(`tls_cert_path` in `cluster.json`), add `--operator-cert`, or
-`--ca-file <bundle.pem>` to check it against a specific CA bundle. Every
-approved member is trusted with the membership, and a node's leave counts only
-from the node's own address; see
-[Who is trusted with membership](doc/cli-reference.md#who-is-trusted-with-membership).
-
-Joining needs the password **and** the host's approval (`require_approval`,
-on by default). Traffic between nodes is TLS-encrypted automatically, with no
-certificates to manage: `cluster init` makes a certificate authority for the
-cluster, and the cluster ID is its fingerprint, so a node that knows the ID
-verifies every node it talks to – the seed it joins included. The initializing
-host is the enrollment authority: use it as the join seed and keep its CA key
-private. Each node generates its own private key locally; an admitted node
-receives only its signed leaf certificate and a member key, never the CA key.
-Nothing a node serves derives from the password, so it cannot be tested offline,
-and the password alone cannot impersonate a TLS node. Legacy clusters require
-an explicit upgrade: stop the old control planes, update QPot on every node,
-then run `qpot cluster upgrade` once on the chosen enrollment host. It preserves
-settings and the local instance, privately backs up the exact old membership,
-and atomically activates a new CA, member key and cluster ID only after checks.
-Event stores are untouched, not backed up by this command. Other nodes must
-leave their old cluster and rejoin with the new ID; incompatible protocol
-versions are rejected. Old signing keys are never trusted by the upgraded
-cluster. Protect and back up the enrollment host's
-private cluster state; ordinary members cannot enroll others. Node certificates
-last one year: re-enroll members before expiry; the enrollment host renews its
-own certificate on startup when it has under 30 days left. Membership runs in
-the control plane, so restart
-`qpot up -d` after `init`/`join`. The password is stored in
-`~/.qpot/cluster/cluster.secret` (0600) or read from `QPOT_CLUSTER_PASSWORD`.
-
----
-
-## Security model
-
-| Area | What QPot does |
-|------|----------------|
-| Isolation | Each honeypot on its own bridge network with a non-overlapping subnet |
-| Egress | Honeypots cannot open connections to your LAN, the Docker host, cloud metadata (`169.254.169.254`) or any other private, loopback, link-local, CGNAT or multicast address. Replies to attackers, public destinations and DNS to the host's resolvers still work. An nftables guard (`netguard` service, host network, `NET_ADMIN` only) enforces it, and honeypots start only after it is in place |
-| Runtime | gVisor or Kata used for honeypots when installed |
-| Containers | `cap_drop: ALL` (minimal add-backs), read-only root with tmpfs, no privileged containers |
-| Limits | CPU, memory, PID and file-descriptor limits per honeypot |
-| Secrets | QPot ID never given to honeypot containers or written to logs; DB password random per instance |
-| Exposure | Web UI, API and database bound to `127.0.0.1` by default |
-| Web | CSP, `X-Frame-Options: DENY`, `nosniff`, constant-time auth checks |
-| HiFi backends | No outbound network, recreated after every session, read-only host keys |
-
----
-
-## Configuration
-
-Each instance has a `config.yaml` (`qpot config -i <name> --print` shows the
-path). Commonly changed settings:
-
-```yaml
-web_ui:
-  port: 8080
-database:
-  type: clickhouse            # or timescaledb
-honeypots:
-  cowrie:
-    enabled: true
-    resources:
-      use_custom_limits: true
-      max_cpu_percent: 30
-      max_memory_mb: 256
-      max_pids: 50
-intelligence:
-  worker_interval: 15m
-security:
-  network_isolation:
-    block_outbound: false        # true: honeypots open no outbound connections at all
-    allow_private_egress: false  # true: switch the egress guard off (not recommended)
-```
-
-The egress guard runs where Docker's bridges live: the host itself on Linux,
-Docker Desktop's VM on Windows and macOS. Its rules outlive a stopped stack
-until the next reboot, and the `netguard` service applies them again whenever
-it starts (Docker restarts it with the honeypots after a reboot).
-
----
-
-## CLI
-
-```bash
-qpot setup | doctor | up [-d] | serve | down | status   [-i <instance>]
-qpot doctor --explain <code>       # explain an error code such as QP-PORT-001
-qpot instance create|list|remove <name>
-qpot honeypot list|enable|disable <name>   qpot honeypot set <name> key=value
-qpot geoip update [--country CC]
-qpot logs [honeypot] [-f]          qpot id          qpot config [--print]
-qpot docker ps|logs|restart        qpot db migrate status|up|down
-qpot cluster ...                   qpot canary ...  qpot overview [--all]
-```
-
-Every command has `--help`; the full reference is
-[doc/cli-reference.md](doc/cli-reference.md). Most commands take
-`-i/--instance` (default `default`).
-
-**Dedicated sensor hosts:** `sudo ./install.sh` runs the T-Pot-style Ansible
-installer (AlmaLinux, Arch, Debian, Fedora, openSUSE, RHEL, Rocky, Ubuntu, …).
-
-
----
-
-## Development
-
-```bash
-make build      # build ./qpot
-make test       # unit tests
-make ci         # fmt, vet, lint, test, security checks
-make build-all  # cross-compile
-```
-
-```
-cmd/qpot/            CLI and control plane
-cmd/qpot-sshproxy/   HiFi SSH broker
-internal/
-  instance/          compose + collector generation, deception, lifecycle
-  intelligence/      ATT&CK classifier, IOC extractor, TTP sessions, worker
-  database/          ClickHouse, TimescaleDB (and Elasticsearch client)
-  server/            web UI and API
-  overview/          local host + activity overview (dashboard, API, CLI)
-  cluster/ canary/ proxy/ security/ config/
-docker/              honeypot images, ssh-proxy/ssh-backend, Kibana connector
-```
-
-CI runs build, gofmt, vet, staticcheck, race tests, fuzzing, govulncheck,
-gosec, gitleaks and a multi-distro smoke test on every push.
-
-### Releases
-
-Pushing a version tag (`v0.1.0`) runs `.github/workflows/release.yml`, which:
-
-1. refuses a tag that is not the version the installers download
-   (`QPOT_VERSION` in `scripts/install.sh` and `install.ps1`, `VERSION` in the
-   Makefile);
-2. builds the archives with `go run ./cmd/qpot-release pack`, reproducibly:
-   the same commit and Go give byte-identical files;
-3. writes `SHA256SUMS` and a signed SLSA build-provenance attestation for every
-   archive (GitHub artifact attestations, keyless through Sigstore), published
-   as `qpot_<version>_provenance.sigstore.json`;
-4. checks that provenance the way the installers do, then publishes the
-   release.
-
-To check a download yourself:
-
-```bash
-sha256sum -c --ignore-missing SHA256SUMS
-gh attestation verify qpot_0.1.0_linux_amd64.tar.gz --repo YurilLAB/QPot \
-  --signer-workflow YurilLAB/QPot/.github/workflows/release.yml --source-ref refs/tags/v0.1.0
-```
-
-After a release, set `QPOT_SOURCE_COMMIT_PINNED` in both installers to the
-tag's commit. Until the first release it is a `main` commit that passed CI; a
-test checks both installers pin the same commit from this repository's history.
-
----
-
-## License
-
-GPL-3.0 – see [LICENSE](LICENSE). QPot builds on
+Every command has `--help`, and the [CLI reference](doc/cli-reference.md) lists
+them all.
+
+## Documentation
+
+| | |
+|---|---|
+| [Installation and setup](doc/installation.md) | Requirements, installers, guided setup |
+| [Web UI](doc/web-ui.md) | The landing page, attack map and dashboard |
+| [Configuration](doc/configuration.md) | The settings file and what you can change |
+| [Honeypots](doc/honeypots.md) | The 27 honeypots and how to manage them |
+| [Deception](doc/deception.md) | How each instance gets its own identity |
+| [Data and threat intelligence](doc/intelligence.md) | Collection, ATT&CK tagging, IOCs and campaigns |
+| [Canaries](doc/canary.md) | Decoys, bait and what a trip means |
+| [Alerts and response hooks](doc/alerts.md) | Webhooks and your own commands |
+| [Clusters](doc/clustering.md) | Pairing nodes, enrollment and trust |
+| [Architecture](doc/architecture.md) | What runs where, and how data flows |
+| [Security model](doc/security.md) | Isolation, the egress guard, safe operation |
+| [CLI reference](doc/cli-reference.md), [Web API](doc/api.md), [Error codes](doc/setup-errors.md) | Reference |
+
+The full index is in [doc/README.md](doc/README.md).
+
+## Disclaimer
+
+A honeypot invites attacks. Run QPot on a host you are prepared to see
+attacked, never on a computer that holds personal or business data, and keep
+it updated. You are responsible for what you deploy and for complying with the
+laws that apply to monitoring network traffic where you run it. QPot is
+provided as is, without warranty, under the terms of its licence.
+
+## Credits and licence
+
+QPot is released under the [GPL-3.0](LICENSE). It builds on
 [T-Pot CE](https://github.com/telekom-security/tpotce) by Deutsche Telekom
-Security (GPL-3.0). Issues: [GitHub Issues](https://github.com/YurilLAB/QPot/issues).
+Security and on the work of every honeypot project T-Pot packages. Country
+data comes from [DB-IP](https://db-ip.com) Lite (CC BY 4.0), and the attack
+map's outlines from [Natural Earth](https://www.naturalearthdata.com).
+
+Questions and bug reports: [GitHub Issues](https://github.com/YurilLAB/QPot/issues).
 
 <p align="center"><strong>Built by Yuril Security</strong><br><em>Australian-made cybersecurity</em></p>

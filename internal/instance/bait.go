@@ -4,7 +4,7 @@ package instance
 // planted in them.
 //
 // What attackers take after a shell on a Linux server (sources in
-// docs/canary.md): credential harvesters read ~/.ssh (private
+// doc/canary.md): credential harvesters read ~/.ssh (private
 // keys, config, known_hosts), .bash_history (ssh/scp/rsync and database
 // command lines), /etc/hosts, ~/.aws/credentials, .git-credentials, .netrc,
 // .pgpass, .env files and database dumps (Kinsing's spre.sh, SSH-Snake,

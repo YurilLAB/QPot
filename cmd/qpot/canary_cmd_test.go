@@ -23,17 +23,30 @@ func TestCanaryDescriptionsStateDetectionLimits(t *testing.T) {
 	if err := cmd.Execute(); err != nil {
 		t.Fatal(err)
 	}
-	descriptions := map[string]string{"CLI help": out.String()}
-	for _, path := range []string{"README.md", "docs/canary.md", "doc/cli-reference.md"} {
+	read := func(path string) string {
 		body, err := os.ReadFile(filepath.Join("..", "..", filepath.FromSlash(path)))
 		if err != nil {
 			t.Fatal(err)
 		}
-		descriptions[path] = string(body)
+		return strings.Join(strings.Fields(string(body)), " ")
 	}
-	for name, description := range descriptions {
+	unsupported := func(t *testing.T, text string) {
+		for _, claim := range []string{
+			"near-zero-false-positive", "moment anyone touches",
+			"alert on any interaction", "nobody has touched a canary",
+		} {
+			if strings.Contains(text, claim) {
+				t.Errorf("unsupported canary claim %q", claim)
+			}
+		}
+	}
+	// Where canaries are described in full, every detection limit is stated.
+	detailed := map[string]string{"CLI help": strings.Join(strings.Fields(out.String()), " ")}
+	for _, path := range []string{"doc/canary.md", "doc/cli-reference.md"} {
+		detailed[path] = read(path)
+	}
+	for name, text := range detailed {
 		t.Run(name, func(t *testing.T) {
-			text := strings.Join(strings.Fields(description), " ")
 			for _, required := range []string{
 				"has not been measured", "false-positive", "captured", "GET", "HEAD",
 				"Reading a credential or file alone need not alert",
@@ -44,15 +57,26 @@ func TestCanaryDescriptionsStateDetectionLimits(t *testing.T) {
 					t.Errorf("missing canary detection limitation %q", required)
 				}
 			}
-			for _, claim := range []string{
-				"near-zero-false-positive", "moment anyone touches",
-				"alert on any interaction", "nobody has touched a canary",
-			} {
-				if strings.Contains(text, claim) {
-					t.Errorf("unsupported canary claim %q", claim)
-				}
-			}
+			unsupported(t, text)
 		})
+	}
+	// The README and the other pages only summarise canaries: they make no
+	// unsupported claim, and the README sends readers to the limits.
+	summaries, err := filepath.Glob(filepath.Join("..", "..", "doc", "*.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	summaries = append(summaries, filepath.Join("..", "..", "README.md"))
+	for _, path := range summaries {
+		body, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		text := strings.Join(strings.Fields(string(body)), " ")
+		t.Run(filepath.Base(path), func(t *testing.T) { unsupported(t, text) })
+	}
+	if !strings.Contains(read("README.md"), "(doc/canary.md)") {
+		t.Error("README does not link to doc/canary.md, where the detection limits are")
 	}
 }
 
