@@ -164,6 +164,13 @@ func TestOldClusterFileLosesQPotIDs(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	// A record from an older node decodes, without its QPot ID.
+	var older Node
+	if err := json.Unmarshal(mustJSON(t, nodes["node_oldpeer"]), &older); err != nil || older.ID != "node_oldpeer" {
+		t.Fatalf("an older node's record did not decode: %v %+v", err, older)
+	}
+	noQPotID(t, "an older node's record once decoded", mustJSON(t, &older))
+
 	m := NewManager(dir)
 	if c, err := m.LoadCluster(); err != nil || c == nil {
 		t.Fatalf("an older cluster.json did not load: %v", err)

@@ -158,12 +158,10 @@ type Node struct {
 	Name    string `json:"name" yaml:"name"`
 	Address string `json:"address" yaml:"address"`
 	Port    int    `json:"port" yaml:"port"`
-	// QPotID is always empty and never sent or stored: the QPot ID is the
-	// instance's web API credential, and gossip, the join answer and
-	// cluster.json handed every member the others'. An older node's is
-	// dropped when read. Mark the local node by its ID (Manager.LocalNodeID);
-	// the field goes once nothing reads it.
-	QPotID       string            `json:"-" yaml:"-"`
+	// A node carries no QPot ID: that is the instance's web API credential,
+	// and gossip, the join answer and cluster.json handed every member the
+	// others'. An older node's "qpot_id" is an unknown field, dropped when
+	// read (LoadCluster also rewrites a cluster.json that has one).
 	InstanceName string            `json:"instance_name" yaml:"instance_name"`
 	Status       NodeStatus        `json:"status" yaml:"status"`
 	LastSeen     time.Time         `json:"last_seen" yaml:"last_seen"`
