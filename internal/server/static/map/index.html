@@ -4,29 +4,26 @@
     <head>
         <meta charset="utf-8">
         <meta name="viewport" content="width=device-width, initial-scale=1.0">
-        <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self'; font-src 'self'; img-src 'self' data:; object-src 'none'; connect-src 'self'">
+        <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self'; font-src 'self'; img-src 'self' data:; object-src 'none'; connect-src 'self'; base-uri 'self'; form-action 'none'">
         <title>QPot Attack Map - Real-time Cybersecurity Visualization</title>
         <meta name="description" content="Real-time visualization of QPot honeypot attacks and cybersecurity threats">
+        <!-- T-Pot 24.04.2's attack map (GPL-3.0, telekom-security/t-pot-attack-map) in QPot's colours,
+             on the Leaflet engine of the same project; licences in static/licenses/. -->
+        <link rel="icon" href="/assets/img/favicon-32.png" sizes="32x32" type="image/png">
+        <link rel="icon" href="/assets/img/favicon-16.png" sizes="16x16" type="image/png">
+        <link rel="icon" href="/assets/img/favicon-48.png" sizes="48x48" type="image/png">
+        <link rel="apple-touch-icon" href="/assets/img/apple-touch-icon.png">
 
         <!-- Check integrity: openssl dgst -sha384 -binary your.file.name | openssl base64 -A-->
 
-        <!--Setup D3-->
-        <script src="static/d3.v7.min.js" defer integrity="sha384-CjloA8y00+1SDAUkjs099PVfnY2KmDC2BZnws9kh8D/lX1s46w6EPhpXdqMfjK6i"></script>
-
-        <!--Setup JQuery-->
-        <script src="static/jquery-3.7.1.min.js" defer integrity="sha384-1H217gwSVyLSIfaLxHbE7dRb3v4mYCKbpQvzx0cegeju1MVsGrX5xXxAvs/HgeFs"></script>
-
-        <!--Setup Luxon-->
-        <script src="static/luxon.min.js" defer integrity="sha384-CU0J6nu6GO5gWB5IqOOhPQsG0LKyjpotF5Gw502R+0zbkzKHjDWc6FKSZsNTJfLX"></script>
-
         <!--Setup Chart.js for enhanced visualizations-->
-        <script src="static/chart.umd.js" defer integrity="sha384-FcQlsUOd0TJjROrBxhJdUhXTUgNJQxTMcxZe6nHbaEfFL1zjQ+bq/uRoBQxb0KMo"></script>
+        <script src="static/chart.umd.js" defer integrity="sha384-hfkuqrKeWFmnTMWN31VWyoe8xgdTADD11kgxmdpx2uyE6j5Az5uZq6u6AKYYmAOw"></script>
 
         <!--Setup Bootstrap-->
-        <link href="static/bootstrap.min.css" rel="stylesheet" integrity="sha384-QWTKZyjpPEjISv5WaRU9OFeRpok6YctnYmDr5pNlyT2bRjXh0JMhjY6hW+ALEwIH"/>
-        <script src="static/bootstrap.min.js" defer integrity="sha384-0pUGZvbkm6XF6gxjEnlmuGrJXVbNuzT9qBBavbLwCsOGabYfZo0T0to5eqruptLy"></script>
+        <link href="static/bootstrap.min.css" rel="stylesheet" integrity="sha384-sRIl4kxILFvY47J16cr9ZwB07vP4J8+LH7qKQnuqkuIAvNWLzeN8tE5YBujZqJLB"/>
 
-        <!--Setup Leaflet-->
+        <!--Setup D3 (the attack arcs) and Leaflet (the map), as T-Pot's attack map 3.x-->
+        <script src="static/d3.v7.min.js" defer integrity="sha384-CjloA8y00+1SDAUkjs099PVfnY2KmDC2BZnws9kh8D/lX1s46w6EPhpXdqMfjK6i"></script>
         <link rel="stylesheet" href="static/leaflet.css" integrity="sha384-Eg+NzzpxiHf8n8FR0ootH/p/s0a33ljAFe4AqhcVbsQfR/WmVsHNIR1Uh37E0omq"/>
         <script src="static/leaflet.js" defer integrity="sha384-cxOPjt7s7Iz04uaHJceBmS+qpjv2JkIHNVcuOrM+YHwZOmJGBXI00mdUXEq65HTH"></script>
 
@@ -35,31 +32,31 @@
         <script src="static/leaflet.fullscreen.js" defer integrity="sha384-TqFtkYBnYsrP2JCfIv/oLQxS9L6xpaIV9xnaI2UGMK25cJsTtQXZIU6WGQ7daT0Z"></script>
 
         <!-- Local Fonts (Inter & JetBrains Mono) -->
-        <link href="static/fonts/fonts.css" rel="stylesheet" integrity="sha384-hfuGJk4QqYM6FMHlIjLQUEioQvJ1nPENVylKK8+JSZTBQ/KG7GwoJe29Mpw+2p11">
+        <link href="static/fonts/fonts.css" rel="stylesheet" integrity="sha384-WiEXL66/E+frAZqRB5+nO/MLUoXj+VrnKxXgvK33R87imSuzxukyaFlj5lnDHV80">
 
         <!-- Local Icons (Font Awesome) -->
-        <link rel="stylesheet" href="static/fontawesome/css/all.min.css" integrity="sha384-t1nt8BQoYMLFN5p42tRAtuAAFQaCQODekUVeKKZrEnEyp4H2R0RHFz0KWpmj7i8g">
+        <link rel="stylesheet" href="static/fontawesome/css/all.min.css" integrity="sha384-qrALq7+6jBOZIQsNnT6xGkMDru64qD6uTlDra39xrt2SoXl4pO3FX6Roz/RpR/BS">
 
-        <link href="static/index.css?v=6" rel="stylesheet" integrity="sha384-ejWwFPtLIHvqqGftVNF9qhDifB44jKPnb5fCp1YziMWETXVJKw/AZsBr1rrUHLFe"/>
+        <link href="static/index.css?v=8" rel="stylesheet" integrity="sha384-+fWPu3CcNV3pqs7mwMN7BhH7xofZKZH4zrS1W5l3GyqpUZ/Bpp/MI47MtyxzP7St"/>
     </head>
 
     <body>
-        <!-- QPot: the feed needs this instance's QPot ID (stored by the home page / dashboard sign-in). -->
-        <div id="qpot-signin" class="qpot-signin">
+        <!-- QPot: the feed needs this instance's QPot ID (signed in on the home page or the dashboard) -->
+        <div id="qpot-signin" class="qpot-signin" role="dialog" aria-modal="true" aria-labelledby="qpot-signin-title">
             <div class="qpot-signin-box">
-                <h2>Sign in to see live attacks</h2>
-                <p>The attack map reads this QPot instance's events, which need your QPot ID.</p>
-                <a class="qpot-signin-btn" href="/">Sign in on the QPot home page</a>
+                <img src="/assets/img/qpot-badge-64.png" alt="" width="64" height="74">
+                <h2 id="qpot-signin-title">Sign in to see live attacks</h2>
+                <p id="qpot-signin-text">The attack map reads this QPot's events, which need its QPot ID.</p>
+                <a class="btn-base btn-primary hover-lift" href="/">Sign in on the QPot home page</a>
             </div>
         </div>
-        <div class="qpot-attribution">IP geolocation by <a href="https://db-ip.com" target="_blank" rel="noopener noreferrer">DB-IP</a> (CC BY 4.0) &middot; based on the T-Pot attack map</div>
+
         <!-- Loading Screen -->
         <div id="loading-screen" class="loading-screen">
             <div class="loading-content">
                 <div class="spinner"></div>
                 <h2>Initializing QPot Attack Map</h2>
                 <p>Loading real-time cybersecurity data...</p>
-                <div class="qpot-id-display" id="loading-qpot-id">QPot ID: <span>Loading...</span></div>
             </div>
         </div>
 
@@ -67,17 +64,9 @@
         <nav class="top-navbar">
             <div class="navbar-content flex-between">
                 <a class="navbar-brand flex-center" href="/" title="QPot home">
-                    <i class="fas fa-shield-halved"></i>
+                    <img class="brand-badge" src="/assets/img/qpot-badge-64.png" alt="QPot logo" width="64" height="74">
                     <span>QPot Attack Map</span>
                 </a>
-                
-                <!-- QPot ID Display in Header -->
-                <div class="qpot-header-id" id="qpot-header-id" title="Click to copy QPot ID">
-                    <i class="fas fa-fingerprint"></i>
-                    <span class="qpot-id-label">QPot ID:</span>
-                    <span class="qpot-id-value" id="qpot-id-value">Loading...</span>
-                    <i class="fas fa-copy copy-icon"></i>
-                </div>
                 
                 <!-- QPot Stats in Header -->
                 <div class="navbar-stats">
@@ -120,6 +109,9 @@
                     <button class="btn-base control-btn flex-center-both hover-lift" id="fullscreen-toggle" title="Toggle Fullscreen">
                         <i class="fas fa-expand"></i>
                     </button>
+                    <a class="btn-base control-btn flex-center-both hover-lift" href="/dashboard" title="QPot dashboard" aria-label="QPot dashboard">
+                        <i class="fas fa-gauge"></i>
+                    </a>
                     <button class="btn-base control-btn flex-center-both hover-lift" id="settings-toggle" title="Settings">
                         <i class="fas fa-gear"></i>
                     </button>
@@ -137,7 +129,8 @@
             <!-- Side Panel (Collapsible) -->
             <div class="side-panel" id="side-panel">
                 <div class="panel-toggle" id="panel-toggle">
-                    <i class="fas fa-chevron-left"></i>
+                    <!-- panel collapses to the RIGHT: open shows '>', collapsed rotates to '<' -->
+                    <i class="fas fa-chevron-right"></i>
                 </div>
                 
                 <div class="panel-content">
@@ -362,19 +355,19 @@
                 <div class="panel-tabs">
                     <button class="tab-btn active" data-tab="live-feed">
                         <i class="fas fa-list-ol"></i>
-                        Live Feed
+                        <span>Live Feed</span>
                     </button>
                     <button class="tab-btn" data-tab="top-ips">
                         <i class="fas fa-bullseye"></i>
-                        Top IPs
+                        <span>Top IPs</span>
                     </button>
                     <button class="tab-btn" data-tab="countries">
                         <i class="fas fa-globe"></i>
-                        Top Countries
+                        <span>Top Countries</span>
                     </button>
                     <button class="tab-btn" data-tab="overview">
                         <i class="fas fa-chart-bar"></i>
-                        Dashboard
+                        <span>Dashboard</span>
                     </button>
                     <div class="panel-resize" id="panel-resize">
                         <i class="fas fa-bars"></i>
@@ -397,7 +390,7 @@
                                 <div class="card-header flex-between">
                                     <h4 class="flex-center"><i class="fas fa-clock"></i> Activity Timeline</h4>
                                     <div class="time-range-selector">
-                                        <select id="timeline-interval" class="timeline-dropdown">
+                                        <select id="timeline-interval" class="timeline-dropdown" title="Timeline range" aria-label="Timeline range">
                                             <option value="1m">Last 1 Minute</option>
                                             <option value="1h">Last 1 Hour</option>
                                             <option value="24h" selected>Last 24 Hours</option>
@@ -441,10 +434,10 @@
                             <table class="data-table" id="ip-table">
                                 <thead>
                                     <tr>
-                                        <th>Rank</th>
+                                        <th class="optional">Rank</th>
                                         <th>Hits</th>
                                         <th>Source IP</th>
-                                        <th>Source IP Reputation</th>
+                                        <th class="optional">Source IP Reputation</th>
                                         <th>Flag</th>
                                         <th>Country</th>
                                         <th>Last Protocol Seen</th>
@@ -464,13 +457,13 @@
                             <table class="data-table" id="country-table">
                                 <thead>
                                     <tr>
-                                        <th>Rank</th>
+                                        <th class="optional">Rank</th>
                                         <th>Hits</th>
                                         <th>Flag</th>
                                         <th>Country</th>
                                         <th>Top Protocol</th>
                                         <th>Unique IPs</th>
-                                        <th>Last Seen IP</th>
+                                        <th class="optional">Last Seen IP</th>
                                         <th>Last Seen</th>
                                     </tr>
                                 </thead>
@@ -489,13 +482,13 @@
                                     <tr>
                                         <th>Time</th>
                                         <th>Source IP</th>
-                                        <th>IP Reputation</th>
+                                        <th class="optional">IP Reputation</th>
                                         <th>Flag</th>
-                                        <th>Country</th>
+                                        <th class="optional">Country</th>
                                         <th>Honeypot</th>
                                         <th>Protocol</th>
-                                        <th>Port</th>
-                                        <th>QPot Hostname</th>
+                                        <th class="optional">Port</th>
+                                        <th class="optional">QPot Hostname</th>
                                     </tr>
                                 </thead>
                                 <tbody id='attack-tracking'>
@@ -514,42 +507,41 @@
             <div class="modal-content">
                 <div class="modal-header flex-between">
                     <h3 class="flex-center"><i class="fas fa-cog"></i> Settings</h3>
-                    <button class="modal-close flex-center-both" id="settings-close">
+                    <button class="modal-close flex-center-both" id="settings-close" title="Close settings" aria-label="Close settings">
                         <i class="fas fa-times"></i>
                     </button>
                 </div>
                 <div class="modal-body">
                     <div class="settings-section">
-                        <h4 class="flex-center"><i class="fas fa-fingerprint"></i> QPot Identity</h4>
+                        <h4 class="flex-center"><i class="fas fa-fingerprint"></i> QPot ID</h4>
                         <div class="setting-item">
-                            <div class="setting-content">
-                                <span class="setting-title">QPot ID</span>
-                                <span class="setting-description">Unique identifier for this QPot instance</span>
-                                <div class="qpot-id-box" id="settings-qpot-id">
-                                    <span class="qpot-id-text">Loading...</span>
-                                    <button class="btn-base btn-sm" id="copy-qpot-id">
-                                        <i class="fas fa-copy"></i> Copy
-                                    </button>
-                                </div>
+                            <span class="setting-description">The feed of this map reads this QPot's events with the
+                                QPot ID this browser signed in with. It stays in this browser.</span>
+                            <div class="qpot-id-box" id="settings-qpot-id">
+                                <span class="qpot-id-text">Not signed in</span>
+                                <button class="btn-base btn-secondary hover-lift" id="copy-qpot-id" type="button">
+                                    <i class="fas fa-copy"></i> Copy
+                                </button>
+                                <button class="btn-base btn-secondary hover-lift" id="signout-qpot-id" type="button">
+                                    <i class="fas fa-right-from-bracket"></i> Sign out
+                                </button>
                             </div>
                         </div>
                     </div>
-                    
+
                     <div class="settings-section">
                         <h4 class="flex-center"><i class="fas fa-volume-up"></i> Audio Alerts</h4>
                         <div class="setting-item">
-                            <label class="setting-label">
+                            <label class="setting-row">
+                                <span class="setting-title">Play sound alerts</span>
                                 <input type="checkbox" id="sound-alerts">
-                                <div class="setting-content">
-                                    <span class="setting-title">Play sound alerts</span>
-                                    <span class="setting-description">Enable audio notifications for new attacks</span>
-                                </div>
                             </label>
+                            <span class="setting-description">Enable audio notifications for new attacks</span>
                         </div>
                         <div class="setting-item" id="sound-options">
-                            <div class="setting-content">
-                                <span class="setting-title">Alert Sound</span>
-                                <select id="alert-sound" class="setting-select">
+                            <div class="setting-row">
+                                <span class="setting-title">Alert sound</span>
+                                <select id="alert-sound" class="setting-select" title="Alert sound">
                                     <option value="beep">Digital Beep</option>
                                     <option value="notification">Notification Chime</option>
                                     <option value="alert">Security Alert</option>
@@ -558,17 +550,36 @@
                             </div>
                         </div>
                     </div>
-                    
+
+                    <div class="settings-section">
+                        <h4 class="flex-center"><i class="fas fa-earth-europe"></i> Map</h4>
+                        <div class="setting-item">
+                            <div class="setting-row">
+                                <span class="setting-title">Activity shading</span>
+                                <select id="shading-mode" class="setting-select" title="Activity shading mode">
+                                    <option value="mixed">Countries</option>
+                                    <option value="off">Off</option>
+                                </select>
+                            </div>
+                            <span class="setting-description">Shades where observed events geolocate
+                                by source IP address — not attribution: it does not establish that an
+                                attacker, operator or state actor is physically located there. Positions
+                                are GeoIP city/centroid estimates and frequently mark hosting providers
+                                and data centres; proxies, VPNs and compromised hosts all shift the
+                                apparent origin.</span>
+                        </div>
+                    </div>
+
                     <div class="settings-section">
                         <h4 class="flex-center"><i class="fas fa-database"></i> Data Management</h4>
                         <div class="setting-item">
-                            <div class="setting-content">
-                                <span class="setting-title">Cache Storage</span>
-                                <span class="setting-description">Clear cached attack data and reset map markers</span>
-                                <button class="btn-base btn-warning hover-lift mt-2" id="clear-cache">
+                            <div class="setting-row">
+                                <span class="setting-title">Cache storage</span>
+                                <button class="btn-base btn-warning hover-lift" id="clear-cache">
                                     <i class="fas fa-trash-alt"></i> Clear Cache
                                 </button>
                             </div>
+                            <span class="setting-description">Clear cached attack data and reset map markers</span>
                         </div>
                     </div>
                 </div>
@@ -583,15 +594,12 @@
             </div>
         </div>
 
-        <!-- Toast Notification Container -->
-        <div id="toast-container" class="toast-container"></div>
-
-        <script src="static/qpot-feed.js" defer integrity="sha384-ac2UNjyUuE9fw592075uJMwlNgt6eU48NvUMzXqr71zK1idqQuF9zoUMT+ur3HID"></script>
+        <!-- QPot: the feed over QPot's authenticated API, the world drawn locally -->
+        <script src="static/qpot-feed.js" defer integrity="sha384-JBtoR4KrcmJvaIH/mhwT8Uvwyrg0DjFQu3NH9yVfxXEPr3H+5hZEHQchh3w0qlFA"></script>
+        <script src="static/world.js" defer integrity="sha384-QBzDCXhDY15hXADbqc9EbxX1cURXahHHZVf2w7vRMM6DIigsZjcZ512EAqEVDOuc"></script>
         <script src="static/cache-bridge.js" defer integrity="sha384-mMltIbf7JoxVuM6ZaB7TYkrLmY2njkbSTL9VvYqNKtmct/C2X1/JvKr8FeYHU0I+"></script>
-        <script src="static/world.js" defer integrity="sha384-npwv8lfs6yXek9SKt/pJdjl+erF5T7TngWyhZsjHhB3nMHiBSHCbAXWTYbRtlMrZ"></script>
-        <script src="static/map.js" defer integrity="sha384-9GzzYijfYPv9KUNkGAW+PQ/yuIFTgkiJE3xwhvbxV+T2dbZ+h2QdVqe1V3bbhXXn"></script>
-        <script src="static/dashboard.js" defer integrity="sha384-G3w6UiVOgfx+CP0Otu961qJu1kfOfCLHDO4rtaWMPxem4VHwdL1SPSA0jDDWqRKF"></script>
-        
+        <script src="static/map.js" defer integrity="sha384-EoNLSKstSpOIHN0dJumtebaODUyXdMhBeaJMEXYfKaku0Q1vcKW1di4yr3yWidkN"></script>
+        <script src="static/dashboard.js" defer integrity="sha384-2wttcJh7yviA5Fcaq5+bZVs4ivnnmXyhL5UGil1HidikfXCTESdYzzWz4buymUDP"></script>
     </body>
 
 </html>

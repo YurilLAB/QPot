@@ -38,15 +38,37 @@ window.webSocketConnected = false;
 // an "API key required" image, and a local layer means the browser contacts
 // no third-party tile server (and works on an isolated sensor network).
 var worldRenderer = L.svg({ pane: 'tilePane', padding: 1 });
+// Land and borders in the colours of T-Pot 24.04.2's basemap styles (earth and
+// boundaries of styles/dark.json and light.json); the sea is the container's
+// background (index.css).
+var CREDITS = '<a href="https://www.naturalearthdata.com/" target="_blank" rel="noopener noreferrer">Natural Earth</a>' +
+    ' &middot; IP geolocation by <a href="https://db-ip.com" target="_blank" rel="noopener noreferrer">DB-IP</a> (CC BY 4.0)' +
+    ' &middot; <a href="https://github.com/telekom-security/t-pot-attack-map" target="_blank" rel="noopener noreferrer">T-Pot attack map</a>';
+// The world three times side by side, as MapLibre repeats it: at the zoom that
+// fits the latitudes, a wide window shows more than 360 degrees.
+var WORLD = (function () {
+    var src = window.QPOT_WORLD || { type: 'FeatureCollection', features: [] };
+    function shift(coords, dx) {
+        return typeof coords[0] === 'number' ? [coords[0] + dx, coords[1]] : coords.map(function (c) { return shift(c, dx); });
+    }
+    var out = [];
+    [0, -360, 360].forEach(function (dx) {
+        src.features.forEach(function (f) {
+            out.push({ type: 'Feature', properties: f.properties || {},
+                       geometry: { type: f.geometry.type, coordinates: dx ? shift(f.geometry.coordinates, dx) : f.geometry.coordinates } });
+        });
+    });
+    return { type: 'FeatureCollection', features: out };
+})();
 function worldLayer(theme) {
     var style = theme === 'light'
-        ? { color: '#c5cfda', weight: 0.7, fillColor: '#e9eef3', fillOpacity: 1 }
-        : { color: '#2a3441', weight: 0.7, fillColor: '#1c242f', fillOpacity: 1 };
-    return L.geoJSON(window.QPOT_WORLD || { type: 'FeatureCollection', features: [] }, {
+        ? { color: '#adadad', weight: 0.7, fillColor: '#e2dfda', fillOpacity: 1 }
+        : { color: '#5b6374', weight: 0.7, fillColor: '#1f1f1f', fillOpacity: 1 };
+    return L.geoJSON(WORLD, {
         style: style,
         renderer: worldRenderer,
         interactive: false,
-        attribution: 'Map: <a href="https://www.naturalearthdata.com/" target="_blank" rel="noopener">Natural Earth</a>'
+        attribution: CREDITS
     });
 }
 var mapLayers = {
@@ -66,28 +88,173 @@ if (window.map) {
 var map = L.map('map', {
     layers: [base],
     tap: false, // ref https://github.com/Leaflet/Leaflet/issues/7255
-    center: new L.LatLng(0, 0),
+    center: new L.LatLng(12.6, 0),
     trackResize: true,
     worldCopyJump: true,
-    minZoom: 2,
+    minZoom: 0.4,
     maxZoom: 8,
-    zoom: 3,
+    zoom: 2,
     zoomSnap: 0.2, // Allow fractional zoom levels
     zoomDelta: 0.2, // Match zoomSnap
+    // as T-Pot 24.04.2's map: no zoom buttons (wheel, pinch and double click zoom), the full
+    // screen button at the top right
+    zoomControl: false,
     fullscreenControl: true,
     fullscreenControlOptions: {
+        position: 'topright',
         title:"Fullscreen Mode",
         titleCancel:"Exit Fullscreen Mode"
     }
 });
+map.attributionControl.setPrefix('<a href="https://leafletjs.com" target="_blank" rel="noopener noreferrer">Leaflet</a>');
 
 // Make map globally accessible
 window.map = map;
 
-// Enhanced attack map with modern dashboard integration
+// T-Pot 24.04.2's dashboard.js calls map.resize() (MapLibre's name) when the
+// bottom panel changes size.
+map.resize = function () {
+    map.invalidateSize();
+    scheduleWorldFit();
+};
 
-// Make map globally accessible
-window.map = map;
+// ---------------------------------------------------------------------------
+// The start view (T-Pot 24.04.2's world fit): the band 58 S - 75 N fitted into
+// the part of the map the bottom panel leaves, refitted on resizes until the
+// first gesture of the user. QPot keeps its own sensor in sight as well: on a
+// phone the world is wider than the screen, and the view slides east or west
+// just enough to show the sensor (the destination of the attacks).
+// ---------------------------------------------------------------------------
+var QPOT_FIT = { south: -58, north: 75, centreLng: 12, margin: 0.12 };
+var autoWorldView = true;
+var homeLatLng = null;
+var worldFitTimer = null;
+
+function visibleMapHeight() {
+    var box = map.getContainer().getBoundingClientRect();
+    var panel = document.getElementById('bottom-panel');
+    var bottom = box.bottom;
+    if (panel) {
+        var p = panel.getBoundingClientRect();
+        if (p.height && p.top < bottom) bottom = Math.max(box.top + 50, p.top);
+    }
+    return { width: box.width, height: bottom - box.top, cut: box.bottom - bottom };
+}
+
+function applyWorldFit() {
+    if (!autoWorldView) return;
+    var vis = visibleMapHeight();
+    if (vis.width < 50 || vis.height < 50) return;
+    // zoom: the latitude band fills the visible height, or the world the width
+    var y0 = map.project([QPOT_FIT.north, 0], 0).y, y1 = map.project([QPOT_FIT.south, 0], 0).y;
+    var zH = Math.log2(vis.height / (y1 - y0));
+    var zW = Math.log2(vis.width / 256);
+    var zoom = Math.max(map.getMinZoom(), Math.min(zH, Math.max(zW, zH - 0.6)));
+    zoom = Math.floor(zoom * 5) / 5;   // zoomSnap 0.2
+    var lng = QPOT_FIT.centreLng;
+    var spanLng = vis.width / (256 * Math.pow(2, zoom)) * 360;
+    if (homeLatLng && spanLng < 360) {
+        var half = spanLng / 2 - spanLng * QPOT_FIT.margin;
+        var d = ((homeLatLng.lng - lng + 540) % 360) - 180;
+        if (d > half) lng += d - half;
+        if (d < -half) lng += d + half;
+    }
+    // centre of the visible part, then shifted down by half the hidden strip
+    var midLat = map.unproject([0, (y0 + y1) / 2 * Math.pow(2, zoom)], zoom).lat;
+    var c = map.project([midLat, lng], zoom).add([0, vis.cut / 2]);
+    map.setView(map.unproject(c, zoom), zoom, { animate: false });
+}
+
+// The credit sits at the bottom right of the part of the map the bottom panel leaves, as T-Pot's
+// does, so the panel never covers it and it never covers the live feed.
+function placeCredit() {
+    var corner = map.getContainer().querySelector('.leaflet-bottom.leaflet-right');
+    if (!corner) return;
+    corner.style.bottom = Math.max(0, Math.round(visibleMapHeight().cut)) + 'px';
+}
+
+function scheduleWorldFit() {
+    placeCredit();
+    if (!autoWorldView) return;
+    clearTimeout(worldFitTimer);
+    worldFitTimer = setTimeout(applyWorldFit, 60);
+}
+
+// the sensor's place, from the first attack that names it (qpot setup --country)
+function noteHome(lat, lng, iso) {
+    if (homeLatLng || iso === 'XX' || !isFinite(lat) || !isFinite(lng)) return;
+    homeLatLng = L.latLng(lat, lng);
+    scheduleWorldFit();
+}
+
+['wheel', 'pointerdown', 'dblclick', 'touchstart'].forEach(function (gesture) {
+    map.getContainer().addEventListener(gesture, function () { autoWorldView = false; }, { passive: true });
+});
+map.on('resize', scheduleWorldFit);
+window.addEventListener('load', scheduleWorldFit);
+window.__worldFit = { credit: placeCredit, apply: applyWorldFit, isAuto: function () { return autoWorldView; }, home: function () { return homeLatLng; } };
+
+// ---------------------------------------------------------------------------
+// Activity shading (T-Pot 24.04.2's choropleth): countries shaded by their share
+// of the attacks, log-scaled to the busiest one, orchid at up to 35 % opacity.
+// dashboard.js reports absolute counts through window.updateChoropleth(); the
+// layer is a copy of the world outlines above the land, without strokes.
+// ---------------------------------------------------------------------------
+var SHADE = '#b65fd9';
+var choroplethHits = new Map();
+var choroplethTimer = null;
+var shadingMode = 'mixed';
+try {
+    var savedSettings = JSON.parse(localStorage.getItem('attack-map-settings') || '{}');
+    if (savedSettings.shadingMode === 'off') shadingMode = 'off';
+} catch (e) { /* the default stays on */ }
+var countryShapes = {};
+var choroplethLayer = L.geoJSON(WORLD, {
+    renderer: worldRenderer,
+    interactive: false,
+    style: { stroke: false, fillColor: SHADE, fillOpacity: 0 },
+    onEachFeature: function (feature, layer) {
+        var iso = feature.properties && feature.properties.iso;
+        if (iso) (countryShapes[iso] = countryShapes[iso] || []).push(layer);
+    }
+});
+if (shadingMode !== 'off') choroplethLayer.addTo(map);
+
+function flushChoropleth() {
+    choroplethTimer = null;
+    var maxHits = 0;
+    choroplethHits.forEach(function (h) { if (h > maxHits) maxHits = h; });
+    var denom = Math.log1p(maxHits);
+    choroplethHits.forEach(function (hits, iso) {
+        var k = denom > 0 ? Math.min(1, Math.max(0, Math.log1p(hits) / denom)) : 0;
+        (countryShapes[iso] || []).forEach(function (l) { l.setStyle({ fillOpacity: 0.35 * k }); });
+    });
+}
+
+window.updateChoropleth = function (iso2, absoluteHits) {
+    if (!iso2 || iso2 === 'XX') return;
+    choroplethHits.set(iso2, absoluteHits);
+    if (!choroplethTimer) choroplethTimer = setTimeout(flushChoropleth, 1000);
+};
+
+window.__choropleth = {
+    setMode: function (mode) {
+        shadingMode = mode === 'off' ? 'off' : 'mixed';
+        if (shadingMode === 'off') map.removeLayer(choroplethLayer);
+        else if (!map.hasLayer(choroplethLayer)) choroplethLayer.addTo(map);
+    },
+    state: function () { return { mode: shadingMode, countries: choroplethHits.size }; }
+};
+
+// Settings -> Clear Cache (dashboard.js): everything drawn on the map goes.
+window.clearMapVisuals = function () {
+    circles.clearLayers();
+    markers.clearLayers();
+    attackLines.clearLayers();
+    if (typeof svg !== 'undefined' && svg) svg.selectAll('*').remove();
+    choroplethHits.clear();
+    choroplethLayer.setStyle({ fillOpacity: 0 });
+};
 
 // Enhanced marker clustering
 var circles = new L.LayerGroup();
@@ -403,26 +570,39 @@ function calcMidpoint(x1, y1, x2, y2, bend) {
     return {"x":a, "y":b};
 }
 
+// QPot: the points along an arc are measured once, when the arc is drawn, and the animation reads
+// only that list. Measuring the path in every frame of every arc (getPointAtLength) made the
+// browser recompute the style of the page each time, dozens of times per frame when a burst of
+// attacks came in: the map's start took several times as long as T-Pot's.
+var ALONG_STEPS = 64;
 function translateAlong(path) {
-    var l = path.getTotalLength();
+    var l = path.getTotalLength(), pts = [];
+    for (var k = 0; k <= ALONG_STEPS; k++) {
+        var q = path.getPointAtLength(l * k / ALONG_STEPS);
+        pts.push([q.x, q.y]);
+    }
     return function(i) {
         return function(t) {
-            // Put in try/catch because sometimes floating point is stupid..
-            try {
-                var p = path.getPointAtLength(t*l);
-                return "translate(" + p.x + "," + p.y + ")";
-            } catch(err){
-                console.log("Caught exception.");
-                return "ERROR";
-            }
+            var f = Math.max(0, Math.min(1, t)) * ALONG_STEPS, a = Math.floor(f), b = Math.min(ALONG_STEPS, a + 1), u = f - a;
+            if (!isFinite(f)) return "translate(" + pts[0][0] + "," + pts[0][1] + ")";
+            return "translate(" + (pts[a][0] + (pts[b][0] - pts[a][0]) * u) + "," + (pts[a][1] + (pts[b][1] - pts[a][1]) * u) + ")";
         };
     };
 }
+
+// QPot: at most this many arcs and source rings move at once. The feed starts with the attacks of
+// the last minute, which came in as one burst of dozens of animations: the page then spent seconds
+// recomputing its styles and the map stayed behind the loading screen. Attacks over the cap still
+// reach the tables, counters and markers; only their animation is left out.
+var MOST_ARCS = 20, MOST_PARTICLES = 30, arcsInFlight = 0, particlesInFlight = 0;
 
 function handleParticle(color, srcPoint) {
     // Skip animation if tab is not visible OR if we are in the "waking up" grace period
     // This prevents the explosion of buffered animations when returning to the tab
     if (document.hidden || isWakingUp) return;
+    if (particlesInFlight >= MOST_PARTICLES) return;
+    particlesInFlight++;
+    setTimeout(function () { particlesInFlight--; }, 800);
 
     var i = 0;
     var x = srcPoint['x'];
@@ -458,6 +638,9 @@ function handleTraffic(color, srcPoint, hqPoint) {
     // sensor's own country, or no sensor location); calcMidpoint divides by
     // the distance and would draw a NaN path.
     if (fromX === toX && fromY === toY) return;
+    if (arcsInFlight >= MOST_ARCS) return;
+    arcsInFlight++;
+    setTimeout(function () { arcsInFlight--; }, 1500);
     var bendArray = [true, false];
     var bend = bendArray[Math.floor(Math.random() * bendArray.length)];
 
@@ -1133,6 +1316,7 @@ const messageHandlers = {
 
     var srcLatLng = new L.LatLng(msg.src_lat, msg.src_long);
     var dstLatLng = new L.LatLng(msg.dst_lat, msg.dst_long);
+    noteHome(msg.dst_lat, msg.dst_long, msg.dst_iso_code);
     var dstPoint = map.latLngToLayerPoint(dstLatLng);
     var srcPoint = map.latLngToLayerPoint(srcLatLng);
 

@@ -1,39 +1,43 @@
+/* T-Pot 24.04.2's attack map stylesheet (GPL-3.0, telekom-security/t-pot-attack-map), with
+   QPot's colours and the Leaflet selectors of the map engine QPot keeps. */
+
 /* CSS Variables for Theme System */
 :root {
     /* Color Palette */
-    --primary-color: #3498db;
-    --primary-hover: #2980b9;
+    /* QPot: the purple of the wallpaper's hexagons (T-Pot: #e20074 / #c8006a) */
+    --primary-color: #b65fd9;
+    --primary-hover: #a054bf;
     --secondary-color: #6c757d;
     --accent-color: #e74c3c;
-    --success-color: #27ae60;
-    --warning-color: #f39c12;
-    --danger-color: #e74c3c;
+    --success-color: #28a745;
+    --warning-color: #ffc107;
+    --danger-color: #dc3545;
     --info-color: #17a2b8;
     
     /* Dark Theme Colors */
-    --bg-primary: #0a0e14;
-    --bg-secondary: #131920;
-    --bg-tertiary: #1c242f;
-    --bg-card: #131920;
-    --bg-modal: #1c242f;
-    --bg-navbar: rgba(19, 25, 32, 0.95);
+    --bg-primary: #0a0a0a;
+    --bg-secondary: #1a1a1a;
+    --bg-tertiary: #2a2a2a;
+    --bg-card: #1e1e1e;
+    --bg-modal: #252525;
+    --bg-navbar: rgba(26, 26, 26, 0.95);
     
     /* Text Colors */
-    --text-primary: #e1e8ed;
-    --text-secondary: #8b9aae;
+    --text-primary: #ffffff;
+    --text-secondary: #b0b0b0;
     --text-muted: #808080;
     --text-disabled: #555555;
     
     /* Border Colors */
-    --border-primary: #2a3441;
-    --border-secondary: #34404f;
+    --border-primary: #333333;
+    --border-secondary: #444444;
     --border-accent: var(--primary-color);
     
     /* Shadow Colors */
     --shadow-light: rgba(0, 0, 0, 0.1);
     --shadow-medium: rgba(0, 0, 0, 0.2);
     --shadow-heavy: rgba(0, 0, 0, 0.4);
-    --glow: rgba(52, 152, 219, 0.3);
+    --glow: rgba(182, 95, 217, 0.3);
     
     /* Typography */
     --font-primary: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
@@ -248,145 +252,10 @@ body {
     align-items: center;
     gap: var(--spacing-md);
     padding: var(--spacing-sm) var(--spacing-lg);
-    background: rgba(52, 152, 219, 0.1);
-    border: 1px solid rgba(52, 152, 219, 0.3);
+    background: rgba(182, 95, 217, 0.1);
+    border: 1px solid rgba(182, 95, 217, 0.3);
     border-radius: var(--radius-md);
     backdrop-filter: blur(5px);
-}
-
-/* QPot ID Display in Header */
-.qpot-header-id {
-    display: flex;
-    align-items: center;
-    gap: var(--spacing-sm);
-    padding: var(--spacing-sm) var(--spacing-md);
-    background: rgba(52, 152, 219, 0.15);
-    border: 1px solid rgba(52, 152, 219, 0.4);
-    border-radius: var(--radius-md);
-    cursor: pointer;
-    transition: all var(--transition-fast);
-    font-family: var(--font-mono);
-    font-size: var(--font-xs);
-}
-
-.qpot-header-id:hover {
-    background: rgba(52, 152, 219, 0.25);
-    border-color: rgba(52, 152, 219, 0.6);
-    transform: translateY(-1px);
-}
-
-.qpot-header-id i {
-    color: var(--primary-color);
-    font-size: var(--font-sm);
-}
-
-.qpot-header-id .qpot-id-label {
-    color: var(--text-secondary);
-    font-weight: 500;
-}
-
-.qpot-header-id .qpot-id-value {
-    color: var(--primary-color);
-    font-weight: 600;
-    letter-spacing: 0.5px;
-}
-
-.qpot-header-id .copy-icon {
-    opacity: 0.6;
-    font-size: var(--font-xs);
-    transition: opacity var(--transition-fast);
-}
-
-.qpot-header-id:hover .copy-icon {
-    opacity: 1;
-}
-
-/* QPot ID in Loading Screen */
-.qpot-id-display {
-    margin-top: var(--spacing-lg);
-    padding: var(--spacing-sm) var(--spacing-md);
-    background: rgba(52, 152, 219, 0.1);
-    border: 1px solid rgba(52, 152, 219, 0.3);
-    border-radius: var(--radius-md);
-    font-family: var(--font-mono);
-    font-size: var(--font-sm);
-    color: var(--text-secondary);
-}
-
-.qpot-id-display span {
-    color: var(--primary-color);
-    font-weight: 600;
-}
-
-/* QPot ID Box in Settings */
-.qpot-id-box {
-    display: flex;
-    align-items: center;
-    gap: var(--spacing-sm);
-    margin-top: var(--spacing-sm);
-    padding: var(--spacing-sm) var(--spacing-md);
-    background: var(--bg-tertiary);
-    border: 1px solid var(--border-primary);
-    border-radius: var(--radius-md);
-    font-family: var(--font-mono);
-    font-size: var(--font-sm);
-}
-
-.qpot-id-box .qpot-id-text {
-    flex: 1;
-    color: var(--primary-color);
-    font-weight: 600;
-    letter-spacing: 0.5px;
-}
-
-/* Toast Notifications */
-.toast-container {
-    position: fixed;
-    bottom: var(--spacing-lg);
-    right: var(--spacing-lg);
-    z-index: 10000;
-    display: flex;
-    flex-direction: column;
-    gap: var(--spacing-sm);
-}
-
-.toast {
-    display: flex;
-    align-items: center;
-    gap: var(--spacing-sm);
-    padding: var(--spacing-sm) var(--spacing-md);
-    background: var(--bg-modal);
-    border: 1px solid var(--border-primary);
-    border-radius: var(--radius-md);
-    box-shadow: 0 4px 12px var(--shadow-medium);
-    font-size: var(--font-sm);
-    color: var(--text-primary);
-    opacity: 0;
-    transform: translateY(10px);
-    transition: all var(--transition-fast);
-}
-
-.toast.show {
-    opacity: 1;
-    transform: translateY(0);
-}
-
-.toast-success {
-    border-color: var(--success-color);
-    background: rgba(40, 167, 69, 0.1);
-}
-
-.toast-success i {
-    color: var(--success-color);
-}
-
-.toast-info {
-    border-color: var(--info-color);
-    background: rgba(23, 162, 184, 0.1);
-}
-
-.toast-info i {
-    color: var(--info-color);
 }
 
 .stats-header-title {
@@ -575,17 +444,16 @@ body {
     z-index: 1;
 }
 
-.leaflet-control-container {
-    position: relative;
-    top: var(--spacing-lg);
-}
-
 .leaflet-control-attribution {
     font-size: var(--font-xs);
     opacity: 0.6;
     color: var(--text-muted) !important;
     background: var(--bg-secondary) !important;
     border-radius: var(--radius-sm);
+}
+
+.leaflet-control-attribution a {
+    color: var(--text-muted);
 }
 
 .leaflet-popup-content-wrapper {
@@ -598,6 +466,12 @@ body {
 .leaflet-popup-tip {
     background: var(--bg-modal);
     border: 1px solid var(--border-primary);
+}
+
+.leaflet-container a.leaflet-popup-close-button {
+    color: var(--text-secondary);
+    font-size: 16px;
+    padding: 2px 6px;
 }
 
 .leaflet-popup-content {
@@ -639,12 +513,6 @@ body {
     border-left: none;
 }
 
-.side-panel.collapsed-right {
-    transform: translateX(200px);
-    width: 0px;
-    border-left: none;
-}
-
 .panel-toggle {
     position: absolute;
     left: -15px;
@@ -664,11 +532,6 @@ body {
     z-index: 10;
 }
 
-.side-panel.collapsed-right .panel-toggle {
-    left: -215px;
-    right: auto;
-}
-
 .panel-toggle:hover {
     background: var(--bg-tertiary);
     color: var(--text-primary);
@@ -686,18 +549,13 @@ body {
     transform: rotate(180deg);
 }
 
-.side-panel.collapsed-right .panel-toggle i {
-    transform: rotate(0deg);
-}
-
 .panel-content {
     flex: 1;
     padding: var(--spacing-md);
     overflow-y: auto;
 }
 
-.side-panel.collapsed .panel-content,
-.side-panel.collapsed-right .panel-content {
+.side-panel.collapsed .panel-content {
     display: none;
 }
 
@@ -1179,13 +1037,13 @@ body {
 /* New row highlight effect */
 @keyframes newRowGlow {
     0% {
-        background: rgba(226, 0, 116, 0.4);
-        box-shadow: 0 0 20px rgba(226, 0, 116, 0.6);
+        background: rgba(182, 95, 217, 0.4);
+        box-shadow: 0 0 20px rgba(182, 95, 217, 0.6);
         transform: scale(1.02);
     }
     50% {
-        background: rgba(226, 0, 116, 0.2);
-        box-shadow: 0 0 15px rgba(226, 0, 116, 0.4);
+        background: rgba(182, 95, 217, 0.2);
+        box-shadow: 0 0 15px rgba(182, 95, 217, 0.4);
         transform: scale(1.01);
     }
     100% {
@@ -1363,8 +1221,8 @@ body {
     background: var(--bg-modal);
     border: 1px solid var(--border-primary);
     border-radius: var(--radius-lg);
-    max-width: 450px;
-    width: 90%;
+    max-width: 640px;
+    width: min(92vw, 640px);
     max-height: 80vh;
     overflow: hidden;
     display: flex;
@@ -1423,7 +1281,7 @@ body {
 
 .modal-body {
     flex: 1;
-    padding: var(--spacing-lg);
+    padding: var(--spacing-md) var(--spacing-lg);
     overflow-y: auto;
     background: var(--bg-primary);
 }
@@ -1432,7 +1290,16 @@ body {
     padding: var(--spacing-md) var(--spacing-lg);
     background: var(--bg-tertiary);
     border-top: 1px solid var(--border-primary);
+    display: flex;
+    flex-wrap: nowrap;
+    align-items: center;
+    justify-content: space-between;
     gap: var(--spacing-md);
+}
+
+/* neutralise Bootstrap's .modal-footer > * child margins */
+.modal-footer > * {
+    margin: 0;
 }
 
 /* Modal-specific button styling */
@@ -1448,8 +1315,8 @@ body {
     background: var(--bg-secondary);
     border: 1px solid var(--border-primary);
     border-radius: var(--radius-lg);
-    padding: var(--spacing-lg);
-    margin-bottom: var(--spacing-lg);
+    padding: var(--spacing-md) var(--spacing-lg);
+    margin-bottom: var(--spacing-md);
 }
 
 .settings-section:last-child {
@@ -1457,7 +1324,7 @@ body {
 }
 
 .settings-section h4 {
-    font-size: 1.125rem;
+    font-size: 1rem;
     font-weight: 600;
     color: var(--text-primary);
     margin: 0 0 var(--spacing-lg) 0;
@@ -1483,6 +1350,42 @@ body {
 
 .setting-content {
     flex: 1;
+}
+
+/* System-settings row layout: title left, control right, description below */
+.setting-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: var(--spacing-md);
+    cursor: pointer;
+}
+
+.setting-row .setting-title {
+    margin-bottom: 0;
+}
+
+.setting-row .setting-select {
+    width: 260px;
+    max-width: 55%;
+    margin-top: 0;
+    flex-shrink: 0;
+}
+
+.setting-row input[type="checkbox"] {
+    margin: 0;
+    accent-color: var(--primary-color);
+    width: 16px;
+    height: 16px;
+    flex-shrink: 0;
+}
+
+.setting-row .btn-base {
+    flex-shrink: 0;
+}
+
+.setting-row + .setting-description {
+    margin-top: var(--spacing-xs);
 }
 
 .setting-title {
@@ -1514,7 +1417,7 @@ body {
 .setting-select:focus {
     outline: none;
     border-color: var(--primary-color);
-    box-shadow: 0 0 0 2px rgba(226, 0, 116, 0.2);
+    box-shadow: 0 0 0 2px rgba(182, 95, 217, 0.2);
 }
 
 /* Custom checkbox styling */
@@ -2764,24 +2667,22 @@ select:focus {
 }
 
 
-/* === LEAFLET FIXES === */
-
-/* Fix for tile gaps/grid lines: Set background color to match map theme */
-/* QPot: the sea behind the locally drawn country outlines */
-html[data-theme="dark"] .leaflet-container {
-    background-color: #0a0e14;
+/* The sea behind the country outlines: the water of T-Pot 24.04.2's basemaps
+   (styles/dark.json, styles/light.json); map.js draws the land in their earth colour */
+html[data-theme="dark"] #map.leaflet-container {
+    background-color: #31353f;
 }
 
-html[data-theme="light"] .leaflet-container {
-    background-color: #f7f9fb;
+html[data-theme="light"] #map.leaflet-container {
+    background-color: #80deea;
 }
 
-/* Additional fix for sub-pixel rendering gaps */
-.leaflet-tile-container img.leaflet-tile {
-    /* Ensure hardware acceleration is used */
-    will-change: transform;
-    /* Disable mix-blend-mode to prevent bright lines from tile overlap fix */
-    mix-blend-mode: normal !important;
+/* the credit: a small pill as T-Pot's, wrapping on a phone instead of running off the map */
+.leaflet-control-attribution {
+    max-width: calc(100vw - 20px);
+    margin: 0 8px 8px 0 !important;
+    padding: 2px 8px !important;
+    line-height: 1.5;
 }
 
 /* Initial hidden states for elements toggled by JS */
@@ -2791,14 +2692,184 @@ html[data-theme="light"] .leaflet-container {
 }
 
 /* ---- QPot ---- */
-a.navbar-brand { color: inherit; text-decoration: none; }
-a.navbar-brand:hover { color: var(--primary-color); }
-.qpot-signin { display: none; position: fixed; inset: 0; z-index: 10000; background: rgba(10, 14, 20, 0.85); align-items: center; justify-content: center; }
-.qpot-signin.show { display: flex; }
-.qpot-signin-box { background: var(--bg-card); border: 1px solid var(--primary-color); border-radius: 12px; padding: 28px 32px; max-width: 420px; text-align: center; color: var(--text-primary); }
-.qpot-signin-box h2 { margin: 0 0 8px; font-size: 1.25rem; }
-.qpot-signin-box p { color: var(--text-secondary); margin: 0 0 18px; }
-.qpot-signin-btn { display: inline-block; background: var(--primary-color); color: #fff; border-radius: 6px; padding: 9px 18px; text-decoration: none; }
-.qpot-signin-btn:hover { background: var(--primary-hover); color: #fff; }
-.qpot-attribution { position: fixed; left: 8px; bottom: 4px; z-index: 900; font-size: 11px; color: var(--text-muted); pointer-events: auto; }
-.qpot-attribution a { color: var(--text-secondary); }
+
+/* the brand: QPot's badge in place of the shield icon, and a way home */
+a.navbar-brand {
+    color: inherit;
+    text-decoration: none;
+}
+
+a.navbar-brand:hover {
+    color: var(--primary-color);
+}
+
+.navbar-brand .brand-badge {
+    width: 32px;
+    height: 37px;
+    flex: none;
+}
+
+/* the sign-in the feed needs (it reads this instance's QPot ID) */
+.qpot-signin {
+    display: none;
+    position: fixed;
+    inset: 0;
+    z-index: var(--z-modal);
+    background: rgba(10, 10, 10, 0.85);
+    align-items: center;
+    justify-content: center;
+    padding: var(--spacing-md);
+}
+
+.qpot-signin.show {
+    display: flex;
+}
+
+.qpot-signin-box {
+    background: var(--bg-modal);
+    border: 1px solid var(--border-primary);
+    border-radius: var(--radius-lg);
+    box-shadow: 0 8px 32px var(--shadow-heavy);
+    padding: var(--spacing-xl);
+    max-width: 440px;
+    text-align: center;
+    color: var(--text-primary);
+}
+
+.qpot-signin-box img {
+    width: 72px;
+    height: auto;
+    margin-bottom: var(--spacing-md);
+}
+
+.qpot-signin-box h2 {
+    margin: 0 0 var(--spacing-sm);
+    font-size: var(--font-lg);
+    font-weight: 600;
+}
+
+.qpot-signin-box p {
+    color: var(--text-secondary);
+    margin: 0 0 var(--spacing-lg);
+}
+
+.qpot-signin-box .btn-base {
+    display: inline-flex;
+    padding: var(--spacing-sm) var(--spacing-lg);
+    text-decoration: none;
+}
+
+/* the QPot ID in the settings */
+.qpot-id-box {
+    display: flex;
+    align-items: center;
+    gap: var(--spacing-sm);
+    margin-top: var(--spacing-sm);
+    padding: var(--spacing-sm) var(--spacing-md);
+    background: var(--bg-tertiary);
+    border: 1px solid var(--border-primary);
+    border-radius: var(--radius-md);
+    font-family: var(--font-mono);
+    font-size: var(--font-xs);
+}
+
+.qpot-id-box .qpot-id-text {
+    flex: 1;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    color: var(--primary-color);
+    font-weight: 600;
+}
+
+.qpot-id-box .btn-base {
+    padding: var(--spacing-xs) var(--spacing-sm);
+    font-size: var(--font-xs);
+}
+
+/* phones: the header keeps its controls in view, the tabs show their icons (T-Pot hides
+   the labels below 480 px, but its labels are bare text nodes the rule cannot reach) */
+@media (max-width: 480px) {
+    .navbar-content {
+        gap: var(--spacing-sm);
+    }
+
+    .navbar-controls {
+        gap: var(--spacing-xs);
+        min-width: 0;
+    }
+
+    .connection-status,
+    .cache-status {
+        padding: var(--spacing-sm);
+    }
+
+    #status-text,
+    #cache-text {
+        display: none;
+    }
+
+    .control-btn {
+        width: 36px;
+        height: 36px;
+    }
+
+    /* the resize grip keeps its place right of the tabs */
+    .panel-tabs {
+        padding-right: 48px;
+    }
+
+    .tab-btn {
+        padding-left: var(--spacing-md);
+        padding-right: var(--spacing-md);
+    }
+
+    /* the tables: the columns that matter on a phone, the clock without the date; what is
+       left over scrolls sideways, with a scrollbar you can see */
+    #live-attacks-table .ip-rep-cell,
+    #live-attacks-table .country-cell,
+    #live-attacks-table .port-cell,
+    #live-attacks-table .tpot-hostname-cell,
+    #ip-table .rank-cell,
+    #ip-table .ip-rep-cell,
+    #country-table .rank-cell,
+    #country-table .last-ip-cell,
+    .data-table th.optional,
+    .data-table .time-date {
+        display: none;
+    }
+
+    .tab-pane {
+        padding: var(--spacing-sm);
+    }
+
+    .data-table th,
+    .data-table td,
+    #live-attacks-table th,
+    #live-attacks-table td,
+    #ip-table,
+    #country-table {
+        font-size: 0.75rem;
+    }
+
+    .data-table th,
+    .data-table td,
+    #live-attacks-table th,
+    #live-attacks-table td {
+        padding-left: 6px;
+        padding-right: 6px;
+    }
+
+    /* T-Pot's minimum widths are for a desktop's columns */
+    #live-attacks-table .time-cell,
+    #live-attacks-table .port-cell,
+    #ip-table td:nth-child(n),
+    #country-table td:nth-child(n) {
+        min-width: 0;
+    }
+
+    .table-wrapper {
+        scrollbar-width: thin !important;
+        scrollbar-color: var(--border-secondary) transparent;
+    }
+}

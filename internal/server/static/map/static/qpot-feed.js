@@ -49,7 +49,7 @@
             // 401: missing/malformed ID; 403: an ID for another instance.
             if (resp.status === 401 || resp.status === 403) {
                 try { localStorage.removeItem(KEY); } catch (_) { /* ignore */ }
-                showSignIn();
+                showSignIn('This QPot did not accept the saved QPot ID. Sign in again with the ID of this instance.');
                 this._emitClose(1008, 'QPot ID not accepted');
                 return;
             }
@@ -90,16 +90,20 @@
     }
     window.QPotFeed = QPotFeed;
 
-    function showSignIn() {
+    function showSignIn(message) {
         const el = document.getElementById('qpot-signin');
-        if (el) el.classList.add('show');
+        if (!el) return;
+        if (message) {
+            const text = document.getElementById('qpot-signin-text');
+            if (text) text.textContent = message;
+        }
+        el.classList.add('show');
     }
 
     function showID() {
         const id = qpotID();
-        const text = id ? mask(id) : 'Not signed in';
-        document.querySelectorAll('#qpot-id-value, #loading-qpot-id span, #settings-qpot-id .qpot-id-text').forEach((el) => {
-            el.textContent = text;
+        document.querySelectorAll('#settings-qpot-id .qpot-id-text').forEach((el) => {
+            el.textContent = id ? mask(id) : 'Not signed in';
         });
         if (!id) showSignIn();
     }
@@ -110,13 +114,20 @@
         navigator.clipboard.writeText(id).catch(() => { /* ignore */ });
     }
 
+    function signOut() {
+        try { localStorage.removeItem(KEY); } catch (_) { /* ignore */ }
+        if (window.webSocket && typeof window.webSocket.close === 'function') window.webSocket.close();
+        showID();
+    }
+
     if (document.readyState === 'loading') {
         document.addEventListener('DOMContentLoaded', showID);
     } else {
         showID();
     }
     document.addEventListener('click', (e) => {
-        if (e.target.closest('#qpot-header-id') || e.target.closest('#copy-qpot-id')) copyID();
+        if (e.target.closest('#copy-qpot-id')) copyID();
+        if (e.target.closest('#signout-qpot-id')) signOut();
     });
-    window.QPotID = { get: qpotID, refresh: showID, copy: copyID };
+    window.QPotID = { get: qpotID, refresh: showID, copy: copyID, signOut: signOut };
 })();
