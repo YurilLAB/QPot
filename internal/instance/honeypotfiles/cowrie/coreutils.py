@@ -551,24 +551,6 @@ class Command_zcat(QpotSum):
     qpot_name = "zcat"
     QPOT_ZCAT_MAX = 8 << 20
     QPOT_ZCAT_MEMBERS = 16
-    QPOT_GLOB_MAX = 4096
-
-    def qpot_glob(self, arg: str) -> list[str]:
-        """The names a pattern in the last part of a path matches, sorted as bash sorts them; the
-        word itself when it has no pattern or matches nothing (bash without nullglob). Cowrie's
-        parser leaves pathname expansion to the commands."""
-        import fnmatch
-
-        head, tail = posixpath.split(arg)
-        if not any(c in tail for c in "*?[") or any(c in head for c in "*?[") or len(tail) > 255:
-            return [arg]
-        try:
-            names = self.fs.listdir(self.fs.resolve_path(head or ".", self.cwd))[: self.QPOT_GLOB_MAX]
-        except Exception:  # noqa: BLE001 - no such folder: the word stays
-            return [arg]
-        found = sorted(n for n in names if (tail.startswith(".") or not n.startswith("."))
-                       and fnmatch.fnmatchcase(n, tail))
-        return [posixpath.join(head, n) if head else n for n in found] or [arg]
 
     def run(self) -> int | None:
         import zlib
@@ -586,7 +568,7 @@ class Command_zcat(QpotSum):
                 self.errorWrite(f"gzip: invalid option -- '{letter}'\n"
                                 "Try `gzip --help' for more information.\n")
                 return 1
-            files.extend(self.qpot_glob(arg))
+            files.append(arg)  # patterns are the shell's (bashparse.py); a quoted one stays
         code, left = 0, self.QPOT_ZCAT_MAX
         for path in files or ["-"]:
             data = self.contents(path, prog)

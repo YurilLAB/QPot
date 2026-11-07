@@ -127,6 +127,10 @@ func TestCowriePatchFiles(t *testing.T) {
 	if !strings.Contains(string(cowrieCoreutilsPy), "(Command_zcat, qpot_bin(\"zcat\"))") {
 		t.Errorf("coreutils.py does not answer zcat")
 	}
+	// the shell expands patterns; a command that did it again would expand a quoted one
+	if strings.Contains(string(cowrieCoreutilsPy), "fnmatch") {
+		t.Errorf("coreutils.py matches patterns of its own")
+	}
 	protocol := string(cowrieProtocolPy)
 	for _, kept := range []string{"def tpot_history_size", "def tpot_commands", "class HoneyPotInteractiveProtocol",
 		"TPOT_LINE_MAX", "def qpot_line_change", "\\x1b[?2004h"} {
