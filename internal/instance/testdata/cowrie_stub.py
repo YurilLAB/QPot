@@ -12,7 +12,7 @@ A case: {"argv": [...], "persona": "ubuntu-24.04", "machine": "x86_64", "files":
 {"b64": .., "mode": .., "uid": .., "mtime": ..} or {"link": target} or {"dir": true}}, "config":
 {"section.key": value}, "dns": {name: address or null}, "http": {url: {"code": .., "body": ..}},
 "terminal": true, "columns": terminal width, "stdin": text, "lines": [typed lines, with "@SECONDS"
-waits], "env": {...}, "installed": epoch, "packages": {name: version}, "plan": {bait plan}, "now": the
+waits], "env": {...} (exported), "shellvars": {...} (set, not exported), "installed": epoch, "packages": {name: version}, "plan": {bait plan}, "now": the
 wall clock ls compares with, "probe": "bash_variables" (the variables the login shell gets, no command) or
 "classify" (qpot_classify and the image's blocklist for each of "addresses") or "qpot_fetch" (qpot_fetch of each
 of "fetch_calls": [url, address]),
@@ -636,14 +636,14 @@ class HoneyPotCommand:
         self.args = list(args)
         self.exit_code = 0
         self.environ = protocol.environ
-        self.exported = set()
+        self.exported = getattr(protocol, "exported", set())
         self.fs = protocol.fs
         self.cwd = protocol.cwd
         self.user = {"uid": 0, "gid": 0, "username": "root", "home": "/root"}
         self.input_data = protocol.stdin
         self.shell = protocol
         self.pp = types.SimpleNamespace(targets={1: ("terminal" if protocol.terminal else "pipe", None),
-                                                 2: ("terminal", None)}, stdin_from_pipe=False)
+                                                 2: ("terminal", None)}, stdin_from_pipe=protocol.stdin is not None)
 
     def write(self, data):
         STATE["out"].append(("o", data))
@@ -724,6 +724,9 @@ class HelpBase(HoneyPotCommand):
 
 
 module("cowrie.commands.base").Command_help = HelpBase
+# base.py's: the session has a terminal (an interactive one, or an exec channel with a pty)
+module("cowrie.commands.base").tpot_pty = lambda protocol: (
+    not hasattr(protocol, "execcmd") or bool(getattr(getattr(protocol, "user", None), "windowSize", None)))
 
 
 class Command_sh(HoneyPotCommand):
@@ -848,9 +851,12 @@ def run(case):
             with open(os.path.join(runtime, "apt-packages.json"), "w") as handle:
                 json.dump({"installed": packages}, handle)
         STATE["config"]["honeypot.contents_path"] = root
+    environ = dict({"HOME": "/root", "PATH": "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"},
+                   **(case.get("env") or {}))
+    exported = set(environ)
+    environ.update(case.get("shellvars") or {})
     protocol = types.SimpleNamespace(
-        fs=fs, environ=dict({"HOME": "/root", "PATH": "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"},
-                            **(case.get("env") or {})),
+        fs=fs, environ=environ, exported=exported - set(case.get("shellvars") or {}),
         cwd=case.get("cwd", "/root"), hostname=case.get("hostname", "web01"), terminal=case.get("terminal", True),
         stdin=case["stdin"].encode() if "stdin" in case else None, events=Events(), password_input=False,
         user=types.SimpleNamespace(username="root", uid=0, gid=0, windowSize=(24, case.get("columns", 80))))

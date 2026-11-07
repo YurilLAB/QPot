@@ -62,7 +62,7 @@ func (r stubResult) code() int {
 // stubPatchFiles are the patch layer's modules the stub loads.
 func stubPatchFiles() map[string][]byte {
 	return map[string][]byte{"qpot_bait.py": cowrieQPotBaitPy, "coreutils.py": cowrieCoreutilsPy,
-		"curl.py": cowrieCurlPy, "wget.py": cowrieWgetPy, "ssh.py": cowrieSSHPy}
+		"curl.py": cowrieCurlPy, "wget.py": cowrieWgetPy, "ssh.py": cowrieSSHPy, "ls.py": cowrieLsPy}
 }
 
 // runCowrieStub runs the cases through the patch layer's commands with the

@@ -70,6 +70,7 @@ const cowriePatchVersion = "24.04.2"
 //	shell/bashparse.py     f0fd17031828d3c98725cd461cc16986879c4bff7c632d8f76d36d2d6daba6e9
 //	commands/curl.py       d4e53f5bfc75eee50a3c69a6ca9998fa41631276ff373353dcacd8ff4d709417
 //	commands/wget.py       1fec4c13975c5827fe557a73fd547f27302af0e959ea1adfd7f1e1afe31191c1
+//	commands/ls.py         a3690435b1734e02bd7c95df66c8f10fed09b0864b6ec35f6097356d173364b5
 //
 // protocol.py: the line editor writes what bash's readline (or BusyBox's ash
 // on the firmware personas) writes, as recorded from bash 5.2.37 and BusyBox
@@ -122,6 +123,14 @@ const cowriePatchVersion = "24.04.2"
 // prints it (recorded from bash 5.2.37), where Cowrie printed bash 4.2.37's
 // on every persona; ash, which keeps no arrays, refuses a line with
 // ${NAME[INDEX]}.
+//
+// ls.py: GNU ls -l counts a folder's links, shows dates as the C locale does,
+// totals its blocks, rounds -h up as GNU does, fills -C's columns top to
+// bottom (-x across, as wide as -w, the terminal or an exported COLUMNS),
+// takes the last of -l, -1, -C and -x, gives getopt's messages, and lists
+// several operands under their names (recorded from coreutils 9.7). BusyBox's
+// ls lays its columns out as 1.37 does: one narrower than the terminal on
+// stdin or an exported COLUMNS, and -w read as a decimal up to INT_MAX.
 var (
 	//go:embed honeypotfiles/cowrie/protocol.py
 	cowrieProtocolPy []byte
@@ -147,6 +156,8 @@ var (
 	cowrieCurlPy []byte
 	//go:embed honeypotfiles/cowrie/wget.py
 	cowrieWgetPy []byte
+	//go:embed honeypotfiles/cowrie/ls.py
+	cowrieLsPy []byte
 )
 
 // cowrieSource is where the image keeps Cowrie's Python package.
@@ -171,6 +182,7 @@ func cowriePatchVolumes() []deployVolume {
 		file("bashparse.py", "shell/bashparse.py", cowrieBashparsePy),
 		file("curl.py", "commands/curl.py", cowrieCurlPy),
 		file("wget.py", "commands/wget.py", cowrieWgetPy),
+		file("ls.py", "commands/ls.py", cowrieLsPy),
 	}
 }
 

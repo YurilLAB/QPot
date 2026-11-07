@@ -37,6 +37,7 @@ func TestCowriePatchMounts(t *testing.T) {
 		cowrieSource + "/shell/bashparse.py":    cowrieBashparsePy,
 		cowrieSource + "/commands/curl.py":      cowrieCurlPy,
 		cowrieSource + "/commands/wget.py":      cowrieWgetPy,
+		cowrieSource + "/commands/ls.py":        cowrieLsPy,
 	}
 	d := deployProfile(config.Default("cowrie-patch"), "cowrie")
 	for _, v := range d.Volumes {
@@ -69,6 +70,7 @@ func TestCowriePatchMounts(t *testing.T) {
 		"/honeypots/cowrie/patch/bashparse.py:" + cowrieSource + "/shell/bashparse.py:ro\n",
 		"/honeypots/cowrie/patch/curl.py:" + cowrieSource + "/commands/curl.py:ro\n",
 		"/honeypots/cowrie/patch/wget.py:" + cowrieSource + "/commands/wget.py:ro\n",
+		"/honeypots/cowrie/patch/ls.py:" + cowrieSource + "/commands/ls.py:ro\n",
 	} {
 		if !strings.Contains(svc, line) {
 			t.Errorf("cowrie service lacks %q", strings.TrimSpace(line))
@@ -150,7 +152,7 @@ func TestCowriePatchFiles(t *testing.T) {
 		"coreutils.py": cowrieCoreutilsPy, "commands_init.py": cowrieCommandsInitPy, "ssh.py": cowrieSSHPy,
 		"awscli.py": cowrieAWSCLIPy, "honeyfs.py": cowrieHoneyfsPy, "qpot_bait.py": cowrieQPotBaitPy,
 		"find.py": cowrieFindPy, "bashparse.py": cowrieBashparsePy, "curl.py": cowrieCurlPy,
-		"wget.py": cowrieWgetPy} {
+		"wget.py": cowrieWgetPy, "ls.py": cowrieLsPy} {
 		if bytes.Contains(content, []byte("\r")) {
 			t.Errorf("%s has CR bytes", name)
 		}
@@ -174,7 +176,7 @@ func TestCowriePatchWritten(t *testing.T) {
 		"coreutils.py": cowrieCoreutilsPy, "commands_init.py": cowrieCommandsInitPy, "ssh.py": cowrieSSHPy,
 		"awscli.py": cowrieAWSCLIPy, "honeyfs.py": cowrieHoneyfsPy, "qpot_bait.py": cowrieQPotBaitPy,
 		"find.py": cowrieFindPy, "bashparse.py": cowrieBashparsePy, "curl.py": cowrieCurlPy,
-		"wget.py": cowrieWgetPy} {
+		"wget.py": cowrieWgetPy, "ls.py": cowrieLsPy} {
 		got, err := os.ReadFile(filepath.Join(cfg.DataPath, "honeypots", "cowrie", "patch", name))
 		if err != nil || !bytes.Equal(got, content) {
 			t.Errorf("patch/%s not written (err %v, %d bytes)", name, err, len(got))
