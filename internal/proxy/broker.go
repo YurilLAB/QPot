@@ -201,12 +201,14 @@ func (b *Broker) handle(ctx context.Context, client net.Conn) {
 		reject(ReasonPoolExhausted)
 		return
 	}
-	// Release runs the backend reset, which can take minutes: the attacker's
-	// connection is closed and its limiter slot freed first, or a failed dial
-	// left an accepted, silent connection open for the whole reset.
+	// Release runs the backend reset, which can take minutes. The attacker's
+	// connection is closed first: a failed dial otherwise left an accepted,
+	// silent connection open for the whole reset. Its limiter slot stays
+	// taken until the reset ends (the deferred release above runs after
+	// this), so a source at its cap cannot park more backends in reset than
+	// it may hold and drain the pool by connecting and dropping.
 	defer func() {
 		_ = client.Close()
-		release()
 		b.pool.Release(backend)
 	}()
 
