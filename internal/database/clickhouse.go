@@ -425,7 +425,7 @@ func (ch *ClickHouse) GetStats(ctx context.Context, since time.Time) (*Stats, er
 
 	// Top countries
 	countryRows, err := ch.conn.Query(ctx,
-		"SELECT country, count() as c FROM events WHERE timestamp >= ? AND country != '' GROUP BY country ORDER BY c DESC LIMIT 10",
+		"SELECT country, count() as c FROM events WHERE timestamp >= ? AND country != '' GROUP BY country ORDER BY c DESC, country LIMIT 10",
 		since)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get top countries: %w", err)
@@ -444,7 +444,7 @@ func (ch *ClickHouse) GetStats(ctx context.Context, since time.Time) (*Stats, er
 
 	// Top honeypots
 	hpRows, err := ch.conn.Query(ctx,
-		"SELECT honeypot, count() as c FROM events WHERE timestamp >= ? GROUP BY honeypot ORDER BY c DESC",
+		"SELECT honeypot, count() as c FROM events WHERE timestamp >= ? GROUP BY honeypot ORDER BY c DESC, honeypot",
 		since)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get top honeypots: %w", err)
@@ -477,13 +477,13 @@ func (ch *ClickHouse) GetTopAttackers(ctx context.Context, limit int, since time
 			min(timestamp),
 			max(timestamp),
 			count(),
-			groupUniqArray(honeypot),
-			groupUniqArray(username),
-			groupUniqArray(password)
+			arraySort(groupUniqArray(honeypot)),
+			arraySort(groupUniqArray(username)),
+			arraySort(groupUniqArray(password))
 		FROM events 
 		WHERE timestamp >= ?
 		GROUP BY source_ip, country
-		ORDER BY count() DESC
+		ORDER BY count() DESC, source_ip, country
 		LIMIT ?
 	`
 
@@ -547,7 +547,7 @@ func (ch *ClickHouse) GetHoneypotStats(ctx context.Context, honeypot string, sin
 	stats.UniqueIPs = int64(uniqueIPs)
 
 	usernameRows, err := ch.conn.Query(ctx,
-		"SELECT username, count() FROM events WHERE honeypot = ? AND timestamp >= ? AND username != '' GROUP BY username ORDER BY count() DESC LIMIT 20",
+		"SELECT username, count() FROM events WHERE honeypot = ? AND timestamp >= ? AND username != '' GROUP BY username ORDER BY count() DESC, username LIMIT 20",
 		honeypot, since)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get top usernames: %w", err)
@@ -564,7 +564,7 @@ func (ch *ClickHouse) GetHoneypotStats(ctx context.Context, honeypot string, sin
 	}
 
 	passwordRows, err := ch.conn.Query(ctx,
-		"SELECT password, count() FROM events WHERE honeypot = ? AND timestamp >= ? AND password != '' GROUP BY password ORDER BY count() DESC LIMIT 20",
+		"SELECT password, count() FROM events WHERE honeypot = ? AND timestamp >= ? AND password != '' GROUP BY password ORDER BY count() DESC, password LIMIT 20",
 		honeypot, since)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get top passwords: %w", err)
@@ -581,7 +581,7 @@ func (ch *ClickHouse) GetHoneypotStats(ctx context.Context, honeypot string, sin
 	}
 
 	commandRows, err := ch.conn.Query(ctx,
-		"SELECT command, count() FROM events WHERE honeypot = ? AND timestamp >= ? AND command != '' GROUP BY command ORDER BY count() DESC LIMIT 20",
+		"SELECT command, count() FROM events WHERE honeypot = ? AND timestamp >= ? AND command != '' GROUP BY command ORDER BY count() DESC, command LIMIT 20",
 		honeypot, since)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get top commands: %w", err)

@@ -682,10 +682,10 @@ func (es *Elasticsearch) GetStats(ctx context.Context, since time.Time) (*Stats,
 				"cardinality": map[string]string{"field": "source_ip"},
 			},
 			"top_countries": map[string]interface{}{
-				"terms": map[string]interface{}{"field": "country", "size": 10},
+				"terms": map[string]interface{}{"field": "country", "size": 10, "order": esCountOrder},
 			},
 			"top_honeypots": map[string]interface{}{
-				"terms": map[string]interface{}{"field": "honeypot", "size": 10},
+				"terms": map[string]interface{}{"field": "honeypot", "size": 10, "order": esCountOrder},
 			},
 			"events_per_hour": map[string]interface{}{
 				"date_histogram": map[string]interface{}{
@@ -768,6 +768,11 @@ func (es *Elasticsearch) GetStats(ctx context.Context, since time.Time) (*Stats,
 	return stats, nil
 }
 
+// esCountOrder orders a terms aggregation's buckets by count, most first,
+// and equal counts by key, so a list keeps its order from one answer to the
+// next.
+var esCountOrder = []map[string]string{{"_count": "desc"}, {"_key": "asc"}}
+
 // GetTopAttackers retrieves top attackers
 func (es *Elasticsearch) GetTopAttackers(ctx context.Context, limit int, since time.Time) ([]*AttackerStats, error) {
 	body := map[string]interface{}{
@@ -784,13 +789,13 @@ func (es *Elasticsearch) GetTopAttackers(ctx context.Context, limit int, since t
 				"terms": map[string]interface{}{
 					"field": "source_ip",
 					"size":  limit,
-					"order": map[string]string{"_count": "desc"},
+					"order": esCountOrder,
 				},
 				"aggs": map[string]interface{}{
 					"first_seen":    map[string]interface{}{"min": map[string]string{"field": "timestamp"}},
 					"last_seen":     map[string]interface{}{"max": map[string]string{"field": "timestamp"}},
-					"top_honeypots": map[string]interface{}{"terms": map[string]interface{}{"field": "honeypot", "size": 10}},
-					"top_country":   map[string]interface{}{"terms": map[string]interface{}{"field": "country", "size": 1}},
+					"top_honeypots": map[string]interface{}{"terms": map[string]interface{}{"field": "honeypot", "size": 10, "order": esCountOrder}},
+					"top_country":   map[string]interface{}{"terms": map[string]interface{}{"field": "country", "size": 1, "order": esCountOrder}},
 				},
 			},
 		},
@@ -877,9 +882,9 @@ func (es *Elasticsearch) GetHoneypotStats(ctx context.Context, honeypot string, 
 		},
 		"aggs": map[string]interface{}{
 			"unique_ips":    map[string]interface{}{"cardinality": map[string]string{"field": "source_ip"}},
-			"top_usernames": map[string]interface{}{"terms": map[string]interface{}{"field": "username", "size": 10}},
-			"top_passwords": map[string]interface{}{"terms": map[string]interface{}{"field": "password", "size": 10}},
-			"top_commands":  map[string]interface{}{"terms": map[string]interface{}{"field": "command.keyword", "size": 10}},
+			"top_usernames": map[string]interface{}{"terms": map[string]interface{}{"field": "username", "size": 10, "order": esCountOrder}},
+			"top_passwords": map[string]interface{}{"terms": map[string]interface{}{"field": "password", "size": 10, "order": esCountOrder}},
+			"top_commands":  map[string]interface{}{"terms": map[string]interface{}{"field": "command.keyword", "size": 10, "order": esCountOrder}},
 		},
 	}
 

@@ -18,6 +18,7 @@ import (
 	"os/exec"
 	"path"
 	"runtime"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -771,12 +772,17 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// By name: the manager lists them in map order, and the web UI redraws
+	// a list whose order changes.
+	honeypots := append([]instance.HoneypotStatus(nil), status.Honeypots...)
+	sort.Slice(honeypots, func(i, j int) bool { return honeypots[i].Name < honeypots[j].Name })
+
 	// The QPot ID is the API credential: the caller has it already, and an
 	// answer that repeats it puts it on screen. No reply carries it.
 	response := map[string]interface{}{
 		"instance":  s.config.InstanceName,
 		"overall":   status.Overall,
-		"honeypots": status.Honeypots,
+		"honeypots": honeypots,
 		"database":  s.config.Database.Type,
 	}
 
@@ -806,8 +812,15 @@ func (s *Server) handleHoneypots(w http.ResponseWriter, r *http.Request) {
 		if err != nil {
 			cfg = s.config
 		}
+		hps := cfg.SnapshotHoneypots()
+		names := make([]string, 0, len(hps))
+		for name := range hps {
+			names = append(names, name)
+		}
+		sort.Strings(names) // one order every time (the UI redraws on a change)
 		var list []map[string]interface{}
-		for name, hp := range cfg.SnapshotHoneypots() {
+		for _, name := range names {
+			hp := hps[name]
 			list = append(list, map[string]interface{}{
 				"name":    name,
 				"enabled": hp.Enabled,
@@ -997,14 +1010,14 @@ func (s *Server) handleTechniques(w http.ResponseWriter, r *http.Request) {
 	for _, e := range counts {
 		result = append(result, e)
 	}
-	// Sort by count descending.
-	for i := 0; i < len(result); i++ {
-		for j := i + 1; j < len(result); j++ {
-			if result[j].Count > result[i].Count {
-				result[i], result[j] = result[j], result[i]
-			}
+	// By count, most first; equal counts by technique ID, so the order does
+	// not change from one answer to the next.
+	sort.Slice(result, func(i, j int) bool {
+		if result[i].Count != result[j].Count {
+			return result[i].Count > result[j].Count
 		}
-	}
+		return result[i].TechniqueID < result[j].TechniqueID
+	})
 
 	s.sendJSON(w, result)
 }
@@ -1222,6 +1235,13 @@ func (s *Server) handleCluster(w http.ResponseWriter, r *http.Request) {
 
 	status := cm.GetStatus()
 	nodes := cm.GetNodes()
+	// By name (the manager keeps members in a map).
+	sort.Slice(nodes, func(i, j int) bool {
+		if nodes[i].Name != nodes[j].Name {
+			return nodes[i].Name < nodes[j].Name
+		}
+		return nodes[i].ID < nodes[j].ID
+	})
 
 	type nodeView struct {
 		Name          string `json:"name"`

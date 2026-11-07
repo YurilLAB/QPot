@@ -489,7 +489,7 @@ func (ts *TimescaleDB) GetStats(ctx context.Context, since time.Time) (*Stats, e
 
 	// Top countries
 	countryRows, err := ts.pool.Query(ctx,
-		"SELECT country, COUNT(*) FROM events WHERE timestamp >= $1 AND country != '' GROUP BY country ORDER BY COUNT(*) DESC LIMIT 10",
+		"SELECT country, COUNT(*) FROM events WHERE timestamp >= $1 AND country != '' GROUP BY country ORDER BY COUNT(*) DESC, country LIMIT 10",
 		since)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get top countries: %w", err)
@@ -511,7 +511,7 @@ func (ts *TimescaleDB) GetStats(ctx context.Context, since time.Time) (*Stats, e
 	// top honeypot and the overview's per-honeypot activity all read these;
 	// without them those features silently did nothing on TimescaleDB.
 	hpRows, err := ts.pool.Query(ctx,
-		"SELECT honeypot, COUNT(*) FROM events WHERE timestamp >= $1 GROUP BY honeypot ORDER BY COUNT(*) DESC",
+		"SELECT honeypot, COUNT(*) FROM events WHERE timestamp >= $1 GROUP BY honeypot ORDER BY COUNT(*) DESC, honeypot",
 		since)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get top honeypots: %w", err)
@@ -544,11 +544,11 @@ func (ts *TimescaleDB) GetTopAttackers(ctx context.Context, limit int, since tim
 			MIN(timestamp) as first_seen,
 			MAX(timestamp) as last_seen,
 			COUNT(*) as attack_count,
-			ARRAY_AGG(DISTINCT honeypot) as honeypots
+			ARRAY_AGG(DISTINCT honeypot ORDER BY honeypot) as honeypots
 		FROM events 
 		WHERE timestamp >= $1
 		GROUP BY source_ip, COALESCE(country, '')
-		ORDER BY attack_count DESC
+		ORDER BY attack_count DESC, source_ip, country
 		LIMIT $2
 	`
 
@@ -597,7 +597,7 @@ func (ts *TimescaleDB) GetHoneypotStats(ctx context.Context, honeypot string, si
 	}
 
 	usernameRows, err := ts.pool.Query(ctx,
-		"SELECT username, COUNT(*) FROM events WHERE honeypot = $1 AND timestamp >= $2 AND username != '' GROUP BY username ORDER BY COUNT(*) DESC LIMIT 20",
+		"SELECT username, COUNT(*) FROM events WHERE honeypot = $1 AND timestamp >= $2 AND username != '' GROUP BY username ORDER BY COUNT(*) DESC, username LIMIT 20",
 		honeypot, since)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get top usernames: %w", err)
@@ -612,7 +612,7 @@ func (ts *TimescaleDB) GetHoneypotStats(ctx context.Context, honeypot string, si
 	}
 
 	passwordRows, err := ts.pool.Query(ctx,
-		"SELECT password, COUNT(*) FROM events WHERE honeypot = $1 AND timestamp >= $2 AND password != '' GROUP BY password ORDER BY COUNT(*) DESC LIMIT 20",
+		"SELECT password, COUNT(*) FROM events WHERE honeypot = $1 AND timestamp >= $2 AND password != '' GROUP BY password ORDER BY COUNT(*) DESC, password LIMIT 20",
 		honeypot, since)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get top passwords: %w", err)
@@ -627,7 +627,7 @@ func (ts *TimescaleDB) GetHoneypotStats(ctx context.Context, honeypot string, si
 	}
 
 	commandRows, err := ts.pool.Query(ctx,
-		"SELECT command, COUNT(*) FROM events WHERE honeypot = $1 AND timestamp >= $2 AND command != '' GROUP BY command ORDER BY COUNT(*) DESC LIMIT 20",
+		"SELECT command, COUNT(*) FROM events WHERE honeypot = $1 AND timestamp >= $2 AND command != '' GROUP BY command ORDER BY COUNT(*) DESC, command LIMIT 20",
 		honeypot, since)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get top commands: %w", err)
