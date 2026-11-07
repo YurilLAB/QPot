@@ -32,6 +32,13 @@ type publicPeer struct {
 
 func newPublicPeer(t *testing.T) *publicPeer {
 	t.Helper()
+	return newPublicPeerServing(t, nil)
+}
+
+// newPublicPeerServing is newPublicPeer with handler, when not nil, serving
+// instead of the recording gossip handler.
+func newPublicPeerServing(t *testing.T, handler http.Handler) *publicPeer {
+	t.Helper()
 	caKey, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	caT := &x509.Certificate{SerialNumber: big.NewInt(1), Subject: pkix.Name{CommonName: "Some Public CA"},
 		NotBefore: time.Now().Add(-time.Hour), NotAfter: time.Now().Add(time.Hour), IsCA: true,
@@ -45,12 +52,15 @@ func newPublicPeer(t *testing.T) *publicPeer {
 	leafDER, _ := x509.CreateCertificate(rand.Reader, leafT, ca, &leafKey.PublicKey, caKey)
 
 	p := &publicPeer{ca: ca}
-	p.srv = httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		p.mu.Lock()
-		p.password, p.member = r.Header.Get("X-Cluster-Password"), r.Header.Get(memberKeyHeader)
-		p.mu.Unlock()
-		_ = json.NewEncoder(w).Encode(GossipMessage{})
-	}))
+	if handler == nil {
+		handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			p.mu.Lock()
+			p.password, p.member = r.Header.Get("X-Cluster-Password"), r.Header.Get(memberKeyHeader)
+			p.mu.Unlock()
+			_ = json.NewEncoder(w).Encode(GossipMessage{})
+		})
+	}
+	p.srv = httptest.NewUnstartedServer(handler)
 	p.srv.TLS = &tls.Config{MinVersion: tls.VersionTLS12,
 		Certificates: []tls.Certificate{{Certificate: [][]byte{leafDER}, PrivateKey: leafKey}}}
 	p.srv.StartTLS()

@@ -52,7 +52,7 @@ func FuzzJoinClientResponse(f *testing.F) {
 
 		// Must not panic regardless of what the seed returns. On success, the
 		// resulting membership must contain no invalid nodes.
-		cl, err := m.attemptJoin(seedAddr, "cl_whatever", "password123", local)
+		cl, err := m.attemptJoin(seedAddr, "cl_whatever", "password123", local, nil)
 		if err == nil && cl != nil {
 			for id, n := range cl.Nodes {
 				if n == nil {

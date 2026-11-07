@@ -83,6 +83,11 @@ type ClusterConfig struct {
 	TLSCertPath     string `json:"tls_cert_path,omitempty" yaml:"tls_cert_path,omitempty"`
 	TLSKeyPath      string `json:"tls_key_path,omitempty" yaml:"tls_key_path,omitempty"`
 	CACertPath      string `json:"ca_cert_path,omitempty" yaml:"ca_cert_path,omitempty"`
+	// TrustOperatorCerts makes this node accept peers serving an operator
+	// certificate (checked against CACertPath, or the system roots without
+	// one) besides those of the cluster CA. Set on a node that joined with
+	// operator certificates allowed (qpot cluster join --operator-cert).
+	TrustOperatorCerts bool `json:"trust_operator_certs,omitempty" yaml:"trust_operator_certs,omitempty"`
 }
 
 // DefaultClusterConfig returns default cluster configuration
@@ -384,7 +389,8 @@ func (m *Manager) peerHTTPClient(timeout time.Duration) *http.Client {
 			}
 		}
 	}
-	operatorCerts := m.cluster.Config.TLSCertPath != "" || m.cluster.Config.CACertPath != ""
+	operatorCerts := m.cluster.Config.TLSCertPath != "" || m.cluster.Config.CACertPath != "" ||
+		m.cluster.Config.TrustOperatorCerts
 	return clusterHTTPClient(timeout, m.cluster.ID, pool, operatorCerts)
 }
 
@@ -516,8 +522,28 @@ func (m *Manager) InitCluster(name, password string, cfg *ClusterConfig) (*Clust
 	return cluster, nil
 }
 
-// JoinCluster joins an existing cluster with password authentication
+// JoinTrust says which seed certificates a joiner accepts. By default only a
+// certificate from the cluster CA its cluster ID pins: the join request and
+// the approval polls carry the cluster password and the poll secret, and the
+// approval hands back the CA and member keys.
+type JoinTrust struct {
+	// OperatorCerts also accepts a seed serving an operator certificate for
+	// the address dialled, checked against CAFile or, without one, the
+	// system roots. Only for clusters set up with operator certificates.
+	OperatorCerts bool
+	// CAFile is a PEM bundle operator certificates are checked against
+	// (implies OperatorCerts).
+	CAFile string
+}
+
+// JoinCluster joins an existing cluster with password authentication,
+// trusting only the cluster CA the cluster ID names.
 func (m *Manager) JoinCluster(clusterID, password string, localNode *Node, seedNodes []string) (*Cluster, error) {
+	return m.JoinClusterTrusting(clusterID, password, localNode, seedNodes, JoinTrust{})
+}
+
+// JoinClusterTrusting is JoinCluster with the seed certificates trust allows.
+func (m *Manager) JoinClusterTrusting(clusterID, password string, localNode *Node, seedNodes []string, trust JoinTrust) (*Cluster, error) {
 	if clusterID == "" {
 		return nil, fmt.Errorf("cluster ID is required")
 	}
@@ -533,11 +559,24 @@ func (m *Manager) JoinCluster(clusterID, password string, localNode *Node, seedN
 	if len(seedNodes) == 0 {
 		return nil, fmt.Errorf("at least one seed node is required")
 	}
+	var pool *x509.CertPool
+	if trust.CAFile != "" {
+		trust.OperatorCerts = true
+		data, err := os.ReadFile(trust.CAFile)
+		if err != nil {
+			return nil, fmt.Errorf("read CA bundle: %w", err)
+		}
+		pool = x509.NewCertPool()
+		if !pool.AppendCertsFromPEM(data) {
+			return nil, fmt.Errorf("CA bundle %s holds no PEM certificate", trust.CAFile)
+		}
+	}
+	tlsClient := clusterHTTPClient(15*time.Second, clusterID, pool, trust.OperatorCerts)
 
 	// Try to join via seed nodes
 	var lastErr error
 	for _, seed := range seedNodes {
-		cluster, err := m.attemptJoin(seed, clusterID, password, localNode)
+		cluster, err := m.attemptJoin(seed, clusterID, password, localNode, tlsClient)
 		if err == nil {
 			// The config came from the seed: its bind address/port and
 			// certificate paths describe THAT host. This node listens on its own
@@ -548,7 +587,10 @@ func (m *Manager) JoinCluster(clusterID, password string, localNode *Node, seedN
 					cluster.Config.BindPort = localNode.Port
 				}
 				cluster.Config.AdvertiseAddr = localNode.Address
-				cluster.Config.TLSCertPath, cluster.Config.TLSKeyPath, cluster.Config.CACertPath = "", "", ""
+				cluster.Config.TLSCertPath, cluster.Config.TLSKeyPath = "", ""
+				// What this node trusts is its operator's choice, never the seed's.
+				cluster.Config.CACertPath = trust.CAFile
+				cluster.Config.TrustOperatorCerts = trust.OperatorCerts
 			}
 			m.mu.Lock()
 			m.cluster = cluster
@@ -566,8 +608,9 @@ func (m *Manager) JoinCluster(clusterID, password string, localNode *Node, seedN
 	return nil, fmt.Errorf("failed to join cluster: %w", lastErr)
 }
 
-// attemptJoin tries to join a cluster via a specific seed node
-func (m *Manager) attemptJoin(seedAddr, clusterID, password string, localNode *Node) (*Cluster, error) {
+// attemptJoin tries to join a cluster via a specific seed node, over
+// tlsClient when the seed speaks TLS.
+func (m *Manager) attemptJoin(seedAddr, clusterID, password string, localNode *Node, tlsClient *http.Client) (*Cluster, error) {
 	pollSecret, err := newPollSecret()
 	if err != nil {
 		return nil, err
@@ -593,7 +636,7 @@ func (m *Manager) attemptJoin(seedAddr, clusterID, password string, localNode *N
 	// The seed address may name the scheme:
 	//   https://1.2.3.4:7946 or 1.2.3.4:7946 -> TLS (the default: new clusters
 	//     encrypt). The seed is verified against the cluster CA the cluster
-	//     ID names (automatic TLS) or the system roots (operator certificate),
+	//     ID names (or, when JoinTrust allows it, an operator certificate),
 	//     so the password is never sent to an impostor or in cleartext.
 	//   http://1.2.3.4:7946 -> plain HTTP, only for clusters that turned
 	//     encryption off.
@@ -610,7 +653,7 @@ func (m *Manager) attemptJoin(seedAddr, clusterID, password string, localNode *N
 
 	joinClient := &http.Client{Timeout: 15 * time.Second}
 	if scheme == "https" {
-		joinClient = clusterHTTPClient(15*time.Second, clusterID, nil, true)
+		joinClient = tlsClient
 	}
 	resp, err := joinClient.Post(url, "application/json", bytes.NewReader(reqBody))
 	if err != nil {
@@ -635,7 +678,7 @@ func (m *Manager) attemptJoin(seedAddr, clusterID, password string, localNode *N
 		if joinResp.Status == "pending" && joinResp.RequestID != "" {
 			slog.Info("Join request submitted; awaiting host approval",
 				"request_id", joinResp.RequestID, "cluster_id", clusterID)
-			approved, perr := m.pollJoinApproval(scheme, host, clusterID, password, joinResp.RequestID, pollSecret)
+			approved, perr := m.pollJoinApproval(joinClient, scheme, host, password, joinResp.RequestID, pollSecret)
 			if perr != nil {
 				return nil, perr
 			}
@@ -701,11 +744,7 @@ func (m *Manager) attemptJoin(seedAddr, clusterID, password string, localNode *N
 // approves it (returning the full JoinResponse the joiner needs), denies it, or
 // the overall timeout elapses. The poll is authenticated with the same cluster
 // password the join used and carries the join's poll secret.
-func (m *Manager) pollJoinApproval(scheme, host, clusterID, password, requestID, pollSecret string) (*JoinResponse, error) {
-	client := &http.Client{Timeout: 15 * time.Second}
-	if scheme == "https" {
-		client = clusterHTTPClient(15*time.Second, clusterID, nil, true)
-	}
+func (m *Manager) pollJoinApproval(client *http.Client, scheme, host, password, requestID, pollSecret string) (*JoinResponse, error) {
 	url := fmt.Sprintf("%s://%s/api/v1/cluster/join/status?request_id=%s", scheme, host, requestID)
 
 	pollInterval := m.joinPollInterval
