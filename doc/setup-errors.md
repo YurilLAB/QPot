@@ -631,8 +631,8 @@ Exit status 0 means success; 1 is a usage error (an unknown flag).
 
 **The database is not ready.**
 
-- Why: The database container is not running yet, or its tables were not created.
-- Fix: Wait a minute and run qpot doctor. If it stays broken, see: qpot docker logs database
+- Why: The database container is not running (it stopped, or is still starting), or its tables were not created.
+- Fix: If qpot doctor shows the database exited or not created, start it with: qpot up -d; if it stays down, run qpot down, then qpot setup. If it is still starting, wait a minute and run qpot doctor. Its log: qpot docker logs database (for another instance add -i <instance> to each command)
 
 ### QP-INST-006
 
@@ -653,7 +653,7 @@ Exit status 0 means success; 1 is a usage error (an unknown flag).
 **A part of the instance is not running properly.**
 
 - Why: A container stopped, was never created, or reports itself unhealthy.
-- Fix: See why with: qpot logs <the part named above>   then restart with: qpot down && qpot up -d
+- Fix: See why with: qpot logs <the part named above>. Start what stopped with: qpot up -d; if it stays down, run qpot down, then qpot setup (for another instance add -i <instance> to each command).
 
 ## Interrupted (`INT`, exit 130)
 

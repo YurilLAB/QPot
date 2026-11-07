@@ -332,8 +332,8 @@ var catalog = []Code{
 		"A container was still starting or kept failing when the wait ran out.",
 		"Run qpot doctor in a minute or two to check again, and qpot logs <honeypot> to see why a part fails."},
 	{"QP-INST-005", "The database is not ready.",
-		"The database container is not running yet, or its tables were not created.",
-		"Wait a minute and run qpot doctor. If it stays broken, see: qpot docker logs database"},
+		"The database container is not running (it stopped, or is still starting), or its tables were not created.",
+		"If qpot doctor shows the database exited or not created, start it with: qpot up -d; if it stays down, run qpot down, then qpot setup. If it is still starting, wait a minute and run qpot doctor. Its log: qpot docker logs database (for another instance add -i <instance> to each command)"},
 	{"QP-INST-006", "The GeoIP database file is missing.",
 		"The instance is set to use a country database that is no longer on disk, so the log collector cannot start.",
 		"Download it again with: qpot geoip update"},
@@ -342,7 +342,7 @@ var catalog = []Code{
 		"Start it with: qpot up -d"},
 	{"QP-INST-008", "A part of the instance is not running properly.",
 		"A container stopped, was never created, or reports itself unhealthy.",
-		"See why with: qpot logs <the part named above>   then restart with: qpot down && qpot up -d"},
+		"See why with: qpot logs <the part named above>. Start what stopped with: qpot up -d; if it stays down, run qpot down, then qpot setup (for another instance add -i <instance> to each command)."},
 
 	// INT: interrupted.
 	{"QP-INT-001", "Setup was stopped before it finished.",

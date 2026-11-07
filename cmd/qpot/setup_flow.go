@@ -223,10 +223,30 @@ func runSetupSteps(ctx context.Context, env *setupEnv, opts setupOptions) *hosts
 				break
 			}
 		}
+		i := iflagFor(cfg.InstanceName)
+		if partsStopped(cs) {
+			return hostsetup.E(code).WithWhy("Some parts of the instance are not running (see above), so waiting will not help.").
+				WithFix("Start them with: qpot up -d%s   If they stay down: qpot down%s, then run qpot setup%s again", i, i, i)
+		}
 		return hostsetup.E(code).WithWhy("Some health checks failed (see above); parts may still be starting.").
-			WithFix("Wait a minute and run: qpot doctor%s", iflagFor(cfg.InstanceName))
+			WithFix("Wait a minute and run: qpot doctor%s", i)
 	}
 	return nil
+}
+
+// stoppedStates are the container states a health check reports for a part
+// that is not running and will not start by itself.
+var stoppedStates = map[string]bool{"not created": true, "created": true, "exited": true, "dead": true, "paused": true}
+
+// partsStopped reports whether a failed health check names a container that
+// is not running (rather than one still starting or unhealthy).
+func partsStopped(cs []check) bool {
+	for _, c := range cs {
+		if c.Level == "fail" && (c.Code == "QP-INST-005" || c.Code == "QP-INST-008") && stoppedStates[c.Detail] {
+			return true
+		}
+	}
+	return false
 }
 
 func iflagFor(name string) string {
@@ -945,7 +965,7 @@ func checkSetupPorts(ctx context.Context, w io.Writer, cfg *config.Config, servi
 		if hostPort == cfg.WebUI.Port {
 			name, _, _ := strings.Cut(key, "\x00")
 			return hostsetup.E("QP-PORT-005").WithWhy("Honeypot %s is set to use port %d, which the web UI uses too.", name, hostPort).
-				WithFix("Change the web UI port: qpot config%s (web_ui.port), then run qpot setup again.", iflagFor(cfg.InstanceName))
+				WithFix("Change the web UI port: qpot config%s (web_ui.port), then run qpot setup%[1]s again.", iflagFor(cfg.InstanceName))
 		}
 	}
 	if len(pcs) > 0 && printChecksTo(w, "Port checks", pcs) {

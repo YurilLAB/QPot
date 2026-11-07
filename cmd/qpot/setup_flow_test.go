@@ -21,6 +21,7 @@ import (
 
 	"github.com/qpot/qpot/internal/config"
 	"github.com/qpot/qpot/internal/hostsetup"
+	"github.com/qpot/qpot/internal/instance"
 )
 
 // fakeDocker answers setup's docker, package manager and sudo commands from
@@ -494,6 +495,65 @@ func TestSetupHealthFailureIsCoded(t *testing.T) {
 	}
 	if err := runSetup(context.Background(), env, setupOptions{instance: "flow12", instanceSet: true, timeout: time.Second}); codeOf(err) != "QP-INST-003" {
 		t.Fatalf("start failure: %v", err)
+	}
+}
+
+// TestSetupHealthFailureFix: a part that has stopped will not come back by
+// waiting, so the fix says how to start it; a part still starting gets the
+// wait-and-check fix.
+func TestSetupHealthFailureFix(t *testing.T) {
+	for _, c := range []struct {
+		checks []check
+		code   string
+		want   string
+	}{
+		{[]check{{Name: "database", Level: "fail", Detail: "exited", Code: "QP-INST-005"}}, "QP-INST-005", "qpot up -d -i flow13"},
+		{[]check{{Name: "honeypot cowrie", Level: "fail", Detail: "not created", Code: "QP-INST-008"}}, "QP-INST-008", "qpot down -i flow13, then run qpot setup -i flow13 again"},
+		{[]check{{Name: "honeypot cowrie", Level: "fail", Detail: "created", Code: "QP-INST-008"}}, "QP-INST-008", "qpot up -d -i flow13"},
+		{[]check{{Name: "honeypot cowrie", Level: "fail", Detail: "unhealthy", Code: "QP-INST-008"}}, "QP-INST-008", "Wait a minute and run: qpot doctor -i flow13"},
+		{[]check{{Name: "database schema", Level: "fail", Detail: "not ready: dial tcp: refused", Code: "QP-INST-005"}}, "QP-INST-005", "Wait a minute"},
+	} {
+		env, _, _ := testEnv(t, ready(), "", false)
+		env.health = func(context.Context, *config.Config, bool, time.Duration) []check { return c.checks }
+		err := runSetup(context.Background(), env, setupOptions{instance: "flow13", instanceSet: true, port: freePort(t), portSet: true, timeout: time.Second})
+		var e *hostsetup.Error
+		if codeOf(err) != c.code || !errors.As(err, &e) || !strings.Contains(e.Fix, c.want) {
+			t.Errorf("%v: err %v, want fix with %q", c.checks, err, c.want)
+		}
+		if strings.Contains(c.want, "qpot up") && strings.Contains(e.Fix, "Wait a minute") {
+			t.Errorf("%v: a stopped part is told to wait: %s", c.checks, e.Fix)
+		}
+	}
+}
+
+// TestSetupPortClashFixNamesInstance: qpot setup without -i sets up the
+// default instance, so a fix that says to run setup again must name the
+// instance it was about.
+func TestSetupPortClashFixNamesInstance(t *testing.T) {
+	env, _, _ := testEnv(t, ready(), "", false)
+	o := setupOptions{instance: "flow14", instanceSet: true, honeypots: "cowrie", honeypotsSet: true,
+		port: freePort(t), portSet: true, noStart: true, timeout: time.Second}
+	if err := runSetup(context.Background(), env, o); err != nil {
+		t.Fatalf("setup --no-start: %v", err)
+	}
+	cfg, err := config.Load("flow14")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, p := range instance.PublishedHostPorts(cfg) {
+		cfg.WebUI.Port = p
+		break
+	}
+	if err := config.Save(cfg); err != nil {
+		t.Fatal(err)
+	}
+	err = runSetup(context.Background(), env, setupOptions{instance: "flow14", instanceSet: true, timeout: time.Second})
+	var e *hostsetup.Error
+	if codeOf(err) != "QP-PORT-005" || !errors.As(err, &e) {
+		t.Fatalf("web UI on a honeypot port: %v", err)
+	}
+	if want := "then run qpot setup -i flow14 again"; !strings.Contains(e.Fix, want) {
+		t.Errorf("fix %q, want %q", e.Fix, want)
 	}
 }
 
