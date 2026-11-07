@@ -140,10 +140,15 @@ func (w *Worker) runOnce(ctx context.Context) int {
 
 // flush runs on every pass, events or not: it persists the TTP sessions that
 // have expired (with no new events they used to stay in memory, unwritten)
-// and tries the writes that failed before again.
+// and the ones still in progress that changed since the last pass (a campaign
+// that never went quiet for the inactivity window was otherwise written only
+// at a clean shutdown), and tries the writes that failed before again.
 func (w *Worker) flush(ctx context.Context) {
 	if w.classifier.ttpBuilder != nil {
 		for _, session := range w.classifier.ttpBuilder.FlushExpired() {
+			w.queueSession(session)
+		}
+		for _, session := range w.classifier.ttpBuilder.TakeChanged() {
 			w.queueSession(session)
 		}
 	}

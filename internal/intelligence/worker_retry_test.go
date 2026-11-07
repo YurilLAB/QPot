@@ -110,7 +110,8 @@ func TestWorkerRetriesFailedSessionWrites(t *testing.T) {
 }
 
 // TestWorkerShutdownWritesSessionsInProgress: a session still active when the
-// worker stops lives only in memory; it is written on the way out.
+// worker stops is written on the way out, in its latest version, whether or
+// not a pass already wrote it.
 func TestWorkerShutdownWritesSessionsInProgress(t *testing.T) {
 	db := &flakyDB{}
 	db.events = []*database.Event{wgetEvent(time.Now().UTC())}
@@ -123,12 +124,10 @@ func TestWorkerShutdownWritesSessionsInProgress(t *testing.T) {
 			t.Fatal("the worker classified nothing")
 		}
 	}
-	if db.sessions.Load() != 0 {
-		t.Fatal("an active session was written before the worker stopped")
-	}
+	before := db.sessions.Load()
 	cancel()
 	<-done
-	if db.sessions.Load() == 0 {
+	if db.sessions.Load() == before {
 		t.Fatal("the session in progress was not written when the worker stopped")
 	}
 }

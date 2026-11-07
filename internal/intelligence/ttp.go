@@ -29,6 +29,9 @@ type sessionState struct {
 	honeypots map[string]bool
 	ips       map[string]bool
 	lastSeen  time.Time
+	// changed is set by an event and cleared when TakeChanged hands the
+	// session out to be written.
+	changed bool
 }
 
 // maxSessionIPs bounds the source addresses one session lists. A campaign many
@@ -89,6 +92,7 @@ func (b *TTPBuilder) Update(event *database.Event) (*database.TTPSession, bool) 
 
 	updateState(state, event)
 	rebuildSession(state)
+	state.changed = true
 
 	return state.session, !exists
 }
@@ -98,21 +102,43 @@ func (b *TTPBuilder) GetActiveSessions() []*database.TTPSession {
 	b.mu.RLock()
 	defer b.mu.RUnlock()
 
-	// Return independent DEEP copies, not the live *TTPSession pointers. The
-	// worker goroutine mutates those objects (and their slices) under the write
-	// lock; handing out the live pointers would let a caller read them after this
-	// RLock is released and race the worker. Copying the slices here (under the
-	// lock) makes each returned session a self-contained snapshot.
 	result := make([]*database.TTPSession, 0, len(b.sessions))
 	for _, s := range b.sessions {
-		cp := *s.session
-		cp.SourceIPs = append([]string(nil), s.session.SourceIPs...)
-		cp.KillChainStages = append([]string(nil), s.session.KillChainStages...)
-		cp.Techniques = append([]string(nil), s.session.Techniques...)
-		cp.IOCIDs = append([]string(nil), s.session.IOCIDs...)
-		result = append(result, &cp)
+		result = append(result, copySession(s.session))
 	}
 	return result
+}
+
+// TakeChanged returns the active sessions that took an event since the last
+// call, and marks them unchanged. The worker writes them on every pass, so a
+// campaign that never goes quiet for the inactivity window is in the database
+// while it lasts, not only once it ends.
+func (b *TTPBuilder) TakeChanged() []*database.TTPSession {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	var result []*database.TTPSession
+	for _, s := range b.sessions {
+		if s.changed {
+			s.changed = false
+			result = append(result, copySession(s.session))
+		}
+	}
+	return result
+}
+
+// copySession returns an independent DEEP copy of a live session, not the
+// *TTPSession itself. The worker goroutine mutates those objects (and their
+// slices) under the write lock; handing out the live pointers would let a
+// caller read them after the lock is released and race the worker. Copying the
+// slices here (under the lock) makes each returned session a self-contained
+// snapshot.
+func copySession(s *database.TTPSession) *database.TTPSession {
+	cp := *s
+	cp.SourceIPs = append([]string(nil), s.SourceIPs...)
+	cp.KillChainStages = append([]string(nil), s.KillChainStages...)
+	cp.Techniques = append([]string(nil), s.Techniques...)
+	cp.IOCIDs = append([]string(nil), s.IOCIDs...)
+	return &cp
 }
 
 // FlushExpired returns sessions that have been inactive longer than
