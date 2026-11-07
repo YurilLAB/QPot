@@ -201,7 +201,14 @@ func (b *Broker) handle(ctx context.Context, client net.Conn) {
 		reject(ReasonPoolExhausted)
 		return
 	}
-	defer b.pool.Release(backend)
+	// Release runs the backend reset, which can take minutes: the attacker's
+	// connection is closed and its limiter slot freed first, or a failed dial
+	// left an accepted, silent connection open for the whole reset.
+	defer func() {
+		_ = client.Close()
+		release()
+		b.pool.Release(backend)
+	}()
 
 	// 3) Dial the backend.
 	dialCtx, cancelDial := context.WithTimeout(ctx, b.cfg.DialTimeout)
