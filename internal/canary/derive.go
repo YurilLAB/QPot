@@ -12,8 +12,8 @@ import (
 	"crypto/ecdh"
 	"crypto/ed25519"
 	"crypto/hmac"
-	"crypto/md5"  //nolint:gosec // OpenSSH's legacy fingerprint format, not a security use
-	"crypto/sha1" //nolint:gosec // HashKnownHosts is HMAC-SHA1 in OpenSSH
+	"crypto/md5"  // #nosec G501 -- OpenSSH's legacy fingerprint format (what Cowrie logs), not a security use
+	"crypto/sha1" // #nosec G505 -- HashKnownHosts is HMAC-SHA1 in OpenSSH; this only writes that format
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/binary"
@@ -262,7 +262,7 @@ func AuthorizedKey(blob []byte, comment string) string {
 // MD5Fingerprint is the colon-separated MD5 fingerprint of a public key blob,
 // the form Cowrie logs for a public key login.
 func MD5Fingerprint(blob []byte) string {
-	sum := md5.Sum(blob) //nolint:gosec // see the import
+	sum := md5.Sum(blob) // #nosec G401 -- Cowrie's fingerprint format; see the import
 	parts := make([]string, len(sum))
 	for i, b := range sum {
 		parts[i] = hex.EncodeToString([]byte{b})
