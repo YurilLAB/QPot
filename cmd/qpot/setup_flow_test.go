@@ -678,3 +678,60 @@ func TestNewSetupEnvNeedsPrivateTempDir(t *testing.T) {
 		}
 	}
 }
+
+// runRealStart runs setup's start step with the background control plane
+// stood in, and returns how often the control plane was started.
+func runRealStart(t *testing.T, name string) int {
+	t.Helper()
+	cfg, err := config.Load(name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	serves := 0
+	orig := backgroundServe
+	backgroundServe = func(*config.Config) (int, string, error) { serves++; return 4242, "", nil }
+	defer func() { backgroundServe = orig }()
+	if unit, err := realStart(context.Background(), cfg, false); err != nil || unit != "" {
+		t.Fatalf("start: unit %q, %v", unit, err)
+	}
+	return serves
+}
+
+// TestSetupStartsStoppedParts: setup's start step asked docker only whether
+// ANY container ran, so after an unclean stop that brought back the
+// collector alone it attached the control plane and never ran compose up:
+// the database, the honeypots and the egress guard stayed down. It now runs
+// compose up -d whenever a service the instance should run is not running.
+func TestSetupStartsStoppedParts(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("the stand-in docker is a shell script")
+	}
+	partialInstance(t, "partial-setup")
+	calls := partialDocker(t, false)
+	serves := runRealStart(t, "partial-setup")
+	data, _ := os.ReadFile(calls)
+	if !strings.Contains(string(data), " up -d\n") {
+		t.Fatalf("compose up -d never ran with only the collector running; docker calls:\n%s", data)
+	}
+	if serves != 1 {
+		t.Errorf("control plane started %d times, want 1", serves)
+	}
+}
+
+// TestSetupAttachesToARunningStack: with every service running, setup's
+// start step starts no container and only attaches the control plane.
+func TestSetupAttachesToARunningStack(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("the stand-in docker is a shell script")
+	}
+	partialInstance(t, "full-setup")
+	calls := partialDocker(t, true)
+	serves := runRealStart(t, "full-setup")
+	data, _ := os.ReadFile(calls)
+	if strings.Contains(string(data), " up -d\n") || strings.Contains(string(data), " pull\n") {
+		t.Errorf("containers started on a running stack; docker calls:\n%s", data)
+	}
+	if serves != 1 {
+		t.Errorf("control plane started %d times, want 1", serves)
+	}
+}

@@ -992,12 +992,16 @@ func realStart(ctx context.Context, cfg *config.Config, service bool) (string, e
 		}
 		return unit, nil
 	}
-	if !mgr.IsRunning(ctx) {
+	// AllRunning, not IsRunning: after an unclean stop docker brings back
+	// only some containers (the collector), and attaching to those left the
+	// database and the honeypots down. compose up -d starts what is missing
+	// and leaves the running ones alone.
+	if !mgr.AllRunning(ctx) {
 		if err := mgr.Start(ctx, true); err != nil {
 			return "", hostsetup.E("QP-INST-003").Wrap(err)
 		}
 	}
-	if _, logPath, err := startBackgroundServe(cfg); err != nil {
+	if _, logPath, err := backgroundServe(cfg); err != nil {
 		return "", hostsetup.E("QP-WEB-001").WithDetails("%v\nlog: %s", err, logPath)
 	}
 	return "", nil
