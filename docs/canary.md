@@ -154,7 +154,9 @@ actionable ("the key from the Jenkins runner was just used from 203.0.113.50").
 
 ## HTTP API
 
-All management routes require the QPot-ID (`X-QPot-ID` header or `?qpot_id=`).
+All management routes require the QPot-ID in the `X-QPot-ID` header
+(`curl -H "X-QPot-ID: $QPOT_ID" http://127.0.0.1:8080/api/canaries`). It is not
+accepted in the query string, where it would end up in logs and history.
 
 | Endpoint | Method | Description |
 |----------|--------|-------------|

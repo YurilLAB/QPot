@@ -172,7 +172,10 @@ func TestWithQPotAuth(t *testing.T) {
 		{"bad format", "not-a-qpot-id", "", http.StatusUnauthorized},
 		{"wrong id same format", "qp_zzzzzzzzzzzzzzzzzzzzzzzz", "", http.StatusForbidden},
 		{"correct id header", validTestID, "", http.StatusOK},
-		{"correct id query", "", validTestID, http.StatusOK},
+		// The credential is never taken from the URL: a query string ends up
+		// in proxy and access logs, shell history and browser history.
+		{"correct id query", "", validTestID, http.StatusUnauthorized},
+		{"correct id header with wrong query", validTestID, "qp_zzzzzzzzzzzzzzzzzzzzzzzz", http.StatusOK},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

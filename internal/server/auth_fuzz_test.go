@@ -9,8 +9,10 @@ import (
 
 // FuzzWithQPotAuth is a security-invariant fuzz: regardless of what arbitrary
 // attacker-supplied value is presented as the X-QPot-ID header or qpot_id query
-// param, the auth gate must (a) never panic and (b) grant access ONLY when the
-// value exactly equals the configured QPot ID. Anything else must be rejected.
+// param, the auth gate must (a) never panic, (b) grant access through the
+// header ONLY when the value exactly equals the configured QPot ID, and (c)
+// never grant it through the query string, where a credential leaks into logs
+// and history.
 func FuzzWithQPotAuth(f *testing.F) {
 	seeds := []string{
 		"", "qp_", validTestID, validTestID + "x", validTestID[:26],
@@ -37,20 +39,23 @@ func FuzzWithQPotAuth(f *testing.F) {
 		recH := httptest.NewRecorder()
 		h(recH, reqH) // must not panic
 
-		// And via query parameter.
+		// The security invariant: access is granted iff candidate == the real ID.
+		shouldGrant := candidate == validTestID
+		if granted != shouldGrant {
+			t.Errorf("auth granted=%v for header candidate %q, want %v", granted, candidate, shouldGrant)
+		}
+		// Defense in depth: a non-matching candidate must never yield 200.
+		if !shouldGrant && recH.Code == http.StatusOK {
+			t.Errorf("non-matching candidate %q produced a 200", candidate)
+		}
+
+		// Via the query parameter: never, not even the real ID.
 		granted = false
 		reqQ := httptest.NewRequest(http.MethodGet, "/api/status?qpot_id="+url.QueryEscape(candidate), nil)
 		recQ := httptest.NewRecorder()
 		h(recQ, reqQ)
-
-		// The security invariant: access is granted iff candidate == the real ID.
-		shouldGrant := candidate == validTestID
-		if granted != shouldGrant {
-			t.Errorf("auth granted=%v for candidate %q, want %v", granted, candidate, shouldGrant)
-		}
-		// Defense in depth: a non-matching candidate must never yield 200.
-		if !shouldGrant && (recH.Code == http.StatusOK || recQ.Code == http.StatusOK) {
-			t.Errorf("non-matching candidate %q produced a 200", candidate)
+		if granted || recQ.Code == http.StatusOK {
+			t.Errorf("candidate %q in the query string was accepted (%d)", candidate, recQ.Code)
 		}
 	})
 }

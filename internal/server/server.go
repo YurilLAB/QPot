@@ -237,13 +237,10 @@ func (s *Server) withQPotAuth(next http.HandlerFunc) http.HandlerFunc {
 			return
 		}
 
-		// Check QPot ID from header
+		// The QPot ID is read from the X-QPot-ID header only, never from the
+		// URL: a query string ends up in proxy and access logs, shell and
+		// browser history, and Referer headers.
 		qpotID := r.Header.Get("X-QPot-ID")
-		if qpotID == "" {
-			// Also check query parameter for easier testing
-			qpotID = r.URL.Query().Get("qpot_id")
-		}
-
 		if qpotID == "" {
 			s.sendError(w, http.StatusUnauthorized, "QPot ID required")
 			return
