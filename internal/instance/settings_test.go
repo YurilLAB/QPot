@@ -13,10 +13,11 @@ import (
 
 // fakeRunner records what a settings change asks of the containers.
 type fakeRunner struct {
-	running  bool
-	startErr error
-	started  []string
-	stopped  []string
+	running   bool
+	startErr  error
+	started   []string
+	stopped   []string
+	restarted []string
 }
 
 func (f *fakeRunner) IsRunning(context.Context) bool { return f.running }
@@ -27,6 +28,10 @@ func (f *fakeRunner) StartHoneypot(_ context.Context, name string) error {
 func (f *fakeRunner) StopHoneypot(_ context.Context, name string) error {
 	f.stopped = append(f.stopped, name)
 	return nil
+}
+func (f *fakeRunner) RestartHoneypot(_ context.Context, name string) error {
+	f.restarted = append(f.restarted, name)
+	return f.startErr
 }
 
 func settingsTestConfig(t *testing.T, name string) *config.Config {

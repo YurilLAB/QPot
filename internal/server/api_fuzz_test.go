@@ -77,3 +77,33 @@ func FuzzHoneypotSettingsPut(f *testing.F) {
 		}
 	})
 }
+
+// FuzzHoneypotRestart sends arbitrary bodies to POST /api/honeypots/restart:
+// no server error, and only an enabled, configured honeypot is restarted.
+func FuzzHoneypotRestart(f *testing.F) {
+	for _, s := range []string{`{"name":"cowrie"}`, `{"name":"conpot"}`, `{"name":"-f"}`, `{"name":"cowrie"} x`,
+		`{"name":"cowrie","name":"ssh-proxy"}`, `{"name":null}`, `[]`, ``} {
+		f.Add(s)
+	}
+	a := newAPITestServer(f, "api-fuzz-restart", func(c *config.Config) { c.EnableHoneypot("cowrie") })
+	a.runner.running = true
+	f.Fuzz(func(t *testing.T, body string) {
+		a.runner.mu.Lock()
+		a.runner.restarted = nil
+		a.runner.mu.Unlock()
+		rec := a.do(http.MethodPost, "/api/honeypots/restart", body)
+		if rec.Code >= 500 {
+			t.Fatalf("POST %q: %d %s", body, rec.Code, rec.Body.String())
+		}
+		a.runner.mu.Lock()
+		defer a.runner.mu.Unlock()
+		if (rec.Code == http.StatusOK) != (len(a.runner.restarted) == 1) {
+			t.Fatalf("POST %q: %d, restarted %v", body, rec.Code, a.runner.restarted)
+		}
+		for _, n := range a.runner.restarted {
+			if n != "cowrie" {
+				t.Fatalf("POST %q restarted %q", body, n)
+			}
+		}
+	})
+}

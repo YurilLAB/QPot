@@ -5,4 +5,5 @@ package server
 // the server's middleware also requires a JSON body type on writes.
 func (s *Server) setupAPIRoutes() {
 	s.mux.HandleFunc("/api/honeypots/settings", s.withQPotAuth(s.handleHoneypotSettings))
+	s.mux.HandleFunc("/api/honeypots/restart", s.withQPotAuth(s.handleHoneypotRestart))
 }

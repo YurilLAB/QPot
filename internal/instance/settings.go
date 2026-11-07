@@ -69,12 +69,13 @@ func ParseSettingArgs(args []string) []SettingChange {
 	return out
 }
 
-// HoneypotRunner is what a settings change or an enable/disable needs from
-// the instance's containers (*Manager has it).
+// HoneypotRunner is what a settings change, an enable/disable or a restart
+// needs from the instance's containers (*Manager has it).
 type HoneypotRunner interface {
 	IsRunning(ctx context.Context) bool
 	StartHoneypot(ctx context.Context, name string) error
 	StopHoneypot(ctx context.Context, name string) error
+	RestartHoneypot(ctx context.Context, name string) error
 }
 
 // SettingsResult is what ApplySettings did.

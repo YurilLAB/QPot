@@ -20,11 +20,12 @@ import (
 
 // fakeHPRunner stands in for the instance's containers in API tests.
 type fakeHPRunner struct {
-	mu       sync.Mutex
-	running  bool
-	startErr error
-	started  []string
-	stopped  []string
+	mu        sync.Mutex
+	running   bool
+	startErr  error
+	started   []string
+	stopped   []string
+	restarted []string
 	// cfgs are the configs the server asked for a runner for.
 	cfgs []*config.Config
 }
@@ -45,6 +46,12 @@ func (f *fakeHPRunner) StopHoneypot(_ context.Context, name string) error {
 	defer f.mu.Unlock()
 	f.stopped = append(f.stopped, name)
 	return nil
+}
+func (f *fakeHPRunner) RestartHoneypot(_ context.Context, name string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.restarted = append(f.restarted, name)
+	return f.startErr
 }
 
 // apiTestServer is a server for one instance whose config file is on disk,
