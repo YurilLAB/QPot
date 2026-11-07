@@ -54,16 +54,7 @@ func Apply(s Spec) error {
 
 	dns4 := &nftables.Set{Table: t, Name: "dns4", KeyType: nftables.TypeIPAddr}
 	dns6 := &nftables.Set{Table: t, Name: "dns6", KeyType: nftables.TypeIP6Addr}
-	var d4, d6 []nftables.SetElement
-	for _, a := range s.DNS {
-		if a.Is4() {
-			b := a.As4()
-			d4 = append(d4, nftables.SetElement{Key: b[:]})
-		} else {
-			b := a.As16()
-			d6 = append(d6, nftables.SetElement{Key: b[:]})
-		}
-	}
+	d4, d6 := resolverElements(s)
 	if err := c.AddSet(dns4, d4); err != nil {
 		return fmt.Errorf("netguard: set dns4: %w", err)
 	}
@@ -178,6 +169,21 @@ func Remove(table string) error {
 	}
 	c.DelTable(t)
 	return c.Flush()
+}
+
+// resolverElements returns the elements of the dns4 and dns6 sets: every
+// address of s.Resolvers(), so the Azure WireServer is always among them.
+func resolverElements(s Spec) (d4, d6 []nftables.SetElement) {
+	for _, a := range s.Resolvers() {
+		if a.Is4() {
+			b := a.As4()
+			d4 = append(d4, nftables.SetElement{Key: b[:]})
+		} else {
+			b := a.As16()
+			d6 = append(d6, nftables.SetElement{Key: b[:]})
+		}
+	}
+	return d4, d6
 }
 
 // guardRules returns the rules of guard_forward (forward=true) or guard_input.

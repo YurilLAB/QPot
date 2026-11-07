@@ -124,28 +124,52 @@ func ParseResolvConf(r io.Reader) ([]netip.Addr, error) {
 	return out, sc.Err()
 }
 
+// AzureWireServer is the address Azure VMs reach their platform through: the
+// VM's DNS resolver and the guest agent's endpoints (HTTP on ports 80 and
+// 32526, which hand out extension settings and certificates). It lies in
+// public address space, so it is listed in blocked4 on its own, and DNS to it
+// is always accepted (see Resolvers). Outside Azure nothing answers on it.
+var AzureWireServer = netip.MustParseAddr("168.63.129.16")
+
+// Resolvers returns the addresses the guard accepts DNS (port 53) to, before
+// any drop: the host's resolvers and the Azure WireServer, which is Azure's
+// resolver even when the host's resolv.conf names another (a custom docker
+// "dns" setting, a resolver of the operator's own that forwards to it).
+func (s Spec) Resolvers() []netip.Addr {
+	out := slices.Clone(s.DNS)
+	if !slices.Contains(out, AzureWireServer) {
+		out = append(out, AzureWireServer)
+	}
+	return out
+}
+
 // blocked4 and blocked6 are the destinations a honeypot must not open new
 // connections to in ModePrivate: everything that is not ordinary public
-// address space (RFC 6890 special-purpose blocks).
+// address space (RFC 6890 special-purpose blocks), and cloud platform
+// endpoints that sit in public space. The metadata services of AWS, GCP,
+// Azure, Oracle, DigitalOcean, Hetzner and OpenStack (169.254.169.254 and,
+// on AWS, fd00:ec2::254), Tencent's (169.254.0.23) and Alibaba's
+// (100.100.100.200) fall in the special-purpose blocks.
 var (
 	blocked4 = mustPrefixes(
-		"0.0.0.0/8",      // "this network"
-		"10.0.0.0/8",     // private
-		"100.64.0.0/10",  // carrier-grade NAT
-		"127.0.0.0/8",    // loopback
-		"169.254.0.0/16", // link-local, cloud metadata (169.254.169.254)
-		"172.16.0.0/12",  // private, docker's default pools
-		"192.0.0.0/24",   // IETF protocol assignments
-		"192.168.0.0/16", // private
-		"198.18.0.0/15",  // benchmarking
-		"224.0.0.0/4",    // multicast
-		"240.0.0.0/4",    // reserved, broadcast
+		"0.0.0.0/8",        // "this network"
+		"10.0.0.0/8",       // private
+		"100.64.0.0/10",    // carrier-grade NAT, Alibaba metadata (100.100.100.200)
+		"127.0.0.0/8",      // loopback
+		"168.63.129.16/32", // Azure WireServer (DNS still passes, see Resolvers)
+		"169.254.0.0/16",   // link-local, cloud metadata (169.254.169.254, 169.254.0.23)
+		"172.16.0.0/12",    // private, docker's default pools
+		"192.0.0.0/24",     // IETF protocol assignments
+		"192.168.0.0/16",   // private
+		"198.18.0.0/15",    // benchmarking
+		"224.0.0.0/4",      // multicast
+		"240.0.0.0/4",      // reserved, broadcast
 	)
 	blocked6 = mustPrefixes(
 		"::/127",         // unspecified, loopback
 		"::ffff:0:0/96",  // IPv4-mapped
 		"64:ff9b:1::/48", // local-use NAT64
-		"fc00::/7",       // unique local
+		"fc00::/7",       // unique local, AWS metadata (fd00:ec2::254)
 		"fe80::/10",      // link-local
 		"ff00::/8",       // multicast
 	)

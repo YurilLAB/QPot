@@ -2,6 +2,7 @@ package netguard
 
 import (
 	"net/netip"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -120,12 +121,63 @@ func TestBlocked(t *testing.T) {
 		"::ffff:10.0.0.1":      true,
 		"::ffff:8.8.8.8":       false,
 		"2001:4860:4860::8888": false,
+
+		// Cloud platform endpoints.
+		"168.63.129.16":   true, // Azure WireServer
+		"168.63.129.15":   false,
+		"168.63.129.17":   false,
+		"169.254.0.23":    true, // Tencent metadata
+		"100.100.100.200": true, // Alibaba metadata
+		"169.254.169.123": true, // AWS time sync
+		"fd00:ec2::254":   true, // AWS metadata over IPv6
+		"fd00:ec2::253":   true, // AWS resolver over IPv6
 	}
 	for a, want := range cases {
 		if got := Blocked(netip.MustParseAddr(a)); got != want {
 			t.Errorf("Blocked(%s) = %v, want %v", a, got, want)
 		}
 	}
+}
+
+// TestResolversKeepAzureDNS: the WireServer is blocked, so DNS to it must be
+// accepted whatever the host's resolv.conf says, or honeypots on Azure lose
+// DNS; and listing it among the resolvers changes nothing.
+func TestResolversKeepAzureDNS(t *testing.T) {
+	if !Blocked(AzureWireServer) {
+		t.Fatal("the Azure WireServer is not blocked")
+	}
+	home := []netip.Addr{netip.MustParseAddr("192.168.1.1"), netip.MustParseAddr("fd00::53")}
+	for name, dns := range map[string][]netip.Addr{
+		"no resolvers":       nil,
+		"home router":        home,
+		"azure resolv.conf":  {AzureWireServer},
+		"wireserver and lan": {netip.MustParseAddr("10.0.0.2"), AzureWireServer},
+	} {
+		s := Spec{Table: "t", Ifaces: []string{"br-a"}, Mode: ModePrivate, DNS: slices.Clone(dns)}
+		got := s.Resolvers()
+		if n := countAddr(got, AzureWireServer); n != 1 {
+			t.Errorf("%s: the WireServer is listed %d times in %v", name, n, got)
+		}
+		if !slices.Equal(got[:len(dns)], dns) {
+			t.Errorf("%s: resolvers %v do not start with the host's %v", name, got, dns)
+		}
+		if !slices.Equal(s.DNS, dns) {
+			t.Errorf("%s: Resolvers changed s.DNS to %v", name, s.DNS)
+		}
+		if err := (Spec{Table: "t", Ifaces: []string{"br-a"}, Mode: ModeAll, DNS: got}).Validate(); err != nil {
+			t.Errorf("%s: resolvers fail Validate: %v", name, err)
+		}
+	}
+}
+
+func countAddr(list []netip.Addr, a netip.Addr) int {
+	n := 0
+	for _, x := range list {
+		if x == a {
+			n++
+		}
+	}
+	return n
 }
 
 // TestBlockedPrefixesAreCanonical: the nftables rules match "daddr & mask ==
