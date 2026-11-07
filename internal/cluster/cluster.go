@@ -1092,6 +1092,11 @@ func (m *Manager) HandleJoinRequest(req *JoinRequest, sourceIP string) *JoinResp
 // admitNodeLocked creates a node from a join request, adds it to the cluster,
 // and returns a success response with the full node list. Caller must hold m.mu.
 func (m *Manager) admitNodeLocked(req *JoinRequest) (*JoinResponse, error) {
+	// The same bound gossip keeps: a full cluster admits no one, open or
+	// host-approved, so a password holder cannot grow it without limit.
+	if len(m.cluster.Nodes) >= maxClusterNodes {
+		return nil, fmt.Errorf("cluster is full (%d members)", maxClusterNodes)
+	}
 	nodeID, err := generateNodeID()
 	if err != nil {
 		return nil, fmt.Errorf("failed to generate node ID")
