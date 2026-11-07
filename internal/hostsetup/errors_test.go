@@ -109,7 +109,7 @@ func TestExitStatusFollowsCategory(t *testing.T) {
 	// The exit statuses are published (README, cli-reference, scripts check
 	// them): they never change once released.
 	published := map[string]int{"INPUT": 10, "HOST": 11, "PERM": 12, "NET": 13, "PKG": 14, "DOCKER": 15,
-		"COMPOSE": 16, "PORT": 17, "RES": 18, "SVC": 19, "WEB": 20, "INST": 21, "INT": 130, "BUG": 70}
+		"COMPOSE": 16, "PORT": 17, "RES": 18, "SVC": 19, "WEB": 20, "INST": 21, "INTEL": 22, "CLUSTER": 23, "INT": 130, "BUG": 70}
 	cats := Categories()
 	if len(cats) != len(published) {
 		t.Errorf("%d categories, %d published", len(cats), len(published))

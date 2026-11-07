@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -153,30 +154,43 @@ func (es *Elasticsearch) InitializeSchema(ctx context.Context) error {
 							"keyword": map[string]interface{}{"type": "keyword", "ignore_above": 1024},
 						},
 					},
-					"payload":          map[string]string{"type": "binary"},
-					"metadata":         map[string]string{"type": "object"},
-					"country":          map[string]string{"type": "keyword"},
-					"city":             map[string]string{"type": "keyword"},
-					"asn":              map[string]string{"type": "keyword"},
-					"technique_id":     map[string]string{"type": "keyword"},
-					"technique_name":   map[string]string{"type": "keyword"},
-					"tactic_id":        map[string]string{"type": "keyword"},
-					"tactic_name":      map[string]string{"type": "keyword"},
-					"kill_chain_stage": map[string]string{"type": "keyword"},
-					"confidence":       map[string]string{"type": "float"},
-					"classified":       map[string]string{"type": "boolean"},
+					"payload":               map[string]string{"type": "binary"},
+					"qpot_payload_encoding": map[string]string{"type": "keyword"},
+					"metadata":              map[string]string{"type": "object"},
+					"country":               map[string]string{"type": "keyword"},
+					"city":                  map[string]string{"type": "keyword"},
+					"asn":                   map[string]string{"type": "keyword"},
+					"technique_id":          map[string]string{"type": "keyword"},
+					"technique_name":        map[string]string{"type": "keyword"},
+					"tactic_id":             map[string]string{"type": "keyword"},
+					"tactic_name":           map[string]string{"type": "keyword"},
+					"kill_chain_stage":      map[string]string{"type": "keyword"},
+					"confidence":            map[string]string{"type": "float"},
+					"classified":            map[string]string{"type": "boolean"},
 				},
 			},
 		},
 	}
 
 	body, _ := json.Marshal(eventsTemplate)
-	_, status, err := es.esRequest(ctx, http.MethodPut, "/_index_template/qpot-events", body)
+	data, status, err := es.esRequest(ctx, http.MethodPut, "/_index_template/qpot-events", body)
 	if err != nil {
 		return fmt.Errorf("failed to create events index template: %w", err)
 	}
-	if status >= 300 {
-		return fmt.Errorf("failed to create events index template: status %d", status)
+	if status < 200 || status >= 300 || !successfulSchemaAcknowledgment(data) {
+		return fmt.Errorf("events index template was not acknowledged: status %d", status)
+	}
+
+	// Existing daily indices do not inherit later template changes. Add the
+	// version marker explicitly, including for strict mappings; old event
+	// documents remain untouched and are decoded with their original format.
+	markerMapping := []byte(`{"properties":{"qpot_payload_encoding":{"type":"keyword"}}}`)
+	data, status, err = es.esRequest(ctx, http.MethodPut, "/qpot-events-*/_mapping?allow_no_indices=true&ignore_unavailable=true", markerMapping)
+	if err != nil {
+		return fmt.Errorf("update event payload encoding mapping: %w", err)
+	}
+	if status < 200 || status >= 300 || !successfulSchemaAcknowledgment(data) {
+		return fmt.Errorf("event payload encoding mapping was not acknowledged: status %d", status)
 	}
 
 	// Create qpot-iocs index
@@ -204,12 +218,13 @@ func (es *Elasticsearch) InitializeSchema(ctx context.Context) error {
 	}
 
 	body, _ = json.Marshal(iocsMapping)
-	_, status, err = es.esRequest(ctx, http.MethodPut, "/qpot-iocs", body)
+	data, status, err = es.esRequest(ctx, http.MethodPut, "/qpot-iocs", body)
 	if err != nil {
 		return fmt.Errorf("failed to create iocs index: %w", err)
 	}
-	// 400 is OK if it already exists (resource_already_exists_exception)
-	if status >= 300 && status != 400 {
+	// A mapping/settings error is also HTTP 400; only the exact existing-index
+	// response makes repeated initialization safe to continue.
+	if !successfulIndexCreation(status, data) {
 		return fmt.Errorf("failed to create iocs index: status %d", status)
 	}
 
@@ -237,11 +252,11 @@ func (es *Elasticsearch) InitializeSchema(ctx context.Context) error {
 	}
 
 	body, _ = json.Marshal(ttpMapping)
-	_, status, err = es.esRequest(ctx, http.MethodPut, "/qpot-ttp-sessions", body)
+	data, status, err = es.esRequest(ctx, http.MethodPut, "/qpot-ttp-sessions", body)
 	if err != nil {
 		return fmt.Errorf("failed to create ttp-sessions index: %w", err)
 	}
-	if status >= 300 && status != 400 {
+	if !successfulIndexCreation(status, data) {
 		return fmt.Errorf("failed to create ttp-sessions index: status %d", status)
 	}
 
@@ -259,15 +274,40 @@ func (es *Elasticsearch) InitializeSchema(ctx context.Context) error {
 	}
 
 	body, _ = json.Marshal(metaMapping)
-	_, status, err = es.esRequest(ctx, http.MethodPut, "/qpot-meta", body)
+	data, status, err = es.esRequest(ctx, http.MethodPut, "/qpot-meta", body)
 	if err != nil {
 		return fmt.Errorf("failed to create meta index: %w", err)
 	}
-	if status >= 300 && status != 400 {
+	if !successfulIndexCreation(status, data) {
 		return fmt.Errorf("failed to create meta index: status %d", status)
 	}
 
-	return nil
+	return es.initializeIntelligenceSchema(ctx)
+}
+
+func successfulSchemaAcknowledgment(data []byte) bool {
+	var ack struct {
+		Acknowledged *bool `json:"acknowledged"`
+	}
+	return json.Unmarshal(data, &ack) == nil && ack.Acknowledged != nil && *ack.Acknowledged
+}
+
+// successfulIndexCreation distinguishes an existing index from other failures
+// sharing status 400. Do not proceed with auto-created/default mappings after
+// an explicit schema creation error.
+func successfulIndexCreation(status int, data []byte) bool {
+	if status >= 200 && status < 300 {
+		return successfulSchemaAcknowledgment(data)
+	}
+	if status != http.StatusBadRequest {
+		return false
+	}
+	var response struct {
+		Error struct {
+			Type string `json:"type"`
+		} `json:"error"`
+	}
+	return json.Unmarshal(data, &response) == nil && response.Error.Type == "resource_already_exists_exception"
 }
 
 // GetSchemaVersion returns the current schema version from the qpot-meta index.
@@ -309,28 +349,29 @@ func (es *Elasticsearch) SetSchemaVersion(ctx context.Context, version int) erro
 
 // esEvent is the JSON representation of an Event for Elasticsearch.
 type esEvent struct {
-	Timestamp      string            `json:"timestamp"`
-	Honeypot       string            `json:"honeypot"`
-	SourceIP       string            `json:"source_ip,omitempty"`
-	SourcePort     int               `json:"source_port"`
-	DestPort       int               `json:"dest_port"`
-	Protocol       string            `json:"protocol"`
-	EventType      string            `json:"event_type"`
-	Username       string            `json:"username,omitempty"`
-	Password       string            `json:"password,omitempty"`
-	Command        string            `json:"command,omitempty"`
-	Payload        string            `json:"payload,omitempty"`
-	Metadata       map[string]string `json:"metadata,omitempty"`
-	Country        string            `json:"country,omitempty"`
-	City           string            `json:"city,omitempty"`
-	ASN            string            `json:"asn,omitempty"`
-	TechniqueID    string            `json:"technique_id,omitempty"`
-	TechniqueName  string            `json:"technique_name,omitempty"`
-	TacticID       string            `json:"tactic_id,omitempty"`
-	TacticName     string            `json:"tactic_name,omitempty"`
-	KillChainStage string            `json:"kill_chain_stage,omitempty"`
-	Confidence     float64           `json:"confidence,omitempty"`
-	Classified     bool              `json:"classified"`
+	Timestamp       string            `json:"timestamp"`
+	Honeypot        string            `json:"honeypot"`
+	SourceIP        string            `json:"source_ip,omitempty"`
+	SourcePort      int               `json:"source_port"`
+	DestPort        int               `json:"dest_port"`
+	Protocol        string            `json:"protocol"`
+	EventType       string            `json:"event_type"`
+	Username        string            `json:"username,omitempty"`
+	Password        string            `json:"password,omitempty"`
+	Command         string            `json:"command,omitempty"`
+	Payload         string            `json:"payload,omitempty"`
+	PayloadEncoding string            `json:"qpot_payload_encoding,omitempty"`
+	Metadata        map[string]string `json:"metadata,omitempty"`
+	Country         string            `json:"country,omitempty"`
+	City            string            `json:"city,omitempty"`
+	ASN             string            `json:"asn,omitempty"`
+	TechniqueID     string            `json:"technique_id,omitempty"`
+	TechniqueName   string            `json:"technique_name,omitempty"`
+	TacticID        string            `json:"tactic_id,omitempty"`
+	TacticName      string            `json:"tactic_name,omitempty"`
+	KillChainStage  string            `json:"kill_chain_stage,omitempty"`
+	Confidence      float64           `json:"confidence,omitempty"`
+	Classified      bool              `json:"classified"`
 }
 
 func eventToES(event *Event) esEvent {
@@ -340,36 +381,75 @@ func eventToES(event *Event) esEvent {
 	if net.ParseIP(sourceIP) == nil {
 		sourceIP = ""
 	}
+	payloadEncoding := ""
+	if event.Payload != nil {
+		payloadEncoding = "base64-v1"
+	}
 	return esEvent{
-		Timestamp:      event.Timestamp.UTC().Format(time.RFC3339Nano),
-		Honeypot:       event.Honeypot,
-		SourceIP:       sourceIP,
-		SourcePort:     event.SourcePort,
-		DestPort:       event.DestPort,
-		Protocol:       event.Protocol,
-		EventType:      event.EventType,
-		Username:       event.Username,
-		Password:       event.Password,
-		Command:        event.Command,
-		Payload:        string(event.Payload),
-		Metadata:       event.Metadata,
-		Country:        event.Country,
-		City:           event.City,
-		ASN:            event.ASN,
-		TechniqueID:    event.TechniqueID,
-		TechniqueName:  event.TechniqueName,
-		TacticID:       event.TacticID,
-		TacticName:     event.TacticName,
-		KillChainStage: event.KillChainStage,
-		Confidence:     event.Confidence,
-		Classified:     event.Classified,
+		Timestamp:       event.Timestamp.UTC().Format(time.RFC3339Nano),
+		Honeypot:        event.Honeypot,
+		SourceIP:        sourceIP,
+		SourcePort:      event.SourcePort,
+		DestPort:        event.DestPort,
+		Protocol:        event.Protocol,
+		EventType:       event.EventType,
+		Username:        event.Username,
+		Password:        event.Password,
+		Command:         event.Command,
+		Payload:         base64.StdEncoding.EncodeToString(event.Payload),
+		PayloadEncoding: payloadEncoding,
+		Metadata:        event.Metadata,
+		Country:         event.Country,
+		City:            event.City,
+		ASN:             event.ASN,
+		TechniqueID:     event.TechniqueID,
+		TechniqueName:   event.TechniqueName,
+		TacticID:        event.TacticID,
+		TacticName:      event.TacticName,
+		KillChainStage:  event.KillChainStage,
+		Confidence:      event.Confidence,
+		Classified:      event.Classified,
 	}
 }
 
 func esDocToEvent(source json.RawMessage) (*Event, error) {
-	var doc esEvent
-	if err := json.Unmarshal(source, &doc); err != nil {
+	var decoded struct {
+		esEvent
+		Encoding   json.RawMessage `json:"qpot_payload_encoding"`
+		RawPayload json.RawMessage `json:"payload"`
+	}
+	if err := json.Unmarshal(source, &decoded); err != nil {
 		return nil, err
+	}
+	doc := decoded.esEvent
+	// Only an absent marker is legacy. An explicit null, empty value or
+	// non-string marker is malformed, not permission to reinterpret evidence.
+	if len(decoded.Encoding) > 0 {
+		if err := json.Unmarshal(decoded.Encoding, &doc.PayloadEncoding); err != nil || doc.PayloadEncoding == "" {
+			return nil, fmt.Errorf("decode event payload: invalid encoding marker")
+		}
+	}
+	if len(decoded.RawPayload) > 0 {
+		if len(decoded.Encoding) > 0 && bytes.Equal(bytes.TrimSpace(decoded.RawPayload), []byte("null")) {
+			return nil, fmt.Errorf("decode event payload: tagged payload must be a string")
+		}
+		if err := json.Unmarshal(decoded.RawPayload, &doc.Payload); err != nil {
+			return nil, fmt.Errorf("decode event payload: payload must be a string")
+		}
+	}
+	// Untagged documents keep their legacy raw-text interpretation. Never
+	// guess from base64-looking text: that would change existing evidence.
+	payload := []byte(doc.Payload)
+	switch doc.PayloadEncoding {
+	case "":
+	case "base64-v1":
+		var err error
+		payload, err = base64.StdEncoding.Strict().DecodeString(doc.Payload)
+		if err != nil || base64.StdEncoding.EncodeToString(payload) != doc.Payload {
+			return nil, fmt.Errorf("decode event payload: invalid base64-v1 data")
+		}
+	default:
+		return nil, fmt.Errorf("decode event payload: unsupported encoding")
 	}
 	ts, err := time.Parse(time.RFC3339Nano, doc.Timestamp)
 	if err != nil {
@@ -390,7 +470,7 @@ func esDocToEvent(source json.RawMessage) (*Event, error) {
 		Username:       doc.Username,
 		Password:       doc.Password,
 		Command:        doc.Command,
-		Payload:        []byte(doc.Payload),
+		Payload:        payload,
 		Metadata:       doc.Metadata,
 		Country:        doc.Country,
 		City:           doc.City,
@@ -407,6 +487,9 @@ func esDocToEvent(source json.RawMessage) (*Event, error) {
 
 // InsertEvent inserts a single event
 func (es *Elasticsearch) InsertEvent(ctx context.Context, event *Event) error {
+	if err := validateElasticsearchEventText(event); err != nil {
+		return err
+	}
 	idx := eventIndex(event.Timestamp)
 	doc := eventToES(event)
 	body, err := json.Marshal(doc)
@@ -426,13 +509,20 @@ func (es *Elasticsearch) InsertEvent(ctx context.Context, event *Event) error {
 
 // InsertEvents inserts multiple events using the Bulk API.
 func (es *Elasticsearch) InsertEvents(ctx context.Context, events []*Event) error {
+	for _, event := range events {
+		if err := validateElasticsearchEventText(event); err != nil {
+			return err
+		}
+	}
 	if len(events) == 0 {
 		return nil
 	}
 
 	var buf bytes.Buffer
+	expected := make([]esBulkExpectation, 0, len(events))
 	for _, event := range events {
 		idx := eventIndex(event.Timestamp)
+		expected = append(expected, esBulkExpectation{Operation: "index", Index: idx})
 		action := map[string]interface{}{
 			"index": map[string]string{"_index": idx},
 		}
@@ -453,46 +543,92 @@ func (es *Elasticsearch) InsertEvents(ctx context.Context, events []*Event) erro
 	if status >= 300 {
 		return fmt.Errorf("bulk insert returned status %d", status)
 	}
-	return checkBulkErrors(data, len(events))
+	return checkBulkErrors(data, expected)
 }
 
-// checkBulkErrors inspects an Elasticsearch _bulk response. The Bulk API returns
-// HTTP 200 even when individual items fail (e.g. mapping conflicts), signalling
-// per-item failures only via the top-level "errors" flag and per-item "error"
-// objects. Checking the status code alone reported partial data loss as success,
-// so parse the body and surface a representative failure.
-func checkBulkErrors(data []byte, total int) error {
-	var resp struct {
-		Errors bool `json:"errors"`
-		Items  []map[string]struct {
-			Status int `json:"status"`
-			Error  *struct {
-				Type   string `json:"type"`
-				Reason string `json:"reason"`
-			} `json:"error"`
-		} `json:"items"`
+// checkBulkErrors validates every ingest acknowledgment. HTTP 200 and the
+// aggregate errors flag alone cannot establish that every row was persisted.
+type esBulkExpectation struct {
+	Operation string
+	Index     string
+	// An empty ID is allowed only for event inserts whose IDs Elasticsearch
+	// generates. Known IOC/document IDs must match the request exactly.
+	ID string
+}
+
+func checkBulkErrors(data []byte, expected []esBulkExpectation) error {
+	total := len(expected)
+	var response struct {
+		Errors *bool                        `json:"errors"`
+		Items  []map[string]json.RawMessage `json:"items"`
 	}
-	if err := json.Unmarshal(data, &resp); err != nil {
-		return nil // unparseable body; the 2xx status already passed
+	if err := json.Unmarshal(data, &response); err != nil {
+		return fmt.Errorf("parse bulk acknowledgment: %w", err)
 	}
-	if !resp.Errors {
-		return nil
+	if response.Errors == nil || len(response.Items) != total {
+		return fmt.Errorf("incomplete bulk acknowledgment: %d of %d items", len(response.Items), total)
 	}
 	failed, firstReason := 0, ""
-	for _, item := range resp.Items {
-		for _, res := range item {
-			if res.Error != nil {
+	for n, item := range response.Items {
+		if len(item) != 1 {
+			return fmt.Errorf("invalid bulk acknowledgment operation")
+		}
+		for operation, raw := range item {
+			want := expected[n]
+			if (operation != "index" && operation != "update") || operation != want.Operation {
+				return fmt.Errorf("unexpected bulk acknowledgment operation")
+			}
+			var result struct {
+				Status int             `json:"status"`
+				Index  string          `json:"_index"`
+				ID     string          `json:"_id"`
+				Error  json.RawMessage `json:"error"`
+				Shards *struct {
+					Failed int `json:"failed"`
+				} `json:"_shards"`
+			}
+			if err := json.Unmarshal(raw, &result); err != nil {
+				return fmt.Errorf("parse bulk item acknowledgment: %w", err)
+			}
+			reason := ""
+			switch {
+			case result.Status < 200 || result.Status >= 300:
+				reason = fmt.Sprintf("item status %d", result.Status)
+			case result.Index == "" || result.ID == "":
+				reason = "missing document identity"
+			case result.Index != want.Index || (want.ID != "" && result.ID != want.ID):
+				reason = "document identity does not match requested row"
+			case result.Shards != nil && result.Shards.Failed != 0:
+				reason = "failed shard writes"
+			default:
+				if err := validateIntelligenceAcknowledgment(raw, result.Index, result.ID, operation == "update"); err != nil {
+					reason = err.Error()
+				}
+			}
+			if len(result.Error) > 0 && string(result.Error) != "null" {
+				reason = "item returned an error"
+				var detail struct {
+					Reason string `json:"reason"`
+				}
+				if json.Unmarshal(result.Error, &detail) == nil && detail.Reason != "" {
+					reason = detail.Reason
+				}
+			}
+			if reason != "" {
 				failed++
 				if firstReason == "" {
-					firstReason = res.Error.Reason
+					firstReason = reason
 				}
 			}
 		}
 	}
-	if failed == 0 {
-		return nil
+	if failed > 0 {
+		return fmt.Errorf("bulk insert: %d/%d items failed (e.g. %s)", failed, total, firstReason)
 	}
-	return fmt.Errorf("bulk insert: %d/%d items failed (e.g. %s)", failed, total, firstReason)
+	if *response.Errors {
+		return fmt.Errorf("bulk acknowledgment reports errors without complete item failure details")
+	}
+	return nil
 }
 
 // esSearchResponse is the common structure for _search responses.
@@ -593,7 +729,7 @@ func (es *Elasticsearch) GetEvents(ctx context.Context, filter EventFilter) ([]*
 	for _, hit := range resp.Hits.Hits {
 		event, err := esDocToEvent(hit.Source)
 		if err != nil {
-			continue
+			return nil, fmt.Errorf("decode stored event: %w", err)
 		}
 		events = append(events, event)
 	}
@@ -1001,7 +1137,7 @@ func (es *Elasticsearch) ExportData(ctx context.Context, start, end time.Time, w
 		for _, hit := range resp.Hits.Hits {
 			event, err := esDocToEvent(hit.Source)
 			if err != nil {
-				continue
+				return fmt.Errorf("decode exported event: %w", err)
 			}
 			if err := encoder.Encode(event); err != nil {
 				return fmt.Errorf("write event: %w", err)
@@ -1105,12 +1241,38 @@ ctx._source.classified = true;`,
 	}
 
 	reqBody, _ := json.Marshal(body)
-	_, status, err := es.esRequest(ctx, http.MethodPost, "/qpot-events-*/_update_by_query", reqBody)
+	data, status, err := es.esRequest(ctx, http.MethodPost, "/qpot-events-*/_update_by_query?refresh=true", reqBody)
 	if err != nil {
 		return fmt.Errorf("tag event: %w", err)
 	}
 	if status >= 300 {
 		return fmt.Errorf("tag event returned status %d", status)
+	}
+	// Tagging is the worker's acknowledgment boundary. A successful HTTP
+	// response alone does not prove update-by-query completed every mutation.
+	var response struct {
+		TimedOut         *bool           `json:"timed_out"`
+		Total            *int64          `json:"total"`
+		Updated          *int64          `json:"updated"`
+		Noops            int64           `json:"noops"`
+		VersionConflicts *int64          `json:"version_conflicts"`
+		Failures         json.RawMessage `json:"failures"`
+	}
+	if err := json.Unmarshal(data, &response); err != nil {
+		return fmt.Errorf("parse tag event acknowledgment: %w", err)
+	}
+	if response.TimedOut == nil || response.Total == nil || response.Updated == nil || response.VersionConflicts == nil || len(response.Failures) == 0 || string(response.Failures) == "null" {
+		return fmt.Errorf("incomplete tag event acknowledgment")
+	}
+	var failures []json.RawMessage
+	if err := json.Unmarshal(response.Failures, &failures); err != nil {
+		return fmt.Errorf("parse tag event failures: %w", err)
+	}
+	if *response.TimedOut || *response.VersionConflicts != 0 || len(failures) > 0 {
+		return fmt.Errorf("tag event incomplete: timed_out=%t version_conflicts=%d failures=%d", *response.TimedOut, *response.VersionConflicts, len(failures))
+	}
+	if *response.Total < 0 || *response.Updated < 0 || response.Noops < 0 || *response.Updated+response.Noops != *response.Total {
+		return fmt.Errorf("tag event acknowledged %d updates and %d noops for %d events", *response.Updated, response.Noops, *response.Total)
 	}
 	return nil
 }
@@ -1166,6 +1328,9 @@ func (es *Elasticsearch) InsertIOC(ctx context.Context, ioc *IOC) error {
 // IOC's ID as the document _id, preserving the same by-ID upsert behavior as
 // InsertIOC while collapsing the worker cycle into a single request.
 func (es *Elasticsearch) InsertIOCs(ctx context.Context, iocs []*IOC) error {
+	if err := validateIntelligenceTextIOCs("elasticsearch", false, iocs); err != nil {
+		return err
+	}
 	iocs = mergeIOCSightings(iocs)
 	if len(iocs) == 0 {
 		return nil
@@ -1174,7 +1339,9 @@ func (es *Elasticsearch) InsertIOCs(ctx context.Context, iocs []*IOC) error {
 	// count incremented and its first/last_seen widened. Indexing by _id (as
 	// before) replaced the stored document, so count stayed at 1.
 	var buf bytes.Buffer
+	expected := make([]esBulkExpectation, 0, len(iocs))
 	for _, ioc := range iocs {
+		expected = append(expected, esBulkExpectation{Operation: "update", Index: "qpot-iocs", ID: esDocID(ioc.ID)})
 		action := map[string]interface{}{
 			"update": map[string]interface{}{"_index": "qpot-iocs", "_id": esDocID(ioc.ID), "retry_on_conflict": 3},
 		}
@@ -1208,7 +1375,7 @@ func (es *Elasticsearch) InsertIOCs(ctx context.Context, iocs []*IOC) error {
 	if status >= 300 {
 		return fmt.Errorf("bulk insert iocs returned status %d", status)
 	}
-	return checkBulkErrors(data, len(iocs))
+	return checkBulkErrors(data, expected)
 }
 
 // GetIOCs retrieves IOCs with optional filtering.
@@ -1272,7 +1439,7 @@ func (es *Elasticsearch) GetIOCs(ctx context.Context, filter IOCFilter) ([]*IOC,
 			},
 		},
 		"size": size,
-		"sort": []map[string]string{{"last_seen": "desc"}},
+		"sort": []map[string]string{{"last_seen": "desc"}, {"type": "asc"}, {"value": "asc"}, {"honeypot": "asc"}},
 	}
 	if filter.Offset > 0 {
 		body["from"] = filter.Offset
@@ -1332,6 +1499,9 @@ func (es *Elasticsearch) GetIOCs(ctx context.Context, filter IOCFilter) ([]*IOC,
 
 // UpsertTTPSession inserts or replaces a TTP session document.
 func (es *Elasticsearch) UpsertTTPSession(ctx context.Context, session *TTPSession) error {
+	if err := validateIntelligenceTextSessions("elasticsearch", false, []*TTPSession{session}); err != nil {
+		return err
+	}
 	doc := map[string]interface{}{
 		"session_id":            session.SessionID,
 		"campaign_fingerprint":  session.CampaignFingerprint,
@@ -1454,7 +1624,7 @@ func (es *Elasticsearch) GetUnclassifiedEvents(ctx context.Context, limit int) (
 	for _, hit := range resp.Hits.Hits {
 		event, err := esDocToEvent(hit.Source)
 		if err != nil {
-			continue
+			return nil, fmt.Errorf("decode stored event: %w", err)
 		}
 		event.ID = hit.ID
 		events = append(events, event)

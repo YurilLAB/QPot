@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/qpot/qpot/internal/database"
+	"github.com/qpot/qpot/internal/durablejson"
 )
 
 // BehavioralFingerprint captures the behavioral signals of an attack campaign.
@@ -29,6 +30,55 @@ type sessionState struct {
 	honeypots map[string]bool
 	ips       map[string]bool
 	lastSeen  time.Time
+}
+
+// sessionCheckpoint preserves the complete accumulator, not just its public
+// projection. Fields are exported only for JSON encoding into the database's
+// durable worker checkpoint.
+type sessionCheckpoint struct {
+	Session   *database.TTPSession `json:"session"`
+	Usernames map[string]bool      `json:"usernames"`
+	Tools     map[string]bool      `json:"tools"`
+	Stems     map[string]bool      `json:"stems"`
+	Honeypots map[string]bool      `json:"honeypots"`
+	IPs       map[string]bool      `json:"ips"`
+	LastSeen  time.Time            `json:"last_seen"`
+}
+
+func (b *TTPBuilder) checkpoint() ([]byte, error) {
+	b.mu.RLock()
+	defer b.mu.RUnlock()
+	state := make(map[string]sessionCheckpoint, len(b.sessions))
+	for fp, s := range b.sessions {
+		state[fp] = sessionCheckpoint{s.session, s.usernames, s.tools, s.stems, s.honeypots, s.ips, s.lastSeen}
+	}
+	return durablejson.Marshal(state)
+}
+
+func (b *TTPBuilder) restoreCheckpoint(data []byte) error {
+	state := make(map[string]sessionCheckpoint)
+	if len(data) > 0 {
+		if err := durablejson.Unmarshal(data, &state); err != nil {
+			return fmt.Errorf("decode intelligence session checkpoint: %w", err)
+		}
+	}
+	sessions := make(map[string]*sessionState, len(state))
+	nonNil := func(m map[string]bool) map[string]bool {
+		if m == nil {
+			return make(map[string]bool)
+		}
+		return m
+	}
+	for fp, s := range state {
+		if s.Session == nil || s.Session.SessionID == "" || s.Session.CampaignFingerprint != fp {
+			return fmt.Errorf("invalid intelligence session checkpoint for %q", fp)
+		}
+		sessions[fp] = &sessionState{s.Session, nonNil(s.Usernames), nonNil(s.Tools), nonNil(s.Stems), nonNil(s.Honeypots), nonNil(s.IPs), s.LastSeen}
+	}
+	b.mu.Lock()
+	b.sessions = sessions
+	b.mu.Unlock()
+	return nil
 }
 
 // maxSessionIPs bounds the source addresses one session lists. A campaign many

@@ -162,10 +162,9 @@ type CollectorConfig struct {
 }
 
 // CanaryConfig controls the canary (honeytoken) subsystem: decoy artifacts
-// planted inside the operator's real estate that fire a high-fidelity alert on
-// any interaction. Canaries complement the honeypot containers — honeypots
-// catch the attacker who connects from outside, canaries catch the one who is
-// already inside and touches something they shouldn't.
+// planted in the operator's environment that alert on monitored beacon requests
+// or watched values in captured event fields. File reads and direct AWS use are
+// not monitored; an observed trip does not by itself establish malicious intent.
 type CanaryConfig struct {
 	// Enabled turns the subsystem on. When true the web server serves the
 	// public beacon endpoint (/c/<token>) and the management API; the

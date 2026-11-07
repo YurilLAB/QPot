@@ -29,6 +29,7 @@ import (
 	"github.com/qpot/qpot/internal/cluster"
 	"github.com/qpot/qpot/internal/config"
 	"github.com/qpot/qpot/internal/database"
+	"github.com/qpot/qpot/internal/hostsetup"
 	"github.com/qpot/qpot/internal/instance"
 	"github.com/qpot/qpot/internal/intelligence"
 	"github.com/spf13/cobra"
@@ -94,8 +95,16 @@ func main() {
 
 	// cobra has already printed "Error: ..." to stderr.
 	if err := run(ctx); err != nil {
-		os.Exit(1)
+		os.Exit(commandExitStatus(err))
 	}
+}
+
+func commandExitStatus(err error) int {
+	var coded *hostsetup.Error
+	if errors.As(err, &coded) && strings.HasPrefix(coded.Code, "QP-CLUSTER-") {
+		return hostsetup.ExitStatus(coded.Code)
+	}
+	return 1 // Preserve existing exit behavior for unrelated commands.
 }
 
 func run(ctx context.Context) error {
@@ -876,6 +885,7 @@ Typical flow:
 
 	cmd.AddCommand(newClusterInitCommand())
 	cmd.AddCommand(newClusterJoinCommand())
+	cmd.AddCommand(newClusterUpgradeCommand())
 	cmd.AddCommand(newClusterStatusCommand())
 	cmd.AddCommand(newClusterLeaveCommand())
 	cmd.AddCommand(newClusterNodesCommand())
@@ -1106,6 +1116,67 @@ func newClusterJoinCommand() *cobra.Command {
 	return cmd
 }
 
+func newClusterUpgradeCommand() *cobra.Command {
+	var password string
+	var yes bool
+	cmd := &cobra.Command{
+		Use:   "upgrade",
+		Short: "Safely upgrade a stopped legacy cluster and require members to rejoin",
+		Long:  "Preserve the saved cluster settings and local instance, back up the old membership, and atomically rotate cluster trust. Stop all old control planes and update every node first. Run this only on the chosen enrollment host; other nodes must leave and rejoin using the new cluster ID. Honeypot/event data is not changed or backed up by this command.",
+		Args:  cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, args []string) (resultErr error) {
+			defer func() {
+				var coded *hostsetup.Error
+				if errors.As(resultErr, &coded) {
+					resultErr = fmt.Errorf("%w: %s Fix: %s", resultErr, coded.Cause(), coded.Remedy())
+				}
+			}()
+			dir, err := cluster.DefaultDataPath()
+			if err != nil {
+				return hostsetup.E("QP-CLUSTER-006").WithWhy("Cannot locate the saved cluster directory.").Wrap(err)
+			}
+			mgr := cluster.NewManager(dir)
+			c, err := mgr.LoadCluster()
+			if err != nil {
+				return hostsetup.E("QP-CLUSTER-006").WithWhy("Cannot read a valid saved cluster configuration; restore or repair it before upgrading.").Wrap(err)
+			}
+			if c == nil {
+				return hostsetup.E("QP-CLUSTER-006").WithWhy("No saved cluster is available to upgrade.")
+			}
+			if password == "" {
+				err = mgr.UnlockFromSecret()
+			} else {
+				err = mgr.UnlockPassword(password)
+			}
+			if err != nil {
+				return hostsetup.E("QP-CLUSTER-006").WithWhy("Cannot unlock the cluster for upgrade; supply the correct password or stored secret.").Wrap(err)
+			}
+			if !yes {
+				cmd.Printf("Upgrade cluster %q? Its ID and signing credentials will change; every member must update and rejoin. Settings/local instance and a private config backup will be kept. [y/N]: ", c.Name)
+				var answer string
+				if _, err := fmt.Fscanln(cmd.InOrStdin(), &answer); err != nil || (answer != "y" && answer != "Y") {
+					cmd.Println("Aborted; cluster unchanged")
+					return nil
+				}
+			}
+			upgraded, backup, err := mgr.UpgradeCluster()
+			if err != nil {
+				if backup != "" {
+					cmd.Printf("Original cluster configuration backup: %s\n", backup)
+				}
+				return err
+			}
+			cmd.Printf("Cluster upgraded to protocol %d. New cluster ID: %s\n", upgraded.Version, upgraded.ID)
+			cmd.Printf("Original configuration/membership backup: %s (contains old secrets; keep private).\n", backup)
+			cmd.Println("Local instance settings and event stores were not changed. Start the enrollment host's control plane, then have each updated member leave its old cluster and rejoin using the new ID. The saved approval setting still applies.")
+			return nil
+		},
+	}
+	cmd.Flags().StringVarP(&password, "password", "p", "", "Cluster password (defaults to stored secret or QPOT_CLUSTER_PASSWORD)")
+	cmd.Flags().BoolVar(&yes, "yes", false, "Confirm trust rotation and member re-enrollment")
+	return cmd
+}
+
 func newClusterStatusCommand() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "status",
@@ -1142,10 +1213,21 @@ func newClusterStatusCommand() *cobra.Command {
 			fmt.Println("==============")
 			fmt.Printf("Cluster ID:    %s\n", status.ID)
 			fmt.Printf("Cluster Name:  %s\n", status.Name)
+			fmt.Printf("Protocol:      %d\n", c.Version)
 			fmt.Printf("Status:        %s\n", map[bool]string{true: "running", false: "stopped"}[status.IsRunning])
-			if c.CAKey == "" {
-				fmt.Println("\n[!] This cluster was created by an older QPot (its TLS came from the password)")
-				fmt.Println("    and does not start. Leave it on every node, then create it again.")
+			switch {
+			case c.Version > cluster.ProtocolVersion:
+				fmt.Println("\n[!] This cluster uses a newer, unsupported protocol")
+				fmt.Println("    and does not start. Update QPot to support this protocol; do not downgrade")
+				fmt.Println("    its trust state or run a legacy cluster upgrade.")
+			case c.Version < cluster.ProtocolVersion:
+				fmt.Println("\n[!] This cluster uses legacy shared signing credentials")
+				fmt.Println("    and does not start. Stop old control planes, update all nodes, then run")
+				fmt.Println("    'qpot cluster upgrade' on the enrollment host; other nodes must rejoin.")
+			case c.NodeCertificate == "" || c.NodeKey == "" || c.MemberKey == "":
+				fmt.Println("\n[!] This cluster's node certificate, private key or membership credential is missing")
+				fmt.Println("    and does not start. Restore trusted current-protocol state or re-enroll")
+				fmt.Println("    through the enrollment host. A legacy upgrade cannot repair this identity.")
 			}
 			fmt.Printf("\nNodes:\n")
 			fmt.Printf("  Total:       %d\n", status.NodeCount)
@@ -2172,22 +2254,25 @@ func newCanaryCommand() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "canary",
 		Short: "Manage canaries (honeytokens)",
-		Long: `Mint and manage canaries: decoy artifacts planted inside your real estate
-that fire a high-fidelity alert the moment anyone touches them.
+		Long: `Mint and manage canaries: decoy artifacts that alert on monitored interactions.
 
-Canaries complement QPot's honeypots. A honeypot catches the attacker who scans
-and connects from outside; a canary catches the one who is already inside and
-opens a file, reads a credential, or follows a link they never should have.
-Because nobody legitimately interacts with a canary, a single trip is a
-near-zero-false-positive, critical alert.
+A trip records a beacon request or a watched value in captured honeypot event
+fields. It does not by itself prove theft or compromise. QPot marks trips as
+critical for investigation. The false-positive rate has not been measured:
+previews, link scanners and authorized tests can also trigger trips.
 
 Kinds:
-  web   a beacon URL; any HTTP fetch of it is a trip. Plant it as a fake
-        bookmark, a link in a config comment, an "internal admin" URL.
-  file  a document that beacons when opened. Plant it as bait on a share
-        ("Q4-salaries.html"). Download it with 'qpot canary artifact'.
-  aws   a realistic but fake AWS key pair. Trips when its value shows up in a
-        captured honeypot session — i.e. it was stolen and replayed.
+  web   a beacon URL; a GET or HEAD reaching it can trip the canary. Plant it
+        as a fake bookmark, a config comment or an "internal admin" URL.
+  file  an HTML document that attempts to fetch its beacon when opened.
+        Plant it on a share. Download it with 'qpot canary artifact'.
+  aws   a realistic but fake AWS key pair, watched in captured honeypot
+        event fields.
+
+Reading a credential or file alone need not alert. Direct use against real AWS
+is not monitored. All kinds can also trip on watched values in captured events;
+this needs intelligence.enabled and runs on the worker's processing cadence.
+No recorded trips does not prove no access occurred.
 
 Canaries are runtime objects owned by a running instance, so 'qpot up' must be
 active. Set 'canary.base_url' in the instance config so minted URLs point at
@@ -2308,7 +2393,7 @@ func newCanaryTripsCommand() *cobra.Command {
 			}
 			trips, _ := resp["trips"].([]interface{})
 			if len(trips) == 0 {
-				fmt.Println("No trips recorded. (That is good — nobody has touched a canary.)")
+				fmt.Println("No trips recorded. This does not rule out access outside monitored events.")
 				return nil
 			}
 			fmt.Printf("%-24s %-9s %-16s %-20s %s\n", "TIME", "CHANNEL", "SOURCE IP", "NAME", "DETAIL")

@@ -31,6 +31,8 @@ a test fails if the two disagree. Regenerate it with
 | `SVC` | Services and systemd | 19 |
 | `WEB` | Web UI and control plane | 20 |
 | `INST` | QPot instance and containers | 21 |
+| `INTEL` | Intelligence recovery and ownership | 22 |
+| `CLUSTER` | Cluster trust and enrollment | 23 |
 | `INT` | Interrupted | 130 |
 | `BUG` | Unexpected problems | 70 |
 
@@ -654,6 +656,115 @@ Exit status 0 means success; 1 is a usage error (an unknown flag).
 
 - Why: A container stopped, was never created, or reports itself unhealthy.
 - Fix: See why with: qpot logs <the part named above>   then restart with: qpot down && qpot up -d
+
+## Intelligence recovery and ownership (`INTEL`, exit 22)
+
+### QP-INTEL-001
+
+**Intelligence recovery could not load a valid checkpoint.**
+
+- Why: The database is unavailable or its saved worker state is invalid. No new events are acknowledged.
+- Fix: Restore database access and inspect the checkpoint error. Keep the checkpoint; do not delete recovery state to bypass the failure.
+
+### QP-INTEL-002
+
+**The intelligence checkpoint could not be saved.**
+
+- Why: The write failed or its acknowledgment was lost. The worker retains the exact record for retry.
+- Fix: Restore database availability or free storage, then let the worker retry. Do not manually mark pending events classified.
+
+### QP-INTEL-003
+
+**The intelligence batch is waiting for replay.**
+
+- Why: An IOC, TTP session or event-tag write failed or returned an uncertain result.
+- Fix: Restore database availability. The saved batch will replay with the same revisions and counts before newer events are processed.
+
+### QP-INTEL-004
+
+**This local intelligence worker could not claim ownership.**
+
+- Why: Another process for this database owns the local lock, or the lock directory is inaccessible.
+- Fix: Run only one worker for a database. Stop the other local control plane or repair lock-directory access, then restart this control plane. Do not delete a lock file held by a running process. Coordinate ownership separately across hosts and OS accounts.
+
+### QP-INTEL-005
+
+**The intelligence batch could not be prepared safely.**
+
+- Why: The backend lacks recovery support, an IOC baseline read failed, or classifier state could not be encoded.
+- Fix: Use a supported initialized backend, inspect its error and retry. Source events remain available for later processing.
+
+### QP-INTEL-006
+
+**The backend cannot preserve an intelligence string.**
+
+- Why: An IOC or session contains invalid UTF-8, or a NUL byte unsupported by this backend. The worker pauses rather than rewriting the value or acknowledging its source events.
+- Fix: Keep the original events and checkpoints. Resolve the backend's string-storage limitation with verified lossless support before retrying. Do not normalize indicator bytes, delete recovery state or manually mark pending events classified; a restart alone will not fix this data.
+
+## Cluster trust and enrollment (`CLUSTER`, exit 23)
+
+### QP-CLUSTER-001
+
+**Legacy cluster requires upgrade.**
+
+- Why: This cluster uses password-derived or shared CA signing credentials.
+- Fix: Stop old control planes, update all QPot nodes, run qpot cluster upgrade once on the chosen enrollment host, then leave and rejoin other nodes with the new ID.
+
+### QP-CLUSTER-002
+
+**Unsupported cluster protocol.**
+
+- Why: The cluster or peer uses an incompatible protocol version.
+- Fix: Update every node to a QPot release supporting the cluster protocol; do not downgrade trust checks.
+
+### QP-CLUSTER-003
+
+**Invalid node enrollment request.**
+
+- Why: The certificate request is missing, malformed, oversized, uses an unsupported key, or lacks a valid signature.
+- Fix: Update the joining QPot and retry enrollment with its locally generated P-256 key.
+
+### QP-CLUSTER-004
+
+**Node is not the enrollment authority.**
+
+- Why: Ordinary cluster members do not hold the CA signing key.
+- Fix: Use the host that initialized or upgraded the cluster as the join seed.
+
+### QP-CLUSTER-005
+
+**Invalid or expired node identity.**
+
+- Why: The node certificate, private key, assigned identity, lifetime, or CA does not match.
+- Fix: Re-enroll the node through the enrollment host; never bypass TLS verification.
+
+### QP-CLUSTER-006
+
+**Cluster upgrade is blocked.**
+
+- Why: The cluster is running, locked, not unlocked, already current, or its local configuration cannot be upgraded safely.
+- Fix: Stop its control plane, unlock the saved password, check the cluster configuration and inspect any upgrade lock before retrying.
+
+### QP-CLUSTER-007
+
+**Cluster changed during upgrade.**
+
+- Why: The saved cluster state no longer matches the prepared upgrade.
+- Fix: Reload the state and coordinate with other processes before retrying. The upgrade did not replace it.
+
+### QP-CLUSTER-008
+
+**Cluster upgrade could not be saved.**
+
+- Why: Backup, staging, or atomic activation failed.
+- Fix: Check disk space and permissions. Keep the original cluster state and any completed backup, then retry after correcting the error.
+
+### QP-CLUSTER-009
+
+**Cluster upgrade activated; durability uncertain.**
+
+- Why: The new cluster state was atomically activated, but syncing its directory failed.
+- Fix: Do not rerun the upgrade or restore the old CA. Inspect qpot cluster status and the private backup, correct the filesystem issue, and keep the new trust state.
 
 ## Interrupted (`INT`, exit 130)
 

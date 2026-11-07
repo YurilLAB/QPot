@@ -282,6 +282,25 @@ The intelligence worker (every 15 minutes by default,
 - **Groups campaigns (TTP sessions)** by shared credentials, tooling, commands
   and targeted services rather than IP alone.
 
+Before marking source events classified, the worker saves a database checkpoint
+and persists its IOC totals and active TTP sessions. Interrupted batches replay
+without adding their observations twice. Run one intelligence worker per database:
+a local OS-account lock prevents duplicate local workers, but separate hosts,
+accounts or database-host aliases still require coordinated ownership. Keep the
+`qpot/intelligence-locks` state under your OS user configuration directory; it
+reserves revisions across interrupted saves. Before moving ownership to another
+host or account, transfer that reservation state or verify all previous database
+requests have finished; stopping the old process alone does not settle requests
+already in flight. Canary notifications remain
+at-least-once across crashes and use their own direct IOC path. Recovery failures
+have `QP-INTEL-*` codes (`qpot doctor --explain <code>`).
+The authenticated intelligence summary also exposes `worker_status`
+(`disabled`, `not_started`, `running`, `retrying` or `stopped`) and
+`worker_healthy` (running without a recorded error). Failures include
+`worker_error_code` and catalog-only `worker_error_remedy`, without database
+error details. A retrying worker uses its normal processing cadence; a stopped
+worker needs the control plane restarted after its cause is resolved.
+
 | Endpoint | Description |
 |----------|-------------|
 | `GET /api/techniques` | Observed ATT&CK techniques with counts |
@@ -302,8 +321,9 @@ file), and Kibana on top of ClickHouse via the bundled connector in
 
 Canaries are decoy artifacts you plant inside your real environment – a fake AWS
 key in a CI runner, a document on a file share, a beacon URL in a config file.
-Nobody should ever touch them, so a trip is a critical, near-zero-false-positive
-alert.
+QPot marks observed trips as critical alerts for investigation. The false-positive
+rate has not been measured: previews, link scanners and authorized tests can
+also trigger a trip.
 
 ```bash
 qpot canary create --kind aws  --name ci-runner --memo "planted in Jenkins"
@@ -312,8 +332,11 @@ qpot canary trips
 ```
 
 `web`/`file` canaries trip when their beacon URL (`/c/<token>`, set
-`canary.base_url` to where this QPot is reachable) is fetched; `aws` canaries
-trip when the key shows up in a captured honeypot session. See
+`canary.base_url` to where this QPot is reachable) receives a GET or HEAD;
+all kinds can also trip when a watched value appears in captured honeypot
+event fields. Reading a credential or file alone need not alert, and direct
+use against real AWS is not monitored. No recorded trips does not prove no
+access occurred. See
 [docs/canary.md](docs/canary.md).
 
 ---
@@ -358,11 +381,24 @@ Joining needs the password **and** the host's approval (`require_approval`,
 on by default). Traffic between nodes is TLS-encrypted automatically, with no
 certificates to manage: `cluster init` makes a certificate authority for the
 cluster, and the cluster ID is its fingerprint, so a node that knows the ID
-verifies every node it talks to – the seed it joins included. An admitted node
-receives the CA key and a member key. Nothing a node serves derives from the
-password, so it cannot be tested offline, and someone who knows the password
-can neither pass as a node nor intercept a join. Clusters created by earlier
-versions (whose TLS came from the password) must be re-created. Membership runs in the control plane, so restart
+verifies every node it talks to – the seed it joins included. The initializing
+host is the enrollment authority: use it as the join seed and keep its CA key
+private. Each node generates its own private key locally; an admitted node
+receives only its signed leaf certificate and a member key, never the CA key.
+Nothing a node serves derives from the password, so it cannot be tested offline,
+and the password alone cannot impersonate a TLS node. Legacy clusters require
+an explicit upgrade: stop the old control planes, update QPot on every node,
+then run `qpot cluster upgrade` once on the chosen enrollment host. It preserves
+settings and the local instance, privately backs up the exact old membership,
+and atomically activates a new CA, member key and cluster ID only after checks.
+Event stores are untouched, not backed up by this command. Other nodes must
+leave their old cluster and rejoin with the new ID; incompatible protocol
+versions are rejected. Old signing keys are never trusted by the upgraded
+cluster. Protect and back up the enrollment host's
+private cluster state; ordinary members cannot enroll others. Node certificates
+last one year: re-enroll members before expiry; the enrollment host renews its
+own certificate on startup when it has under 30 days left. Membership runs in
+the control plane, so restart
 `qpot up -d` after `init`/`join`. The password is stored in
 `~/.qpot/cluster/cluster.secret` (0600) or read from `QPOT_CLUSTER_PASSWORD`.
 

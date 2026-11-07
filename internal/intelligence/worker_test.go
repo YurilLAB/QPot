@@ -2,7 +2,12 @@ package intelligence
 
 import (
 	"context"
+	"encoding/json"
+	"fmt"
 	"io"
+	"slices"
+	"sort"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -12,11 +17,15 @@ import (
 
 // fakeDB is a minimal database.Database stub for worker tests.
 type fakeDB struct {
-	events       []*database.Event
-	taggedCount  atomic.Int64
-	iocCount     atomic.Int64
-	ttpCount     atomic.Int64
-	failTagEvent bool
+	events         []*database.Event
+	taggedCount    atomic.Int64
+	iocCount       atomic.Int64
+	ttpCount       atomic.Int64
+	failTagEvent   bool
+	storeMu        sync.Mutex
+	checkpointData []byte
+	iocRows        map[string]*database.IOC
+	sessionRows    map[string]*database.TTPSession
 }
 
 func (f *fakeDB) Connect(ctx context.Context) error                             { return nil }
@@ -64,7 +73,96 @@ func (f *fakeDB) InsertIOCs(ctx context.Context, iocs []*database.IOC) error {
 	return nil
 }
 func (f *fakeDB) GetIOCs(ctx context.Context, filter database.IOCFilter) ([]*database.IOC, error) {
-	return nil, nil
+	f.storeMu.Lock()
+	defer f.storeMu.Unlock()
+	var rows []*database.IOC
+	for _, row := range f.iocRows {
+		if len(filter.Values) > 0 && !slices.Contains(filter.Values, row.Value) {
+			continue
+		}
+		cp := *row
+		rows = append(rows, &cp)
+	}
+	sort.Slice(rows, func(i, j int) bool { return rows[i].ID < rows[j].ID })
+	if filter.Offset >= len(rows) {
+		return nil, nil
+	}
+	rows = rows[filter.Offset:]
+	if filter.Limit > 0 && len(rows) > filter.Limit {
+		rows = rows[:filter.Limit]
+	}
+	return rows, nil
+}
+
+func (f *fakeDB) LoadIntelligenceCheckpoint(context.Context) (*database.IntelligenceCheckpoint, error) {
+	f.storeMu.Lock()
+	defer f.storeMu.Unlock()
+	if len(f.checkpointData) == 0 {
+		return nil, nil
+	}
+	var cp database.IntelligenceCheckpoint
+	err := json.Unmarshal(f.checkpointData, &cp)
+	return &cp, err
+}
+
+func (f *fakeDB) ReadIntelligenceIOCs(_ context.Context, wanted []*database.IOC) ([]*database.IOC, error) {
+	f.storeMu.Lock()
+	defer f.storeMu.Unlock()
+	var rows []*database.IOC
+	for _, key := range wanted {
+		for _, row := range f.iocRows {
+			if key.Type == row.Type && key.Value == row.Value && key.Honeypot == row.Honeypot {
+				cp := *row
+				rows = append(rows, &cp)
+			}
+		}
+	}
+	return rows, nil
+}
+func (f *fakeDB) SaveIntelligenceCheckpoint(_ context.Context, cp *database.IntelligenceCheckpoint) error {
+	f.storeMu.Lock()
+	defer f.storeMu.Unlock()
+	if len(f.checkpointData) > 0 {
+		var old database.IntelligenceCheckpoint
+		if err := json.Unmarshal(f.checkpointData, &old); err != nil {
+			return err
+		}
+		if old.Revision > cp.Revision {
+			return nil
+		}
+	}
+	data, err := json.Marshal(cp)
+	if err != nil {
+		return err
+	}
+	f.checkpointData = data
+	return nil
+}
+func (f *fakeDB) ReplaceIntelligenceIOCs(_ context.Context, _ uint64, rows []*database.IOC) error {
+	f.storeMu.Lock()
+	defer f.storeMu.Unlock()
+	if f.iocRows == nil {
+		f.iocRows = make(map[string]*database.IOC)
+	}
+	for _, row := range rows {
+		cp := *row
+		f.iocRows[row.ID] = &cp
+	}
+	f.iocCount.Add(int64(len(rows)))
+	return nil
+}
+func (f *fakeDB) ReplaceIntelligenceSessions(_ context.Context, _ uint64, rows []*database.TTPSession) error {
+	f.storeMu.Lock()
+	defer f.storeMu.Unlock()
+	if f.sessionRows == nil {
+		f.sessionRows = make(map[string]*database.TTPSession)
+	}
+	for _, row := range rows {
+		cp := *row
+		f.sessionRows[row.SessionID] = &cp
+	}
+	f.ttpCount.Add(int64(len(rows)))
+	return nil
 }
 func (f *fakeDB) UpsertTTPSession(ctx context.Context, s *database.TTPSession) error {
 	f.ttpCount.Add(1)
@@ -82,6 +180,11 @@ func (f *fakeDB) GetUnclassifiedEvents(ctx context.Context, limit int) ([]*datab
 	}
 	out := make([]*database.Event, limit)
 	copy(out, f.events[:limit])
+	for i, e := range out {
+		if e.ID == "" {
+			e.ID = fmt.Sprint(i + 1)
+		}
+	}
 	return out, nil
 }
 

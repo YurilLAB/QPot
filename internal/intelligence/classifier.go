@@ -65,7 +65,7 @@ func (c *Classifier) Classify(ctx context.Context, event *database.Event) []*dat
 
 // ExtractIOCs runs only the IOC extractor over an event, without applying any
 // ATT&CK rule. It is used for events that are already classified out-of-band
-// (e.g. canary trips, which are ground truth and must not have their technique
+// (e.g. canary trips with policy-assigned techniques that must not have those
 // fields overwritten by a heuristic rule) but whose source IP / payload should
 // still feed the IOC store and downstream forwarding. Extracted IOCs inherit
 // the event's existing TechniqueID.

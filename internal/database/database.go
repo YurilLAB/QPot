@@ -3,6 +3,7 @@ package database
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"time"
@@ -75,8 +76,10 @@ type TTPSession struct {
 
 // IOCFilter filters IOC queries
 type IOCFilter struct {
-	Types     []string
-	Honeypots []string
+	// intelligenceKeys is an internal exact-key read, without search pagination.
+	intelligenceKeys []*IOC
+	Types            []string
+	Honeypots        []string
 	// Values matches IOC values exactly (any of them).
 	Values []string
 	// SourceIPs matches the attacker IP an IOC was observed from.
@@ -118,6 +121,32 @@ type TimeSeries struct {
 // trip (ClickHouse: one synchronous mutation instead of one per event).
 type BatchTagger interface {
 	TagEvents(ctx context.Context, events []*Event) error
+}
+
+// IntelligenceCheckpoint is the durable write-ahead record for the single
+// intelligence worker serving this database. Its prepared outputs are absolute
+// snapshots: replaying them must never increment observation counts. Revision
+// increases whenever a different record is saved; retrying a save uses the same
+// revision and payload. State contains the classifier's active session state.
+type IntelligenceCheckpoint struct {
+	Revision uint64          `json:"revision"`
+	Events   []*Event        `json:"events,omitempty"`
+	IOCs     []*IOC          `json:"iocs,omitempty"`
+	Sessions []*TTPSession   `json:"sessions,omitempty"`
+	State    json.RawMessage `json:"state,omitempty"`
+	Complete bool            `json:"complete"`
+}
+
+// IntelligenceStore provides durable recovery for the per-database worker.
+// Backends must return only acknowledged, durable data and surface partial
+// writes as errors. A failed or ambiguous save must be retried with the exact
+// same record, never a newly accumulated batch.
+type IntelligenceStore interface {
+	LoadIntelligenceCheckpoint(context.Context) (*IntelligenceCheckpoint, error)
+	SaveIntelligenceCheckpoint(context.Context, *IntelligenceCheckpoint) error
+	ReadIntelligenceIOCs(context.Context, []*IOC) ([]*IOC, error)
+	ReplaceIntelligenceIOCs(context.Context, uint64, []*IOC) error
+	ReplaceIntelligenceSessions(context.Context, uint64, []*TTPSession) error
 }
 
 // Database is the interface for database operations

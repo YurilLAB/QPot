@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -11,6 +12,74 @@ import (
 
 	"github.com/qpot/qpot/internal/config"
 )
+
+// Operator-facing descriptions must retain the detection boundary rather than
+// presenting a canary match as proof of compromise or an empirically low FP rate.
+func TestCanaryDescriptionsStateDetectionLimits(t *testing.T) {
+	cmd := newCanaryCommand()
+	var out bytes.Buffer
+	cmd.SetOut(&out)
+	cmd.SetArgs([]string{"--help"})
+	if err := cmd.Execute(); err != nil {
+		t.Fatal(err)
+	}
+	descriptions := map[string]string{"CLI help": out.String()}
+	for _, path := range []string{"README.md", "docs/canary.md", "doc/cli-reference.md"} {
+		body, err := os.ReadFile(filepath.Join("..", "..", filepath.FromSlash(path)))
+		if err != nil {
+			t.Fatal(err)
+		}
+		descriptions[path] = string(body)
+	}
+	for name, description := range descriptions {
+		t.Run(name, func(t *testing.T) {
+			text := strings.Join(strings.Fields(description), " ")
+			for _, required := range []string{
+				"has not been measured", "false-positive", "captured", "GET", "HEAD",
+				"Reading a credential or file alone need not alert",
+				"real AWS is not monitored",
+				"No recorded trips does not prove no access occurred",
+			} {
+				if !strings.Contains(text, required) {
+					t.Errorf("missing canary detection limitation %q", required)
+				}
+			}
+			for _, claim := range []string{
+				"near-zero-false-positive", "moment anyone touches",
+				"alert on any interaction", "nobody has touched a canary",
+			} {
+				if strings.Contains(text, claim) {
+					t.Errorf("unsupported canary claim %q", claim)
+				}
+			}
+		})
+	}
+}
+
+func TestCanaryEmptyTripsDoesNotRuleOutUnobservedAccess(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/canaries/trips" {
+			t.Errorf("unexpected request path %q", r.URL.Path)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"trips":[]}`))
+	}))
+	defer ts.Close()
+	name := canaryCLIInstance(t, ts)
+	cmd := newCanaryTripsCommand()
+	cmd.SetArgs([]string{"-i", name})
+	out := captureStdout(t, func() {
+		if err := cmd.Execute(); err != nil {
+			t.Fatal(err)
+		}
+	})
+	if !strings.Contains(out, "No trips recorded.") || !strings.Contains(out, "does not rule out access outside monitored events") {
+		t.Fatalf("empty history must acknowledge the observation limit: %q", out)
+	}
+	if strings.Contains(out, "nobody has touched") {
+		t.Fatalf("empty history incorrectly rules out unobserved access: %q", out)
+	}
+}
 
 // canaryCLIInstance saves an instance whose web UI is the given test server
 // and returns its name.

@@ -46,8 +46,8 @@ func TestCanaryBeaconAlertsDespiteSaveFailure(t *testing.T) {
 
 	trips := cs.Trips(0)
 	t.Logf("trips recorded in store: %d, events emitted: %d", len(trips), len(db.insertedEvents()))
-	if len(trips) == 1 && len(db.insertedEvents()) == 0 {
-		t.Errorf("trip recorded in memory but alert event never emitted (persistence error swallowed the alert)")
+	if len(trips) != 1 || len(db.insertedEvents()) != 1 {
+		t.Errorf("save failure must still record and emit exactly one trip")
 	}
 }
 
@@ -77,8 +77,8 @@ func TestCanaryBeaconAlertsAfterClientDisconnect(t *testing.T) {
 	req := httptest.NewRequest(http.MethodGet, "/c/"+c.Token, nil).WithContext(ctx)
 	s.mux.ServeHTTP(httptest.NewRecorder(), req)
 	t.Logf("trips=%d events=%d", len(cs.Trips(0)), len(db.insertedEvents()))
-	if len(cs.Trips(0)) == 1 && len(db.insertedEvents()) == 0 {
-		t.Errorf("trip recorded but alert event lost because request ctx was cancelled")
+	if len(cs.Trips(0)) != 1 || len(db.insertedEvents()) != 1 {
+		t.Errorf("disconnected request must still record and emit exactly one trip")
 	}
 }
 
@@ -122,8 +122,8 @@ func TestCanaryEventTripsOnlyOnce(t *testing.T) {
 	w.Run(ctx)
 	n := len(cs.Trips(0))
 	t.Logf("one attacker event -> %d canary trips, %d critical events", n, len(db.insertedEvents()))
-	if n > 1 {
-		t.Errorf("single event re-tripped canary %d times", n)
+	if n != 1 || len(db.insertedEvents()) != 1 {
+		t.Errorf("single event must record and emit exactly one canary trip: %d trips, %d events", n, len(db.insertedEvents()))
 	}
 }
 

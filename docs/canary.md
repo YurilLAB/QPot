@@ -4,18 +4,20 @@ Canaries are QPot's second deception primitive, complementary to the honeypot
 containers. A **honeypot** is a decoy *system* an attacker connects to from the
 outside; a **canary** is a decoy *artifact* planted **inside** your real estate
 — a fake AWS key in a CI runner, a tempting `Q4-salaries.html` on a file share,
-a beacon URL hidden in a config comment — that fires the moment anyone touches
-it.
+a beacon URL hidden in a config comment — that alerts when QPot observes a
+configured trigger.
 
-Because nobody legitimately interacts with a canary, **a single trip is a
-near-zero-false-positive, critical alert.** Honeypots tell you *the perimeter is
-being scanned*; canaries tell you *someone is already inside and moving through
-your data*. Run both.
+**QPot marks observed trips as critical alerts for investigation.** A trip
+confirms a beacon request or a watched value in captured event data, not theft,
+compromise or malicious intent. The false-positive rate has not been measured:
+previews, link scanners, indexing tools and authorized tests can trigger trips.
+Choose placements with little expected legitimate activity and investigate the
+source and context of each trip.
 
 ```
-        outside ───scan/connect──▶  HONEYPOT containers   (perimeter signal)
-        inside  ───open/read/use──▶ CANARY artifacts      (post-breach signal)
-                                       │ trip
+        beacon GET/HEAD ─────────▶ public /c/<token> endpoint
+        captured event fields ───▶ watched-value matcher
+                                       │ observed trip
                                        ▼
                          database.Event (honeypot="canary", severity=critical)
                          → events feed → IOC store → overview
@@ -29,24 +31,28 @@ local overview — with no special-casing downstream.
 
 | Kind   | What it is | How it trips | Plant it as… |
 |--------|-----------|--------------|--------------|
-| `web`  | A unique beacon URL (`/c/<token>`) | Any HTTP GET of the URL | a fake intranet bookmark, an "internal-admin" link, a URL in a config comment |
-| `file` | An HTML document that beacons when opened/previewed | The embedded beacon URL is fetched | bait on a file share (`Q4-salaries.html`, `vpn-keys.html`) |
+| `web`  | A unique beacon URL (`/c/<token>`) | A GET or HEAD reaches the beacon endpoint | a fake intranet bookmark, an "internal-admin" link, a URL in a config comment |
+| `file` | An HTML document that attempts to load a beacon when opened/previewed | A GET or HEAD reaches the embedded beacon URL | bait on a file share (`Q4-salaries.html`, `vpn-keys.html`) |
 | `aws`  | A realistic but fake AWS access-key pair (`AKIA…` + 40-char secret) | The key id or secret appears in a captured honeypot session | a credential in `~/.aws/credentials`, a CI secret, a `.env` |
 | `credential` | A password or token (planted by QPot only) | The value appears in a captured honeypot session | see [Canaries planted in the honeypots](#canaries-planted-in-the-honeypots) |
 | `ssh-key` | An SSH key pair (planted by QPot only) | The public key or its fingerprint appears in a captured session: the key offered in a login | see below |
 
-`web` and `file` trip via the **public beacon endpoint**. `aws` trips via the
-**intelligence worker**, which scans every captured session for the planted
-value — i.e. the attacker stole the key from wherever you planted it and is now
-replaying it against your own deception estate. (AWS-credential matching
-therefore requires `intelligence.enabled: true`, which is the default.)
+`web` and `file` can trip via the **public beacon endpoint**. The
+**intelligence worker** also matches watched values for all kinds in the
+`command`, `username`, `password`, `payload` and metadata values of captured
+honeypot events. It does not monitor arbitrary filesystem reads or real AWS
+API calls. Matching requires `intelligence.enabled: true` (the default), event
+collection and successful processing; a match alone does not establish how the
+value was obtained or whether its use was unauthorized.
 
-Each kind is pre-mapped to a defensible ATT&CK technique so trips classify
+Each kind is pre-mapped to an ATT&CK technique so trips classify
 consistently: `aws` → **T1078.004 Valid Accounts: Cloud Accounts**,
 `file` → **T1530 Data from Cloud Storage**, `web` → **T1213 Data from
 Information Repositories**, `credential` → **T1552.001 Unsecured Credentials:
 Credentials In Files**, `ssh-key` → **T1552.004 Unsecured Credentials: Private
-Keys**.
+Keys**. These are policy labels for triage, not proof that the named technique
+occurred. Likewise, the event's `confidence: 1.0` denotes the deterministic
+trigger classification, not a measured probability of malicious activity.
 
 Web and file tokens are also watched in captured sessions: a beacon URL typed
 or fetched on a honeypot trips its canary on the honeypot channel even when
@@ -86,11 +92,12 @@ file, `ssh` to one of the internal hosts times out like an unreachable host
 (what is typed at its prompts and the keys it would offer are logged), `aws` answers like a CLI without
 network, and `zcat` reads the dump.
 
-**No trip needs the web UI to be reachable.** The planted canaries trip on the
-honeypot channel: the value turns up in a session one of QPot's honeypots
-captured, from any address, in any protocol. The healthcheck URL also trips on
-the http channel, and only when `canary.base_url` says where the beacon is
-reachable; without it the URL points into the persona's internal network.
+**The honeypot channel does not need the beacon endpoint to be reachable.** It
+needs a watched value in the captured event fields listed above. A command such
+as `cat /root/.aws/credentials` contains a path, not the key: unless the value
+is also captured, reading that file does not trip its canary. The healthcheck
+URL can also trip on the HTTP channel when a GET or HEAD reaches the beacon;
+without `canary.base_url` its URL points into the persona's internal network.
 
 The server registers the planted canaries in the store when it starts
 (`planted: true` in the API), and follows the instance's config file while it
@@ -150,7 +157,8 @@ qpot canary rm cnry_abc123
 
 `--memo` is the most important field operationally: it records **where** the
 canary is planted and is echoed on every trip, so the alert is immediately
-actionable ("the key from the Jenkins runner was just used from 203.0.113.50").
+actionable ("the key planted in the Jenkins runner appeared in a captured
+event from 203.0.113.50"). The memo records placement, not proof of theft there.
 
 ## HTTP API
 
@@ -163,7 +171,7 @@ All management routes require the QPot-ID (`X-QPot-ID` header or `?qpot_id=`).
 | `/api/canaries?id=<id>` | DELETE | Remove a canary (409 for a planted one) |
 | `/api/canaries/trips?limit=N` | GET | Recent trips, newest first |
 | `/api/canaries/artifact?id=<id>` | GET | Download a file canary's document |
-| `/c/<token>` | GET | **Public** beacon — records a trip, returns the decoy |
+| `/c/<token>` | GET, HEAD | **Public** beacon — records a trip, returns the decoy |
 
 ## Storage
 
@@ -174,16 +182,25 @@ instance reloads it.
 
 ## Operational notes & honest limitations
 
-- **Web/file canaries need the beacon reachable.** If `/c/` is not reachable
-  from where the token is planted (e.g. an air-gapped segment), a web/file
-  canary cannot phone home. AWS canaries have no such requirement — they trip
-  purely on value-matching inside captured sessions.
+- **Reading a credential or file alone need not alert.** QPot has no general
+  file-read monitor. Copying a file, reading it as text or opening it with
+  remote resources blocked can leave no monitored trigger. No recorded trips
+  does not prove no access occurred.
+- **HTTP trips need the beacon reachable.** If `/c/` is unreachable from the
+  artifact (for example, in an air-gapped segment), or a viewer blocks remote
+  resources, a web/file canary cannot phone home. All kinds can still trip when
+  their watched values are present in captured honeypot event fields.
 - **AWS canaries are decoys, not live credentials.** They will not authenticate
-  to real AWS. They detect *theft + replay against QPot*, not direct use against
-  AWS. (Detecting use against real AWS would require CloudTrail integration,
-  which is out of scope here.)
+  to real AWS. Direct use against real AWS is not monitored. QPot watches for
+  their values in captured honeypot event fields; there is no AWS-side audit
+  integration in this subsystem.
 - **The matcher runs on the intelligence worker's cadence** (`worker_interval`,
-  default 15m) for stored-but-unclassified events. Beacon (web/file) trips are
-  real-time; credential matches surface within one worker cycle.
+  default 15m) for stored-but-unclassified events. Beacon requests are handled
+  as they arrive; captured-value matches wait for collection and processing.
+  Backlogs, stopped workers or database failures can delay or prevent alerts.
+- **False positives are possible.** A scanner or authorized user can fetch a
+  beacon or submit a watched value. No measured false-positive rate is
+  established here; test the placement and assess the event context before
+  treating a trip as evidence of compromise.
 - **Trip history is bounded** (`max_trips`); the lifetime per-canary trip
   counter keeps counting even after old trips age out of the visible history.

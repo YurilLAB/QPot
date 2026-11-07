@@ -201,3 +201,102 @@ func TestCanaryMatcherTripsOnCredentialInSession(t *testing.T) {
 		t.Fatal("unexpected match on benign session")
 	}
 }
+
+// Only watched values in collected event fields are observable. A file path or
+// a command using credentials implicitly is not evidence that QPot captured them.
+func TestCanaryMatcherObservationBoundary(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		event func(*canary.Canary) *database.Event
+		want  bool
+	}{
+		{"credential file read", func(c *canary.Canary) *database.Event {
+			return &database.Event{Command: "cat /root/.aws/credentials"}
+		}, false},
+		{"credential file copy", func(c *canary.Canary) *database.Event {
+			return &database.Event{Command: "cp /root/.aws/credentials /tmp/credentials"}
+		}, false},
+		{"AWS command without captured values", func(c *canary.Canary) *database.Event {
+			return &database.Event{Command: "aws sts get-caller-identity"}
+		}, false},
+		{"key in command", func(c *canary.Canary) *database.Event {
+			return &database.Event{Command: "export AWS_ACCESS_KEY_ID=" + c.AccessKeyID}
+		}, true},
+		{"key in username", func(c *canary.Canary) *database.Event {
+			return &database.Event{Username: c.AccessKeyID}
+		}, true},
+		{"secret in password", func(c *canary.Canary) *database.Event {
+			return &database.Event{Password: c.SecretAccessKey}
+		}, true},
+		{"key in payload", func(c *canary.Canary) *database.Event {
+			return &database.Event{Payload: []byte("aws_access_key_id=" + c.AccessKeyID)}
+		}, true},
+		{"key in metadata value", func(c *canary.Canary) *database.Event {
+			return &database.Event{Metadata: map[string]string{"captured": c.AccessKeyID}}
+		}, true},
+		{"authorized test containing key", func(c *canary.Canary) *database.Event {
+			return &database.Event{Command: "echo " + c.AccessKeyID + " # authorized canary test"}
+		}, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			db := &fakeDB{}
+			s := newCanaryTestServer(t, db)
+			c, err := s.canaries.Create(canary.KindAWS, "ci", "runner")
+			if err != nil {
+				t.Fatal(err)
+			}
+			ev := tc.event(c)
+			ev.Honeypot = "cowrie"
+			ev.SourceIP = "203.0.113.50"
+			if got := (&canaryMatcher{s: s}).MatchEvent(t.Context(), ev); got != tc.want {
+				t.Fatalf("matched=%v, want %v", got, tc.want)
+			}
+			wantCount := 0
+			if tc.want {
+				wantCount = 1
+			}
+			trips := s.canaries.Trips(0)
+			events := db.insertedEvents()
+			if len(trips) != wantCount || len(events) != wantCount {
+				t.Fatalf("trips=%d events=%d, want %d each", len(trips), len(events), wantCount)
+			}
+			if tc.want && (trips[0].CanaryID != c.ID || trips[0].Channel != "honeypot" || events[0].Metadata["canary_id"] != c.ID) {
+				t.Fatal("observed value did not preserve its canary identity and channel")
+			}
+		})
+	}
+}
+
+func TestCanaryArtifactReadNeedsObservedTrigger(t *testing.T) {
+	for _, method := range []string{http.MethodGet, http.MethodHead} {
+		t.Run(method, func(t *testing.T) {
+			db := &fakeDB{}
+			s := newCanaryTestServer(t, db)
+			c, err := s.canaries.Create(canary.KindFile, "report", "share")
+			if err != nil {
+				t.Fatal(err)
+			}
+			rec := httptest.NewRecorder()
+			s.mux.ServeHTTP(rec, authReq(http.MethodGet, "/api/canaries/artifact?id="+c.ID, ""))
+			if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), c.URL(s.config.Canary.BaseURL)) {
+				t.Fatal("artifact did not contain the expected beacon")
+			}
+			// Downloading/reading bytes does not fetch their linked resources.
+			if len(s.canaries.Trips(0)) != 0 || len(db.insertedEvents()) != 0 {
+				t.Fatal("artifact bytes alone triggered a trip")
+			}
+			// A link scanner can issue the same request as a malicious reader.
+			// QPot records the interaction, not the requester's intent.
+			req := httptest.NewRequest(method, "/c/"+c.Token+"?r=img", nil)
+			req.Header.Set("User-Agent", "Authorized-Link-Scanner/1.0")
+			s.mux.ServeHTTP(httptest.NewRecorder(), req)
+			trips := s.canaries.Trips(0)
+			if len(trips) != 1 || len(db.insertedEvents()) != 1 {
+				t.Fatal("beacon request was not recorded")
+			}
+			if trips[0].Channel != "http" || trips[0].UserAgent != req.UserAgent() {
+				t.Fatalf("beacon observation context lost: %+v", trips[0])
+			}
+		})
+	}
+}
