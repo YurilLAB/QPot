@@ -314,9 +314,16 @@ func FuzzKeyFingerprint(f *testing.F) {
 		if _, err := hex.DecodeString(got); err != nil {
 			t.Fatalf("fingerprint %q is not hex", got)
 		}
-		// Only blank lines may come before the armor.
-		if !strings.HasPrefix(strings.TrimLeft(strings.ReplaceAll(string(data), "\r\n", "\n"), " \t\n"), armorBegin+"\n") {
+		// Only blank lines may come before the armor. The BEGIN line itself
+		// may end in blanks: RFC 4880 6.2 lets armor lines carry trailing
+		// whitespace, which readers ignore.
+		norm := strings.TrimLeft(strings.ReplaceAll(string(data), "\r\n", "\n"), " \t\n")
+		if first, _, ok := strings.Cut(norm, "\n"); !ok || strings.TrimRight(first, " \t") != armorBegin {
 			t.Fatalf("accepted with bytes before the BEGIN line: %q", data)
+		}
+		// What gets installed is clean armor whatever the input's blanks.
+		if !bytes.HasPrefix(canonical, []byte(armorBegin+"\n\n")) || !bytes.HasSuffix(canonical, []byte("\n"+armorEnd+"\n")) {
+			t.Fatalf("canonical form is not clean armor: %q", canonical)
 		}
 		// The installed form holds the same packets and checks the same.
 		raw, err := dearmor(data)
