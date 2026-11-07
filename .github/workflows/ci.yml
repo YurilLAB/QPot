@@ -31,7 +31,8 @@ name: CI
 #                  runtime-portability breaks a cross-compile cannot.
 #   coverage     - reports total/per-package coverage and guards a low floor.
 #   install-windows - scripts/install.ps1 against a local fake release, on
-#                  PowerShell 7 and Windows PowerShell 5.1.
+#                  PowerShell 7 and Windows PowerShell 5.1, and the setup
+#                  tests that build only on Windows.
 #
 # The tool versions and gosec's exclude list live in .github/ci-tools.env,
 # which every job that needs them loads first; scripts/ci-local.sh runs these
@@ -620,3 +621,8 @@ jobs:
       - name: install.ps1 on Windows PowerShell 5.1
         shell: pwsh
         run: powershell -NoProfile -ExecutionPolicy Bypass -File ./scripts/test-install.ps1
+      - name: Windows-only setup tests
+        # Tests that build only on Windows, such as starting Docker Desktop;
+        # the Linux jobs never compile them.
+        shell: pwsh
+        run: go test -count=1 ./internal/hostsetup/
