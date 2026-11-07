@@ -516,12 +516,25 @@ qpot cluster join --id <cluster-id> [flags]
 | `--node-name string` | Name for this node (default: hostname). |
 | `--node-addr string` | Address for this node (auto-detected if unset). |
 | `--node-port int` | Port for cluster communication (default `7946`). |
-| `--qpot-id string` | QPot ID (auto-detected if unset). |
+| `--operator-cert` | Also accept a seed serving a certificate from your own or a public CA, checked against the system roots. |
+| `--ca-file string` | PEM bundle the seed's certificate is checked against instead of the system roots (implies `--operator-cert`). |
+| `--qpot-id string` | Deprecated and ignored: the QPot ID is the web UI's credential and is not sent to the cluster. |
 
 ```bash
 qpot cluster join --id qc_abc123 --password "SecurePass123!" --seed 192.168.1.10:7946
 qpot cluster join --id qc_abc123 -p "MyP@ssw0rd" -s 10.0.0.5:7946 -s 10.0.0.6:7946 --node-name sensor-01
+qpot cluster join --id qc_abc123 -s seed.example.net:7946 --ca-file /etc/qpot/cluster-ca.pem
 ```
+
+#### Which seeds a joining node trusts
+
+By default a joining node trusts only the cluster's own certificate
+authority, which the cluster ID pins: the seed must present a certificate
+from that CA before the password is sent. If the seed serves a certificate
+from your own or a public CA instead (`tls_cert_path` in its `cluster.json`),
+add `--operator-cert` to accept one the system roots trust, or
+`--ca-file <bundle.pem>` to check it against a specific CA bundle. The node
+keeps that choice for its later connections to the other members.
 
 ### Join approval
 

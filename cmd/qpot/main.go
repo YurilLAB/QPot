@@ -960,6 +960,8 @@ func newClusterJoinCommand() *cobra.Command {
 		nodePort     int
 		qpotID       string
 		instanceName string
+		operatorCert bool
+		caFile       string
 	)
 
 	cmd := &cobra.Command{
@@ -982,6 +984,12 @@ func newClusterJoinCommand() *cobra.Command {
 			existing, _ := mgr.LoadCluster()
 			if existing != nil {
 				return fmt.Errorf("already in cluster %s. Leave first with 'qpot cluster leave'", existing.ID)
+			}
+			// A missing CA bundle is reported before the password is asked for.
+			if caFile != "" {
+				if _, err := os.Stat(caFile); err != nil {
+					return fmt.Errorf("--ca-file: %w", err)
+				}
 			}
 
 			// Prompt for password if not provided (no echo)
@@ -1020,8 +1028,11 @@ func newClusterJoinCommand() *cobra.Command {
 				Capabilities: []string{"honeypot", "sensor"},
 			}
 
-			// Join cluster
-			c, err := mgr.JoinCluster(clusterID, password, localNode, seedNodes)
+			// Join cluster: by default the seed must prove itself with the
+			// cluster CA the cluster ID names; an operator certificate is
+			// accepted only when asked for.
+			c, err := mgr.JoinClusterTrusting(clusterID, password, localNode, seedNodes,
+				cluster.JoinTrust{OperatorCerts: operatorCert, CAFile: caFile})
 			if err != nil {
 				return fmt.Errorf("failed to join cluster: %w", err)
 			}
@@ -1056,6 +1067,10 @@ func newClusterJoinCommand() *cobra.Command {
 		panic(fmt.Errorf("cluster join: deprecate --qpot-id: %w", err))
 	}
 	cmd.Flags().StringVar(&instanceName, "instance", "default", "QPot instance name")
+	cmd.Flags().BoolVar(&operatorCert, "operator-cert", false,
+		"Also accept a seed serving a certificate from your own or a public CA (tls_cert_path in its cluster.json), checked against the system roots")
+	cmd.Flags().StringVar(&caFile, "ca-file", "",
+		"PEM bundle the seed's operator certificate is checked against instead of the system roots (implies --operator-cert)")
 	if err := cmd.MarkFlagRequired("id"); err != nil {
 		panic(fmt.Errorf("cluster join: mark --id required: %w", err))
 	}

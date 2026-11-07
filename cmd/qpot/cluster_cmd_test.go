@@ -1,14 +1,24 @@
 package main
 
 import (
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
+	"crypto/tls"
+	"crypto/x509"
+	"crypto/x509/pkix"
+	"encoding/pem"
 	"io"
+	"math/big"
 	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/qpot/qpot/internal/cluster"
 )
@@ -162,5 +172,89 @@ func TestClusterJoinSendsNoQPotID(t *testing.T) {
 	}
 	if strings.Contains(string(got), id.ID) || strings.Contains(string(got), "qpot_id") {
 		t.Fatalf("the join request carries the instance's QPot ID: %s", got)
+	}
+}
+
+// testCA makes a CA and a certificate it signed for 127.0.0.1, and returns
+// the CA as PEM and the server certificate.
+func testCA(t *testing.T) ([]byte, tls.Certificate) {
+	t.Helper()
+	caKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	caTmpl := &x509.Certificate{SerialNumber: big.NewInt(1), Subject: pkix.Name{CommonName: "operator CA"},
+		NotBefore: time.Now().Add(-time.Hour), NotAfter: time.Now().Add(time.Hour),
+		IsCA: true, BasicConstraintsValid: true, KeyUsage: x509.KeyUsageCertSign}
+	caDER, err := x509.CreateCertificate(rand.Reader, caTmpl, caTmpl, &caKey.PublicKey, caKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	caCert, _ := x509.ParseCertificate(caDER)
+	leafKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	leafTmpl := &x509.Certificate{SerialNumber: big.NewInt(2), Subject: pkix.Name{CommonName: "seed"},
+		NotBefore: time.Now().Add(-time.Hour), NotAfter: time.Now().Add(time.Hour),
+		IPAddresses: []net.IP{net.ParseIP("127.0.0.1")}, ExtKeyUsage: []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+		KeyUsage: x509.KeyUsageDigitalSignature}
+	leafDER, err := x509.CreateCertificate(rand.Reader, leafTmpl, caCert, &leafKey.PublicKey, caKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: caDER}),
+		tls.Certificate{Certificate: [][]byte{leafDER}, PrivateKey: leafKey}
+}
+
+// TestClusterJoinTrustFlags: a seed serving an operator certificate is
+// refused unless the join is told to accept one: --ca-file checks it against
+// that bundle, --operator-cert alone against the system roots.
+func TestClusterJoinTrustFlags(t *testing.T) {
+	caPEM, cert := testCA(t)
+	otherPEM, _ := testCA(t)
+	var reached atomic.Int32
+	seed := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		reached.Add(1)
+		http.Error(w, "denied", http.StatusForbidden)
+	}))
+	seed.TLS = &tls.Config{Certificates: []tls.Certificate{cert}, MinVersion: tls.VersionTLS12}
+	seed.StartTLS()
+	defer seed.Close()
+	dir := t.TempDir()
+	caFile, otherFile := filepath.Join(dir, "ca.pem"), filepath.Join(dir, "other.pem")
+	if err := os.WriteFile(caFile, caPEM, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(otherFile, otherPEM, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	join := func(extra ...string) (bool, error) {
+		t.Helper()
+		clusterHome(t)
+		before := reached.Load()
+		cmd := newClusterCommand()
+		cmd.SetArgs(append([]string{"join", "--id", "qc_test", "--password", "correct-horse-battery",
+			"--seed", strings.TrimPrefix(seed.URL, "https://"), "--node-addr", "127.0.0.1"}, extra...))
+		cmd.SetOut(io.Discard)
+		cmd.SetErr(io.Discard)
+		err := cmd.Execute()
+		return reached.Load() > before, err
+	}
+	if got, _ := join(); got {
+		t.Error("a seed with an operator certificate was trusted without --operator-cert or --ca-file")
+	}
+	if got, _ := join("--operator-cert"); got {
+		t.Error("--operator-cert trusted a CA the system roots do not hold")
+	}
+	if got, _ := join("--ca-file", otherFile); got {
+		t.Error("--ca-file trusted a certificate from another CA")
+	}
+	if got, _ := join("--ca-file", caFile); !got {
+		t.Error("--ca-file did not trust the seed's certificate from that CA")
+	}
+	if got, err := join("--ca-file", filepath.Join(dir, "missing.pem")); err == nil || got || !strings.Contains(err.Error(), "--ca-file") {
+		t.Errorf("a missing --ca-file: err %v, seed reached %v", err, got)
 	}
 }
