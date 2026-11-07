@@ -285,13 +285,18 @@ func TestSetupDryRunChangesNothing(t *testing.T) {
 // agreed, and the summary shows the QPot ID on the owner's terminal.
 func TestSetupInteractive(t *testing.T) {
 	d := ready()
-	port := freePort(t)
 	busy, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer busy.Close()
 	busyPort := busy.Addr().(*net.TCPAddr).Port
+	// Picked while busy is held: freePort closes its listener, so taking it
+	// first let the kernel hand the same port to busy (seen on CI).
+	port := freePort(t)
+	if port == busyPort {
+		t.Fatalf("free port %d equals the busy one", port)
+	}
 	answers := strings.Join([]string{
 		"bad name!",   // instance name: invalid
 		"flow4",       // instance name
