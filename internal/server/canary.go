@@ -325,6 +325,10 @@ func (s *Server) handleCanaryArtifact(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	id := r.URL.Query().Get("id")
+	if id == "" {
+		s.sendError(w, http.StatusBadRequest, "id required")
+		return
+	}
 	c, ok := s.canaries.Get(id)
 	if !ok {
 		s.sendError(w, http.StatusNotFound, "canary not found")

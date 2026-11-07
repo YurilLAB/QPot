@@ -1,6 +1,7 @@
 package server
 
 import (
+	"encoding/json"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -91,6 +92,37 @@ func TestStaticServesRealDashboard(t *testing.T) {
 	}
 }
 
+// unrouted reports whether an answer is the mux's own 404 - no route took
+// the request. A handler's JSON 404 (an unknown canary) proves the route
+// exists, so only a 404 whose body is the mux's text, or not JSON, counts.
+func unrouted(code int, body []byte) bool {
+	return code == http.StatusNotFound && (string(body) == "404 page not found\n" || !json.Valid(body))
+}
+
+// apiRouted sends GET /api<ep> through srv's mux, authenticated, and reports
+// whether a route took it.
+func apiRouted(srv *Server, ep string) bool {
+	req := httptest.NewRequest(http.MethodGet, "/api"+ep, nil)
+	req.Header.Set("X-QPot-ID", validTestID)
+	rec := httptest.NewRecorder()
+	srv.mux.ServeHTTP(rec, req)
+	return !unrouted(rec.Code, rec.Body.Bytes())
+}
+
+// dashboardFetches returns the ${API_BASE}/<ep> endpoints page fetches.
+func dashboardFetches(page string) []string {
+	re := regexp.MustCompile(`\$\{API_BASE\}(/[a-zA-Z][a-zA-Z0-9/_-]*)`)
+	seen := map[string]bool{}
+	var eps []string
+	for _, m := range re.FindAllStringSubmatch(page, -1) {
+		if !seen[m[1]] {
+			seen[m[1]] = true
+			eps = append(eps, m[1])
+		}
+	}
+	return eps
+}
+
 // TestEmbeddedDashboardEndpointsAreRouted is the other half of "connected":
 // every ${API_BASE}/<ep> the dashboard fetches must have a matching route
 // registered in setupRoutes. This catches the dashboard calling an endpoint
@@ -112,39 +144,58 @@ func TestEmbeddedDashboardEndpointsAreRouted(t *testing.T) {
 		t.Fatalf("server.New: %v", err)
 	}
 
-	re := regexp.MustCompile(`\$\{API_BASE\}(/[a-zA-Z][a-zA-Z0-9/_-]*)`)
-	seen := map[string]bool{}
-	for _, m := range re.FindAllStringSubmatch(page, -1) {
-		ep := m[1]
-		if seen[ep] {
-			continue
-		}
-		seen[ep] = true
-		// The dashboard must authenticate; reaching the handler (not 404)
-		// proves the route exists. We assert "not 404" rather than 200 since
-		// the DB is intentionally unreachable here.
-		req := httptest.NewRequest(http.MethodGet, "/api"+ep, nil)
-		req.Header.Set("X-QPot-ID", validTestID)
-		rec := httptest.NewRecorder()
-		srv.mux.ServeHTTP(rec, req)
-		if rec.Code == http.StatusNotFound {
+	// The dashboard must authenticate; reaching a handler proves the route
+	// exists. A handler may answer anything, a 404 of its own included
+	// (the database is intentionally unreachable here).
+	eps := dashboardFetches(page)
+	if len(eps) == 0 {
+		t.Error("found no ${API_BASE} fetch calls in the embedded dashboard")
+	}
+	for _, ep := range eps {
+		if !apiRouted(srv, ep) {
 			t.Errorf("dashboard fetches /api%s but no route is registered (404)", ep)
 		}
-	}
-	if len(seen) == 0 {
-		t.Error("found no ${API_BASE} fetch calls in the embedded dashboard")
 	}
 
 	// The landing page and the attack map call these directly.
 	for _, ep := range []string{"/status", "/overview", "/iocs/export", "/map/stream"} {
-		req := httptest.NewRequest(http.MethodGet, "/api"+ep, nil)
-		req.Header.Set("X-QPot-ID", validTestID)
-		rec := httptest.NewRecorder()
-		srv.mux.ServeHTTP(rec, req)
-		if rec.Code == http.StatusNotFound {
+		if !apiRouted(srv, ep) {
 			t.Errorf("landing page / map fetch /api%s but no route is registered (404)", ep)
 		}
 	}
+
+	// Negative control: a page that fetches a made-up endpoint is caught.
+	t.Run("made-up endpoint", func(t *testing.T) {
+		found := false
+		for _, ep := range dashboardFetches(page + "\nfetch(`${API_BASE}/nope`);\n") {
+			if ep == "/nope" {
+				found = true
+				if apiRouted(srv, ep) {
+					t.Error("a fetch of ${API_BASE}/nope counts as routed")
+				}
+			}
+		}
+		if !found {
+			t.Error("the made-up fetch was not found in the page")
+		}
+	})
+	t.Run("what counts as unrouted", func(t *testing.T) {
+		for _, c := range []struct {
+			code int
+			body string
+			want bool
+		}{
+			{http.StatusNotFound, "404 page not found\n", true},
+			{http.StatusNotFound, "<html>not found</html>", true},
+			{http.StatusNotFound, `{"error":"canary not found"}` + "\n", false},
+			{http.StatusBadRequest, `{"error":"id required"}`, false},
+			{http.StatusServiceUnavailable, "database not available\n", false},
+		} {
+			if got := unrouted(c.code, []byte(c.body)); got != c.want {
+				t.Errorf("unrouted(%d, %q) = %v, want %v", c.code, c.body, got, c.want)
+			}
+		}
+	})
 }
 
 func TestStaticRejectsNonGET(t *testing.T) {

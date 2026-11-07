@@ -167,6 +167,28 @@ func TestCanaryFileArtifactDownload(t *testing.T) {
 	}
 }
 
+// A download without an id is a bad request, not a missing canary; an
+// unknown id is.
+func TestCanaryArtifactNeedsAnID(t *testing.T) {
+	s := newCanaryTestServer(t, &fakeDB{})
+	for _, c := range []struct {
+		path string
+		want int
+		msg  string
+	}{
+		{"/api/canaries/artifact", http.StatusBadRequest, "id required"},
+		{"/api/canaries/artifact?id=", http.StatusBadRequest, "id required"},
+		{"/api/canaries/artifact?id=cnry_nosuch", http.StatusNotFound, "canary not found"},
+	} {
+		rec := httptest.NewRecorder()
+		s.mux.ServeHTTP(rec, authReq(http.MethodGet, c.path, ""))
+		var e map[string]string
+		if rec.Code != c.want || json.Unmarshal(rec.Body.Bytes(), &e) != nil || e["error"] != c.msg {
+			t.Errorf("%s: %d %s, want %d %q", c.path, rec.Code, rec.Body.String(), c.want, c.msg)
+		}
+	}
+}
+
 func TestCanaryMatcherTripsOnCredentialInSession(t *testing.T) {
 	db := &fakeDB{}
 	s := newCanaryTestServer(t, &fakeDB{})
