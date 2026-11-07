@@ -12,6 +12,7 @@ import (
 	"crypto/x509/pkix"
 	"encoding/base32"
 	"encoding/base64"
+	"encoding/pem"
 	"errors"
 	"fmt"
 	"math/big"
@@ -19,24 +20,47 @@ import (
 	"net/http"
 	"strings"
 	"time"
+
+	"github.com/qpot/qpot/internal/hostsetup"
 )
 
 // Cluster TLS.
 //
 // Each cluster has a certificate authority of its own: a random Ed25519 key
-// made by `cluster init` (Cluster.CAKey), which a node receives when it is
-// admitted. The cluster ID is derived from the CA's public key, so whoever
+// made by `cluster init` (Cluster.CAKey), kept only by that enrollment host.
+// Joiners make their own private keys and receive signed leaf certificates,
+// never the CA key. The cluster ID is derived from the CA's public key, so whoever
 // knows the ID - a joiner as much as a member - checks that a node presents a
 // certificate from that CA, and no node serves anything derived from the
 // password: nothing to test password guesses against offline. Someone who
 // knows the password but not the CA key can neither pass as a node nor
 // collect the password, or the member key a joiner is given, on the way.
 
-// errOldClusterFormat stops a cluster created before clusters had their own
-// CA: its TLS rested on the password, and it cannot be moved over in place.
-var errOldClusterFormat = errors.New("this cluster was created by an older QPot, whose cluster TLS is " +
-	"derived from the password: re-create it ('qpot cluster leave' on every node, then " +
-	"'qpot cluster init' and 'qpot cluster join')")
+// Old clusters either derived TLS from the password or distributed the CA
+// key. Removing local copies cannot revoke those keys, so use a new CA/ID.
+var errOldClusterFormat = hostsetup.E("QP-CLUSTER-001").WithWhy("this cluster uses legacy shared signing credentials: " +
+	"stop the old control planes, update all nodes, run 'qpot cluster upgrade' on the enrollment host, " +
+	"then leave and rejoin the other nodes using the new cluster ID")
+
+const maxNodeCSRBytes = 4096
+
+func checkClusterVersion(version int) error {
+	if version < ProtocolVersion {
+		return errOldClusterFormat
+	}
+	if version != ProtocolVersion {
+		return hostsetup.E("QP-CLUSTER-002").WithWhy("Unsupported cluster protocol version %d; update QPot before starting this cluster.", version)
+	}
+	return nil
+}
+
+func identityFailure(err error) error {
+	var coded *hostsetup.Error
+	if errors.As(err, &coded) {
+		return err
+	}
+	return hostsetup.E("QP-CLUSTER-005").WithWhy("The local cluster signing identity could not be validated or renewed; restore trusted state or re-enroll the node.").Wrap(err)
+}
 
 // clusterIDFor returns the cluster ID of a CA public key: ClusterIDPrefix and
 // the first ClusterIDLength base32 characters (120 bits) of its SHA-256.
@@ -56,8 +80,7 @@ func newClusterCA() (caKey, clusterID string, err error) {
 	return base64.StdEncoding.EncodeToString(priv.Seed()), clusterIDFor(pub), nil
 }
 
-// clusterCA rebuilds the CA key and certificate from Cluster.CAKey. Ed25519
-// signing is deterministic, so every node builds the same certificate.
+// clusterCA rebuilds the enrollment authority's key and certificate.
 func clusterCA(caKey string) (ed25519.PrivateKey, *x509.Certificate, error) {
 	seed, err := base64.StdEncoding.DecodeString(caKey)
 	if err != nil || len(seed) != ed25519.SeedSize {
@@ -97,42 +120,188 @@ func checkClusterCA(clusterID, caKey string) error {
 	return nil
 }
 
-// newNodeCertificate issues a node certificate (a fresh key, kept in memory)
-// signed by the cluster CA. The CA certificate goes in the chain, so a peer
-// can match its public key with the cluster ID.
-func newNodeCertificate(caKey, nodeID string) (tls.Certificate, error) {
-	signer, ca, err := clusterCA(caKey)
-	if err != nil {
-		return tls.Certificate{}, err
-	}
+// newNodeRequest makes a private key and proof-of-possession CSR locally. Only
+// the CSR leaves the node; the key is persisted in its private cluster state.
+func newNodeRequest() (keyPEM, csrPEM string, err error) {
 	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
-		return tls.Certificate{}, err
+		return "", "", err
+	}
+	keyDER, err := x509.MarshalECPrivateKey(key)
+	if err != nil {
+		return "", "", err
+	}
+	keyPEM = string(pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: keyDER}))
+	csrPEM, err = nodeRequestForKey(keyPEM)
+	return keyPEM, csrPEM, err
+}
+
+func nodeRequestForKey(keyPEM string) (string, error) {
+	block, rest := pem.Decode([]byte(keyPEM))
+	if block == nil || block.Type != "EC PRIVATE KEY" || len(strings.TrimSpace(string(rest))) != 0 {
+		return "", errors.New("cluster TLS: malformed node private key")
+	}
+	key, err := x509.ParseECPrivateKey(block.Bytes)
+	if err != nil || key.Curve != elliptic.P256() {
+		return "", errors.New("cluster TLS: node private key must use P-256")
+	}
+	csr, err := x509.CreateCertificateRequest(rand.Reader, &x509.CertificateRequest{}, key)
+	if err != nil {
+		return "", err
+	}
+	return string(pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE REQUEST", Bytes: csr})), nil
+}
+
+func parseNodeRequest(csrPEM string) (request *x509.CertificateRequest, resultErr error) {
+	defer func() {
+		if resultErr != nil {
+			resultErr = hostsetup.E("QP-CLUSTER-003").WithWhy("The node certificate request is invalid; update the joining QPot and retry.").Wrap(resultErr)
+		}
+	}()
+	if len(csrPEM) == 0 || len(csrPEM) > maxNodeCSRBytes {
+		return nil, errors.New("cluster TLS: a node certificate request is required (update the joining QPot)")
+	}
+	block, rest := pem.Decode([]byte(csrPEM))
+	if block == nil || block.Type != "CERTIFICATE REQUEST" || len(strings.TrimSpace(string(rest))) != 0 {
+		return nil, errors.New("cluster TLS: malformed node certificate request")
+	}
+	csr, err := x509.ParseCertificateRequest(block.Bytes)
+	if err != nil {
+		return nil, fmt.Errorf("cluster TLS: parse node certificate request: %w", err)
+	}
+	key, ok := csr.PublicKey.(*ecdsa.PublicKey)
+	if !ok || key.Curve != elliptic.P256() {
+		return nil, errors.New("cluster TLS: node certificate request must use P-256")
+	}
+	if err := csr.CheckSignature(); err != nil {
+		return nil, fmt.Errorf("cluster TLS: invalid node certificate request signature: %w", err)
+	}
+	return csr, nil
+}
+
+// issueNodeCertificate signs only the CSR's public key. Identity, lifetime,
+// usages and constraints are fixed here, never copied from requested extensions.
+func issueNodeCertificate(caKey, nodeID, csrPEM string) (string, error) {
+	csr, err := parseNodeRequest(csrPEM)
+	if err != nil {
+		return "", err
+	}
+	signer, ca, err := clusterCA(caKey)
+	if err != nil {
+		return "", err
 	}
 	serial, err := rand.Int(rand.Reader, new(big.Int).Lsh(big.NewInt(1), 120))
 	if err != nil {
-		return tls.Certificate{}, err
+		return "", err
 	}
 	tmpl := &x509.Certificate{
-		SerialNumber: serial,
-		Subject:      pkix.Name{CommonName: "qpot-node " + nodeID},
-		DNSNames:     []string{"qpot-cluster-node"},
-		IPAddresses:  []net.IP{net.IPv4(127, 0, 0, 1)},
-		NotBefore:    time.Now().Add(-time.Hour),
-		NotAfter:     time.Now().Add(365 * 24 * time.Hour),
-		KeyUsage:     x509.KeyUsageDigitalSignature,
-		ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth, x509.ExtKeyUsageClientAuth},
+		SerialNumber:          serial,
+		Subject:               pkix.Name{CommonName: "qpot-node " + nodeID},
+		DNSNames:              []string{"qpot-cluster-node"},
+		IPAddresses:           []net.IP{net.IPv4(127, 0, 0, 1)},
+		NotBefore:             time.Now().Add(-time.Hour),
+		NotAfter:              time.Now().Add(365 * 24 * time.Hour),
+		KeyUsage:              x509.KeyUsageDigitalSignature,
+		ExtKeyUsage:           []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth, x509.ExtKeyUsageClientAuth},
+		BasicConstraintsValid: true,
 	}
-	der, err := x509.CreateCertificate(rand.Reader, tmpl, ca, &key.PublicKey, signer)
+	der, err := x509.CreateCertificate(rand.Reader, tmpl, ca, csr.PublicKey, signer)
 	if err != nil {
-		return tls.Certificate{}, err
+		return "", err
 	}
-	return tls.Certificate{Certificate: [][]byte{der, ca.Raw}, PrivateKey: key}, nil
+	chain := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der})
+	chain = append(chain, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: ca.Raw})...)
+	return string(chain), nil
+}
+
+// nodeCertificate checks the persisted or newly enrolled identity before use.
+// In particular, a seed cannot substitute a certificate for a different key,
+// node or cluster, or grant a joining member certificate-signing powers.
+func nodeCertificate(clusterID, nodeID, certPEM, keyPEM string) (tls.Certificate, error) {
+	return nodeCertificateAt(clusterID, nodeID, certPEM, keyPEM, time.Now())
+}
+
+func nodeCertificateAt(clusterID, nodeID, certPEM, keyPEM string, now time.Time) (certificate tls.Certificate, resultErr error) {
+	defer func() {
+		if resultErr != nil && !errors.Is(resultErr, errOldClusterFormat) {
+			resultErr = hostsetup.E("QP-CLUSTER-005").WithWhy("The node identity is invalid or expired; re-enroll through the enrollment host.").Wrap(resultErr)
+		}
+	}()
+	if certPEM == "" || keyPEM == "" {
+		return tls.Certificate{}, errOldClusterFormat
+	}
+	cert, err := tls.X509KeyPair([]byte(certPEM), []byte(keyPEM))
+	if err != nil {
+		return tls.Certificate{}, fmt.Errorf("cluster TLS: invalid node identity: %w", err)
+	}
+	chain := make([]*x509.Certificate, 0, len(cert.Certificate))
+	for _, der := range cert.Certificate {
+		c, err := x509.ParseCertificate(der)
+		if err != nil {
+			return tls.Certificate{}, err
+		}
+		chain = append(chain, c)
+	}
+	if len(chain) != 2 || nodeID == "" || chain[0].Subject.CommonName != "qpot-node "+nodeID ||
+		chain[0].IsCA || chain[0].KeyUsage&x509.KeyUsageCertSign != 0 {
+		return tls.Certificate{}, errors.New("cluster TLS: certificate is not this node's leaf identity")
+	}
+	if err := verifyClusterPeerAt(clusterID, chain, now); err != nil {
+		return tls.Certificate{}, fmt.Errorf("cluster TLS: invalid or expired node certificate; re-enroll this node: %w", err)
+	}
+	return cert, nil
+}
+
+// renewAuthorityCertificateLocked renews only this enrollment host's own
+// identity, near expiry or after downtime. Validate its existing key, assigned
+// identity and chain at issuance time before using the authority key. Ordinary
+// members have no signing key and must re-enroll. Caller holds m.mu.
+func (m *Manager) renewAuthorityCertificateLocked() error {
+	c := m.cluster
+	if c.CAKey == "" || c.NodeCertificate == "" || c.NodeKey == "" || c.LocalNode == nil {
+		return nil
+	}
+	if err := checkClusterCA(c.ID, c.CAKey); err != nil {
+		return err
+	}
+	block, _ := pem.Decode([]byte(c.NodeCertificate))
+	if block == nil || block.Type != "CERTIFICATE" {
+		return errors.New("cluster TLS: malformed enrollment host certificate")
+	}
+	leaf, err := x509.ParseCertificate(block.Bytes)
+	if err != nil {
+		return err
+	}
+	if time.Until(leaf.NotAfter) > 30*24*time.Hour {
+		return nil
+	}
+	if _, err := nodeCertificateAt(c.ID, c.LocalNode.ID, c.NodeCertificate, c.NodeKey, leaf.NotBefore); err != nil {
+		return err
+	}
+	csr, err := nodeRequestForKey(c.NodeKey)
+	if err != nil {
+		return err
+	}
+	certificate, err := issueNodeCertificate(c.CAKey, c.LocalNode.ID, csr)
+	if err != nil {
+		return err
+	}
+	previous := c.NodeCertificate
+	c.NodeCertificate = certificate
+	if err := m.saveClusterLocked(); err != nil {
+		c.NodeCertificate = previous
+		return fmt.Errorf("cluster TLS: save renewed enrollment host certificate: %w", err)
+	}
+	return nil
 }
 
 // verifyClusterPeer checks that certs (a peer's chain) end in a certificate
 // signed by the CA whose public key gives clusterID.
 func verifyClusterPeer(clusterID string, certs []*x509.Certificate) error {
+	return verifyClusterPeerAt(clusterID, certs, time.Now())
+}
+
+func verifyClusterPeerAt(clusterID string, certs []*x509.Certificate, now time.Time) error {
 	if len(certs) == 0 {
 		return errors.New("cluster TLS: peer sent no certificate")
 	}
@@ -143,7 +312,7 @@ func verifyClusterPeer(clusterID string, certs []*x509.Certificate) error {
 		}
 		roots := x509.NewCertPool()
 		roots.AddCert(c)
-		if _, err := certs[0].Verify(x509.VerifyOptions{Roots: roots,
+		if _, err := certs[0].Verify(x509.VerifyOptions{Roots: roots, CurrentTime: now,
 			KeyUsages: []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth}}); err == nil {
 			return nil
 		}

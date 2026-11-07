@@ -1,6 +1,7 @@
 package database
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"net/http"
@@ -117,6 +118,11 @@ func TestESInsertAttackerShapedEvents(t *testing.T) {
 	}
 	if len(got) != len(events) {
 		t.Fatalf("stored %d of %d events", len(got), len(events))
+	}
+	for _, event := range got {
+		if event.Honeypot == "dionaea" && !bytes.Equal(event.Payload, events[0].Payload) {
+			t.Fatal("stored binary payload differs from captured bytes")
+		}
 	}
 }
 

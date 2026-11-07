@@ -116,7 +116,7 @@ func TestClusterRequestsEscapeJoinerNames(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer host.Stop()
-	host.HandleJoinRequest(&cluster.JoinRequest{ClusterID: cl.ID, Password: pw, PollSecret: strings.Repeat("p", 32), NodeName: hostileText,
+	host.HandleJoinRequest(&cluster.JoinRequest{Version: cluster.ProtocolVersion, NodeCSR: testNodeCSR(t), ClusterID: cl.ID, Password: pw, PollSecret: strings.Repeat("p", 32), NodeName: hostileText,
 		InstanceName: "\x1b[31mprod", NodeAddress: "10.0.0.8", NodePort: 7946}, "10.0.0.8")
 
 	out := captureStdout(t, func() {

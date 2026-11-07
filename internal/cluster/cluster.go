@@ -18,16 +18,21 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/qpot/qpot/internal/hostsetup"
 	"golang.org/x/crypto/bcrypt"
 )
 
 const (
+	// ProtocolVersion requires node-specific certificate enrollment. Older
+	// QPot clients must update before they can join or run this cluster.
+	ProtocolVersion    = 2
 	ClusterIDPrefix    = "qc_"
 	ClusterIDLength    = 24
 	NodeIDPrefix       = "qn_"
@@ -37,6 +42,7 @@ const (
 
 // Cluster represents a QPot cluster
 type Cluster struct {
+	Version      int    `json:"version,omitempty" yaml:"version,omitempty"`
 	ID           string `json:"id" yaml:"id"`
 	Name         string `json:"name" yaml:"name"`
 	PasswordHash string `json:"password_hash" yaml:"password_hash"`
@@ -45,12 +51,16 @@ type Cluster struct {
 	// a node the host denied (or has not approved) cannot take part. Empty
 	// for clusters created before it existed: their peers use the password.
 	MemberKey string `json:"member_key,omitempty" yaml:"member_key,omitempty"`
-	// CAKey is the cluster's certificate authority (see autotls.go): the ID
-	// is derived from its public key, and a node gets it when admitted.
-	CAKey     string            `json:"ca_key,omitempty" yaml:"ca_key,omitempty"`
-	CreatedAt time.Time         `json:"created_at" yaml:"created_at"`
-	UpdatedAt time.Time         `json:"updated_at" yaml:"updated_at"`
-	Metadata  map[string]string `json:"metadata,omitempty" yaml:"metadata,omitempty"`
+	// CAKey exists only on the host that initialized the cluster, which acts
+	// as its enrollment authority. It is never sent to admitted members.
+	CAKey string `json:"ca_key,omitempty" yaml:"ca_key,omitempty"`
+	// NodeKey is generated locally; NodeCertificate is the CA-signed leaf and
+	// public CA chain. Both survive restart in this node's private state.
+	NodeKey         string            `json:"node_key,omitempty" yaml:"node_key,omitempty"`
+	NodeCertificate string            `json:"node_certificate,omitempty" yaml:"node_certificate,omitempty"`
+	CreatedAt       time.Time         `json:"created_at" yaml:"created_at"`
+	UpdatedAt       time.Time         `json:"updated_at" yaml:"updated_at"`
+	Metadata        map[string]string `json:"metadata,omitempty" yaml:"metadata,omitempty"`
 
 	// Node management
 	LocalNode *Node            `json:"local_node" yaml:"local_node"`
@@ -223,6 +233,7 @@ type NodeStats struct {
 
 // JoinRequest represents a request to join a cluster
 type JoinRequest struct {
+	Version      int               `json:"version"`
 	ClusterID    string            `json:"cluster_id"`
 	Password     string            `json:"password"`
 	NodeName     string            `json:"node_name"`
@@ -233,13 +244,16 @@ type JoinRequest struct {
 	Capabilities []string          `json:"capabilities,omitempty"`
 	// PollSecret is a random secret of the joiner's. A join that waits for
 	// host approval is collected only by a poll that carries it (the outcome
-	// holds the member key and CA key), not by anyone who has the password and
-	// the request ID. The host keeps only its hash.
+	// holds the member key and node certificate), not by anyone who has the
+	// password and the request ID. The host keeps only its hash.
 	PollSecret string `json:"poll_secret,omitempty"`
+	// NodeCSR proves possession of the joining node's locally generated key.
+	NodeCSR string `json:"node_csr"`
 }
 
 // JoinResponse represents the response to a join request
 type JoinResponse struct {
+	Version int  `json:"version"`
 	Success bool `json:"success"`
 	// Status is "approved" when the node was admitted, or "pending" when the
 	// cluster requires host approval and the request is now awaiting it.
@@ -251,14 +265,27 @@ type JoinResponse struct {
 	ClusterName string         `json:"cluster_name,omitempty"`
 	Nodes       []*Node        `json:"nodes,omitempty"`
 	Config      *ClusterConfig `json:"config,omitempty"`
-	// MemberKey and CAKey are only sent to an admitted node (see Cluster).
-	MemberKey string `json:"member_key,omitempty"`
-	CAKey     string `json:"ca_key,omitempty"`
-	Error     string `json:"error,omitempty"`
+	// No private signing key is part of the enrollment response.
+	MemberKey       string `json:"member_key,omitempty"`
+	NodeCertificate string `json:"node_certificate,omitempty"`
+	Error           string `json:"error,omitempty"`
+	ErrorCode       string `json:"error_code,omitempty"`
+}
+
+func joinFailure(err error) *JoinResponse {
+	response := &JoinResponse{Error: err.Error()}
+	var coded *hostsetup.Error
+	if errors.As(err, &coded) {
+		response.ErrorCode = coded.Code
+		response.Error = coded.Cause()
+	}
+	return response
 }
 
 // memberKeyHeader carries Cluster.MemberKey on peer requests.
 const memberKeyHeader = "X-Cluster-Member"
+
+const clusterVersionHeader = "X-Cluster-Version"
 
 // ClusterStatus represents the overall cluster status
 type ClusterStatus struct {
@@ -323,6 +350,11 @@ type Manager struct {
 	// overridable in tests. Zero means use the production defaults.
 	joinPollInterval time.Duration
 	joinPollTimeout  time.Duration
+	// upgradeActivate is an optional filesystem activation hook for fault
+	// tests. Production uses an atomic rename in the cluster state directory.
+	upgradeActivate      func(staged, active string) error
+	upgradeWrite         func(file *os.File, data []byte) error
+	upgradeSyncDirectory func(path string) error
 	// authLimit throttles sources that keep sending wrong passwords.
 	authLimit authLimiter
 	// probedFailed is when gossip last tried each failed peer (see gossip).
@@ -480,6 +512,7 @@ func (m *Manager) InitCluster(name, password string, cfg *ClusterConfig) (*Clust
 
 	now := time.Now()
 	cluster := &Cluster{
+		Version:       ProtocolVersion,
 		ID:            clusterID,
 		Name:          name,
 		PasswordHash:  passwordHash,
@@ -512,14 +545,18 @@ func (m *Manager) InitCluster(name, password string, cfg *ClusterConfig) (*Clust
 
 	cluster.LocalNode = localNode
 	cluster.Nodes[localNode.ID] = localNode
+	key, csr, err := newNodeRequest()
+	if err != nil {
+		return nil, fmt.Errorf("failed to make the node key: %w", err)
+	}
+	cluster.NodeCertificate, err = issueNodeCertificate(caKey, localNodeID, csr)
+	if err != nil {
+		return nil, fmt.Errorf("failed to issue the node certificate: %w", err)
+	}
+	cluster.NodeKey = key
 
-	m.mu.Lock()
-	m.cluster = cluster
-	m.plainPassword = password
-	m.mu.Unlock()
-
-	// Save cluster configuration
-	if err := m.saveCluster(); err != nil {
+	// Do not activate signing credentials until the state file was saved.
+	if err := m.installLocalCluster(cluster, password); err != nil {
 		return nil, fmt.Errorf("failed to save cluster: %w", err)
 	}
 
@@ -534,7 +571,8 @@ func (m *Manager) InitCluster(name, password string, cfg *ClusterConfig) (*Clust
 // JoinTrust says which seed certificates a joiner accepts. By default only a
 // certificate from the cluster CA its cluster ID pins: the join request and
 // the approval polls carry the cluster password and the poll secret, and the
-// approval hands back the CA and member keys.
+// approval hands back the member key. The node certificate in the approval is
+// checked against the cluster ID whatever certificate the seed serves.
 type JoinTrust struct {
 	// OperatorCerts also accepts a seed serving an operator certificate for
 	// the address dialled, checked against CAFile or, without one, the
@@ -582,6 +620,8 @@ func (m *Manager) JoinClusterTrusting(clusterID, password string, localNode *Nod
 	}
 	tlsClient := clusterHTTPClient(15*time.Second, clusterID, pool, trust.OperatorCerts)
 
+	// Keep the caller's local identity unchanged if enrollment cannot be saved.
+	originalNode := *localNode
 	// Try to join via seed nodes
 	var lastErr error
 	for _, seed := range seedNodes {
@@ -601,13 +641,11 @@ func (m *Manager) JoinClusterTrusting(clusterID, password string, localNode *Nod
 				cluster.Config.CACertPath = trust.CAFile
 				cluster.Config.TrustOperatorCerts = trust.OperatorCerts
 			}
-			m.mu.Lock()
-			m.cluster = cluster
-			m.plainPassword = password
-			m.mu.Unlock()
-
-			if err := m.saveCluster(); err != nil {
-				slog.Warn("Failed to save cluster config", "error", err)
+			if err := m.installLocalCluster(cluster, password); err != nil {
+				*localNode = originalNode
+				// This is a local failure, not a reason to enroll again through
+				// another seed and create more unreachable member identities.
+				return nil, fmt.Errorf("failed to save joined cluster identity; fix local storage and re-enroll: %w", err)
 			}
 			return cluster, nil
 		}
@@ -620,11 +658,17 @@ func (m *Manager) JoinClusterTrusting(clusterID, password string, localNode *Nod
 // attemptJoin tries to join a cluster via a specific seed node, over
 // tlsClient when the seed speaks TLS.
 func (m *Manager) attemptJoin(seedAddr, clusterID, password string, localNode *Node, tlsClient *http.Client) (*Cluster, error) {
+	nodeKey, nodeCSR, err := newNodeRequest()
+	if err != nil {
+		return nil, fmt.Errorf("failed to make the node key: %w", err)
+	}
 	pollSecret, err := newPollSecret()
 	if err != nil {
 		return nil, err
 	}
 	joinReq := JoinRequest{
+		Version:      ProtocolVersion,
+		NodeCSR:      nodeCSR,
 		PollSecret:   pollSecret,
 		ClusterID:    clusterID,
 		Password:     password,
@@ -692,14 +736,24 @@ func (m *Manager) attemptJoin(seedAddr, clusterID, password string, localNode *N
 			}
 			joinResp = *approved
 		} else {
+			switch joinResp.ErrorCode {
+			case "QP-CLUSTER-001", "QP-CLUSTER-002", "QP-CLUSTER-003", "QP-CLUSTER-004", "QP-CLUSTER-005":
+				return nil, hostsetup.E(joinResp.ErrorCode)
+			}
 			return nil, fmt.Errorf("join rejected: %s", joinResp.Error)
 		}
 	}
 
-	// The seed was verified by the CA the cluster ID names, and must hand over
-	// exactly that CA's key.
-	if err := checkClusterCA(clusterID, joinResp.CAKey); err != nil {
-		return nil, fmt.Errorf("join: the seed sent no valid key for cluster %s: %w", clusterID, err)
+	// The authority signs our public key; no CA or node private key crosses
+	// the wire. Reject old seeds and substituted identities before saving.
+	if joinResp.Version != ProtocolVersion {
+		return nil, hostsetup.E("QP-CLUSTER-002").WithWhy("The seed uses protocol %d; all nodes must update to protocol %d.", joinResp.Version, ProtocolVersion)
+	}
+	if _, err := nodeCertificate(clusterID, joinResp.NodeID, joinResp.NodeCertificate, nodeKey); err != nil {
+		return nil, fmt.Errorf("join: the seed sent no valid node certificate for cluster %s: %w", clusterID, err)
+	}
+	if err := checkMemberKey(joinResp.MemberKey); err != nil {
+		return nil, err
 	}
 
 	// Create local cluster state
@@ -710,15 +764,17 @@ func (m *Manager) attemptJoin(seedAddr, clusterID, password string, localNode *N
 	localNode.Status = NodeStatusHealthy
 
 	cluster := &Cluster{
-		ID:           clusterID,
-		Name:         joinResp.ClusterName,
-		PasswordHash: hashPassword(password), // bcrypt hash for local verification
-		MemberKey:    joinResp.MemberKey,
-		CAKey:        joinResp.CAKey,
-		CreatedAt:    now,
-		UpdatedAt:    now,
-		LocalNode:    localNode,
-		Nodes:        make(map[string]*Node),
+		Version:         ProtocolVersion,
+		ID:              clusterID,
+		Name:            joinResp.ClusterName,
+		PasswordHash:    hashPassword(password), // bcrypt hash for local verification
+		MemberKey:       joinResp.MemberKey,
+		NodeKey:         nodeKey,
+		NodeCertificate: joinResp.NodeCertificate,
+		CreatedAt:       now,
+		UpdatedAt:       now,
+		LocalNode:       localNode,
+		Nodes:           make(map[string]*Node),
 		// The seed's Config is untrusted wire input: a nil or out-of-range
 		// value would panic time.NewTicker in Start or overflow the
 		// failure-detection deadline in gossip(). Clamp it.
@@ -808,8 +864,25 @@ func (m *Manager) Start() error {
 	if m.cluster.isRunning {
 		return nil
 	}
-	if err := checkClusterCA(m.cluster.ID, m.cluster.CAKey); err != nil {
+	if err := checkClusterVersion(m.cluster.Version); err != nil {
 		return err
+	}
+	if err := checkMemberKey(m.cluster.MemberKey); err != nil {
+		return err
+	}
+	if m.cluster.LocalNode == nil {
+		return fmt.Errorf("local node not initialized")
+	}
+	if err := m.renewAuthorityCertificateLocked(); err != nil {
+		return identityFailure(err)
+	}
+	if _, err := nodeCertificate(m.cluster.ID, m.cluster.LocalNode.ID, m.cluster.NodeCertificate, m.cluster.NodeKey); err != nil {
+		return err
+	}
+	if m.cluster.CAKey != "" {
+		if err := checkClusterCA(m.cluster.ID, m.cluster.CAKey); err != nil {
+			return identityFailure(err)
+		}
 	}
 
 	// Only the bcrypt hash is persisted, so a manager restored by LoadCluster
@@ -1095,6 +1168,24 @@ func (m *Manager) HandleJoinRequest(req *JoinRequest, sourceIP string) *JoinResp
 	if m.cluster == nil || m.cluster.ID != clusterID {
 		return &JoinResponse{Success: false, Error: "cluster not initialized"}
 	}
+	if err := checkClusterVersion(m.cluster.Version); err != nil {
+		return joinFailure(err)
+	}
+	if req.Version != ProtocolVersion {
+		return joinFailure(hostsetup.E("QP-CLUSTER-002").WithWhy("Unsupported cluster protocol version %d; update the joining QPot to protocol %d.", req.Version, ProtocolVersion))
+	}
+	if m.cluster.NodeCertificate == "" || m.cluster.NodeKey == "" {
+		return joinFailure(errOldClusterFormat)
+	}
+	if err := checkMemberKey(m.cluster.MemberKey); err != nil {
+		return joinFailure(err)
+	}
+	if m.cluster.CAKey == "" {
+		return joinFailure(hostsetup.E("QP-CLUSTER-004").WithWhy("This node is not the enrollment authority; use the host that initialized or upgraded the cluster as the seed."))
+	}
+	if _, err := parseNodeRequest(req.NodeCSR); err != nil {
+		return joinFailure(err)
+	}
 
 	// When the cluster requires host approval, the correct password is not
 	// enough: queue the request for the host to review (with the real source IP
@@ -1106,7 +1197,7 @@ func (m *Manager) HandleJoinRequest(req *JoinRequest, sourceIP string) *JoinResp
 	// Approval not required: admit immediately.
 	resp, err := m.admitNodeLocked(req)
 	if err != nil {
-		return &JoinResponse{Success: false, Error: err.Error()}
+		return joinFailure(err)
 	}
 	return resp
 }
@@ -1119,9 +1210,22 @@ func (m *Manager) admitNodeLocked(req *JoinRequest) (*JoinResponse, error) {
 	if m.memberCountLocked() >= maxClusterNodes {
 		return nil, fmt.Errorf("cluster is full (%d members)", maxClusterNodes)
 	}
+	if err := checkMemberKey(m.cluster.MemberKey); err != nil {
+		return nil, err
+	}
+	if m.cluster.CAKey == "" {
+		return nil, hostsetup.E("QP-CLUSTER-004")
+	}
+	if err := checkClusterCA(m.cluster.ID, m.cluster.CAKey); err != nil {
+		return nil, err
+	}
 	nodeID, err := generateNodeID()
 	if err != nil {
 		return nil, fmt.Errorf("failed to generate node ID")
+	}
+	certificate, err := issueNodeCertificate(m.cluster.CAKey, nodeID, req.NodeCSR)
+	if err != nil {
+		return nil, err
 	}
 
 	now := time.Now()
@@ -1138,11 +1242,14 @@ func (m *Manager) admitNodeLocked(req *JoinRequest) (*JoinResponse, error) {
 		Capabilities: req.Capabilities,
 	}
 
+	previousUpdated := m.cluster.UpdatedAt
 	m.cluster.Nodes[nodeID] = node
-	if err := m.saveClusterLocked(); err != nil {
-		slog.Warn("Failed to persist cluster membership", "error", err)
-	}
 	m.cluster.UpdatedAt = now
+	if err := m.saveClusterLocked(); err != nil {
+		delete(m.cluster.Nodes, nodeID)
+		m.cluster.UpdatedAt = previousUpdated
+		return nil, fmt.Errorf("failed to persist cluster membership: %w", err)
+	}
 
 	nodes := m.snapshotNodesLocked()
 
@@ -1153,14 +1260,15 @@ func (m *Manager) admitNodeLocked(req *JoinRequest) (*JoinResponse, error) {
 		"total_nodes", len(m.cluster.Nodes))
 
 	return &JoinResponse{
-		Success:     true,
-		Status:      "approved",
-		NodeID:      nodeID,
-		ClusterName: m.cluster.Name,
-		Nodes:       nodes,
-		Config:      m.cluster.Config,
-		MemberKey:   m.cluster.MemberKey,
-		CAKey:       m.cluster.CAKey,
+		Version:         ProtocolVersion,
+		Success:         true,
+		Status:          "approved",
+		NodeID:          nodeID,
+		ClusterName:     m.cluster.Name,
+		Nodes:           nodes,
+		Config:          m.cluster.Config,
+		MemberKey:       m.cluster.MemberKey,
+		NodeCertificate: certificate,
 	}, nil
 }
 
@@ -1186,14 +1294,21 @@ func (m *Manager) withClusterAuth(next http.HandlerFunc) http.HandlerFunc {
 }
 
 // withMemberAuth guards the peer endpoints: the password (withClusterAuth)
-// and, for clusters that have one, the member key only admitted nodes hold.
+// and the member key only admitted nodes hold. Missing credentials fail closed;
+// legacy clusters must upgrade their trust rather than use password-only peers.
 func (m *Manager) withMemberAuth(next http.HandlerFunc) http.HandlerFunc {
 	return m.withClusterAuth(func(w http.ResponseWriter, r *http.Request) {
-		if key := m.memberKey(); key != "" &&
+		if key := m.memberKey(); key == "" ||
 			subtle.ConstantTimeCompare([]byte(r.Header.Get(memberKeyHeader)), []byte(key)) != 1 {
 			trusted := fromThisHost(r) || m.isMemberAddress(r.RemoteAddr)
 			m.authLimit.failed(authKey(r.RemoteAddr, trusted), time.Now(), trusted)
 			http.Error(w, "Unauthorized", http.StatusUnauthorized)
+			return
+		}
+		if r.Header.Get(clusterVersionHeader) != strconv.Itoa(ProtocolVersion) {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusUpgradeRequired)
+			json.NewEncoder(w).Encode(joinFailure(hostsetup.E("QP-CLUSTER-002")))
 			return
 		}
 		next(w, r)
@@ -1202,12 +1317,20 @@ func (m *Manager) withMemberAuth(next http.HandlerFunc) http.HandlerFunc {
 
 // setPeerAuth adds the credentials of a request to another member.
 func setPeerAuth(req *http.Request, password, memberKey string) {
+	req.Header.Set(clusterVersionHeader, strconv.Itoa(ProtocolVersion))
 	if password != "" {
 		req.Header.Set("X-Cluster-Password", password)
 	}
 	if memberKey != "" {
 		req.Header.Set(memberKeyHeader, memberKey)
 	}
+}
+
+func checkMemberKey(key string) error {
+	if key == "" {
+		return hostsetup.E("QP-CLUSTER-005").WithWhy("The cluster membership credential is missing; restore trusted state or re-enroll this node.")
+	}
+	return nil
 }
 
 // memberKey returns the cluster's member key ("" for older clusters).
@@ -1350,11 +1473,7 @@ func (m *Manager) startAPIServer() error {
 		// No operator certificate: serve a node certificate signed by the
 		// cluster's own CA (see autotls.go). Never fall back to plain HTTP,
 		// which would expose the password header.
-		var nodeID string
-		if m.cluster.LocalNode != nil {
-			nodeID = m.cluster.LocalNode.ID
-		}
-		cert, err := newNodeCertificate(m.cluster.CAKey, nodeID)
+		cert, err := nodeCertificate(m.cluster.ID, m.cluster.LocalNode.ID, m.cluster.NodeCertificate, m.cluster.NodeKey)
 		if err != nil {
 			return fmt.Errorf("cluster TLS: %w", err)
 		}
@@ -2230,6 +2349,21 @@ func (m *Manager) saveCluster() error {
 	return m.saveClusterLocked()
 }
 
+// installLocalCluster publishes a new local identity only when its state file
+// is saved. Holding the lock across both operations prevents Start or another
+// save from observing an identity that failed to reach disk.
+func (m *Manager) installLocalCluster(cluster *Cluster, password string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	previous, previousPassword := m.cluster, m.plainPassword
+	m.cluster, m.plainPassword = cluster, password
+	if err := m.saveClusterLocked(); err != nil {
+		m.cluster, m.plainPassword = previous, previousPassword
+		return err
+	}
+	return nil
+}
+
 // saveClusterLocked writes cluster.json; the caller holds m.mu (read or
 // write), so the snapshot is consistent. Membership changes (an admitted or
 // gossip-discovered node) are persisted, so a restarted host still knows its
@@ -2316,6 +2450,184 @@ func (m *Manager) LocalNodeID() string {
 	return m.cluster.LocalNode.ID
 }
 
+// UpgradeCluster prepares and validates a new trust root for a stopped legacy
+// cluster, backs up the exact old state, then atomically activates the new state.
+// The local instance, settings and event stores are not removed. Other members
+// remain only in the backup and must update QPot and rejoin under the saved
+// approval policy.
+// The backup is recovery material, never an additional trusted CA.
+func (m *Manager) UpgradeCluster() (result *Cluster, backupPath string, resultErr error) {
+	defer func() {
+		var coded *hostsetup.Error
+		if resultErr != nil && !errors.As(resultErr, &coded) {
+			resultErr = hostsetup.E("QP-CLUSTER-008").WithWhy("The upgrade could not be saved; the active cluster was not replaced. Check disk space and permissions.").Wrap(resultErr)
+		}
+	}()
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.cluster == nil || m.cluster.LocalNode == nil {
+		return nil, "", hostsetup.E("QP-CLUSTER-006").WithWhy("No local cluster is available to upgrade.")
+	}
+	if m.cluster.isRunning {
+		return nil, "", hostsetup.E("QP-CLUSTER-006").WithWhy("Stop the QPot control plane before upgrading the cluster.")
+	}
+	if m.cluster.Version >= ProtocolVersion {
+		return nil, "", hostsetup.E("QP-CLUSTER-006").WithWhy("Cluster protocol %d is not a supported legacy upgrade.", m.cluster.Version)
+	}
+	if m.plainPassword == "" || !checkPassword(m.plainPassword, m.cluster.PasswordHash) {
+		return nil, "", hostsetup.E("QP-CLUSTER-006").WithWhy("Unlock the cluster password before upgrading.")
+	}
+	// Reserve the configured listener for the whole transaction. This also
+	// catches a separately running control plane loaded by the CLI from disk.
+	cfg := m.cluster.Config
+	if cfg == nil || cfg.BindPort < 1 || cfg.BindPort > 65535 {
+		return nil, "", hostsetup.E("QP-CLUSTER-006").WithWhy("The saved cluster has no valid listening port.")
+	}
+	ln, err := net.Listen("tcp", net.JoinHostPort(cfg.BindAddr, strconv.Itoa(cfg.BindPort)))
+	if err != nil {
+		return nil, "", hostsetup.E("QP-CLUSTER-006").WithWhy("Stop the QPot control plane and free its cluster port before upgrading.").Wrap(err)
+	}
+	defer ln.Close()
+	lockPath := filepath.Join(m.dataPath, "cluster.upgrade.lock")
+	lock, err := os.OpenFile(lockPath, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0600)
+	if err != nil {
+		return nil, "", hostsetup.E("QP-CLUSTER-006").WithWhy("Another upgrade may be active; inspect %s before retrying.", lockPath).Wrap(err)
+	}
+	lock.Close()
+	defer os.Remove(lockPath)
+	path := filepath.Join(m.dataPath, "cluster.json")
+	oldData, err := os.ReadFile(path)
+	if err != nil {
+		return nil, "", err
+	}
+	var next Cluster
+	if err := json.Unmarshal(oldData, &next); err != nil {
+		return nil, "", err
+	}
+	if next.ID != m.cluster.ID || next.Version != m.cluster.Version || next.LocalNode == nil ||
+		!checkPassword(m.plainPassword, next.PasswordHash) {
+		return nil, "", hostsetup.E("QP-CLUSTER-007").WithWhy("The saved cluster changed; reload it before upgrading.")
+	}
+	next.Config = sanitizeClusterConfig(next.Config)
+	if *next.Config != *cfg {
+		return nil, "", hostsetup.E("QP-CLUSTER-007").WithWhy("The saved cluster configuration changed; reload it before upgrading.")
+	}
+	next.Version = ProtocolVersion
+	next.CAKey, next.ID, err = newClusterCA()
+	if err != nil {
+		return nil, "", err
+	}
+	next.MemberKey, err = generateID("qk_", 64)
+	if err != nil {
+		return nil, "", err
+	}
+	var csr string
+	next.NodeKey, csr, err = newNodeRequest()
+	if err != nil {
+		return nil, "", err
+	}
+	next.NodeCertificate, err = issueNodeCertificate(next.CAKey, next.LocalNode.ID, csr)
+	if err != nil {
+		return nil, "", err
+	}
+	if _, err := nodeCertificate(next.ID, next.LocalNode.ID, next.NodeCertificate, next.NodeKey); err != nil {
+		return nil, "", fmt.Errorf("validate upgraded node identity: %w", err)
+	}
+	if next.Config.EnableEncryption && (next.Config.TLSCertPath != "" || next.Config.TLSKeyPath != "") {
+		if _, err := tls.LoadX509KeyPair(next.Config.TLSCertPath, next.Config.TLSKeyPath); err != nil {
+			return nil, "", hostsetup.E("QP-CLUSTER-006").WithWhy("The configured operator TLS certificate/key cannot be loaded; fix it before upgrading.").Wrap(err)
+		}
+	}
+	next.Nodes = map[string]*Node{next.LocalNode.ID: next.LocalNode}
+	next.UpdatedAt = time.Now()
+	next.isInitialized = true
+	newData, err := json.MarshalIndent(&next, "", "  ")
+	if err != nil {
+		return nil, "", err
+	}
+	// Unique 0600 files prevent concurrent temporary-file collisions. Sync
+	// both before activation: a failure or interrupted preparation leaves the
+	// original cluster.json untouched and never partially installs new trust.
+	backup, err := os.CreateTemp(m.dataPath, "cluster.legacy-*.json")
+	if err != nil {
+		return nil, "", err
+	}
+	backupPath = backup.Name()
+	write := m.upgradeWrite
+	if write == nil {
+		write = writeUpgradeFile
+	}
+	if err := write(backup, oldData); err != nil {
+		os.Remove(backupPath)
+		return nil, "", fmt.Errorf("back up old cluster: %w", err)
+	}
+	staged, err := os.CreateTemp(m.dataPath, "cluster.upgrade-*.tmp")
+	if err != nil {
+		return nil, backupPath, err
+	}
+	defer os.Remove(staged.Name())
+	if err := write(staged, newData); err != nil {
+		return nil, backupPath, fmt.Errorf("stage upgraded cluster: %w", err)
+	}
+	syncDirectory := m.upgradeSyncDirectory
+	if syncDirectory == nil {
+		syncDirectory = syncUpgradeDirectory
+	}
+	if err := syncDirectory(m.dataPath); err != nil {
+		return nil, backupPath, fmt.Errorf("sync upgrade backup and staging directory: %w", err)
+	}
+	current, err := os.ReadFile(path)
+	if err != nil || !bytes.Equal(current, oldData) {
+		return nil, backupPath, hostsetup.E("QP-CLUSTER-007").WithWhy("The saved cluster changed during upgrade; the upgrade did not replace it.")
+	}
+	activate := m.upgradeActivate
+	if activate == nil {
+		activate = os.Rename
+	}
+	if err := activate(staged.Name(), path); err != nil {
+		return nil, backupPath, fmt.Errorf("activate upgraded cluster; original state is unchanged: %w", err)
+	}
+	m.cluster = &next
+	m.pendingJoins = make(map[string]*PendingJoin)
+	m.joinOutcomes = make(map[string]*JoinOutcome)
+	m.peerIntel = make(map[string]*ThreatIntel)
+	if err := syncDirectory(m.dataPath); err != nil {
+		// The rename committed. Never claim rollback or restore old signing
+		// credentials merely because durability could not be confirmed.
+		return m.cluster, backupPath, hostsetup.E("QP-CLUSTER-009").Wrap(err)
+	}
+	return m.cluster, backupPath, nil
+}
+
+func writeUpgradeFile(file *os.File, data []byte) error {
+	n, err := file.Write(data)
+	if err == nil && n != len(data) {
+		err = io.ErrShortWrite
+	}
+	if err == nil {
+		err = file.Sync()
+	}
+	closeErr := file.Close()
+	if err == nil {
+		err = closeErr
+	}
+	return err
+}
+
+func syncUpgradeDirectory(path string) error {
+	// Windows does not support fsync on a directory handle through os.File.
+	// The replacement still uses os.Rename and individually synced files.
+	if runtime.GOOS == "windows" {
+		return nil
+	}
+	dir, err := os.Open(path)
+	if err != nil {
+		return err
+	}
+	defer dir.Close()
+	return dir.Sync()
+}
+
 // LeaveCluster removes this node from the cluster.
 //
 // Implementation note: we used to hold m.mu (write lock) for the entire
@@ -2325,8 +2637,7 @@ func (m *Manager) LocalNodeID() string {
 // network I/O, then take the lock again to mutate state.
 func (m *Manager) LeaveCluster() error {
 	// A manager restored by LoadCluster (the CLI) only has the bcrypt hash; the
-	// peers need the plaintext password, and automatic TLS derives its CA
-	// from it, so unlock from the stored secret first.
+	// peers need the plaintext password, so unlock from the stored secret first.
 	m.mu.RLock()
 	locked := m.cluster != nil && m.plainPassword == ""
 	m.mu.RUnlock()

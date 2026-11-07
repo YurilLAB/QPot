@@ -4,25 +4,23 @@
 // "passwords.xlsx" on a file share, a beacon URL embedded in a document —
 // rather than exposed as a standalone honeypot service.
 //
-// The design follows the canary philosophy that high-interaction honeypots
-// (QPot's containers) and canaries are complementary halves of a deception
-// program: honeypots catch the attacker who scans and connects from outside;
-// canaries catch the attacker who is *already inside* and touches something
-// they never should have. Because nobody legitimately reads a canary, a single
-// interaction is a near-zero-false-positive, high-severity signal — the exact
-// opposite of the noisy perimeter alerts most teams drown in.
+// Canaries complement honeypots by recording monitored interactions with
+// planted artifacts. QPot marks trips as critical for investigation; a trip
+// alone does not prove theft, compromise or malicious intent. Previews,
+// scanners and authorized tests can trigger trips. The false-positive rate
+// has not been measured.
 //
 // A canary trips through one of two channels:
 //
 //   - http     — someone fetched the canary's unique beacon URL (a web token,
 //     or the beacon embedded in a document/file token). Served by the QPot web
-//     server at /c/<token>; any GET is a trip. This needs the web server to be
+//     server at /c/<token>; GET and HEAD can trip. This needs the web server to be
 //     reachable at canary.base_url.
 //   - honeypot — a planted value (an AKIA… key, a password, an SSH public key,
 //     a beacon token) showed up in a captured QPot honeypot session. The
-//     attacker took it from wherever it was planted and is now using it against
-//     our own deception estate. Detected by the intelligence worker as it
-//     processes events; it needs nothing reachable but the honeypots.
+//     value is matched in captured event fields by the intelligence worker as
+//     it processes events. It does not monitor arbitrary file reads or real
+//     AWS API calls, and does not establish how the value was obtained.
 //
 // Besides the canaries an operator mints, QPot plants canaries of its own in
 // the fake files of its Cowrie personas (see instance/bait.go and
@@ -53,19 +51,19 @@ import (
 type Kind string
 
 const (
-	// KindWeb is a bare beacon URL. Any HTTP GET of /c/<token> is a trip.
+	// KindWeb is a bare beacon URL. HTTP GET/HEAD of /c/<token> can trip it.
 	// Plant it where only an intruder would look: a fake bookmark, a comment
 	// in a config file, a "internal-admin" link.
 	KindWeb Kind = "web"
 
-	// KindFile is a document (HTML) that beacons the canary URL when opened in
+	// KindFile is a document (HTML) that attempts to fetch the canary URL in
 	// a browser/preview. Plant it as bait on a share ("Q4-salaries.html").
-	// Trips via the same /c/<token> path as KindWeb.
+	// It trips only if the beacon is reached or a watched token is captured.
 	KindFile Kind = "file"
 
 	// KindAWS is a realistic but fake AWS access-key pair. It cannot be used
-	// against real AWS, but the moment its key id or secret appears in a
-	// captured QPot honeypot session we know it was stolen and replayed.
+	// against real AWS. It trips when the worker matches its key id or secret
+	// in captured QPot event fields, not merely when a credential file is read.
 	KindAWS Kind = "aws"
 
 	// KindCredential is a password or API token (Values) QPot planted in a
@@ -307,9 +305,9 @@ func (c *Canary) URL(base string) string {
 
 // RenderFile returns the bytes of the document artifact for a file canary and a
 // suggested filename. The artifact is a small, innocuous-looking HTML page that
-// loads the beacon URL (an invisible image plus a meta-refresh fallback) the
-// moment it is opened in any browser or preview pane. Returns an error for any
-// non-file kind.
+// attempts to load the beacon URL through stylesheet and image references.
+// Reading it as text or blocking remote resources need not contact the beacon.
+// Returns an error for any non-file kind.
 func (c *Canary) RenderFile(base string) (filename string, body []byte, err error) {
 	if c.Kind != KindFile {
 		return "", nil, fmt.Errorf("canary %s is kind %q, not a file canary", c.ID, c.Kind)
@@ -367,9 +365,8 @@ func sanitizeFilename(s string) string {
 }
 
 // attckFor maps a canary kind to an ATT&CK technique/tactic so canary trips are
-// classified consistently with the rest of the pipeline. These are deliberate,
-// defensible choices: a stolen cloud credential being replayed is Valid
-// Accounts; a planted document being opened/exfiltrated is Collection.
+// classified consistently with the rest of the pipeline. These are policy
+// labels for triage, not proof that the named technique occurred.
 func attckFor(k Kind) (techID, techName, tacticID, tacticName string) {
 	switch k {
 	case KindAWS:
@@ -386,9 +383,9 @@ func attckFor(k Kind) (techID, techName, tacticID, tacticName string) {
 }
 
 // ToEvent maps a trip onto a database.Event tagged honeypot="canary". The event
-// is pre-classified (Classified=true, Confidence=1.0) — a canary trip needs no
-// heuristic; it is ground truth — and carries the canary context in Metadata so
-// downstream consumers (events feed, overview) can render an actionable alert.
+// is pre-classified (Classified=true, Confidence=1.0) for its deterministic
+// trigger, not a measured probability of malicious activity. Metadata carries
+// the observed context so downstream consumers can investigate the alert.
 func (t *Trip) ToEvent() *database.Event {
 	techID, techName, tacticID, tacticName := attckFor(t.Kind)
 	proto := "http"

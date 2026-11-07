@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"encoding/json"
 	"io"
 	"sync"
 	"time"
@@ -12,9 +13,40 @@ import (
 // fakeDB is a minimal database.Database for server handler tests. It records
 // IOCs passed to InsertIOC and returns zero values everywhere else.
 type fakeDB struct {
-	mu     sync.Mutex
-	iocs   []*database.IOC
-	events []*database.Event
+	mu             sync.Mutex
+	iocs           []*database.IOC
+	events         []*database.Event
+	checkpointData []byte
+}
+
+func (f *fakeDB) LoadIntelligenceCheckpoint(context.Context) (*database.IntelligenceCheckpoint, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if len(f.checkpointData) == 0 {
+		return nil, nil
+	}
+	var cp database.IntelligenceCheckpoint
+	err := json.Unmarshal(f.checkpointData, &cp)
+	return &cp, err
+}
+func (f *fakeDB) SaveIntelligenceCheckpoint(_ context.Context, cp *database.IntelligenceCheckpoint) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	data, err := json.Marshal(cp)
+	if err != nil {
+		return err
+	}
+	f.checkpointData = data
+	return nil
+}
+func (f *fakeDB) ReadIntelligenceIOCs(context.Context, []*database.IOC) ([]*database.IOC, error) {
+	return nil, nil
+}
+func (f *fakeDB) ReplaceIntelligenceIOCs(ctx context.Context, _ uint64, rows []*database.IOC) error {
+	return f.InsertIOCs(ctx, rows)
+}
+func (f *fakeDB) ReplaceIntelligenceSessions(context.Context, uint64, []*database.TTPSession) error {
+	return nil
 }
 
 func (f *fakeDB) InsertIOC(ctx context.Context, ioc *database.IOC) error {

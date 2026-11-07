@@ -185,7 +185,7 @@ func TestApproveUnknownRequest(t *testing.T) {
 }
 
 // TestJoinOutcomeGoesOnlyToTheJoiner: an approved join's outcome carries the
-// member key and the cluster CA key. The request ID is no secret (it is logged
+// member key and its signed node certificate. The request ID is no secret (it is logged
 // and listed to the host), so anyone with the password and that ID could
 // collect the outcome, and a request from the joiner's address under its names
 // was handed the same ID. Only the joiner's poll secret collects it now.
@@ -197,7 +197,7 @@ func TestJoinOutcomeGoesOnlyToTheJoiner(t *testing.T) {
 		t.Fatal(err)
 	}
 	join := func(secret string) *JoinResponse {
-		return host.HandleJoinRequest(&JoinRequest{ClusterID: cl.ID, Password: pw, PollSecret: secret,
+		return host.HandleJoinRequest(&JoinRequest{Version: ProtocolVersion, NodeCSR: testNodeCSR(t), ClusterID: cl.ID, Password: pw, PollSecret: secret,
 			NodeName: "sensor-7", NodeAddress: "10.9.9.9", NodePort: 7946}, "10.9.9.9")
 	}
 	if r := join(""); r.Status == "pending" || r.RequestID != "" || r.Error != errNoPollSecret {
@@ -239,7 +239,8 @@ func TestJoinOutcomeGoesOnlyToTheJoiner(t *testing.T) {
 	rec := poll(testPollSecret)
 	var got JoinResponse
 	if rec.Code != http.StatusOK || json.Unmarshal(rec.Body.Bytes(), &got) != nil ||
-		got.CAKey != cl.CAKey || got.MemberKey != cl.MemberKey || got.NodeID == "" {
+		got.NodeCertificate == "" || strings.Contains(rec.Body.String(), cl.CAKey) ||
+		strings.Contains(rec.Body.String(), "PRIVATE KEY") || got.MemberKey != cl.MemberKey || got.NodeID == "" {
 		t.Fatalf("the joiner's own poll: %d %q", rec.Code, rec.Body.String())
 	}
 }

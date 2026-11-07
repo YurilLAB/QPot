@@ -32,7 +32,7 @@ func TestClusterApprovalIsHostOnly(t *testing.T) {
 		t.Fatal(err)
 	}
 	h := seed.apiHandler()
-	body, _ := json.Marshal(JoinRequest{ClusterID: cl.ID, Password: pw, PollSecret: testPollSecret, NodeName: "evil", NodeAddress: "10.6.6.6", NodePort: 7946})
+	body, _ := json.Marshal(JoinRequest{Version: ProtocolVersion, NodeCSR: testNodeCSR(t), ClusterID: cl.ID, Password: pw, PollSecret: testPollSecret, NodeName: "evil", NodeAddress: "10.6.6.6", NodePort: 7946})
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/api/v1/cluster/join", bytes.NewReader(body)))
 	var jr JoinResponse

@@ -2,9 +2,9 @@ package server
 
 // Canary (honeytoken) subsystem HTTP surface and event wiring.
 //
-// Canaries are decoy artifacts planted inside the operator's real estate that
-// fire a high-fidelity alert on any interaction. Two trip channels:
-//   - the PUBLIC beacon (/c/<token>) — an HTTP GET of a web/file token, and
+// Canaries are decoy artifacts that alert on observed triggers, not every
+// interaction or file read. Two trip channels:
+//   - the PUBLIC beacon (/c/<token>) — an HTTP GET/HEAD of a web/file token, and
 //   - the intelligence worker — a planted credential value seen in a captured
 //     honeypot session (see canaryMatcher).
 // Every trip becomes a database.Event tagged honeypot="canary" via onCanaryTrip.
@@ -127,7 +127,7 @@ func readConfigBounded(path string) ([]byte, error) {
 	return data, nil
 }
 
-// handleCanaryBeacon serves the public canary URL. Any GET of /c/<token>
+// handleCanaryBeacon serves the public canary URL. A GET/HEAD of a known token
 // records a trip and returns an innocuous decoy. The response is identical
 // whether or not the token exists, so the endpoint is not a token-enumeration
 // oracle (and the tokens are high-entropy regardless).

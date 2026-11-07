@@ -211,7 +211,7 @@ func (ts *TimescaleDB) InitializeSchema(ctx context.Context) error {
 		return fmt.Errorf("failed to create ttp_sessions table: %w", err)
 	}
 
-	return nil
+	return ts.initializeIntelligenceSchema(ctx)
 }
 
 // InsertEvent inserts a single event
@@ -963,6 +963,9 @@ func (ts *TimescaleDB) createIOCTable(ctx context.Context) error {
 
 // InsertIOC upserts an IOC, incrementing count and updating last_seen on conflict.
 func (ts *TimescaleDB) InsertIOC(ctx context.Context, ioc *IOC) error {
+	if err := validateIntelligenceTextIOCs("timescaledb", true, []*IOC{ioc}); err != nil {
+		return err
+	}
 	if ts.pool == nil {
 		return fmt.Errorf("not connected")
 	}
@@ -994,6 +997,9 @@ func (ts *TimescaleDB) InsertIOC(ctx context.Context, ioc *IOC) error {
 // cheaper than N implicit transactions and keeps the batch atomic. Each row
 // keeps the same ON CONFLICT upsert semantics as InsertIOC.
 func (ts *TimescaleDB) InsertIOCs(ctx context.Context, iocs []*IOC) error {
+	if err := validateIntelligenceTextIOCs("timescaledb", true, iocs); err != nil {
+		return err
+	}
 	if ts.pool == nil {
 		return fmt.Errorf("not connected")
 	}
@@ -1036,6 +1042,16 @@ func (ts *TimescaleDB) GetIOCs(ctx context.Context, filter IOCFilter) ([]*IOC, e
 	var args []interface{}
 	argIdx := 1
 
+	if len(filter.intelligenceKeys) > 0 {
+		var clauses []string
+		for _, key := range filter.intelligenceKeys {
+			clauses = append(clauses, fmt.Sprintf("(type = $%d AND value = $%d AND honeypot = $%d)", argIdx, argIdx+1, argIdx+2))
+			args = append(args, key.Type, key.Value, key.Honeypot)
+			argIdx += 3
+		}
+		query += " AND (" + strings.Join(clauses, " OR ") + ")"
+	}
+
 	if len(filter.Types) > 0 {
 		query += fmt.Sprintf(" AND type = ANY($%d)", argIdx)
 		args = append(args, filter.Types)
@@ -1066,7 +1082,7 @@ func (ts *TimescaleDB) GetIOCs(ctx context.Context, filter IOCFilter) ([]*IOC, e
 		args = append(args, filter.EndTime)
 		argIdx++
 	}
-	query += " ORDER BY last_seen DESC"
+	query += " ORDER BY last_seen DESC, type, value, honeypot"
 	if filter.Limit > 0 {
 		query += fmt.Sprintf(" LIMIT $%d", argIdx)
 		args = append(args, filter.Limit)
@@ -1103,6 +1119,9 @@ func (ts *TimescaleDB) GetIOCs(ctx context.Context, filter IOCFilter) ([]*IOC, e
 
 // UpsertTTPSession inserts or updates a TTP session record.
 func (ts *TimescaleDB) UpsertTTPSession(ctx context.Context, session *TTPSession) error {
+	if err := validateIntelligenceTextSessions("timescaledb", true, []*TTPSession{session}); err != nil {
+		return err
+	}
 	if ts.pool == nil {
 		return fmt.Errorf("not connected")
 	}

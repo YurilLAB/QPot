@@ -17,15 +17,17 @@ type sessionDB struct {
 	writes  int
 }
 
-func (s *sessionDB) UpsertTTPSession(ctx context.Context, sess *database.TTPSession) error {
+func (s *sessionDB) ReplaceIntelligenceSessions(ctx context.Context, revision uint64, rows []*database.TTPSession) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.written == nil {
 		s.written = map[string]database.TTPSession{}
 	}
-	s.written[sess.SessionID] = *sess
-	s.writes++
-	return nil
+	for _, sess := range rows {
+		s.written[sess.SessionID] = *sess
+		s.writes++
+	}
+	return s.fakeDB.ReplaceIntelligenceSessions(ctx, revision, rows)
 }
 
 func (s *sessionDB) snapshot() (map[string]database.TTPSession, int) {

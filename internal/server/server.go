@@ -27,6 +27,7 @@ import (
 	"github.com/qpot/qpot/internal/cluster"
 	"github.com/qpot/qpot/internal/config"
 	"github.com/qpot/qpot/internal/database"
+	"github.com/qpot/qpot/internal/hostsetup"
 	"github.com/qpot/qpot/internal/instance"
 	"github.com/qpot/qpot/internal/intelligence"
 	"github.com/qpot/qpot/internal/overview"
@@ -103,8 +104,9 @@ func connectDatabase(cfg *config.Config) database.Database {
 				return rawDB
 			}
 			if time.Now().After(deadline) {
-				slog.Warn("Database schema initialization failed; collection may not work", "error", err)
-				return rawDB
+				slog.Warn("Database schema initialization failed; control-plane database access and intelligence are disabled", "error", err)
+				_ = rawDB.Close()
+				return nil
 			}
 			rawDB.Close()
 		} else {
@@ -1193,6 +1195,20 @@ func (s *Server) handleIntelligenceSummary(w http.ResponseWriter, r *http.Reques
 		"active_sessions":     activeSessions,
 		"worker_enabled":      s.worker != nil,
 		"attck_loaded":        attckLoaded,
+		"worker_status":       "disabled",
+		"worker_healthy":      false,
+	}
+	if s.worker != nil {
+		state, lastError := s.worker.Status()
+		summary["worker_status"] = state
+		summary["worker_healthy"] = state == "running"
+		var coded *hostsetup.Error
+		if errors.As(lastError, &coded) {
+			// Only expose catalog guidance, never the wrapped database error,
+			// which may contain an event payload, connection string or secret.
+			summary["worker_error_code"] = coded.Code
+			summary["worker_error_remedy"] = hostsetup.E(coded.Code).Remedy()
+		}
 	}
 
 	s.sendJSON(w, summary)

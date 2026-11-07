@@ -216,7 +216,7 @@ func (ch *ClickHouse) InitializeSchema(ctx context.Context) error {
 		return fmt.Errorf("failed to create ttp_sessions table: %w", err)
 	}
 
-	return nil
+	return ch.initializeIntelligenceSchema(ctx)
 }
 
 // InsertEvent inserts a single event
@@ -1194,8 +1194,17 @@ func (ch *ClickHouse) GetIOCs(ctx context.Context, filter IOCFilter) ([]*IOC, er
 		return nil, fmt.Errorf("not connected")
 	}
 
-	query := "SELECT id, type, value, honeypot, source_ip, technique_id, first_seen, last_seen, count, metadata FROM iocs FINAL WHERE 1=1"
+	query := "SELECT id, type, value, honeypot, source_ip, technique_id, first_seen, last_seen, count, metadata FROM (SELECT id, type, value, honeypot, source_ip, technique_id, first_seen, last_seen, count, metadata FROM intelligence_iocs FINAL UNION ALL SELECT id, type, value, honeypot, source_ip, technique_id, first_seen, last_seen, count, metadata FROM iocs FINAL WHERE (type,value,honeypot) NOT IN (SELECT type,value,honeypot FROM intelligence_iocs FINAL)) WHERE 1=1"
 	var args []interface{}
+
+	if len(filter.intelligenceKeys) > 0 {
+		var clauses []string
+		for _, key := range filter.intelligenceKeys {
+			clauses = append(clauses, "(type = ? AND value = ? AND honeypot = ?)")
+			args = append(args, key.Type, key.Value, key.Honeypot)
+		}
+		query += " AND (" + strings.Join(clauses, " OR ") + ")"
+	}
 
 	if len(filter.Types) > 0 {
 		query += " AND type IN ?"
@@ -1221,7 +1230,7 @@ func (ch *ClickHouse) GetIOCs(ctx context.Context, filter IOCFilter) ([]*IOC, er
 		query += " AND last_seen <= ?"
 		args = append(args, filter.EndTime)
 	}
-	query += " ORDER BY last_seen DESC"
+	query += " ORDER BY last_seen DESC, type, value, honeypot"
 	if filter.Limit > 0 {
 		query += fmt.Sprintf(" LIMIT %d", filter.Limit)
 		if filter.Offset > 0 {
@@ -1292,7 +1301,7 @@ func (ch *ClickHouse) GetTTPSessions(ctx context.Context, limit int) ([]*TTPSess
 		SELECT session_id, campaign_fingerprint, source_ips,
 		       shared_infrastructure, kill_chain_stages, techniques,
 		       ioc_ids, event_count, first_seen, last_seen, confidence
-		FROM ttp_sessions FINAL
+		FROM (SELECT session_id, campaign_fingerprint, source_ips, shared_infrastructure, kill_chain_stages, techniques, ioc_ids, event_count, first_seen, last_seen, confidence FROM intelligence_sessions FINAL UNION ALL SELECT session_id, campaign_fingerprint, source_ips, shared_infrastructure, kill_chain_stages, techniques, ioc_ids, event_count, first_seen, last_seen, confidence FROM ttp_sessions FINAL WHERE session_id NOT IN (SELECT session_id FROM intelligence_sessions FINAL))
 		ORDER BY last_seen DESC
 	`
 	if limit > 0 {

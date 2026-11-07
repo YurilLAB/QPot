@@ -28,7 +28,7 @@ func TestAdmissionRespectsTheNodeCap(t *testing.T) {
 		}
 		m.mu.Unlock()
 		for i := 0; i < 5; i++ {
-			r := m.HandleJoinRequest(&JoinRequest{ClusterID: cl.ID, Password: pw, PollSecret: testPollSecret,
+			r := m.HandleJoinRequest(&JoinRequest{Version: ProtocolVersion, NodeCSR: testNodeCSR(t), ClusterID: cl.ID, Password: pw, PollSecret: testPollSecret,
 				NodeName: "x", NodeAddress: "10.9.9.9", NodePort: 7946}, fmt.Sprintf("198.51.100.%d", i+1))
 			if approval && r.Status == "pending" {
 				_, _ = m.ApproveJoin(r.RequestID)

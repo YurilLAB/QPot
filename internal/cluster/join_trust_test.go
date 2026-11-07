@@ -16,22 +16,34 @@ import (
 	"time"
 )
 
-// impostorSeed answers /join and /join/status as a seed of the cluster would,
-// serving a certificate a public CA (stood in for by systemRoots) issued for
-// 127.0.0.1, and records every request body and poll it gets.
+// impostorSeed answers /join and /join/status as the cluster's enrollment
+// host would (it signs the joiner's request with the cluster CA), serving a
+// certificate a public CA (stood in for by systemRoots) issued for 127.0.0.1,
+// and records every request body and poll it gets.
 func impostorSeed(t *testing.T, clusterID, caKey string) (*publicPeer, func() []string) {
 	t.Helper()
 	var mu sync.Mutex
 	var seen []string
+	var csr string
 	p := newPublicPeerServing(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		b, _ := io.ReadAll(io.LimitReader(r.Body, 1<<16))
 		mu.Lock()
+		defer mu.Unlock()
 		seen = append(seen, r.URL.Path+" "+string(b)+" "+r.Header.Get("X-Cluster-Password"))
-		mu.Unlock()
-		resp := JoinResponse{Status: "pending", RequestID: "jr_1"}
-		if r.URL.Path == "/api/v1/cluster/join/status" {
-			resp = JoinResponse{Success: true, Status: "approved", ClusterName: "c",
-				NodeID: "qn_joiner", CAKey: caKey, MemberKey: "member-key-from-the-seed", Config: DefaultClusterConfig()}
+		resp := JoinResponse{Version: ProtocolVersion, Status: "pending", RequestID: "jr_1"}
+		switch r.URL.Path {
+		case "/api/v1/cluster/join":
+			var req JoinRequest
+			_ = json.Unmarshal(b, &req)
+			csr = req.NodeCSR
+		case "/api/v1/cluster/join/status":
+			cert, err := issueNodeCertificate(caKey, "qn_joiner", csr)
+			if err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
+			resp = JoinResponse{Version: ProtocolVersion, Success: true, Status: "approved", ClusterName: "c",
+				NodeID: "qn_joiner", NodeCertificate: cert, MemberKey: "member-key-from-the-seed", Config: DefaultClusterConfig()}
 		}
 		_ = json.NewEncoder(w).Encode(resp)
 	}))
@@ -44,7 +56,7 @@ func impostorSeed(t *testing.T, clusterID, caKey string) (*publicPeer, func() []
 
 // TestJoinTrustsOnlyTheClusterCAByDefault: the join request and the approval
 // polls carry the cluster password and the poll secret, and the approval hands
-// over the CA and member keys, yet the joiner accepted any seed whose
+// over the member key, yet the joiner accepted any seed whose
 // certificate the system roots trust for the address dialled - the pin the
 // cluster ID gives it was bypassed. A joiner now trusts the cluster CA alone
 // unless told to accept operator certificates.
@@ -153,7 +165,7 @@ func TestJoinThroughTheClusterCAByDefault(t *testing.T) {
 }
 
 // TestJoinPollTrustsOnlyTheClusterCA: the approval polls carry the password
-// and the poll secret and bring back the CA and member keys. A seed that
+// and the poll secret and bring back the member key. A seed that
 // answered the join with the cluster CA's certificate but whose address
 // later serves another certificate - one the system roots trust - gets no
 // poll.
@@ -162,7 +174,15 @@ func TestJoinPollTrustsOnlyTheClusterCA(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	node, err := newNodeCertificate(caKey, "qn_seed")
+	seedKey, seedCSR, err := newNodeRequest()
+	if err != nil {
+		t.Fatal(err)
+	}
+	seedChain, err := issueNodeCertificate(caKey, "qn_seed", seedCSR)
+	if err != nil {
+		t.Fatal(err)
+	}
+	node, err := tls.X509KeyPair([]byte(seedChain), []byte(seedKey))
 	if err != nil {
 		t.Fatal(err)
 	}

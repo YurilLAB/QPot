@@ -1,9 +1,14 @@
 package server
 
 import (
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
 	"crypto/sha256"
+	"crypto/x509"
 	"encoding/hex"
 	"encoding/json"
+	"encoding/pem"
 	"net"
 	"net/http"
 	"os"
@@ -139,7 +144,7 @@ func TestClusterRequestsLive(t *testing.T) {
 	a := newAPITestServer(t, "api-cluster-live", nil)
 	cm, c, pw := startedTestCluster(t)
 	poll := strings.Repeat("p", 40)
-	resp := cm.HandleJoinRequest(&cluster.JoinRequest{ClusterID: c.ID, Password: pw, NodeName: "sensor-9",
+	resp := cm.HandleJoinRequest(&cluster.JoinRequest{Version: cluster.ProtocolVersion, NodeCSR: testNodeCSR(t), ClusterID: c.ID, Password: pw, NodeName: "sensor-9",
 		NodeAddress: "198.51.100.7", NodePort: 7946, InstanceName: "far", PollSecret: poll}, "203.0.113.9")
 	if resp.Status != "pending" || resp.RequestID == "" {
 		t.Fatalf("join: %+v", resp)
@@ -250,4 +255,18 @@ func TestJoinCommands(t *testing.T) {
 			t.Errorf("%q gave %q %q", id, a, d)
 		}
 	}
+}
+
+// testNodeCSR makes the certificate request a joining node sends.
+func testNodeCSR(t *testing.T) string {
+	t.Helper()
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	der, err := x509.CreateCertificateRequest(rand.Reader, &x509.CertificateRequest{}, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE REQUEST", Bytes: der}))
 }

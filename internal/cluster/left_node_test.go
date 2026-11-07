@@ -409,7 +409,7 @@ func TestNodesThatLeftDoNotFillTheCluster(t *testing.T) {
 	if !isMember(m, "qn_new") {
 		t.Error("a new node was not discovered: the records of nodes that left filled the cluster")
 	}
-	if r := m.HandleJoinRequest(&JoinRequest{ClusterID: m.cluster.ID, Password: "password123", PollSecret: testPollSecret,
+	if r := m.HandleJoinRequest(&JoinRequest{Version: ProtocolVersion, NodeCSR: testNodeCSR(t), ClusterID: m.cluster.ID, Password: "password123", PollSecret: testPollSecret,
 		NodeName: "joiner", NodeAddress: "127.0.0.1", NodePort: 7964}, "127.0.0.1"); !r.Success {
 		t.Errorf("a join was refused: the records of nodes that left filled the cluster: %+v", r)
 	}

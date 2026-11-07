@@ -71,6 +71,12 @@ func TestWorkerClassifiesAgainstClickHouse(t *testing.T) {
 	loader.loadEmbedded()
 	classifier := NewClassifier(loader, NewTTPBuilder(30*time.Minute))
 	w := NewWorker(classifier, db, time.Minute, 500)
+	lock, err := acquireWorkerLock(w.ownershipKey)
+	if err != nil {
+		t.Fatalf("worker ownership: %v", err)
+	}
+	w.ownershipLock = lock
+	defer lock.Close()
 
 	classified := w.runOnce(ctx)
 	if classified == 0 {

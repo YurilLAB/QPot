@@ -52,7 +52,7 @@ func mustJSON(t *testing.T, v any) []byte {
 // request, the host listed it with the pending request, put it on the node it
 // admitted and so in cluster.json, the join answer and every gossip digest:
 // every member learnt every other member's web API credential. A request
-// from an older joiner that still sends it is accepted and the ID dropped.
+// that still sends it is accepted and the ID dropped.
 func TestJoinKeepsTheJoinersQPotID(t *testing.T) {
 	const password = "correct-horse-battery"
 	seedDir := t.TempDir()
@@ -64,6 +64,7 @@ func TestJoinKeepsTheJoinersQPotID(t *testing.T) {
 	base := startSeedServer(t, seed)
 
 	body := mustJSON(t, map[string]any{
+		"version": ProtocolVersion, "node_csr": testNodeCSR(t),
 		"cluster_id": cl.ID, "password": password, "node_name": "old-sensor",
 		"node_address": "10.9.9.9", "node_port": 7947, "qpot_id": joinerQPotID,
 		"instance_name": "default", "poll_secret": testPollSecret,
@@ -76,7 +77,7 @@ func TestJoinKeepsTheJoinersQPotID(t *testing.T) {
 	resp.Body.Close()
 	var pending JoinResponse
 	if err := json.Unmarshal(answer, &pending); err != nil || pending.Status != "pending" {
-		t.Fatalf("an older joiner's request was not queued: %d %s", resp.StatusCode, answer)
+		t.Fatalf("a request carrying a QPot ID was not queued: %d %s", resp.StatusCode, answer)
 	}
 	noQPotID(t, "the pending list", mustJSON(t, seed.ListPendingJoins()))
 

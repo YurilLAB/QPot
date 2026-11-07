@@ -1,8 +1,11 @@
 package cluster
 
 import (
+	"bytes"
 	"net"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -100,8 +103,8 @@ func itoa(i int) string {
 }
 
 // TestTwoNodeJoinOverAutoTLS: a node joins over automatic TLS (verifying the
-// seed by the CA its cluster ID names), receives the member key and the CA
-// key, and then both nodes reach each other with certificates from that CA.
+// seed by the CA its cluster ID names), receives its signed leaf and the
+// member key, and both nodes reach each other without sharing the CA key.
 func TestTwoNodeJoinOverAutoTLS(t *testing.T) {
 	const password = "correct-horse-battery"
 	free := func() int {
@@ -138,8 +141,11 @@ func TestTwoNodeJoinOverAutoTLS(t *testing.T) {
 	if joined.MemberKey == "" || joined.MemberKey != cl.MemberKey {
 		t.Fatalf("joiner's member key %q, host's %q", joined.MemberKey, cl.MemberKey)
 	}
-	if joined.CAKey != cl.CAKey || checkClusterCA(cl.ID, joined.CAKey) != nil {
-		t.Fatal("the joiner did not get the cluster's CA key")
+	if joined.CAKey != "" || joined.NodeKey == "" || joined.NodeKey == cl.NodeKey {
+		t.Fatal("the joiner received shared signing credentials")
+	}
+	if _, err := nodeCertificate(cl.ID, joined.LocalNode.ID, joined.NodeCertificate, joined.NodeKey); err != nil {
+		t.Fatal(err)
 	}
 	joiner.mu.Lock()
 	joiner.cluster.Config.BindAddr = "127.0.0.1"
@@ -166,5 +172,41 @@ func TestTwoNodeJoinOverAutoTLS(t *testing.T) {
 	}
 	if code, err := get(host, joinerPort); err != nil || code != http.StatusOK {
 		t.Fatalf("host -> joiner under the member CA: code=%d err=%v", code, err)
+	}
+
+	// The persisted member identity survives restart without a CA key. A
+	// member cannot become an enrollment authority merely by knowing the
+	// cluster password and member key.
+	if err := joiner.Stop(); err != nil {
+		t.Fatal(err)
+	}
+	state, err := os.ReadFile(filepath.Join(joiner.dataPath, "cluster.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Contains(state, []byte(cl.CAKey)) || bytes.Contains(state, []byte(`"ca_key"`)) {
+		t.Fatal("joined member persisted the cluster CA private key")
+	}
+	restarted := NewManager(joiner.dataPath)
+	restored, err := restarted.LoadCluster()
+	if err != nil || restored == nil || restored.CAKey != "" || restored.NodeKey != joined.NodeKey {
+		t.Fatalf("member identity did not survive restart: %v", err)
+	}
+	if err := restarted.UnlockPassword(password); err != nil {
+		t.Fatal(err)
+	}
+	if err := restarted.Start(); err != nil {
+		t.Fatal(err)
+	}
+	defer restarted.Stop()
+	if code, err := get(host, joinerPort); err != nil || code != http.StatusOK {
+		t.Fatalf("host -> restarted member: code=%d err=%v", code, err)
+	}
+	if _, err := newJoiner(t).JoinCluster(cl.ID, password,
+		&Node{Name: "node-3", Address: "127.0.0.1", Port: 7948}, []string{"127.0.0.1:" + itoa(joinerPort)}); err == nil || !strings.Contains(err.Error(), "not the enrollment authority") {
+		t.Fatalf("member enrolled another node: %v", err)
+	}
+	if len(restarted.ListPendingJoins()) != 0 {
+		t.Fatal("ordinary member queued an enrollment request")
 	}
 }

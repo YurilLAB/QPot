@@ -1,7 +1,9 @@
 package server
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"io/fs"
 	"net/http"
@@ -9,13 +11,110 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/qpot/qpot/internal/config"
+	"github.com/qpot/qpot/internal/database"
+	"github.com/qpot/qpot/internal/hostsetup"
+	"github.com/qpot/qpot/internal/intelligence"
 )
 
 // validTestID is a syntactically valid QPot ID (qp_ + 24 chars = 27 total).
 const validTestID = "qp_abcdefghijklmnopqrstuvwx"
+
+type intelligenceHealthDB struct {
+	fakeDB
+	failing atomic.Bool
+	err     error
+}
+
+func (d *intelligenceHealthDB) GetUnclassifiedEvents(context.Context, int) ([]*database.Event, error) {
+	if d.failing.Load() {
+		return nil, d.err
+	}
+	return nil, nil
+}
+
+func TestIntelligenceSummaryReportsWorkerLifecycleWithoutSecrets(t *testing.T) {
+	for _, code := range []string{
+		intelligence.CodeRecovery, intelligence.CodeCheckpoint, intelligence.CodeReplay,
+		intelligence.CodeOwnership, intelligence.CodePreparation, intelligence.CodeEncoding,
+	} {
+		t.Run(code, func(t *testing.T) {
+			const secret = "private-database-password-and-event-payload"
+			db := &intelligenceHealthDB{err: hostsetup.E(code).WithFix(secret).Wrap(errors.New(secret))}
+			if code == intelligence.CodeEncoding {
+				db.err = errors.Join(errors.New(secret), &database.IntelligenceEncodingError{
+					Backend: "elasticsearch", Field: "ioc.value", Reason: "invalid UTF-8",
+				})
+			}
+			s := newTestServer(true)
+			s.database = db
+			s.setupRoutes()
+			read := func(wantState string, wantHealthy bool, wantCode string) {
+				t.Helper()
+				rec := httptest.NewRecorder()
+				s.mux.ServeHTTP(rec, authReq(http.MethodGet, "/api/intelligence", ""))
+				if rec.Code != http.StatusOK {
+					t.Fatalf("summary status=%d: %s", rec.Code, rec.Body.String())
+				}
+				var got map[string]interface{}
+				if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+					t.Fatal(err)
+				}
+				if got["worker_enabled"] != (s.worker != nil) || got["worker_status"] != wantState || got["worker_healthy"] != wantHealthy {
+					t.Fatalf("incorrect worker lifecycle: %v", got)
+				}
+				for _, field := range []string{"techniques_observed", "iocs_total", "active_sessions", "attck_loaded"} {
+					if _, ok := got[field]; !ok {
+						t.Errorf("existing API field %s missing", field)
+					}
+				}
+				if wantCode == "" {
+					if got["worker_error_code"] != nil || got["worker_error_remedy"] != nil {
+						t.Fatalf("stale error after recovery: %v", got)
+					}
+				} else if got["worker_error_code"] != wantCode || got["worker_error_remedy"] != hostsetup.E(wantCode).Remedy() {
+					t.Fatalf("missing safe code/catalog guidance: %v", got)
+				}
+				if strings.Contains(rec.Body.String(), secret) {
+					t.Fatal("summary exposed a private error cause or custom remedy")
+				}
+			}
+			read("disabled", false, "")
+			loader := intelligence.NewATTCKLoader(t.TempDir())
+			s.worker = intelligence.NewWorker(intelligence.NewClassifier(loader, nil), db, time.Millisecond, 10)
+			read("not_started", false, "")
+			db.failing.Store(true)
+			ctx, cancel := context.WithCancel(t.Context())
+			done := make(chan struct{})
+			go func() { defer close(done); s.worker.Run(ctx) }()
+			t.Cleanup(func() { cancel(); <-done })
+			awaitState := func(want string) {
+				t.Helper()
+				deadline := time.Now().Add(5 * time.Second)
+				for time.Now().Before(deadline) {
+					if state, _ := s.worker.Status(); state == want {
+						return
+					}
+					time.Sleep(time.Millisecond)
+				}
+				state, err := s.worker.Status()
+				t.Fatalf("worker did not reach %s: %s %v", want, state, err)
+			}
+			awaitState("retrying")
+			read("retrying", false, code)
+			db.failing.Store(false)
+			awaitState("running")
+			read("running", true, "")
+			cancel()
+			<-done
+			read("stopped", false, "")
+		})
+	}
+}
 
 func newTestServer(qpotIDAuth bool) *Server {
 	return &Server{

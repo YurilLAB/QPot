@@ -22,7 +22,7 @@ func TestApproveResponseDoesNotShareTheLiveNode(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	jr := m.HandleJoinRequest(&JoinRequest{ClusterID: cl.ID, Password: pw, PollSecret: testPollSecret,
+	jr := m.HandleJoinRequest(&JoinRequest{Version: ProtocolVersion, NodeCSR: testNodeCSR(t), ClusterID: cl.ID, Password: pw, PollSecret: testPollSecret,
 		NodeName: "n", NodeAddress: "10.0.0.7", NodePort: 7946}, "10.0.0.7")
 	if jr.Status != "pending" {
 		t.Fatalf("join: %+v", jr)
@@ -61,7 +61,7 @@ func TestApproveResponseDoesNotShareTheLiveNode(t *testing.T) {
 
 	// And the node it returns is a copy: changing it leaves the member alone.
 	node, err := func() (*Node, error) {
-		jr2 := m.HandleJoinRequest(&JoinRequest{ClusterID: cl.ID, Password: pw, PollSecret: testPollSecret,
+		jr2 := m.HandleJoinRequest(&JoinRequest{Version: ProtocolVersion, NodeCSR: testNodeCSR(t), ClusterID: cl.ID, Password: pw, PollSecret: testPollSecret,
 			NodeName: "n2", NodeAddress: "10.0.0.8", NodePort: 7946}, "10.0.0.8")
 		return m.ApproveJoin(jr2.RequestID)
 	}()

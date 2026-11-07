@@ -1,13 +1,16 @@
 package main
 
 import (
+	"bytes"
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
 	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
+	"encoding/json"
 	"encoding/pem"
+	"errors"
 	"io"
 	"math/big"
 	"net"
@@ -21,6 +24,7 @@ import (
 	"time"
 
 	"github.com/qpot/qpot/internal/cluster"
+	"github.com/qpot/qpot/internal/hostsetup"
 )
 
 // clusterHome points HOME at a temp dir and returns the cluster data dir.
@@ -257,4 +261,220 @@ func TestClusterJoinTrustFlags(t *testing.T) {
 	if got, err := join("--ca-file", filepath.Join(dir, "missing.pem")); err == nil || got || !strings.Contains(err.Error(), "--ca-file") {
 		t.Errorf("a missing --ca-file: err %v, seed reached %v", err, got)
 	}
+}
+
+func TestClusterUpgradeCommandPreservesInstanceAndRequiresConfirmation(t *testing.T) {
+	dir := clusterHome(t)
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := cluster.DefaultClusterConfig()
+	cfg.BindAddr, cfg.BindPort = "127.0.0.1", ln.Addr().(*net.TCPAddr).Port
+	ln.Close()
+	mgr := cluster.NewManager(dir)
+	c, err := mgr.InitCluster("existing", "password123", cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := mgr.SaveSecret(); err != nil {
+		t.Fatal(err)
+	}
+	c.Version, c.NodeKey, c.NodeCertificate = 0, "", ""
+	c.LocalNode.InstanceName = "keep-instance"
+	original, err := json.Marshal(c)
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dir, "cluster.json")
+	if err := os.WriteFile(path, original, 0600); err != nil {
+		t.Fatal(err)
+	}
+	var output bytes.Buffer
+	abort := newClusterUpgradeCommand()
+	abort.SetOut(&output)
+	abort.SetErr(io.Discard)
+	abort.SetIn(strings.NewReader("n\n"))
+	if err := abort.Execute(); err != nil {
+		t.Fatal(err)
+	}
+	unchanged, err := os.ReadFile(path)
+	if err != nil || !bytes.Equal(unchanged, original) {
+		t.Fatal("declined upgrade modified saved instance")
+	}
+	upgrade := newClusterUpgradeCommand()
+	upgrade.SetOut(&output)
+	upgrade.SetErr(io.Discard)
+	upgrade.SetArgs([]string{"--yes"})
+	if err := upgrade.Execute(); err != nil {
+		t.Fatal(err)
+	}
+	got, err := cluster.NewManager(dir).LoadCluster()
+	if err != nil || got.Version != cluster.ProtocolVersion || got.ID == c.ID || got.LocalNode.InstanceName != "keep-instance" {
+		t.Fatalf("upgrade did not preserve instance and rotate version/trust: %v", err)
+	}
+	for _, text := range []string{"new cluster id", "backup", "were not changed", "rejoin"} {
+		if !strings.Contains(strings.ToLower(output.String()), text) {
+			t.Errorf("upgrade output lacks %q", text)
+		}
+	}
+	if strings.Contains(output.String(), c.CAKey) || strings.Contains(output.String(), got.NodeKey) || strings.Contains(output.String(), "password123") {
+		t.Fatal("upgrade output exposed private credentials")
+	}
+}
+
+func TestClusterUpgradeCommandErrorsAreCoded(t *testing.T) {
+	for _, mode := range []string{"missing", "corrupt", "password"} {
+		t.Run(mode, func(t *testing.T) {
+			dir := clusterHome(t)
+			if mode == "corrupt" {
+				if err := os.MkdirAll(dir, 0700); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(filepath.Join(dir, "cluster.json"), []byte("invalid JSON private marker"), 0600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if mode == "password" {
+				if _, err := cluster.NewManager(dir).InitCluster("test", "password123", nil); err != nil {
+					t.Fatal(err)
+				}
+			}
+			cmd := newClusterUpgradeCommand()
+			cmd.SetOut(io.Discard)
+			cmd.SetErr(io.Discard)
+			cmd.SetArgs([]string{"--yes", "--password", "wrong-password"})
+			err := cmd.Execute()
+			var coded *hostsetup.Error
+			if !errors.As(err, &coded) || coded.Code != "QP-CLUSTER-006" || commandExitStatus(err) != 23 {
+				t.Fatalf("upgrade error not coded: %v", err)
+			}
+			if strings.Contains(err.Error(), "private marker") || strings.Contains(err.Error(), "wrong-password") || !strings.Contains(err.Error(), "Fix:") {
+				t.Fatalf("upgrade error leaked data or lacks guidance: %v", err)
+			}
+		})
+	}
+}
+
+func TestClusterErrorExitStatusPreservesOtherCommands(t *testing.T) {
+	if commandExitStatus(errors.New("ordinary command failure")) != 1 || commandExitStatus(hostsetup.E("QP-INPUT-001")) != 1 {
+		t.Fatal("unrelated command exit behavior changed")
+	}
+}
+
+func TestClusterStatusDistinguishesLegacyFutureAndDamagedIdentity(t *testing.T) {
+	for _, mode := range []string{"legacy", "future", "missing-key", "missing-certificate", "missing-member-key", "current"} {
+		t.Run(mode, func(t *testing.T) {
+			dir := clusterHome(t)
+			c, err := cluster.NewManager(dir).InitCluster("status-test", "password123", nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			want := ""
+			switch mode {
+			case "legacy":
+				c.Version = 0
+				want = "'qpot cluster upgrade'"
+			case "future":
+				c.Version = cluster.ProtocolVersion + 1
+				want = "Update QPot to support this protocol"
+			case "missing-key":
+				c.NodeKey = ""
+				want = "re-enroll"
+			case "missing-certificate":
+				c.NodeCertificate = ""
+				want = "re-enroll"
+			case "missing-member-key":
+				c.MemberKey = ""
+				want = "re-enroll"
+			}
+			data, err := json.Marshal(c)
+			if err != nil {
+				t.Fatal(err)
+			}
+			path := filepath.Join(dir, "cluster.json")
+			if err := os.WriteFile(path, data, 0600); err != nil {
+				t.Fatal(err)
+			}
+			out := captureStdout(t, func() {
+				if err := newClusterStatusCommand().Execute(); err != nil {
+					t.Fatal(err)
+				}
+			})
+			if want != "" && !strings.Contains(out, want) {
+				t.Fatalf("missing actionable guidance %q: %s", want, out)
+			}
+			if mode != "legacy" && strings.Contains(out, "'qpot cluster upgrade'") {
+				t.Fatal("non-legacy cluster incorrectly advised to perform legacy upgrade")
+			}
+			if mode == "current" && strings.Contains(out, "[!]") {
+				t.Fatalf("valid current identity incorrectly warned: %s", out)
+			}
+			if after, err := os.ReadFile(path); err != nil || !bytes.Equal(data, after) {
+				t.Fatal("status changed the saved cluster")
+			}
+		})
+	}
+}
+
+func TestClusterUpgradeEnvironmentPasswordAndRepeatedInvocation(t *testing.T) {
+	dir := clusterHome(t)
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := cluster.DefaultClusterConfig()
+	cfg.BindAddr, cfg.BindPort = "127.0.0.1", listener.Addr().(*net.TCPAddr).Port
+	listener.Close()
+	c, err := cluster.NewManager(dir).InitCluster("env-password", "password123", cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	c.Version, c.NodeCertificate, c.NodeKey = 0, "", ""
+	data, err := json.Marshal(c)
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dir, "cluster.json")
+	if err := os.WriteFile(path, data, 0600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv(cluster.ClusterPasswordEnv, "password123")
+	cmd := newClusterUpgradeCommand()
+	cmd.SetOut(io.Discard)
+	cmd.SetErr(io.Discard)
+	cmd.SetArgs([]string{"--yes"})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("environment-only password upgrade: %v", err)
+	}
+	upgraded, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cmd = newClusterUpgradeCommand()
+	cmd.SetOut(io.Discard)
+	cmd.SetErr(io.Discard)
+	cmd.SetArgs([]string{"--yes"})
+	err = cmd.Execute()
+	var coded *hostsetup.Error
+	if !errors.As(err, &coded) || coded.Code != "QP-CLUSTER-006" || commandExitStatus(err) != 23 {
+		t.Fatalf("repeated upgrade must fail with a supported code: %v", err)
+	}
+	if after, err := os.ReadFile(path); err != nil || !bytes.Equal(upgraded, after) {
+		t.Fatal("repeated upgrade rotated or damaged current trust")
+	}
+}
+
+// testNodeCSR makes the certificate request a joining node sends.
+func testNodeCSR(t *testing.T) string {
+	t.Helper()
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	der, err := x509.CreateCertificateRequest(rand.Reader, &x509.CertificateRequest{}, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE REQUEST", Bytes: der}))
 }

@@ -90,7 +90,7 @@ qpot --version
 | `qpot docker` | Inspect and manage the underlying Docker containers. |
 | `qpot db` | Inspect schema versions and run/roll back migrations. |
 | `qpot cluster` | Pair multiple nodes into a managed group (aliases: `group`, `pair`, `networking`). |
-| `qpot canary` | Mint and manage canaries (honeytokens) — decoy artifacts that alert on any interaction. |
+| `qpot canary` | Mint and manage canaries (honeytokens) — decoy artifacts that alert on monitored interactions. |
 | `qpot overview` | Host resources, 24h honeypot activity and recent events, for one or all local instances. |
 | `qpot geoip` | Install or refresh the GeoIP database used for countries and the attack map. |
 | `qpot config` | Open or print the instance config file. |
@@ -476,6 +476,7 @@ qpot cluster [command]
 |------------|-------------|
 | `init` | Initialize a new cluster (prints the cluster ID and password). |
 | `join` | Join an existing cluster. |
+| `upgrade` | Safely upgrade a stopped legacy cluster, preserving settings and requiring members to rejoin. |
 | `requests` | List pending join requests awaiting approval. |
 | `approve <request-id>` | Approve a pending join request. |
 | `deny <request-id>` | Deny a pending join request. |
@@ -534,7 +535,9 @@ from that CA before the password is sent. If the seed serves a certificate
 from your own or a public CA instead (`tls_cert_path` in its `cluster.json`),
 add `--operator-cert` to accept one the system roots trust, or
 `--ca-file <bundle.pem>` to check it against a specific CA bundle. The node
-keeps that choice for its later connections to the other members.
+keeps that choice for its later connections to the other members. Either way,
+the node certificate the seed hands back must come from the CA the cluster ID
+names and match the key the joining node made.
 
 ### Join approval
 
@@ -558,15 +561,60 @@ connection, not the request body) alongside its claimed hostname and instance.
 
 On approval the joiner receives the cluster's **member key**, which the peer
 endpoints (gossip, intel, nodes, status, leave) require besides the password,
-and the key of the cluster's certificate authority, from which each node
-makes its TLS certificate. The cluster ID is that authority's fingerprint, so
-the joiner verifies the seed before sending the password and receives both
-keys over a connection only a real node can answer. Only the joiner collects
-them: its join carries a random poll secret, and the host answers a poll for
+and a signed **node certificate** for a private key generated on the joiner.
+The private node key never leaves the node; the CA key stays only on the host
+that ran `cluster init`. Use that enrollment host as `--seed`; ordinary members
+cannot enroll others. The cluster ID is the authority's fingerprint, so the
+joiner verifies the seed before sending the password and checks the returned
+certificate against its own key and assigned node ID. Only the joiner collects
+the result: its join carries a random poll secret, and the host answers a poll for
 the decision only when it carries that secret, so knowing the password and a
-request ID is not enough. A cluster created by an
-earlier QPot, whose TLS was derived from the password, does not start; leave
-it on every node and create it again.
+request ID is not enough. Certificates expire after one year; re-enroll members
+before expiry. The enrollment host renews its own certificate on startup when
+it has under 30 days left, including after expiry. Keep that host available for
+joins and protect/back up its private cluster state.
+
+Clusters created by earlier QPot versions (password-derived TLS or a CA key
+shared with members) do not start until explicitly upgraded. Old clients without
+the current protocol version and a valid certificate request are rejected.
+
+### `qpot cluster upgrade`
+
+Stop the old control planes and install the updated QPot on every node first.
+Run this **once**, on the chosen enrollment host:
+
+```text
+qpot cluster upgrade [-p <password>] [--yes]
+```
+
+The password defaults to the stored secret or `QPOT_CLUSTER_PASSWORD`. Without
+`--yes`, the command asks before rotating trust. It refuses a running cluster,
+an occupied cluster port, an outstanding upgrade lock, changed saved settings,
+or invalid configured TLS files. It preserves the cluster name, settings,
+metadata and local instance identity, validates the replacement certificate,
+writes a private byte-for-byte `cluster.legacy-*.json` configuration/membership
+backup, then atomically replaces `cluster.json`. Preparation/write failures
+leave the old active file and instance unchanged. Other instance files and event
+databases are never modified or backed up by this operation.
+
+The new cluster has a new ID, CA and member key, and initially only the local
+node. Start that host's control plane. Every other updated node must leave its
+old cluster and rejoin using the printed new ID and the enrollment host as the
+seed. The saved approval setting still applies. Missing or incompatible protocol
+versions cannot join. Previously shared signing keys cannot be safely retained
+as trusted roots, and backups are never automatically activated as fallback.
+
+If preparation was interrupted, keep the old state and any completed backup;
+inspect `cluster.upgrade.lock` and confirm no upgrade/control plane is running
+before removing a stale lock and retrying. A completed atomic replacement loads
+the new version on restart. Keep independent storage backups for power-loss or
+filesystem recovery. Configuration backups contain old secrets and must remain
+private; do not restore their old CA into the upgraded cluster's trust.
+
+Upgrade/enrollment failures use `QP-CLUSTER-001` through `QP-CLUSTER-009` with
+actionable guidance; join API failures also expose `error_code`. Code `009`
+means activation completed but filesystem durability is uncertain: inspect
+the active new state and backup, and never automatically restore the old CA.
 
 ### `qpot cluster leave`
 
@@ -589,17 +637,18 @@ new node ID.
 
 ### Who is trusted with membership
 
-Every admitted member holds the cluster password and the member key, and
-receives the cluster CA's key, so the cluster trusts every member with its
-membership: any member can add nodes through gossip, and nothing in a
-request proves which member sent it. Approve only nodes you control. A node's
-departure is the exception, taken only from the node itself as far as its
-address shows: a leave request counts only when it comes from the address the
-node is registered with, gossip pushed to a member never marks a node as
-left, and the only gossip that does is a node's own answer when a member
-contacts it. A node that leaves from behind NAT is refused; it has stopped,
-so the members mark it failed when they cannot reach it. Clusters created
-before the member key existed rely on the password alone.
+Every admitted member holds the cluster password, the member key and a node
+certificate of its own (never the CA key), so the cluster trusts every member
+with its membership: any member can add nodes through gossip, and nothing in a
+request proves which member sent it, as members present no client certificate
+to each other. Approve only nodes you control. A node's departure is the
+exception, taken only from the node itself as far as its address shows: a
+leave request counts only when it comes from the address the node is
+registered with, gossip pushed to a member never marks a node as left, and the
+only gossip that does is a node's own answer when a member contacts it. A node
+that leaves from behind NAT is refused; it has stopped, so the members mark it
+failed when they cannot reach it. Clusters created before the member key
+existed do not start until upgraded (`qpot cluster upgrade`).
 
 ### `qpot cluster nodes` / `qpot cluster status`
 
@@ -615,19 +664,23 @@ qpot cluster nodes    # per-node table: ID, name, address, status, events
 ## Canaries — `qpot canary`
 
 Mint and manage **canaries** (honeytokens): decoy artifacts planted inside your
-real estate that fire a critical alert the moment anyone touches them. They
-complement the honeypot containers — a honeypot catches the attacker who
-connects from outside; a canary catches the one already inside who opens a file,
-reads a credential, or follows a link they never should have.
+environment that alert on monitored interactions. A trip records a beacon
+request or a watched value in captured honeypot event fields; it does not by
+itself prove theft or compromise. QPot marks trips as critical for investigation.
+The false-positive rate has not been measured: previews, link scanners and
+authorized tests can also trip a canary.
 
 Canaries are runtime objects owned by a **running** instance, so `qpot up` must
 be active; the CLI talks to the instance's local API (QPot-ID auth). Set
 `canary.base_url` in the instance config so minted URLs point at wherever this
 QPot is reachable. See [docs/canary.md](../docs/canary.md) for the full design.
 
-Kinds: `web` (a beacon URL), `file` (a document that beacons when opened),
-`aws` (a fake AWS key pair that trips when its value appears in a captured
-session).
+Kinds: `web` (a beacon URL), `file` (an HTML document that attempts to fetch its
+beacon), `aws` (a fake AWS key pair watched in captured honeypot event fields).
+GET or HEAD requests to a reachable beacon can trip web/file canaries. All
+kinds can also trip on a watched value in captured events, with intelligence
+enabled. Reading a credential or file alone need not alert; direct use against
+real AWS is not monitored. No recorded trips does not prove no access occurred.
 
 ### `qpot canary create`
 
