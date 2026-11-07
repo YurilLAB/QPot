@@ -16,8 +16,10 @@ import (
 	"net/http"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
+	"github.com/qpot/qpot/internal/cluster"
 	"github.com/qpot/qpot/internal/config"
 	"github.com/qpot/qpot/internal/instance"
 )
@@ -41,6 +43,10 @@ type apiState struct {
 	doctorMu   sync.Mutex
 	doctorLast *doctorReport
 	doctor     doctorChecks
+
+	// liveCluster is the cluster manager this control plane runs
+	// (SetCluster); nil when it runs none.
+	liveCluster atomic.Pointer[cluster.Manager]
 
 	// cfgMu guards the parsed config file cache readConfig keeps.
 	cfgMu  sync.Mutex

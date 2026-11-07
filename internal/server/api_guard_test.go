@@ -57,6 +57,7 @@ var apiRoutes = []apiRoute{
 	{method: http.MethodGet, path: "/api/doctor"},
 	{method: http.MethodGet, path: "/api/doctor/explain?code=QP-INST-005"},
 	{method: http.MethodGet, path: "/api/doctor/codes"},
+	{method: http.MethodGet, path: "/api/cluster/requests"},
 }
 
 func routePath(p string) string {
@@ -140,6 +141,9 @@ func newGuardServer(t *testing.T) *guardServer {
 	}
 	a.s.manager = mgr
 	a.s.database = &fakeDB{}
+	// A paired node: the cluster's own secrets must not leak either.
+	cs := withTestCluster(t, a.s)
+	sec["cluster password hash"], sec["cluster member key"], sec["cluster CA key"] = cs.passwordHash, cs.memberKey, cs.caKey
 	return &guardServer{apiTestServer: a, secrets: sec}
 }
 
@@ -269,11 +273,12 @@ func TestAPIAnswersCarryNoSecrets(t *testing.T) {
 			}
 		}
 	}
-	// The secrets are in the file the server reads: the check is not vacuous.
+	// The secrets are in the file the server reads (the cluster's are in its
+	// cluster.json): the check is not vacuous.
 	cfg := string(g.configFile(t))
 	var missing []string
 	for what, v := range g.secrets {
-		if !strings.Contains(cfg, v) {
+		if !strings.HasPrefix(what, "cluster ") && !strings.Contains(cfg, v) {
 			missing = append(missing, what)
 		}
 	}

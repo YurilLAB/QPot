@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/qpot/qpot/internal/cluster"
@@ -56,6 +57,28 @@ func runControlPlane(ctx context.Context, cfg *config.Config, mgr *instance.Mana
 	defer cancel()
 	fatal := make(chan error, 1)
 
+	// The web server shows the cluster this control plane runs (live members,
+	// join requests). It and the cluster start independently; whichever is
+	// ready second hands the running manager over.
+	var (
+		attachMu sync.Mutex
+		web      *server.Server
+		running  *cluster.Manager
+	)
+	attach := func(w *server.Server, cm *cluster.Manager) {
+		attachMu.Lock()
+		defer attachMu.Unlock()
+		if w != nil {
+			web = w
+		}
+		if cm != nil {
+			running = cm
+		}
+		if web != nil && running != nil {
+			web.SetCluster(running)
+		}
+	}
+
 	// server.New may wait for the database to finish starting; do that in the
 	// background so the recycler and cluster are not held up by it. The port is
 	// claimed-checked up front: a control plane whose web UI cannot bind used
@@ -71,6 +94,7 @@ func runControlPlane(ctx context.Context, cfg *config.Config, mgr *instance.Mana
 				fatal <- fmt.Errorf("web server: %w", err)
 				return
 			}
+			attach(webSrv, nil)
 			slog.Info("Web server started", "addr", fmt.Sprintf("%s:%d", cfg.WebUI.BindAddr, cfg.WebUI.Port))
 			if err := webSrv.Start(ctx); err != nil && !errors.Is(err, http.ErrServerClosed) {
 				fatal <- fmt.Errorf("web server: %w", err)
@@ -91,6 +115,7 @@ func runControlPlane(ctx context.Context, cfg *config.Config, mgr *instance.Mana
 			} else {
 				slog.Info("Cluster membership running", "cluster", c.Name)
 				defer func() { _ = cm.Stop() }()
+				attach(nil, cm)
 			}
 		}
 	}

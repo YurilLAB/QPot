@@ -152,10 +152,10 @@ func (s *Server) handleInstance(w http.ResponseWriter, r *http.Request) {
 		"response_hooks":     len(cfg.Response.OnAttackDetected),
 	}
 	info.Cluster = map[string]any{"clustered": false}
-	if s.cluster != nil {
-		if st := s.cluster.GetStatus(); st != nil {
+	if cm, live := s.clusterView(); cm != nil {
+		if st := cm.GetStatus(); st != nil {
 			info.Cluster = map[string]any{"clustered": true, "name": st.Name, "nodes": st.NodeCount,
-				"healthy": st.HealthyNodes, "running": st.IsRunning}
+				"healthy": st.HealthyNodes, "running": st.IsRunning, "live": live}
 		}
 	}
 	writeJSON(w, http.StatusOK, info)

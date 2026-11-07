@@ -1199,8 +1199,8 @@ func (s *Server) handleOverview(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var cl *overview.Cluster
-	if s.cluster != nil {
-		if st := s.cluster.GetStatus(); st != nil {
+	if cm, _ := s.clusterView(); cm != nil {
+		if st := cm.GetStatus(); st != nil {
 			cl = &overview.Cluster{ID: st.ID, Name: st.Name, Nodes: st.NodeCount, Healthy: st.HealthyNodes}
 		}
 	}
@@ -1214,13 +1214,14 @@ func (s *Server) handleCluster(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	if s.cluster == nil {
-		s.sendJSON(w, map[string]interface{}{"clustered": false})
+	cm, live := s.clusterView()
+	if cm == nil {
+		s.sendJSON(w, map[string]interface{}{"clustered": false, "live": false})
 		return
 	}
 
-	status := s.cluster.GetStatus()
-	nodes := s.cluster.GetNodes()
+	status := cm.GetStatus()
+	nodes := cm.GetNodes()
 
 	type nodeView struct {
 		Name          string `json:"name"`
@@ -1233,7 +1234,7 @@ func (s *Server) handleCluster(w http.ResponseWriter, r *http.Request) {
 		IsLocal       bool   `json:"is_local"`
 	}
 	views := make([]nodeView, 0, len(nodes))
-	localID := s.cluster.LocalNodeID()
+	localID := cm.LocalNodeID()
 	for _, n := range nodes {
 		views = append(views, nodeView{
 			Name:          n.Name,
@@ -1249,8 +1250,11 @@ func (s *Server) handleCluster(w http.ResponseWriter, r *http.Request) {
 
 	s.sendJSON(w, map[string]interface{}{
 		"clustered": true,
-		"group":     status,
-		"nodes":     views,
+		// live: from the cluster this control plane runs; else as cluster.json
+		// held when the server started.
+		"live":  live,
+		"group": status,
+		"nodes": views,
 	})
 }
 
