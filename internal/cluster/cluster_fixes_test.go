@@ -93,7 +93,7 @@ func TestClusterTLSChecksIPPeerName(t *testing.T) {
 
 	pool := x509.NewCertPool()
 	pool.AddCert(ca) // stands in for the system roots / operator CA
-	c := clusterHTTPClient(5*time.Second, "qc_x", pool)
+	c := clusterHTTPClient(5*time.Second, "qc_x", pool, true)
 	resp, err := c.Post("https://"+ln.Addr().String()+"/api/v1/cluster/join", "application/json", bytes.NewReader([]byte(`{"password":"secret-pass"}`)))
 	if err == nil {
 		resp.Body.Close()

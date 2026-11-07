@@ -356,11 +356,13 @@ func (m *Manager) schemeLocked() string {
 }
 
 // peerHTTPClient builds an HTTP client suitable for talking to other
-// cluster members. When TLS is enabled it verifies peer certs against
-// the configured CA bundle (CACertPath). With EnableEncryption=true and
-// no CA path set, it falls back to the system trust store — operators
-// using self-signed certs should always set CACertPath to avoid
-// mid-rotation verification failures.
+// cluster members. When TLS is enabled it verifies peers by the cluster CA.
+// A cluster that names an operator certificate (TLSCertPath) or a CA bundle
+// (CACertPath) also accepts operator certificates, verified against that
+// bundle or, without one, the system trust store - operators using
+// self-signed certs should always set CACertPath to avoid mid-rotation
+// verification failures. One that names neither runs on cluster-CA
+// certificates alone and accepts nothing else.
 func (m *Manager) peerHTTPClient(timeout time.Duration) *http.Client {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
@@ -382,7 +384,8 @@ func (m *Manager) peerHTTPClient(timeout time.Duration) *http.Client {
 			}
 		}
 	}
-	return clusterHTTPClient(timeout, m.cluster.ID, pool)
+	operatorCerts := m.cluster.Config.TLSCertPath != "" || m.cluster.Config.CACertPath != ""
+	return clusterHTTPClient(timeout, m.cluster.ID, pool, operatorCerts)
 }
 
 // HTTPClient returns a client for talking to this cluster's API (e.g. the
@@ -607,7 +610,7 @@ func (m *Manager) attemptJoin(seedAddr, clusterID, password string, localNode *N
 
 	joinClient := &http.Client{Timeout: 15 * time.Second}
 	if scheme == "https" {
-		joinClient = clusterHTTPClient(15*time.Second, clusterID, nil)
+		joinClient = clusterHTTPClient(15*time.Second, clusterID, nil, true)
 	}
 	resp, err := joinClient.Post(url, "application/json", bytes.NewReader(reqBody))
 	if err != nil {
@@ -701,7 +704,7 @@ func (m *Manager) attemptJoin(seedAddr, clusterID, password string, localNode *N
 func (m *Manager) pollJoinApproval(scheme, host, clusterID, password, requestID, pollSecret string) (*JoinResponse, error) {
 	client := &http.Client{Timeout: 15 * time.Second}
 	if scheme == "https" {
-		client = clusterHTTPClient(15*time.Second, clusterID, nil)
+		client = clusterHTTPClient(15*time.Second, clusterID, nil, true)
 	}
 	url := fmt.Sprintf("%s://%s/api/v1/cluster/join/status?request_id=%s", scheme, host, requestID)
 

@@ -86,11 +86,11 @@ func TestAutoTLSServesAndVerifies(t *testing.T) {
 		resp.Body.Close()
 		return resp.StatusCode, nil
 	}
-	if code, err := get(clusterHTTPClient(3*time.Second, c.ID, nil)); err != nil || code != http.StatusOK {
+	if code, err := get(clusterHTTPClient(3*time.Second, c.ID, nil, true)); err != nil || code != http.StatusOK {
 		t.Fatalf("member client: code=%d err=%v", code, err)
 	}
 	_, other, _ := newClusterCA()
-	if _, err := get(clusterHTTPClient(3*time.Second, other, nil)); err == nil {
+	if _, err := get(clusterHTTPClient(3*time.Second, other, nil, true)); err == nil {
 		t.Fatal("a client of another cluster trusted the node")
 	}
 	plain := &http.Client{Timeout: 3 * time.Second, Transport: &http.Transport{TLSClientConfig: &tls.Config{MinVersion: tls.VersionTLS12}}}
@@ -131,7 +131,7 @@ func TestPasswordHolderCannotPoseAsANode(t *testing.T) {
 		t.Fatal("a member trusted a node outside the cluster's CA")
 	}
 	join, _ := http.NewRequest(http.MethodPost, impostor.URL+"/api/v1/cluster/join", bytes.NewReader([]byte(`{"password":"`+pw+`"}`)))
-	if resp, err := clusterHTTPClient(3*time.Second, c.ID, nil).Do(join); err == nil {
+	if resp, err := clusterHTTPClient(3*time.Second, c.ID, nil, true).Do(join); err == nil {
 		resp.Body.Close()
 		t.Fatal("a joiner trusted a node outside the cluster's CA")
 	}
