@@ -209,8 +209,9 @@ func (m *Manager) ListPendingJoins() []*PendingJoin {
 	return out
 }
 
-// ApproveJoin admits the pending request identified by requestID and returns the
-// admitted node. Errors if the request is unknown (already decided or expired).
+// ApproveJoin admits the pending request identified by requestID and returns a
+// copy of the admitted node. Errors if the request is unknown (already decided
+// or expired).
 func (m *Manager) ApproveJoin(requestID string) (*Node, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -231,7 +232,9 @@ func (m *Manager) ApproveJoin(requestID string) (*Node, error) {
 	}
 	slog.Info("Cluster join request approved",
 		"request_id", requestID, "node_id", resp.NodeID, "node_name", p.NodeName)
-	return m.cluster.Nodes[resp.NodeID], nil
+	// A copy: the caller encodes it after the lock is released, while gossip
+	// and the failure detector keep writing the member's record under it.
+	return m.cluster.Nodes[resp.NodeID].clone(), nil
 }
 
 // DenyJoin rejects the pending request identified by requestID.
