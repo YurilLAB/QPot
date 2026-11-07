@@ -62,6 +62,13 @@ type Server struct {
 	// single alertLoop goroutine.
 	lastAlert time.Time
 
+	// startedAt is when this control plane started serving: the node's uptime
+	// in its cluster. nodeStats is the last node stats sent to the cluster,
+	// kept when a database query fails. Both touched only by Start and the
+	// node stats goroutine.
+	startedAt time.Time
+	nodeStats cluster.NodeStats
+
 	// api is the state of the web UI's api_*.go endpoints.
 	api apiState
 }
@@ -386,6 +393,10 @@ func (s *Server) Start(ctx context.Context) error {
 		go s.alertLoop(ctx)
 	}
 
+	// This node's uptime and event counts for its cluster, if it joins one.
+	s.startedAt = time.Now()
+	go s.nodeStatsLoop(ctx)
+
 	// Start intelligence worker goroutine when enabled.
 	workerDone := make(chan struct{})
 	if s.worker != nil {
@@ -462,6 +473,55 @@ func (s *Server) alertLoop(ctx context.Context) {
 			}
 		}
 	}
+}
+
+// nodeStatsInterval is how often this node's stats go to its cluster.
+const nodeStatsInterval = 30 * time.Second
+
+// nodeStatsLoop keeps this node's stats in its cluster current. The cluster
+// can attach after the server starts (SetCluster), so every pass checks.
+func (s *Server) nodeStatsLoop(ctx context.Context) {
+	t := time.NewTicker(nodeStatsInterval)
+	defer t.Stop()
+	for {
+		s.updateNodeStats(ctx)
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+		}
+	}
+}
+
+// updateNodeStats gives the running cluster this node's uptime (this control
+// plane's) and its events: the last 24 hours' total, as the dashboard counts
+// them, and the distinct sources of the last 5 minutes as active attacks.
+// Gossip carries them to the other nodes. Nothing set them before, so every
+// node showed "0m" and 0 events. A no-op when this control plane does not run
+// the cluster; a failed query keeps the last known counts.
+func (s *Server) updateNodeStats(ctx context.Context) {
+	cm := s.api.liveCluster.Load()
+	if cm == nil {
+		return
+	}
+	now := time.Now()
+	if s.database != nil {
+		qctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+		if day, err := s.database.GetStats(qctx, now.Add(-24*time.Hour)); err == nil {
+			s.nodeStats.TotalEvents = day.TotalEvents
+		} else {
+			slog.Debug("Node stats: failed to count events", "error", err)
+		}
+		if recent, err := s.database.GetStats(qctx, now.Add(-5*time.Minute)); err == nil {
+			s.nodeStats.ActiveAttacks = recent.UniqueIPs
+		}
+		cancel()
+	}
+	if !s.startedAt.IsZero() {
+		s.nodeStats.Uptime = now.Sub(s.startedAt).Truncate(time.Second)
+	}
+	s.nodeStats.LastSync = now
+	cm.UpdateNodeStats(s.nodeStats)
 }
 
 // alertThresholdExceeded reports whether the last-minute stats cross the
