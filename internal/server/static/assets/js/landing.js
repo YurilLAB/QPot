@@ -1,117 +1,122 @@
-// QPot landing page: QPot ID sign-in (kept in this browser only, like the
-// dashboard) and live status from the instance's own API.
+// QPot's part of the landing page: the QPot ID. T-Pot's page sits behind nginx's login; QPot's API
+// wants this instance's QPot ID in the X-QPot-ID header instead. The ID is kept in this browser
+// only (localStorage 'qpot_id', shared with the dashboard and the attack map) and never put in a
+// URL. Values from the API only go in as text.
 (function () {
-    'use strict';
-    const KEY = 'qpot_id';
-    const $ = (id) => document.getElementById(id);
+  'use strict';
+  var TPot = window.TPot = window.TPot || {};
 
-    function toast(msg) {
-        const t = $('toast');
-        t.textContent = msg;
-        t.classList.add('show');
-        setTimeout(() => t.classList.remove('show'), 2500);
+  var KEY = 'qpot_id';
+  var FORMAT = /^qp_[a-z0-9]{24}$/;
+
+  function $(id) { return document.getElementById(id); }
+
+  function id() {
+    try { return window.localStorage.getItem(KEY) || ''; } catch (e) { return ''; }
+  }
+
+  function keep(value) {
+    try { window.localStorage.setItem(KEY, value); } catch (e) { /* private window: this tab only */ }
+  }
+
+  function forget() {
+    try { window.localStorage.removeItem(KEY); } catch (e) { /* nothing kept */ }
+  }
+
+  // the credential is shown masked; Copy still copies it whole
+  function mask(value) {
+    return value.length > 10 ? value.slice(0, 6) + '…' + value.slice(-4) : value;
+  }
+
+  function get(path, value) {
+    return fetch('/api' + path, { headers: { 'X-QPot-ID': value }, cache: 'no-store', credentials: 'same-origin' });
+  }
+
+  // ---------- the two states ----------
+
+  function showSignedIn() {
+    var value = id();
+    $('signin').hidden = true;
+    $('id-menu').hidden = false;
+    $('id-label').textContent = mask(value);
+    about(value);
+  }
+
+  // the band asks for the ID; message: why (empty: not signed in yet)
+  function showSignedOut(message) {
+    $('id-menu').hidden = true;
+    $('signin').hidden = false;
+    $('signin-error').textContent = message || '';
+    $('version').textContent = '';
+  }
+
+  // the version of this QPot next to the brand, as T-Pot shows its own
+  function about(value) {
+    get('/overview', value).then(function (r) { return r.ok ? r.json() : null; }).then(function (o) {
+      var v = o && typeof o.version === 'string' ? o.version : '';
+      $('version').textContent = /^[0-9A-Za-z.+_-]{1,32}$/.test(v) ? v : '';
+      var host = o && typeof o.hostname === 'string' ? o.hostname : '';
+      if (host) $('version').setAttribute('title', 'QPot on ' + host);
+    }, function () { /* the version is a nicety */ });
+  }
+
+  function signIn(ev) {
+    ev.preventDefault();
+    var input = $('signin-id'), value = input.value.trim(), err = $('signin-error');
+    if (!FORMAT.test(value)) {
+      err.textContent = 'A QPot ID is qp_ and 24 lowercase letters or digits. `qpot id` prints it on this host.';
+      input.focus();
+      return;
     }
-
-    function storedID() {
-        try { return localStorage.getItem(KEY) || ''; } catch (e) { return ''; }
-    }
-
-    async function api(path, id) {
-        const r = await fetch('/api' + path, { headers: { 'X-QPot-ID': id } });
-        if (!r.ok) { const e = new Error(r.status); e.status = r.status; throw e; }
-        return r.json();
-    }
-
-    function mask(id) {
-        return id.length > 10 ? id.slice(0, 6) + '…' + id.slice(-4) : id;
-    }
-
-    function showLocked(message) {
-        $('id-locked').classList.remove('hidden');
-        $('id-unlocked').classList.add('hidden');
-        $('status-dot').className = 'dot';
-        $('status-text').textContent = 'Locked';
-        $('stats').textContent = '';
-        $('id-err').textContent = message || '';
-    }
-
-    async function refresh() {
-        const id = storedID();
-        if (!id) { showLocked(); return; }
-        try {
-            const [st, ov] = await Promise.all([api('/status', id), api('/overview', id)]);
-            $('id-locked').classList.add('hidden');
-            $('id-unlocked').classList.remove('hidden');
-            $('id-value').textContent = mask(id);
-            const hps = (st.honeypots || []).filter((h) => h.status !== 'disabled');
-            const up = hps.filter((h) => h.running).length;
-            const ok = st.overall === 'running' || up > 0;
-            $('status-dot').className = 'dot ' + (ok ? 'ok' : 'bad');
-            $('status-text').textContent = (ok ? 'Running' : 'Stopped') + ' · ' + up + '/' + hps.length + ' honeypots';
-            const s = $('stats');
-            s.textContent = '';
-            const parts = [
-                [String(ov.events_24h || 0), ' events'],
-                [String(ov.unique_ips_24h || 0), ' attackers'],
-                [(Number(ov.events_per_sec) || 0).toFixed(2), '/s'],
-            ];
-            parts.forEach(([v, label], i) => {
-                const b = document.createElement('b');
-                b.textContent = v;
-                s.appendChild(b);
-                s.appendChild(document.createTextNode(label + (i < parts.length - 1 ? ' · ' : ' in the last 24h')));
-            });
-        } catch (e) {
-            if (e.status === 401 || e.status === 403) {
-                try { localStorage.removeItem(KEY); } catch (_) { /* ignore */ }
-                showLocked('That QPot ID was not accepted.');
-            } else {
-                $('status-dot').className = 'dot bad';
-                $('status-text').textContent = 'Unreachable';
-            }
-        }
-    }
-
-    async function unlock() {
-        const id = $('id-input').value.trim();
-        if (!/^qp_[a-z0-9]{24}$/.test(id)) { $('id-err').textContent = 'A QPot ID looks like qp_ followed by 24 characters.'; return; }
-        try {
-            await api('/status', id);
-            try { localStorage.setItem(KEY, id); } catch (_) { /* ignore */ }
-            $('id-input').value = '';
-            $('id-err').textContent = '';
-            refresh();
-        } catch (e) {
-            $('id-err').textContent = (e.status === 401 || e.status === 403) ? 'That QPot ID was not accepted.' : 'The QPot API is not reachable.';
-        }
-    }
-
-    async function exportMISP() {
-        const id = storedID();
-        if (!id) { toast('Unlock with your QPot ID first'); return; }
-        try {
-            const r = await fetch('/api/iocs/export?format=misp', { headers: { 'X-QPot-ID': id } });
-            if (!r.ok) { toast('Export failed'); return; }
-            const url = URL.createObjectURL(await r.blob());
-            const a = document.createElement('a');
-            a.href = url;
-            a.download = 'qpot-iocs-misp.json';
-            document.body.appendChild(a);
-            a.click();
-            a.remove();
-            URL.revokeObjectURL(url);
-        } catch (e) { toast('Export failed'); }
-    }
-
-    document.addEventListener('DOMContentLoaded', () => {
-        $('id-unlock').addEventListener('click', unlock);
-        $('id-input').addEventListener('keydown', (e) => { if (e.key === 'Enter') unlock(); });
-        $('id-signout').addEventListener('click', () => {
-            try { localStorage.removeItem(KEY); } catch (_) { /* ignore */ }
-            showLocked();
-        });
-        $('export-misp').addEventListener('click', exportMISP);
-        refresh();
-        setInterval(refresh, 15000);
+    err.textContent = 'Checking…';
+    get('/status', value).then(function (r) {
+      if (r.status === 401 || r.status === 403) {
+        err.textContent = 'This QPot did not accept that ID. It belongs to another instance, or it was mistyped.';
+        return;
+      }
+      if (!r.ok) {
+        err.textContent = 'QPot answered ' + r.status + '. Try again in a moment.';
+        return;
+      }
+      keep(value);
+      input.value = '';
+      err.textContent = '';
+      showSignedIn();
+      document.dispatchEvent(new CustomEvent('qpot:auth'));
+    }, function () {
+      err.textContent = 'The QPot API is not reachable. Is qpot serve running?';
     });
+  }
+
+  function copy() {
+    var value = id();
+    if (!value || !navigator.clipboard) return;
+    navigator.clipboard.writeText(value).then(function () {
+      $('id-label').textContent = 'Copied';
+      setTimeout(function () { if (id()) $('id-label').textContent = mask(id()); }, 1500);
+    }, function () { /* clipboard refused: nothing to show */ });
+  }
+
+  TPot.qpot = {
+    id: id,
+    // pulse.js could not use the saved ID (none, or refused): forget a refused one and ask
+    signedOut: function (message) {
+      if (message) forget();
+      showSignedOut(message);
+    }
+  };
+
+  document.addEventListener('DOMContentLoaded', function () {
+    $('signin').addEventListener('submit', signIn);
+    TPot.menu($('id-menu'), function (action) {
+      if (action === 'copy') copy();
+      if (action === 'dashboard') window.location.assign('/dashboard');
+      if (action === 'signout') {
+        forget();
+        showSignedOut('');
+        document.dispatchEvent(new CustomEvent('qpot:auth'));
+      }
+    });
+    if (id()) showSignedIn(); else showSignedOut('');
+  });
 })();

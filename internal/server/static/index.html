@@ -1,160 +1,202 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="color-scheme" content="dark">
+    <meta name="referrer" content="no-referrer">
     <title>QPot</title>
-    <link rel="icon" href="/assets/img/qpot-logo.svg" type="image/svg+xml">
-    <!-- T-Pot's landing page, redesigned for QPot: same layout (particles,
-         clock, logo, tool boxes), QPot's palette, and wired to QPot's own
-         API instead of T-Pot's nginx/Kibana stack. -->
-    <script src="/assets/js/particles.min.js" defer></script>
-    <script src="/assets/js/particles_conf.js" defer></script>
-    <script src="/assets/js/clock.js" defer></script>
-    <script src="/assets/js/landing.js" defer></script>
-    <style>
-        @font-face {
-            font-display: swap;
-            font-family: 'Russo One';
-            font-style: normal;
-            font-weight: 400;
-            src: url('/assets/fonts/russo-one-v16-latin-regular.woff2') format('woff2');
-        }
-        :root {
-            --bg-primary: #0a0e14;
-            --bg-secondary: #131920;
-            --bg-tertiary: #1c242f;
-            --text-primary: #e1e8ed;
-            --text-secondary: #8b9aae;
-            --accent: #3498db;
-            --accent-hover: #2980b9;
-            --success: #27ae60;
-            --warning: #f39c12;
-            --danger: #e74c3c;
-            --border: #2a3441;
-        }
-        * { box-sizing: border-box; }
-        html, body {
-            margin: 0; padding: 0; width: 100%; min-height: 100%;
-            background: var(--bg-primary);
-            color: var(--text-primary);
-            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-            overflow-x: hidden;
-        }
-        #particles-js { position: fixed; inset: 0; z-index: 0; }
-        .page { position: relative; z-index: 1; min-height: 100vh; display: flex; flex-direction: column; padding: 16px 24px 24px; }
-
-        .header { display: flex; justify-content: space-between; align-items: flex-start; gap: 16px; flex-wrap: wrap; }
-        .clock, .brand { font-family: 'Russo One', sans-serif; color: var(--accent); font-size: clamp(32px, 6vw, 72px); line-height: 1.1; }
-        .brand { text-align: right; letter-spacing: 2px; }
-
-        .status-row { display: flex; justify-content: space-between; align-items: flex-start; gap: 16px; flex-wrap: wrap; margin-top: 12px; }
-        .status { display: flex; align-items: center; gap: 10px; text-transform: uppercase; letter-spacing: 1px; font-size: 14px; color: var(--text-secondary); }
-        .dot { width: 12px; height: 12px; border-radius: 50%; background: var(--text-secondary); }
-        .dot.ok { background: var(--success); box-shadow: 0 0 10px var(--success); animation: pulse 2s infinite; }
-        .dot.bad { background: var(--danger); box-shadow: 0 0 10px var(--danger); }
-        @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: .4; } }
-        .stats { font-size: 13px; color: var(--text-secondary); margin-top: 6px; }
-        .stats b { color: var(--text-primary); font-weight: 600; }
-
-        .idbox { background: rgba(52, 152, 219, .08); border: 1px solid var(--accent); border-radius: 10px; padding: 12px 16px; min-width: 300px; }
-        .idbox .label { color: var(--accent); font-size: 11px; text-transform: uppercase; letter-spacing: 2px; margin-bottom: 6px; }
-        .idbox .value { font-family: 'Consolas', 'Monaco', monospace; font-size: 16px; }
-        .idbox input { width: 100%; background: var(--bg-secondary); border: 1px solid var(--border); color: var(--text-primary); border-radius: 6px; padding: 8px 10px; font-family: 'Consolas', 'Monaco', monospace; font-size: 14px; }
-        .idbox input:focus { outline: none; border-color: var(--accent); }
-        .idbox .row { display: flex; gap: 8px; margin-top: 8px; align-items: center; }
-        .idbox button { background: var(--accent); color: #fff; border: 0; border-radius: 6px; padding: 7px 14px; cursor: pointer; font-size: 13px; }
-        .idbox button.secondary { background: transparent; color: var(--text-secondary); border: 1px solid var(--border); }
-        .idbox button:hover { background: var(--accent-hover); color: #fff; }
-        .idbox .err { color: var(--danger); font-size: 12px; min-height: 14px; margin-top: 6px; }
-        .hidden { display: none !important; }
-
-        .logo-wrap { flex: 1; display: flex; justify-content: flex-end; align-items: center; min-height: 160px; }
-        .logo { width: min(25vw, 360px); min-width: 140px; height: auto; opacity: .9; margin-right: 6%; }
-
-        .boxes { display: flex; gap: 20px; flex-wrap: wrap; margin-top: 16px; }
-        .box {
-            position: relative; flex: 1 1 280px; max-width: 360px;
-            background: rgba(28, 36, 47, .55); border: 1px solid var(--border);
-            border-radius: 20px; padding: 46px 20px 18px; text-align: center;
-            transition: box-shadow .4s ease, border-color .4s ease;
-        }
-        .box:hover { box-shadow: 0 0 15px 4px rgba(52, 152, 219, .45); border-color: var(--accent); }
-        .box .cap { position: absolute; top: -22px; left: 50%; transform: translateX(-50%); width: 44px; height: 44px; border-radius: 50%; background: var(--bg-primary); border: 1px solid var(--border); display: flex; align-items: center; justify-content: center; color: var(--text-primary); transition: color .4s ease; }
-        .box:hover .cap { color: var(--accent); }
-        .box .cap svg { width: 22px; height: 22px; }
-        .box h2 { margin: 0 0 6px; font-family: 'Russo One', sans-serif; font-weight: 400; font-size: 13px; letter-spacing: 3px; text-transform: uppercase; color: var(--text-secondary); }
-        .link { display: block; color: var(--text-primary); text-decoration: none; font-family: 'Russo One', sans-serif; font-size: clamp(20px, 2.2vw, 28px); margin: 12px 0 0; transition: color .3s ease; background: none; border: 0; cursor: pointer; width: 100%; }
-        .link:hover { color: var(--accent); }
-        .desc { color: var(--text-secondary); font-size: 12px; margin-top: 2px; }
-        .ext::after { content: " \2197"; font-size: .6em; vertical-align: super; }
-
-        .toast { position: fixed; bottom: 24px; right: 24px; background: var(--accent); color: #fff; padding: 12px 20px; border-radius: 8px; font-size: 14px; opacity: 0; transform: translateY(16px); transition: all .3s ease; z-index: 10; }
-        .toast.show { opacity: 1; transform: none; }
-        @media (max-width: 640px) {
-            .page { padding: 12px 16px 20px; }
-            .brand { text-align: left; }
-            .idbox { min-width: 0; width: 100%; }
-            .logo-wrap { justify-content: center; min-height: 120px; }
-            .logo { margin-right: 0; }
-            .box { max-width: none; }
-        }
-    </style>
+    <!-- T-Pot 24.04.2's landing page (GPL-3.0, github.com/telekom-security/tpotce), in QPot's colours,
+         with QPot's badge and QPot's tools. No inline code. Integrity of a changed file:
+         openssl dgst -sha384 -binary FILE | openssl base64 -A -->
+    <link rel="icon" href="/assets/img/favicon-32.png" sizes="32x32" type="image/png">
+    <link rel="icon" href="/assets/img/favicon-16.png" sizes="16x16" type="image/png">
+    <link rel="icon" href="/assets/img/favicon-48.png" sizes="48x48" type="image/png">
+    <link rel="apple-touch-icon" href="/assets/img/apple-touch-icon.png">
+    <link rel="stylesheet" href="assets/css/tpot.css" integrity="sha384-CavXkRFeHyThhQGitwypgu1Z/U3SWt2tY2Exh/qZzVkuH5LABbTo/3BDcF//OcTC" crossorigin="anonymous">
+    <script src="assets/js/hexgrid.js" defer integrity="sha384-sA0GgVlaw99VMpyL8tH+dItlcAeVQSBv1zA2MbJQoxYaZalM8fzN5PffZ6YyZTFQ" crossorigin="anonymous"></script>
+    <script src="assets/js/effect-comb.js" defer integrity="sha384-UsoPf182QbX3CJMslKFulRfoAW3THSTX/+KLyVyMCCj8y9Sv0tXYbJatGugXp5k+" crossorigin="anonymous"></script>
+    <script src="assets/js/effect-honey.js" defer integrity="sha384-o12tV6y2G27yxdI0DGQ1oJhkntWD9cV3SqlAopR4c7opvFSIj8KMUCE20LynBGMq" crossorigin="anonymous"></script>
+    <script src="assets/js/effect-net.js" defer integrity="sha384-b4uHg69qq9wmfPT4v50s5PoQtYo/OROArbzroajtEtfOfRAAd9DtDD5+YdI6W5Yj" crossorigin="anonymous"></script>
+    <script src="assets/js/menu.js" defer integrity="sha384-1dII9UT6lbR4cmGcOji2jmn71Zfz7WutKLlxjgpGNElvmyPZhTaZcmQtIYvv4wj5" crossorigin="anonymous"></script>
+    <script src="assets/js/landing.js" defer integrity="sha384-7mHNn4bq2AEy4bQbPUtr8w3yHycSmx6YMapP4BMi2BZJJMFG3eXjd3TfVwC8bNRd" crossorigin="anonymous"></script>
+    <script src="assets/js/pulse.js" defer integrity="sha384-Gd7yeQjgRXfSrpTJ0aOecjgotn70cdDswW3CKmr0MoTsZ7NprF1ng6rEQ3OI54CG" crossorigin="anonymous"></script>
+    <script src="assets/js/graph.js" defer integrity="sha384-+dEckzN6vOExv5tNRazy/caf4eud+BY3Rg9AAA+aBEXwjvuawpRNS5AMC16ZycWn" crossorigin="anonymous"></script>
+    <script src="assets/js/view.js" defer integrity="sha384-DpZJPr4rDp7V91lU4+yoFpX1jYai/Wvlj23d3xzRgxu+IBldP+94sjH0qC+PHXH1" crossorigin="anonymous"></script>
+    <script src="assets/js/app.js" defer integrity="sha384-ea2WjSsrFhU34gAJKV27Es5d93Znn078jURNQ1rTJHsVdZwOZZh5U8Vvx9K/cYAj" crossorigin="anonymous"></script>
 </head>
-<body>
-<div id="particles-js"></div>
-<div class="page">
-    <div class="header">
-        <div class="clock" id="clock"></div>
-        <div class="brand">QPOT</div>
-    </div>
+<body class="effect-comb">
 
-    <div class="status-row">
-        <div>
-            <div class="status"><div class="dot" id="status-dot"></div><span id="status-text">Locked</span></div>
-            <div class="stats" id="stats"></div>
-        </div>
-        <div class="idbox" id="idbox">
-            <div class="label">QPot ID</div>
-            <div id="id-locked">
-                <input type="password" id="id-input" placeholder="qp_xxxxxxxxxxxxxxxxxxxxxxxx" maxlength="27" autocomplete="off" spellcheck="false" aria-label="QPot ID">
-                <div class="row"><button id="id-unlock">Unlock</button><span class="desc">shown by <code>qpot setup</code> / <code>qpot id</code></span></div>
-                <div class="err" id="id-err"></div>
-            </div>
-            <div id="id-unlocked" class="hidden">
-                <div class="value" id="id-value"></div>
-                <div class="row"><button class="secondary" id="id-signout">Sign out</button></div>
+<canvas id="backdrop" aria-hidden="true"></canvas>
+
+<header class="top">
+    <h1 class="brand">QPot<span class="version" id="version"></span><a class="readme" href="https://github.com/YurilLAB/QPot/blob/main/README.md" target="_blank" rel="noopener noreferrer" title="QPot readme" aria-label="QPot readme"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M2 2.5C2 2.2 2.2 2 2.5 2H6c.9 0 1.6.4 2 1 .4-.6 1.1-1 2-1h3.5c.3 0 .5.2.5.5v10c0 .3-.2.5-.5.5H10c-.8 0-1.5.4-1.5 1h-1C7.5 13.4 6.8 13 6 13H2.5c-.3 0-.5-.2-.5-.5zM7.4 4.5C7.4 3.7 6.8 3 6 3H3v9h3c.5 0 1 .1 1.4.4zm1.2 7.9c.4-.3.9-.4 1.4-.4h3V3h-3c-.8 0-1.4.7-1.4 1.5z"/></svg></a></h1>
+    <div class="menus">
+        <div class="menu" id="range-menu">
+            <button type="button" class="menu-button" id="range-button" aria-haspopup="menu" aria-expanded="false" aria-controls="range-list" title="Time range of the numbers, graphs and lists">
+                <svg class="glyph" viewBox="0 0 16 16" width="16" height="16" aria-hidden="true"><path d="M8 1a7 7 0 1 0 0 14A7 7 0 0 0 8 1zm0 2a5 5 0 1 1 0 10A5 5 0 0 1 8 3zm-1 1v4.4l3.3 2 1-1.6L9 7.6V4z"/></svg><span class="menu-label">Last 24 hours</span><svg class="chevron" viewBox="0 0 12 12" width="12" height="12" aria-hidden="true"><path d="M2.5 4.5L6 8l3.5-3.5"/></svg>
+            </button>
+            <div class="menu-panel" id="range-list">
+                <ul role="menu" aria-labelledby="range-button">
+                    <li role="none"><button type="button" role="menuitemradio" data-value="24h" aria-checked="true"><svg class="glyph" viewBox="0 0 16 16" width="16" height="16" aria-hidden="true"><path d="M8 1a7 7 0 1 0 0 14A7 7 0 0 0 8 1zm0 2a5 5 0 1 1 0 10A5 5 0 0 1 8 3zm-1 1v4.4l3.3 2 1-1.6L9 7.6V4z"/></svg><span class="item-name">Last 24 hours</span><span class="item-note">a point every 30 minutes</span><svg class="check" viewBox="0 0 16 16" width="16" height="16" aria-hidden="true"><path d="M3 8.5l3 3 7-7"/></svg></button></li>
+                    <li role="none"><button type="button" role="menuitemradio" data-value="1h" aria-checked="false"><svg class="glyph" viewBox="0 0 16 16" width="16" height="16" aria-hidden="true"><path d="M8 1a7 7 0 1 0 0 14A7 7 0 0 0 8 1zm0 2a5 5 0 1 1 0 10A5 5 0 0 1 8 3zm-1 1v4.4l3.3 2 1-1.6L9 7.6V4z"/></svg><span class="item-name">Last hour</span><span class="item-note">a point every minute</span><svg class="check" viewBox="0 0 16 16" width="16" height="16" aria-hidden="true"><path d="M3 8.5l3 3 7-7"/></svg></button></li>
+                    <li role="none"><button type="button" role="menuitemradio" data-value="1m" aria-checked="false"><svg class="glyph" viewBox="0 0 16 16" width="16" height="16" aria-hidden="true"><path d="M8 1a7 7 0 1 0 0 14A7 7 0 0 0 8 1zm0 2a5 5 0 1 1 0 10A5 5 0 0 1 8 3zm-1 1v4.4l3.3 2 1-1.6L9 7.6V4z"/></svg><span class="item-name">Last minute</span><span class="item-note">a point every 2 seconds</span><svg class="check" viewBox="0 0 16 16" width="16" height="16" aria-hidden="true"><path d="M3 8.5l3 3 7-7"/></svg></button></li>
+                </ul>
             </div>
         </div>
-    </div>
-
-    <div class="logo-wrap"><img src="/assets/img/qpot-logo.svg" alt="QPot" class="logo"></div>
-
-    <div class="boxes">
-        <div class="box">
-            <div class="cap" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12h4l3-8 4 16 3-8h4"/></svg></div>
-            <h2>Monitor</h2>
-            <a class="link" href="/dashboard">Dashboard</a><div class="desc">Honeypots, live activity, controls</div>
-            <a class="link" href="/map/">Attack Map</a><div class="desc">Live attack visualisation</div>
-            <a class="link" href="/dashboard#overview">Overview</a><div class="desc">Host load and 24h activity</div>
-            <a class="link" href="/dashboard#intel">Threat Intel</a><div class="desc">ATT&amp;CK, IOCs, campaigns</div>
+        <div class="menu" id="effect-menu">
+            <button type="button" class="menu-button" id="effect-button" aria-haspopup="menu" aria-expanded="false" aria-controls="effect-list" title="Background effect">
+                <svg class="glyph" viewBox="0 0 16 16" width="16" height="16" aria-hidden="true"><path d="M7 1l1.4 4.6L13 7l-4.6 1.4L7 13 5.6 8.4 1 7l4.6-1.4zM13 10l.7 1.8L15.5 12.5l-1.8.7L13 15l-.7-1.8-1.8-.7 1.8-.7z"/></svg><span class="menu-label">Comb</span><svg class="chevron" viewBox="0 0 12 12" width="12" height="12" aria-hidden="true"><path d="M2.5 4.5L6 8l3.5-3.5"/></svg>
+            </button>
+            <div class="menu-panel" id="effect-list">
+                <ul role="menu" aria-labelledby="effect-button">
+                    <li role="none"><button type="button" role="menuitemradio" data-value="comb" aria-checked="true"><svg class="glyph" viewBox="0 0 16 16" width="16" height="16" aria-hidden="true"><path d="M4.5 1l3 1.75v3.5L4.5 8l-3-1.75v-3.5zM11.5 1l3 1.75v3.5L11.5 8l-3-1.75v-3.5zM8 8.5l3 1.75v3.5L8 15.5l-3-1.75v-3.5z"/></svg><span class="item-name">Comb</span><span class="item-note">a cell lights up for every attack</span><svg class="check" viewBox="0 0 16 16" width="16" height="16" aria-hidden="true"><path d="M3 8.5l3 3 7-7"/></svg></button></li>
+                    <li role="none"><button type="button" role="menuitemradio" data-value="honey" aria-checked="false"><svg class="glyph" viewBox="0 0 16 16" width="16" height="16" aria-hidden="true"><path d="M8 1c0 0-5 5.6-5 9a5 5 0 0 0 10 0c0-3.4-5-9-5-9z"/></svg><span class="item-name">Honey</span><span class="item-note">a drop falls into the pot for every attack</span><svg class="check" viewBox="0 0 16 16" width="16" height="16" aria-hidden="true"><path d="M3 8.5l3 3 7-7"/></svg></button></li>
+                    <li role="none"><button type="button" role="menuitemradio" data-value="net" aria-checked="false"><svg class="glyph" viewBox="0 0 16 16" width="16" height="16" aria-hidden="true"><path d="M3.2 4.4l4.6-2 .4 1-4.6 2zM8.6 2.6l4.2 3-.6.8-4.2-3zM12 6l-.8 5.6-1-.2.8-5.6zM10.6 12.4l-5.2 1.4-.2-1 5.2-1.4zM4.6 12.6L2.4 5.8l1-.4 2.2 6.8z"/><circle cx="3" cy="5" r="2"/><circle cx="8" cy="2.5" r="2"/><circle cx="12.8" cy="6" r="2"/><circle cx="11" cy="12" r="2"/><circle cx="5" cy="13.4" r="2"/></svg><span class="item-name">Network</span><span class="item-note">a node flashes for every attack</span><svg class="check" viewBox="0 0 16 16" width="16" height="16" aria-hidden="true"><path d="M3 8.5l3 3 7-7"/></svg></button></li>
+                </ul>
+            </div>
         </div>
-        <div class="box">
-            <div class="cap" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14.7 6.3a4 4 0 0 0-5.4 5.4L3 18l3 3 6.3-6.3a4 4 0 0 0 5.4-5.4l-2.6 2.6-2.4-.6-.6-2.4z"/></svg></div>
-            <h2>Tools</h2>
-            <button class="link" id="export-misp" type="button">IOC Export</button><div class="desc">Download IOCs as a MISP event</div>
-            <a class="link ext" href="https://gchq.github.io/CyberChef/" target="_blank" rel="noopener noreferrer">CyberChef</a><div class="desc">Decode attacker payloads</div>
-            <a class="link ext" href="https://sicherheitstacho.eu/" target="_blank" rel="noopener noreferrer">SecurityMeter</a><div class="desc">Global honeypot threat view</div>
-        </div>
-        <div class="box">
-            <div class="cap" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10 13a5 5 0 0 0 7.5.5l3-3a5 5 0 0 0-7-7l-1.7 1.7"/><path d="M14 11a5 5 0 0 0-7.5-.5l-3 3a5 5 0 0 0 7 7l1.7-1.7"/></svg></div>
-            <h2>Links</h2>
-            <a class="link ext" href="https://github.com/YurilLAB/QPot" target="_blank" rel="noopener noreferrer">QPot @ GitHub</a><div class="desc">Source and documentation</div>
-            <a class="link ext" href="https://github.com/telekom-security/tpotce" target="_blank" rel="noopener noreferrer">T-Pot @ GitHub</a><div class="desc">The honeypots QPot runs</div>
-            <a class="link ext" href="https://github.com/YurilLAB/QPot/blob/main/doc/cli-reference.md" target="_blank" rel="noopener noreferrer">CLI Reference</a><div class="desc">Every command and flag</div>
+        <!-- QPot: the QPot ID this browser signed in with (T-Pot has nginx's login instead) -->
+        <div class="menu" id="id-menu" hidden>
+            <button type="button" class="menu-button" id="id-button" aria-haspopup="menu" aria-expanded="false" aria-controls="id-list" title="The QPot ID this browser is signed in with">
+                <svg class="glyph" viewBox="0 0 16 16" width="16" height="16" aria-hidden="true"><path d="M10.5 1a4.5 4.5 0 0 0-4.3 5.8L1 12v3h3v-1.5h1.5V12H7l1.2-1.2A4.5 4.5 0 1 0 10.5 1zm1 2.5a1.5 1.5 0 1 1 0 3 1.5 1.5 0 0 1 0-3z"/></svg><span class="menu-label" id="id-label">Signed in</span><svg class="chevron" viewBox="0 0 12 12" width="12" height="12" aria-hidden="true"><path d="M2.5 4.5L6 8l3.5-3.5"/></svg>
+            </button>
+            <div class="menu-panel" id="id-list">
+                <ul role="menu" aria-labelledby="id-button">
+                    <li role="none"><button type="button" role="menuitem" data-value="dashboard"><svg class="glyph" viewBox="0 0 16 16" width="16" height="16" aria-hidden="true"><path d="M1 14h14v1.5H1zM2 8h3v5H2zM6.5 3h3v10h-3zM11 6h3v7h-3z"/></svg><span class="item-name">Open the dashboard</span><span class="item-note">honeypots, events, intel, canaries</span></button></li>
+                    <li role="none"><button type="button" role="menuitem" data-value="copy"><svg class="glyph" viewBox="0 0 16 16" width="16" height="16" aria-hidden="true"><path d="M5 1h8a1 1 0 0 1 1 1v9h-2V3H5zM2 4h8a1 1 0 0 1 1 1v9a1 1 0 0 1-1 1H2a1 1 0 0 1-1-1V5a1 1 0 0 1 1-1z"/></svg><span class="item-name">Copy QPot ID</span><span class="item-note">the whole ID, to the clipboard</span></button></li>
+                    <li role="none"><button type="button" role="menuitem" data-value="signout"><svg class="glyph" viewBox="0 0 16 16" width="16" height="16" aria-hidden="true"><path d="M2 2h7v2H4v8h5v2H2zM10 4.5l4 3.5-4 3.5V9H6V7h4z"/></svg><span class="item-name">Sign out</span><span class="item-note">forget the ID in this browser</span></button></li>
+                </ul>
+            </div>
         </div>
     </div>
-</div>
-<div class="toast" id="toast"></div>
+    <p class="clock"><time id="clock"></time></p>
+</header>
+
+<section class="band" id="band" aria-label="Attacks on this QPot" data-state="wait">
+    <div class="band-in">
+        <div class="band-head">
+            <h2 id="hero-title">Attacks in the last 24 hours</h2>
+            <span class="live" id="live" data-state="wait">
+                <svg class="ring" viewBox="0 0 16 16" width="16" height="16" aria-hidden="true"><circle class="ring-track" cx="8" cy="8" r="6.5"/><circle class="ring-fill" id="ring-fill" cx="8" cy="8" r="6.5"/><path class="ring-dot" d="M8 4.5l3 1.75v3.5L8 11.5 5 9.75v-3.5z"/></svg>
+                <span id="live-text" role="status">connecting</span>
+            </span>
+        </div>
+        <p class="big" id="total">&nbsp;</p>
+        <ul class="facts">
+            <li class="fact" id="fact-trend">
+                <span class="fact-icon"><svg viewBox="0 0 20 20" width="20" height="20" aria-hidden="true"><path class="line" id="trend-path" d="M4 15L15 4M8 4h7v7"/></svg></span>
+                <span class="fact-value"></span><span class="fact-label"></span>
+            </li>
+            <li class="fact" id="fact-latest">
+                <span class="fact-icon"><svg viewBox="0 0 20 20" width="20" height="20" aria-hidden="true"><path d="M11.5 1L3 11.5h5.5L7.5 19 16 8.5h-5.5z"/></svg></span>
+                <span class="fact-value"></span><span class="fact-label">latest attack</span>
+            </li>
+            <li class="fact" id="fact-sources">
+                <span class="fact-icon"><svg viewBox="0 0 20 20" width="20" height="20" aria-hidden="true"><path d="M10 1a6.5 6.5 0 0 0-6.5 6.5C3.5 12.4 10 19 10 19s6.5-6.6 6.5-11.5A6.5 6.5 0 0 0 10 1zm0 9a2.5 2.5 0 1 1 0-5 2.5 2.5 0 0 1 0 5z"/></svg></span>
+                <span class="fact-value"></span><span class="fact-label">sources</span>
+            </li>
+            <li class="fact" id="fact-honeypots">
+                <span class="fact-icon"><svg viewBox="0 0 20 20" width="20" height="20" aria-hidden="true"><path fill-rule="evenodd" d="M10 1l8 4.5v9L10 19l-8-4.5v-9zm0 4L5.5 7.5v5L10 15l4.5-2.5v-5z"/></svg></span>
+                <span class="fact-value"></span><span class="fact-label">honeypots hit</span>
+            </li>
+        </ul>
+        <p class="band-message" id="band-message"></p>
+        <!-- QPot: the attacks need this instance's QPot ID -->
+        <form class="signin" id="signin" hidden autocomplete="off">
+            <label class="signin-label" for="signin-id">Sign in with this QPot's ID to see its attacks</label>
+            <div class="signin-row">
+                <input class="signin-input" id="signin-id" type="password" inputmode="text" maxlength="27" spellcheck="false" autocapitalize="off" placeholder="qp_&hellip;" aria-describedby="signin-note signin-error">
+                <button class="menu-button signin-button" type="submit"><svg class="glyph" viewBox="0 0 16 16" width="16" height="16" aria-hidden="true"><path d="M10.5 1a4.5 4.5 0 0 0-4.3 5.8L1 12v3h3v-1.5h1.5V12H7l1.2-1.2A4.5 4.5 0 1 0 10.5 1zm1 2.5a1.5 1.5 0 1 1 0 3 1.5 1.5 0 0 1 0-3z"/></svg><span>Sign in</span></button>
+            </div>
+            <p class="signin-note" id="signin-note"><code>qpot id</code> prints it on this host. It stays in this browser and unlocks the dashboard and the attack map too.</p>
+            <p class="signin-error" id="signin-error" role="alert"></p>
+        </form>
+        <div class="band-chart" id="band-chart" tabindex="0" aria-label="Attacks over the time range; the arrow keys move through the time">
+            <p class="band-read" id="band-read"></p>
+            <canvas id="band-canvas" aria-hidden="true"></canvas>
+            <div class="band-axis" id="band-axis" aria-hidden="true"></div>
+        </div>
+        <div class="sr-only"><table id="band-table"></table></div>
+    </div>
+</section>
+
+<main>
+    <nav class="hive" aria-label="Tools">
+        <div class="cluster">
+            <a class="cell at-nw" href="/map/" target="_blank" rel="noopener noreferrer">
+                <span class="cell-in">
+                    <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3c2.6 2.5 3.9 5.5 3.9 9s-1.3 6.5-3.9 9c-2.6-2.5-3.9-5.5-3.9-9S9.4 5.5 12 3z"/></svg>
+                    <span class="tool">Attack Map</span>
+                    <span class="what">Attacks on a world map, as they happen</span>
+                </span>
+            </a>
+            <a class="cell at-ne" href="/dashboard" target="_blank" rel="noopener noreferrer">
+                <span class="cell-in">
+                    <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 20V10M10 20V4M16 20v-7M22 20H2"/></svg>
+                    <span class="tool">Dashboard</span>
+                    <span class="what">Honeypots, threat intel, canaries and settings</span>
+                </span>
+            </a>
+            <a class="cell ext at-w" href="https://sicherheitstacho.eu/" target="_blank" rel="noopener noreferrer">
+                <span class="cell-in">
+                    <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M3.5 17a9 9 0 1 1 17 0M12 13l4-5"/><circle cx="12" cy="14" r="1.6"/></svg>
+                    <span class="tool">SecurityMeter</span>
+                    <span class="what">Attacks on the honeypots of Deutsche Telekom</span>
+                    <svg class="away" viewBox="0 0 12 12" aria-hidden="true"><path d="M5 2H2v8h8V7M7 1.5h3.5V5M10.5 1.5L5.5 6.5"/></svg>
+                </span>
+            </a>
+            <picture>
+                <source srcset="assets/img/qpot-badge.webp" type="image/webp">
+                <img class="logo" src="assets/img/qpot-badge.png" alt="QPot logo" width="397" height="459">
+            </picture>
+            <canvas id="honey" class="honey" aria-hidden="true"></canvas>
+            <a class="cell ext at-e" href="https://github.com/YurilLAB/QPot" target="_blank" rel="noopener noreferrer">
+                <span class="cell-in">
+                    <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M8 7l-5 5 5 5M16 7l5 5-5 5M14 4l-4 16"/></svg>
+                    <span class="tool">QPot on GitHub</span>
+                    <span class="what">Source, issues and releases</span>
+                    <svg class="away" viewBox="0 0 12 12" aria-hidden="true"><path d="M5 2H2v8h8V7M7 1.5h3.5V5M10.5 1.5L5.5 6.5"/></svg>
+                </span>
+            </a>
+            <a class="cell ext at-sw" href="https://gchq.github.io/CyberChef/" target="_blank" rel="noopener noreferrer">
+                <span class="cell-in">
+                    <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M7 14a4 4 0 1 1 1.2-7.8 4 4 0 0 1 7.6 0A4 4 0 1 1 17 14v6H7z M7 17h10"/></svg>
+                    <span class="tool">CyberChef</span>
+                    <span class="what">Decode, decrypt and analyse payloads</span>
+                    <svg class="away" viewBox="0 0 12 12" aria-hidden="true"><path d="M5 2H2v8h8V7M7 1.5h3.5V5M10.5 1.5L5.5 6.5"/></svg>
+                </span>
+            </a>
+            <a class="cell at-se" href="/dashboard#events" target="_blank" rel="noopener noreferrer">
+                <span class="cell-in">
+                    <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><ellipse cx="12" cy="5.5" rx="8" ry="3"/><path d="M4 5.5v13c0 1.7 3.6 3 8 3s8-1.3 8-3v-13M4 12c0 1.7 3.6 3 8 3s8-1.3 8-3"/></svg>
+                    <span class="tool">Events</span>
+                    <span class="what">Search and filter every captured event</span>
+                </span>
+            </a>
+        </div>
+    </nav>
+
+    <div class="side">
+        <section class="multiples" aria-labelledby="series-title">
+            <div class="multiples-head">
+                <h2 id="series-title">Attacks per honeypot, last 24 hours</h2>
+                <p class="when" id="series-when"></p>
+            </div>
+            <ol class="series" id="series" tabindex="0" aria-label="Attacks per honeypot over time; the arrow keys move through the time"></ol>
+        </section>
+
+        <section class="top-sources" aria-labelledby="sources-title">
+            <h2 id="sources-title">Top sources, last 24 hours</h2>
+            <ol class="rows sources" id="sources"></ol>
+        </section>
+
+        <section class="sensors" id="sensors-box" aria-labelledby="sensors-title" hidden>
+            <h2 id="sensors-title">Nodes, last 24 hours</h2>
+            <ol class="rows sensor-rows" id="sensors"></ol>
+        </section>
+    </div>
+</main>
+
 </body>
 </html>
