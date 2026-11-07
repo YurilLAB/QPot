@@ -321,6 +321,9 @@ type Manager struct {
 	joinPollTimeout  time.Duration
 	// authLimit throttles sources that keep sending wrong passwords.
 	authLimit authLimiter
+	// probedFailed is when gossip last tried each failed peer (see gossip).
+	probeMu      sync.Mutex
+	probedFailed map[string]time.Time
 }
 
 // NewManager creates a new cluster manager
@@ -1575,16 +1578,35 @@ func (m *Manager) gossip() {
 		address string
 		port    int
 	}
+	// A failed peer is tried again once per sync interval rather than every
+	// round (an unreachable one costs the round its timeout): skipped for good,
+	// as it was, any outage longer than the failure deadline split the cluster
+	// permanently, since the status is saved and nothing else revives it.
+	reprobe := m.cluster.Config.SyncInterval
+	now := time.Now()
 	var peers []peerInfo
+	m.probeMu.Lock()
 	for _, n := range m.cluster.Nodes {
-		if n.ID == localID {
+		if n.ID == localID || n.Status == NodeStatusLeft {
 			continue
 		}
-		if n.Status == NodeStatusLeft || n.Status == NodeStatusFailed {
-			continue
+		if n.Status == NodeStatusFailed {
+			if now.Sub(m.probedFailed[n.ID]) < reprobe {
+				continue
+			}
+			if m.probedFailed == nil {
+				m.probedFailed = make(map[string]time.Time)
+			}
+			m.probedFailed[n.ID] = now
 		}
 		peers = append(peers, peerInfo{id: n.ID, address: n.Address, port: n.Port})
 	}
+	for id := range m.probedFailed {
+		if n := m.cluster.Nodes[id]; n == nil || n.Status != NodeStatusFailed {
+			delete(m.probedFailed, id)
+		}
+	}
+	m.probeMu.Unlock()
 	m.mu.RUnlock()
 
 	msg := GossipMessage{
