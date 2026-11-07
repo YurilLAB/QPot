@@ -134,7 +134,7 @@
   // attacks that came in since the previous answer of the same range, per point (the sum slides)
   function fresh(previous, now) {
     if (!previous || previous.range !== now.range) return null;
-    // QPot: no points over time (no /api/pulse yet): the growth of the totals
+    // no points over time (a qpot serve without /api/pulse): the growth of the totals
     if (!now.slots.length) {
       return { attacks: Math.max(0, now.total - previous.total), sources: Math.max(0, now.sources - previous.sources) };
     }
@@ -161,12 +161,10 @@
 
   var answers = {};   // range -> { at, body }
 
-  // QPot: GET /api/pulse is not in qpot serve yet (planned in the web UI's API contract). Until it
-  // is, the page shows what the API already has - the counters of the last 24 hours
-  // (GET /api/overview) and the top sources of the last 24 hours (GET /api/ioc) - and says that the
-  // timeline is not available yet. USE_PULSE switches to /api/pulse; a 404 from it falls back too.
-  var USE_PULSE = false;
-  var partial = !USE_PULSE;
+  // GET /api/pulse answers every range. A qpot serve older than it answers 404: then the page shows
+  // what that API has - the counters of the last 24 hours (GET /api/overview) and the top sources of
+  // the last 24 hours (GET /api/ioc) - and says that the timeline is not available on that QPot.
+  var partial = false;
 
   function get(path, id) {
     var ctrl = typeof AbortController === 'function' ? new AbortController() : null;
@@ -262,7 +260,7 @@
 
   TPot.pulse = {
     load: function () { return Promise.resolve(RANGES); },
-    // the ranges: { key: {points, every, lists, name, short, per} }; only the last 24 hours while
+    // the ranges: { key: {points, every, lists, name, short, per} }; only the last 24 hours when
     // this qpot serve has no /api/pulse
     ranges: function () { return partial ? { '24h': RANGES['24h'] } : RANGES; },
     partial: function () { return partial; },
