@@ -146,3 +146,18 @@ func TestSettingsPutEndpointRefusesMetadata(t *testing.T) {
 		}
 	}
 }
+
+// A name the server cannot look up (a container name only Docker knows) is
+// refused with the host command that sets it instead.
+func TestSettingsPutUnresolvedHostNamesTheCLI(t *testing.T) {
+	a := newAPITestServer(t, "api-set-unres", func(c *config.Config) { c.EnableHoneypot("beelzebub") })
+	for _, u := range []string{"http://ollama:11434/api/chat", "http://host.docker.internal:11434/api/chat"} {
+		rec := a.do(http.MethodPut, "/api/honeypots/settings", `{"name":"beelzebub","settings":{"llm_host":"`+u+`"}}`)
+		e := decodeAPIError(t, rec)
+		want := "qpot honeypot set beelzebub -i api-set-unres llm_host=" + u
+		if rec.Code != http.StatusBadRequest || e.Code != "QP-INPUT-012" || !strings.Contains(e.Error, want) ||
+			!strings.Contains(e.Error, "could not look up") {
+			t.Errorf("%s: %d %q, want it to name %q", u, rec.Code, e.Error, want)
+		}
+	}
+}

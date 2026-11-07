@@ -36,6 +36,15 @@ import (
 // the secret again.
 var ErrSecretRequired = errors.New("secret must be entered again")
 
+// UnresolvedHostError: an endpoint names a host this computer cannot look
+// up, so it cannot be checked (a name only Docker's network knows, such as a
+// container name or host.docker.internal).
+type UnresolvedHostError struct{ Host string }
+
+func (e *UnresolvedHostError) Error() string {
+	return fmt.Sprintf("names a host QPot could not look up from this computer (%s)", e.Host)
+}
+
 // SecretRequiredError says which secret settings a change must carry again.
 type SecretRequiredError struct {
 	Honeypot string
@@ -102,7 +111,16 @@ func CheckRemoteSettings(ctx context.Context, cfg *config.Config, name string, c
 			continue
 		}
 		if err := CheckEndpoint(ctx, c.Value, lookup); err != nil {
-			return &SettingsError{Kind: ErrInvalidSetting, Msg: fmt.Sprintf("%s: %s %v", name, c.Key, err), Err: err}
+			msg := fmt.Sprintf("%s: %s %v", name, c.Key, err)
+			var ue *UnresolvedHostError
+			if errors.As(err, &ue) {
+				// The value passed ValidateSettings: a URL without spaces,
+				// quotes or markup, safe to show as part of a command.
+				msg = fmt.Sprintf("%s: QPot could not look up %s from this computer. If it is a name only Docker knows "+
+					"(a container name, host.docker.internal), set it on the host with: qpot honeypot set %s -i %s %s=%s "+
+					"(the web UI only accepts addresses it can check)", name, ue.Host, name, cfg.InstanceName, c.Key, c.Value)
+			}
+			return &SettingsError{Kind: ErrInvalidSetting, Msg: msg, Err: err}
 		}
 	}
 
@@ -211,7 +229,7 @@ func CheckEndpoint(ctx context.Context, raw string, lookup LookupFunc) error {
 	defer cancel()
 	addrs, err := lookup(lctx, host)
 	if err != nil || len(addrs) == 0 {
-		return fmt.Errorf("names a host that does not resolve from this computer (%s); use its IP address", host)
+		return &UnresolvedHostError{Host: host}
 	}
 	for _, a := range addrs {
 		if blockedAddr(a) {
