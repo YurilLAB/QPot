@@ -426,6 +426,10 @@ a.navbar-brand:hover {
     font-family: var(--font-mono);
     color: var(--primary-color);
     white-space: nowrap;
+    /* a source address is attacker text: one short line, the whole of it in the tooltip */
+    max-width: 18ch;
+    overflow: hidden;
+    text-overflow: ellipsis;
 }
 
 .rank-list .what {
@@ -467,7 +471,103 @@ a.navbar-brand:hover {
 }
 
 .data-table td.wrap {
-    min-width: 180px;
+    min-width: 8rem;
+}
+
+/* A table fits its card, not the window (the Overview's half card at 1024 px is as narrow as a
+   phone): a narrow card drops the button labels, then the date (the clock stays), then the
+   optional columns. */
+.dash-card .table-wrapper {
+    container-type: inline-size;
+}
+
+@container (max-width: 760px) {
+    .data-table th,
+    .data-table td {
+        padding-left: 8px;
+        padding-right: 8px;
+    }
+
+    .data-table .hp-tools .btn-icon span {
+        display: none;
+    }
+
+    /* Events search: who and what on the first line, then user:password and the command on
+       lines of their own (shown when the event has them) */
+    #events-table tr {
+        display: grid;
+        grid-template-columns: minmax(0, 170fr) minmax(0, 94fr) minmax(0, 141fr) minmax(0, 87fr) minmax(0, 133fr);
+    }
+
+    #events-table th:nth-child(n+6) {
+        display: none;
+    }
+
+    #events-table td {
+        min-width: 0;
+        overflow: hidden;
+        text-overflow: ellipsis;
+    }
+
+    #events-table tbody tr {
+        border-bottom: 1px solid var(--border-primary);
+    }
+
+    #events-table tbody td {
+        border-bottom: 0;
+    }
+
+    #events-table tbody td.wrap,
+    #events-table tbody td[colspan] {
+        grid-column: 1 / -1;
+    }
+
+    #events-table tbody td.wrap {
+        padding-top: 0;
+        color: var(--text-secondary);
+    }
+
+    #events-table tbody td.wrap:empty {
+        display: none;
+    }
+}
+
+@container (max-width: 640px) {
+    .data-table .time-date {
+        display: none;
+    }
+
+    #events-table tr {
+        grid-template-columns: minmax(0, 90fr) minmax(0, 94fr) minmax(0, 141fr) minmax(0, 87fr) minmax(0, 133fr);
+    }
+}
+
+@container (max-width: 600px) {
+    .data-table th.optional,
+    .data-table td.optional {
+        display: none;
+    }
+
+    #events-table tr {
+        grid-template-columns: minmax(0, 70fr) minmax(0, 77fr) minmax(0, 113fr) minmax(0, 106fr);
+    }
+
+    #events-table tbody td.optional.wrap:not(:empty) {
+        display: block;
+    }
+}
+
+@container (max-width: 480px) {
+    .data-table th,
+    .data-table td {
+        padding-left: 6px;
+        padding-right: 6px;
+        font-size: 0.75rem;
+    }
+
+    .data-table td.wrap {
+        min-width: 6rem;
+    }
 }
 
 .data-table td.mono-accent {

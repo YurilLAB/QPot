@@ -17,7 +17,7 @@
     <link href="/map/static/fonts/fonts.css" rel="stylesheet" integrity="sha384-WiEXL66/E+frAZqRB5+nO/MLUoXj+VrnKxXgvK33R87imSuzxukyaFlj5lnDHV80">
     <link href="/map/static/fontawesome/css/all.min.css" rel="stylesheet" integrity="sha384-qrALq7+6jBOZIQsNnT6xGkMDru64qD6uTlDra39xrt2SoXl4pO3FX6Roz/RpR/BS">
     <link href="/map/static/index.css?v=8" rel="stylesheet" integrity="sha384-F4gdNU3u74uMqjmFBLqfUI0IMwkZi07wpwIdoGzPWeWF6/qEGw/uaeb0plLpu7pT">
-    <link href="/assets/css/dashboard.css" rel="stylesheet" integrity="sha384-shgKy81d+aHqPgvhDmjCxJybAucpR9JPjbH5dnL+wdaHVvZ4uG9ylPCTJ1FT2RjW">
+    <link href="/assets/css/dashboard.css" rel="stylesheet" integrity="sha384-E4jHlr6MGpwMAS+EBA5y4rGetcWJLMgjZTp8Z3Di5UUXvC6TeDYZQhBIRH1gTA5T">
 </head>
 <body class="qpot-dashboard">
 
@@ -205,7 +205,7 @@
                         <div class="callout error modal-message" id="events-error"></div>
                     </div>
                     <div class="table-wrapper">
-                        <table class="data-table">
+                        <table class="data-table" id="events-table">
                             <thead><tr><th>Time</th><th>Honeypot</th><th>Source IP</th><th class="optional">Country</th><th>Event</th><th class="optional">User / password</th><th>Command</th></tr></thead>
                             <tbody id="events-body"></tbody>
                         </table>
@@ -1159,7 +1159,8 @@
             if (!items.length) { ul.replaceChildren(h('li', { class: 'empty-state' }, emptyText)); return; }
             ul.replaceChildren(...items.map((x) => {
                 const [tag, what, num] = cols(x);
-                return h('li', {}, h('span', { class: 'tag' }, String(tag || '')), h('span', { class: 'what' }, String(what || '')), h('span', { class: 'num' }, String(num || '')));
+                const t = String(tag || '');
+                return h('li', {}, h('span', { class: 'tag', title: t.length > 18 ? t : null }, t), h('span', { class: 'what' }, String(what || '')), h('span', { class: 'num' }, String(num || '')));
             }));
         }
 
@@ -1990,8 +1991,13 @@
             const m = $(id);
             m.inert = false;
             m.classList.add('active');
-            const focus = m.querySelector('select, input, button:not([data-close])') || m.querySelector('button');
-            if (focus) setTimeout(() => focus.focus(), 30);
+            // the first field once the dialog is shown (its fields may load after it opens); never
+            // pulled away from a field the person already went to
+            setTimeout(() => {
+                if (m.contains(document.activeElement)) return;
+                const focus = m.querySelector('select, input, button:not([data-close])') || m.querySelector('button');
+                if (focus) focus.focus();
+            }, 30);
         }
 
         function closeModals() {
