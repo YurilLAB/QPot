@@ -289,6 +289,8 @@ func (s *Server) handleStatic(w http.ResponseWriter, r *http.Request) {
 		serveEmbeddedHTML(w, "static/dashboard.html")
 	case p == "/map":
 		http.Redirect(w, r, "/map/", http.StatusMovedPermanently)
+	case p == "/favicon.ico":
+		serveFavicon(w, r)
 	case strings.Contains(p, ".."):
 		// The FileServer below serves the whole static root, so
 		// "/assets/../x" would reach files outside the asset trees; the mux
@@ -306,6 +308,20 @@ func (s *Server) handleStatic(w http.ResponseWriter, r *http.Request) {
 	default:
 		http.NotFound(w, r)
 	}
+}
+
+// serveFavicon answers /favicon.ico, which a browser asks for on its own
+// (for an image or a JSON answer opened in a tab) besides the icon each page
+// names.
+func serveFavicon(w http.ResponseWriter, r *http.Request) {
+	data, err := staticFS.ReadFile("static/assets/img/favicon.ico")
+	if err != nil {
+		http.NotFound(w, r)
+		return
+	}
+	w.Header().Set("Content-Type", "image/x-icon")
+	w.Header().Set("Cache-Control", "public, max-age=86400")
+	http.ServeContent(w, r, "favicon.ico", time.Time{}, bytes.NewReader(data))
 }
 
 func serveEmbeddedHTML(w http.ResponseWriter, name string) {
@@ -655,7 +671,7 @@ func withoutURL(err error) error {
 // must be reachable by anyone who triggers a planted token.
 func isPublicPath(p string) bool {
 	switch p {
-	case "/", "/index.html", "/dashboard", "/dashboard/", "/map":
+	case "/", "/index.html", "/dashboard", "/dashboard/", "/map", "/favicon.ico":
 		return true
 	}
 	return strings.HasPrefix(p, "/assets/") || strings.HasPrefix(p, "/map/") || strings.HasPrefix(p, "/c/")
