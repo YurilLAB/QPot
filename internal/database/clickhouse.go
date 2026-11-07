@@ -317,6 +317,12 @@ func (ch *ClickHouse) GetEvents(ctx context.Context, filter EventFilter) ([]*Eve
 		query += " AND event_type IN ?"
 		args = append(args, filter.EventTypes)
 	}
+	if filter.Text != "" {
+		// position*() takes the term literally (no LIKE wildcards).
+		query += " AND (positionCaseInsensitiveUTF8(username, ?) > 0 OR positionCaseInsensitiveUTF8(password, ?) > 0" +
+			" OR positionCaseInsensitiveUTF8(command, ?) > 0 OR positionCaseInsensitiveUTF8(payload, ?) > 0)"
+		args = append(args, filter.Text, filter.Text, filter.Text, filter.Text)
+	}
 
 	query += " ORDER BY timestamp DESC"
 

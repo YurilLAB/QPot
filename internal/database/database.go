@@ -179,7 +179,15 @@ type EventFilter struct {
 	EndTime    time.Time `json:"end_time"`
 	Limit      int       `json:"limit"`
 	Offset     int       `json:"offset"`
+	// Text keeps the events whose username, password, command or payload
+	// contain it, ignoring case (Elasticsearch: not the payload, which it
+	// stores as binary). Always passed to the database as a parameter, never
+	// as query syntax; callers bound it to MaxEventText bytes.
+	Text string `json:"text,omitempty"`
 }
+
+// MaxEventText is the longest EventFilter.Text the web API accepts.
+const MaxEventText = 200
 
 // AttackerStats represents statistics about an attacker
 type AttackerStats struct {

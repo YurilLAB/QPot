@@ -12,6 +12,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"strings"
 	"time"
 
 	"github.com/qpot/qpot/internal/config"
@@ -510,6 +511,20 @@ type esSearchResponse struct {
 	Aggregations json.RawMessage `json:"aggregations"`
 }
 
+// escapeWildcard escapes the characters an Elasticsearch wildcard query
+// gives a meaning (* ? and the escape character itself), so text matches
+// literally.
+func escapeWildcard(s string) string {
+	var b strings.Builder
+	for _, r := range s {
+		if r == '*' || r == '?' || r == '\\' {
+			b.WriteByte('\\')
+		}
+		b.WriteRune(r)
+	}
+	return b.String()
+}
+
 // buildEventQuery constructs an Elasticsearch bool query from an EventFilter.
 func buildEventQuery(filter EventFilter) map[string]interface{} {
 	must := make([]interface{}, 0)
@@ -533,6 +548,23 @@ func buildEventQuery(filter EventFilter) map[string]interface{} {
 		must = append(must, map[string]interface{}{
 			"terms": map[string]interface{}{"event_type": filter.EventTypes},
 		})
+	}
+
+	if filter.Text != "" {
+		// wildcard and match_phrase take the term as a value, not as query
+		// syntax; only the wildcard's own * ? and \ need escaping.
+		pattern := "*" + escapeWildcard(filter.Text) + "*"
+		wc := func(field string) map[string]interface{} {
+			return map[string]interface{}{"wildcard": map[string]interface{}{
+				field: map[string]interface{}{"value": pattern, "case_insensitive": true}}}
+		}
+		must = append(must, map[string]interface{}{"bool": map[string]interface{}{
+			"should": []interface{}{
+				wc("username"), wc("password"), wc("command.keyword"),
+				map[string]interface{}{"match_phrase": map[string]interface{}{"command": filter.Text}},
+			},
+			"minimum_should_match": 1,
+		}})
 	}
 
 	rangeFilter := make(map[string]interface{})

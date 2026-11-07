@@ -306,57 +306,7 @@ func (ts *TimescaleDB) GetEvents(ctx context.Context, filter EventFilter) ([]*Ev
 		return nil, fmt.Errorf("not connected")
 	}
 
-	query := `
-		SELECT
-			id, timestamp, honeypot, COALESCE(host(source_ip), ''), COALESCE(source_port, 0), COALESCE(dest_port, 0),
-			COALESCE(protocol, ''), COALESCE(event_type, ''), COALESCE(username, ''), COALESCE(password, ''), COALESCE(command, ''),
-			payload, metadata, COALESCE(country, ''), COALESCE(city, ''), COALESCE(asn, ''),
-			technique_id, technique_name, tactic_id, tactic_name,
-			kill_chain_stage, confidence, classified
-		FROM events
-		WHERE 1=1`
-
-	var args []interface{}
-	argIdx := 1
-
-	if !filter.StartTime.IsZero() {
-		query += fmt.Sprintf(" AND timestamp >= $%d", argIdx)
-		args = append(args, filter.StartTime)
-		argIdx++
-	}
-	if !filter.EndTime.IsZero() {
-		query += fmt.Sprintf(" AND timestamp <= $%d", argIdx)
-		args = append(args, filter.EndTime)
-		argIdx++
-	}
-	if len(filter.Honeypots) > 0 {
-		query += fmt.Sprintf(" AND honeypot = ANY($%d)", argIdx)
-		args = append(args, filter.Honeypots)
-		argIdx++
-	}
-	if len(filter.SourceIPs) > 0 {
-		query += fmt.Sprintf(" AND host(source_ip) = ANY($%d)", argIdx)
-		args = append(args, filter.SourceIPs)
-		argIdx++
-	}
-	if len(filter.Countries) > 0 {
-		query += fmt.Sprintf(" AND country = ANY($%d)", argIdx)
-		args = append(args, filter.Countries)
-		argIdx++
-	}
-
-	query += " ORDER BY timestamp DESC"
-
-	if filter.Limit > 0 {
-		query += fmt.Sprintf(" LIMIT $%d", argIdx)
-		args = append(args, filter.Limit)
-		argIdx++
-	}
-	if filter.Offset > 0 {
-		query += fmt.Sprintf(" OFFSET $%d", argIdx)
-		args = append(args, filter.Offset)
-	}
-
+	query, args := pgEventsQuery(filter)
 	rows, err := ts.pool.Query(ctx, query, args...)
 	if err != nil {
 		return nil, fmt.Errorf("failed to query events: %w", err)
@@ -401,6 +351,76 @@ func (ts *TimescaleDB) GetEvents(ctx context.Context, filter EventFilter) ([]*Ev
 		return nil, err
 	}
 	return events, nil
+}
+
+// pgEventsQuery builds GetEvents' SQL; every filter value is a $n parameter.
+func pgEventsQuery(filter EventFilter) (string, []interface{}) {
+	query := `
+		SELECT
+			id, timestamp, honeypot, COALESCE(host(source_ip), ''), COALESCE(source_port, 0), COALESCE(dest_port, 0),
+			COALESCE(protocol, ''), COALESCE(event_type, ''), COALESCE(username, ''), COALESCE(password, ''), COALESCE(command, ''),
+			payload, metadata, COALESCE(country, ''), COALESCE(city, ''), COALESCE(asn, ''),
+			technique_id, technique_name, tactic_id, tactic_name,
+			kill_chain_stage, confidence, classified
+		FROM events
+		WHERE 1=1`
+
+	var args []interface{}
+	argIdx := 1
+
+	if !filter.StartTime.IsZero() {
+		query += fmt.Sprintf(" AND timestamp >= $%d", argIdx)
+		args = append(args, filter.StartTime)
+		argIdx++
+	}
+	if !filter.EndTime.IsZero() {
+		query += fmt.Sprintf(" AND timestamp <= $%d", argIdx)
+		args = append(args, filter.EndTime)
+		argIdx++
+	}
+	if len(filter.Honeypots) > 0 {
+		query += fmt.Sprintf(" AND honeypot = ANY($%d)", argIdx)
+		args = append(args, filter.Honeypots)
+		argIdx++
+	}
+	if len(filter.SourceIPs) > 0 {
+		query += fmt.Sprintf(" AND host(source_ip) = ANY($%d)", argIdx)
+		args = append(args, filter.SourceIPs)
+		argIdx++
+	}
+	if len(filter.Countries) > 0 {
+		query += fmt.Sprintf(" AND country = ANY($%d)", argIdx)
+		args = append(args, filter.Countries)
+		argIdx++
+	}
+	if len(filter.EventTypes) > 0 {
+		query += fmt.Sprintf(" AND event_type = ANY($%d)", argIdx)
+		args = append(args, filter.EventTypes)
+		argIdx++
+	}
+	if filter.Text != "" {
+		// strpos() takes the term literally (no LIKE wildcards); the bytea
+		// payload is searched in its escaped text form.
+		query += fmt.Sprintf(" AND (strpos(lower(COALESCE(username, '')), lower($%[1]d)) > 0"+
+			" OR strpos(lower(COALESCE(password, '')), lower($%[1]d)) > 0"+
+			" OR strpos(lower(COALESCE(command, '')), lower($%[1]d)) > 0"+
+			" OR strpos(lower(encode(COALESCE(payload, ''::bytea), 'escape')), lower($%[1]d)) > 0)", argIdx)
+		args = append(args, filter.Text)
+		argIdx++
+	}
+
+	query += " ORDER BY timestamp DESC"
+
+	if filter.Limit > 0 {
+		query += fmt.Sprintf(" LIMIT $%d", argIdx)
+		args = append(args, filter.Limit)
+		argIdx++
+	}
+	if filter.Offset > 0 {
+		query += fmt.Sprintf(" OFFSET $%d", argIdx)
+		args = append(args, filter.Offset)
+	}
+	return query, args
 }
 
 // GetEventByID retrieves a single event by ID

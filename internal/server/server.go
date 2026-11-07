@@ -843,47 +843,6 @@ func (s *Server) handleHoneypots(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// handleEvents returns events
-func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
-	if s.database == nil {
-		s.sendError(w, http.StatusServiceUnavailable, "database not available")
-		return
-	}
-
-	ctx := r.Context()
-
-	filter := database.EventFilter{
-		Limit: 100,
-	}
-
-	// Parse query params
-	if honeypots := r.URL.Query()["honeypot"]; len(honeypots) > 0 {
-		filter.Honeypots = honeypots
-	}
-	if limit := r.URL.Query().Get("limit"); limit != "" {
-		if n, err := strconv.Atoi(limit); err == nil && n > 0 {
-			if n > 1000 {
-				n = 1000
-			}
-			filter.Limit = n
-		}
-	}
-
-	events, err := s.database.GetEvents(ctx, filter)
-	if err != nil {
-		s.sendInternalError(w, "get events failed", err)
-		return
-	}
-
-	// Add QPot ID to each event for tracking
-	response := map[string]interface{}{
-		"qpot_id": s.config.QPotID,
-		"events":  events,
-	}
-
-	s.sendJSON(w, response)
-}
-
 // handleStats returns statistics
 func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
