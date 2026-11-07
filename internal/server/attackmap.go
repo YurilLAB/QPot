@@ -55,11 +55,30 @@ type mapTraffic struct {
 }
 
 // mapStats is the periodic counter message (attacks in the last 1m/1h/24h).
+// It also carries the sensor's place, in Traffic's dst_* fields, so the map
+// can centre on a quiet sensor and pin it before the first attack. That is
+// the sensor's own location only (mapHome); absent when it is unknown.
 type mapStats struct {
-	Type    string `json:"type"` // "Stats"
-	Last1m  int64  `json:"last_1m"`
-	Last1h  int64  `json:"last_1h"`
-	Last24h int64  `json:"last_24h"`
+	Type           string   `json:"type"` // "Stats"
+	Last1m         int64    `json:"last_1m"`
+	Last1h         int64    `json:"last_1h"`
+	Last24h        int64    `json:"last_24h"`
+	DstLat         *float64 `json:"dst_lat,omitempty"`
+	DstLong        *float64 `json:"dst_long,omitempty"`
+	DstISOCode     string   `json:"dst_iso_code,omitempty"`
+	DstCountryName string   `json:"dst_country_name,omitempty"`
+}
+
+// withSensorPlace sets m's dst_* fields to the sensor's place, as Traffic
+// messages carry it, when the place is known (mapHome gives 0,0 when not).
+func (m *mapStats) withSensorPlace(lat, lon float64, code, name string) {
+	if lat == 0 && lon == 0 {
+		return
+	}
+	if code == "" {
+		code, name = "XX", "Sensor"
+	}
+	m.DstLat, m.DstLong, m.DstISOCode, m.DstCountryName = &lat, &lon, code, name
 }
 
 // mapHome is where attacks are drawn to: the configured attack_map location,
@@ -164,6 +183,7 @@ func (s *Server) handleMapStream(w http.ResponseWriter, r *http.Request) {
 		qctx, cancel := context.WithTimeout(ctx, 10*time.Second)
 		defer cancel()
 		m := mapStats{Type: "Stats"}
+		m.withSensorPlace(homeLat, homeLon, homeCode, homeName)
 		for _, win := range []struct {
 			d   time.Duration
 			dst *int64

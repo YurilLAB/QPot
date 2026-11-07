@@ -12,6 +12,7 @@ import (
 
 	"github.com/qpot/qpot/internal/config"
 	"github.com/qpot/qpot/internal/database"
+	"github.com/qpot/qpot/internal/geo"
 )
 
 // mapDB returns the same recent events on every poll (as a backend with
@@ -185,4 +186,66 @@ func FuzzToMapTraffic(f *testing.F) {
 			t.Fatalf("message does not marshal: %v", err)
 		}
 	})
+}
+
+// firstMapStats reads the first Stats message of s's attack map stream.
+func firstMapStats(t *testing.T, s *Server) map[string]any {
+	t.Helper()
+	ts := httptest.NewServer(http.HandlerFunc(s.handleMapStream))
+	defer ts.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, ts.URL, nil)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	sc := bufio.NewScanner(resp.Body)
+	for sc.Scan() {
+		data, ok := strings.CutPrefix(sc.Text(), "data: ")
+		if !ok {
+			continue
+		}
+		var m map[string]any
+		if err := json.Unmarshal([]byte(data), &m); err != nil {
+			t.Fatalf("bad message %q: %v", data, err)
+		}
+		if m["type"] == "Stats" {
+			return m
+		}
+	}
+	t.Fatal("no Stats message")
+	return nil
+}
+
+// The Stats message carries the sensor's own place (as Traffic's dst_*), so
+// the map can pin a sensor no attack has reached yet; nothing when the place
+// is unknown.
+func TestMapStatsCarrySensorPlace(t *testing.T) {
+	t.Setenv("TZ", "Etc/UTC") // a zone of no country: the host gives no place
+	db := &mapDB{}            // a quiet sensor: no events
+	au, _ := geo.Lookup("AU")
+
+	s := &Server{config: &config.Config{InstanceName: "t", AttackMap: config.AttackMapConfig{Country: "au"}}, database: db}
+	m := firstMapStats(t, s)
+	if m["dst_lat"] != au.Lat || m["dst_long"] != au.Lon || m["dst_iso_code"] != "AU" || m["dst_country_name"] != au.Name {
+		t.Errorf("country: %v", m)
+	}
+	if _, ok := m["last_24h"]; !ok {
+		t.Errorf("counters missing: %v", m)
+	}
+
+	s.config.AttackMap = config.AttackMapConfig{Latitude: -16.92, Longitude: 145.77}
+	if m := firstMapStats(t, s); m["dst_lat"] != -16.92 || m["dst_long"] != 145.77 || m["dst_iso_code"] != "XX" {
+		t.Errorf("coordinates only: %v", m)
+	}
+
+	s.config.AttackMap = config.AttackMapConfig{}
+	m = firstMapStats(t, s)
+	for _, k := range []string{"dst_lat", "dst_long", "dst_iso_code", "dst_country_name"} {
+		if _, ok := m[k]; ok {
+			t.Errorf("unknown place, but %s = %v", k, m[k])
+		}
+	}
 }
