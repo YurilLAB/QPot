@@ -25,6 +25,10 @@ type Command struct {
 	Root        bool          // needs administrator rights (run through sudo when not root)
 	Timeout     time.Duration // 0 means DefaultTimeout
 	Interactive bool          // connect it to the terminal (installers that ask their own questions)
+	// Detached: it starts a program that keeps running (Docker Desktop).
+	// The command gets no output pipes, which that program would inherit
+	// and hold open, so waiting for the command would wait for it.
+	Detached bool
 }
 
 // Result is what a command did.
@@ -135,9 +139,12 @@ func (r *ExecRunner) Run(ctx context.Context, c Command) Result {
 	if r.Log != nil {
 		_, _ = io.WriteString(r.Log, "\n$ "+ShellJoin(argv)+"\n")
 	}
-	if c.Interactive {
+	switch {
+	case c.Detached:
+		// Stdin, Stdout and Stderr stay nil: the null device.
+	case c.Interactive:
 		cmd.Stdin, cmd.Stdout, cmd.Stderr = r.Stdin, r.Stdout, r.Stderr
-	} else {
+	default:
 		outWs, errWs := []io.Writer{&stdout}, []io.Writer{&stderr}
 		if r.Log != nil {
 			lw := &lockedWriter{w: r.Log}

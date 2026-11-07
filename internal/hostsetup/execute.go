@@ -86,8 +86,18 @@ func (in *Installer) planWindows(need Need) (*Plan, *Error) {
 		return nil, E("QP-COMPOSE-001").WithWhy("Docker Desktop includes Compose, but it is missing here.").
 			WithFix("Update Docker Desktop (winget upgrade -e --id Docker.DockerDesktop, or its own updater), then run qpot setup again.")
 	default:
+		exe := desktopExe()
 		p.Steps = []Step{{Title: "Open Docker Desktop and wait for it to start (accept its terms there if it asks)", Kind: KindDesktop,
-			Cmds:  []Command{{Args: []string{"cmd", "/c", "start", "", desktopExe()}, Timeout: time.Minute}},
+			// Without the program there, start would show a dialog and
+			// wait until someone closes it.
+			Prepare: func(context.Context) *Error {
+				if isFile(exe) {
+					return nil
+				}
+				return E("QP-DOCKER-007").WithWhy("The docker command is installed, but Docker Desktop is not at %s, so setup cannot start it.", exe).
+					WithFix("Open Docker Desktop from the Start menu, accept its terms if you agree, wait until it says the engine is running, then run qpot setup again.")
+			},
+			Cmds:  []Command{{Args: []string{"cmd", "/c", "start", "", exe}, Detached: true, Timeout: time.Minute}},
 			After: in.waitDesktop}}
 	}
 	return p, nil
@@ -104,6 +114,12 @@ func (in *Installer) waitDesktop(ctx context.Context) *Error {
 	}
 	if ctx.Err() != nil {
 		return E("QP-INT-001").Wrap(ctx.Err())
+	}
+	if in.P.GOOS == "windows" {
+		// Docker Desktop on Windows runs its engine in WSL 2; a missing or
+		// old WSL keeps it from starting, and only Docker Desktop says so.
+		return E("QP-DOCKER-007").WithWhy("Docker Desktop did not start its engine within %s. It may be waiting for you to accept its terms, or it may need WSL 2, which it runs Docker in.", wait.Round(time.Second)).
+			WithFix("Open Docker Desktop and do what it asks (accept its terms if you agree). If it says WSL 2 is missing or out of date, run 'wsl --install' or 'wsl --update' in a terminal opened as administrator and restart Windows. When it says the engine is running, run qpot setup again.")
 	}
 	return E("QP-DOCKER-007")
 }

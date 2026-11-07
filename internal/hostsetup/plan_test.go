@@ -868,3 +868,40 @@ exit 1`
 		}
 	})
 }
+
+// TestWindowsDesktopStart: with Docker Desktop installed but stopped, setup
+// starts it without output pipes (Docker Desktop would hold them open),
+// and when its engine does not come up it names WSL 2 as well as the terms.
+// Without Docker Desktop.exe where setup looks it runs nothing.
+func TestWindowsDesktopStart(t *testing.T) {
+	h := newFakeHost(t, "")
+	h.script("cmd", "exit 0")
+	h.set("docker-installed", true)
+	pf := t.TempDir()
+	t.Setenv("ProgramFiles", pf)
+	in := h.installer(nil, "", 1000)
+	in.P.GOOS = "windows"
+	in.DaemonWait = time.Second
+	plan, err := in.Plan(context.Background(), Need{Start: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c := plan.Steps[0].Cmds[0]; !c.Detached || c.Interactive {
+		t.Errorf("the start command keeps output pipes: %+v", c)
+	}
+	e := in.Execute(context.Background(), plan)
+	if e == nil || e.Code != "QP-DOCKER-007" || !strings.Contains(e.Cause(), "is not at") || h.countCalls("cmd") != 0 {
+		t.Fatalf("without Docker Desktop.exe: %v (cmd ran %d times)", e, h.countCalls("cmd"))
+	}
+	exe := filepath.Join(pf, "Docker", "Docker", "Docker Desktop.exe")
+	if err := os.MkdirAll(filepath.Dir(exe), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(exe, nil, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	e = in.Execute(context.Background(), plan)
+	if e == nil || e.Code != "QP-DOCKER-007" || !strings.Contains(e.Cause(), "WSL 2") || !strings.Contains(e.Remedy(), "wsl --install") || h.countCalls("cmd") != 1 {
+		t.Fatalf("engine never up: %v\nwhy: %s\nfix: %s (cmd ran %d times)", e, e.Cause(), e.Remedy(), h.countCalls("cmd"))
+	}
+}
