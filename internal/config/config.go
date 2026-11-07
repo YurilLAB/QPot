@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"sync"
 	"time"
@@ -740,6 +741,10 @@ func Parse(data []byte, configPath string) (*Config, error) {
 		cfg.WebUI.BindAddr = "127.0.0.1"
 	}
 
+	if err := cfg.checkIdentifiers(); err != nil {
+		return nil, fmt.Errorf("invalid config file %s: %w", configPath, err)
+	}
+
 	// Ensure paths are set
 	if cfg.DataPath == "" {
 		cfg.DataPath = filepath.Dir(configPath)
@@ -806,6 +811,60 @@ func Parse(data []byte, configPath string) (*Config, error) {
 		slog.Warn("Config validation", "instance", instanceName, "warning", msg)
 	}
 	return &cfg, nil
+}
+
+var (
+	// instanceNamePattern is the instance name the CLI accepts (qpot setup,
+	// qpot instance create): a single path component, a docker name.
+	instanceNamePattern = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9_-]{0,31}$`)
+	// honeypotNamePattern covers every honeypot QPot has: a compose service
+	// name, a network name and a directory under honeypots/.
+	honeypotNamePattern = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,63}$`)
+)
+
+// knownDatabaseTypes are the backends database.New opens ("" leaves the
+// instance without a database service).
+var knownDatabaseTypes = map[string]bool{"": true, "clickhouse": true, "timescaledb": true, "elasticsearch": true}
+
+// knownRiskLevels are the risk levels the UI shows ("" is unset).
+var knownRiskLevels = map[string]bool{"": true, "low": true, "medium": true, "high": true, "critical": true}
+
+// checkIdentifiers refuses the values that are written into
+// docker-compose.yml, file paths and the web UI as they are: the instance
+// name, the database type and the honeypot names (container and service
+// names, bind-mount paths, a comment), the data path (bind mounts) and the
+// risk levels (the dashboard). A newline in one of them added a service of
+// its choosing to the compose file. Risk levels are matched without regard
+// to case and stored in lower case.
+func (c *Config) checkIdentifiers() error {
+	if c.InstanceName != "" && !instanceNamePattern.MatchString(c.InstanceName) {
+		return fmt.Errorf("instance_name %q: use 1-32 letters, digits, hyphens or underscores", c.InstanceName)
+	}
+	if !knownDatabaseTypes[c.Database.Type] {
+		return fmt.Errorf("database.type %q: use clickhouse, timescaledb or elasticsearch", c.Database.Type)
+	}
+	for _, p := range []struct{ key, value string }{
+		{"data_path", c.DataPath}, {"config_path", c.ConfigPath},
+		{"collector.geoip_db_path", c.Collector.GeoIPDBPath},
+	} {
+		if strings.ContainsFunc(p.value, func(r rune) bool { return r < 0x20 || r == 0x7f }) {
+			return fmt.Errorf("%s %q contains a control character", p.key, p.value)
+		}
+	}
+	for name, hp := range c.Honeypots {
+		if !honeypotNamePattern.MatchString(name) {
+			return fmt.Errorf("honeypot name %q: use lower-case letters, digits and hyphens", name)
+		}
+		risk := strings.ToLower(strings.TrimSpace(hp.RiskLevel))
+		if !knownRiskLevels[risk] {
+			return fmt.Errorf("honeypots.%s.risk_level %q: use low, medium, high or critical", name, hp.RiskLevel)
+		}
+		if risk != hp.RiskLevel {
+			hp.RiskLevel = risk
+			c.Honeypots[name] = hp
+		}
+	}
+	return nil
 }
 
 // Validate returns a slice of human-readable warnings for any
