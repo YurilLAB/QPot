@@ -23,11 +23,6 @@
     try { window.localStorage.removeItem(KEY); } catch (e) { /* nothing kept */ }
   }
 
-  // the credential is shown masked; Copy still copies it whole
-  function mask(value) {
-    return value.length > 10 ? value.slice(0, 6) + '…' + value.slice(-4) : value;
-  }
-
   function get(path, value) {
     return fetch('/api' + path, { headers: { 'X-QPot-ID': value }, cache: 'no-store', credentials: 'same-origin' });
   }
@@ -38,7 +33,8 @@
     var value = id();
     $('signin').hidden = true;
     $('id-menu').hidden = false;
-    $('id-label').textContent = mask(value);
+    // the ID is the credential: no character of it is ever shown
+    $('id-label').textContent = 'Signed in';
     about(value);
   }
 
@@ -88,15 +84,6 @@
     });
   }
 
-  function copy() {
-    var value = id();
-    if (!value || !navigator.clipboard) return;
-    navigator.clipboard.writeText(value).then(function () {
-      $('id-label').textContent = 'Copied';
-      setTimeout(function () { if (id()) $('id-label').textContent = mask(id()); }, 1500);
-    }, function () { /* clipboard refused: nothing to show */ });
-  }
-
   TPot.qpot = {
     id: id,
     // pulse.js could not use the saved ID (none, or refused): forget a refused one and ask
@@ -109,7 +96,12 @@
   document.addEventListener('DOMContentLoaded', function () {
     $('signin').addEventListener('submit', signIn);
     TPot.menu($('id-menu'), function (action) {
-      if (action === 'copy') copy();
+      if (action === 'change') {
+        forget();
+        showSignedOut('');
+        document.dispatchEvent(new CustomEvent('qpot:auth'));
+        $('signin-id').focus();
+      }
       if (action === 'dashboard') window.location.assign('/dashboard');
       if (action === 'signout') {
         forget();

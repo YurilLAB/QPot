@@ -19,7 +19,7 @@
     <script src="assets/js/effect-honey.js" defer integrity="sha384-o12tV6y2G27yxdI0DGQ1oJhkntWD9cV3SqlAopR4c7opvFSIj8KMUCE20LynBGMq" crossorigin="anonymous"></script>
     <script src="assets/js/effect-net.js" defer integrity="sha384-b4uHg69qq9wmfPT4v50s5PoQtYo/OROArbzroajtEtfOfRAAd9DtDD5+YdI6W5Yj" crossorigin="anonymous"></script>
     <script src="assets/js/menu.js" defer integrity="sha384-1dII9UT6lbR4cmGcOji2jmn71Zfz7WutKLlxjgpGNElvmyPZhTaZcmQtIYvv4wj5" crossorigin="anonymous"></script>
-    <script src="assets/js/landing.js" defer integrity="sha384-7mHNn4bq2AEy4bQbPUtr8w3yHycSmx6YMapP4BMi2BZJJMFG3eXjd3TfVwC8bNRd" crossorigin="anonymous"></script>
+    <script src="assets/js/landing.js" defer integrity="sha384-AJNmJLtY/musB9m/jUcJOmYAwGYyNDKdtFAnR67BDABKd5h13vJeRYDP4ufv7TF/" crossorigin="anonymous"></script>
     <script src="assets/js/pulse.js" defer integrity="sha384-Gd7yeQjgRXfSrpTJ0aOecjgotn70cdDswW3CKmr0MoTsZ7NprF1ng6rEQ3OI54CG" crossorigin="anonymous"></script>
     <script src="assets/js/graph.js" defer integrity="sha384-+dEckzN6vOExv5tNRazy/caf4eud+BY3Rg9AAA+aBEXwjvuawpRNS5AMC16ZycWn" crossorigin="anonymous"></script>
     <script src="assets/js/view.js" defer integrity="sha384-DpZJPr4rDp7V91lU4+yoFpX1jYai/Wvlj23d3xzRgxu+IBldP+94sjH0qC+PHXH1" crossorigin="anonymous"></script>
@@ -58,13 +58,13 @@
         </div>
         <!-- QPot: the QPot ID this browser signed in with (T-Pot has nginx's login instead) -->
         <div class="menu" id="id-menu" hidden>
-            <button type="button" class="menu-button" id="id-button" aria-haspopup="menu" aria-expanded="false" aria-controls="id-list" title="The QPot ID this browser is signed in with">
+            <button type="button" class="menu-button" id="id-button" aria-haspopup="menu" aria-expanded="false" aria-controls="id-list" title="This browser is signed in with this QPot's ID">
                 <svg class="glyph" viewBox="0 0 16 16" width="16" height="16" aria-hidden="true"><path d="M10.5 1a4.5 4.5 0 0 0-4.3 5.8L1 12v3h3v-1.5h1.5V12H7l1.2-1.2A4.5 4.5 0 1 0 10.5 1zm1 2.5a1.5 1.5 0 1 1 0 3 1.5 1.5 0 0 1 0-3z"/></svg><span class="menu-label" id="id-label">Signed in</span><svg class="chevron" viewBox="0 0 12 12" width="12" height="12" aria-hidden="true"><path d="M2.5 4.5L6 8l3.5-3.5"/></svg>
             </button>
             <div class="menu-panel" id="id-list">
                 <ul role="menu" aria-labelledby="id-button">
                     <li role="none"><button type="button" role="menuitem" data-value="dashboard"><svg class="glyph" viewBox="0 0 16 16" width="16" height="16" aria-hidden="true"><path d="M1 14h14v1.5H1zM2 8h3v5H2zM6.5 3h3v10h-3zM11 6h3v7h-3z"/></svg><span class="item-name">Open the dashboard</span><span class="item-note">honeypots, events, intel, canaries</span></button></li>
-                    <li role="none"><button type="button" role="menuitem" data-value="copy"><svg class="glyph" viewBox="0 0 16 16" width="16" height="16" aria-hidden="true"><path d="M5 1h8a1 1 0 0 1 1 1v9h-2V3H5zM2 4h8a1 1 0 0 1 1 1v9a1 1 0 0 1-1 1H2a1 1 0 0 1-1-1V5a1 1 0 0 1 1-1z"/></svg><span class="item-name">Copy QPot ID</span><span class="item-note">the whole ID, to the clipboard</span></button></li>
+                    <li role="none"><button type="button" role="menuitem" data-value="change"><svg class="glyph" viewBox="0 0 16 16" width="16" height="16" aria-hidden="true"><path d="M10.5 1a4.5 4.5 0 0 0-4.3 5.8L1 12v3h3v-1.5h1.5V12H7l1.2-1.2A4.5 4.5 0 1 0 10.5 1zm1 2.5a1.5 1.5 0 1 1 0 3 1.5 1.5 0 0 1 0-3z"/></svg><span class="item-name">Change ID</span><span class="item-note">sign in with another QPot ID</span></button></li>
                     <li role="none"><button type="button" role="menuitem" data-value="signout"><svg class="glyph" viewBox="0 0 16 16" width="16" height="16" aria-hidden="true"><path d="M2 2h7v2H4v8h5v2H2zM10 4.5l4 3.5-4 3.5V9H6V7h4z"/></svg><span class="item-name">Sign out</span><span class="item-note">forget the ID in this browser</span></button></li>
                 </ul>
             </div>

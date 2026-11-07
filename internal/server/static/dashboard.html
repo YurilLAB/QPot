@@ -568,12 +568,12 @@
             </div>
             <div class="modal-body">
                 <div class="setting-item">
-                    <span class="setting-description">This browser is signed in to this QPot with the QPot ID below. It is kept in this browser only and sent with every request in the X-QPot-ID header.</span>
-                    <div class="qpot-id-box"><span class="qpot-id-text" id="qpot-id-display">-</span></div>
+                    <span class="setting-description">This browser is signed in to this QPot with its QPot ID. The ID is kept in this browser only, sent with every request in the X-QPot-ID header and never shown.</span>
+                    <div class="qpot-id-box"><span class="qpot-id-text" id="qpot-id-display"><i class="fas fa-key" aria-hidden="true"></i> Signed in</span></div>
                 </div>
             </div>
             <div class="modal-footer flex-between">
-                <button class="btn-base btn-secondary hover-lift" type="button" id="id-copy"><i class="fas fa-copy"></i> Copy</button>
+                <button class="btn-base btn-secondary hover-lift" type="button" id="id-change"><i class="fas fa-key"></i> Change ID</button>
                 <button class="btn-base btn-warning hover-lift" type="button" id="id-signout"><i class="fas fa-right-from-bracket"></i> Sign out</button>
             </div>
         </div>
@@ -780,14 +780,9 @@
             try { return localStorage.getItem(KEY) || ''; } catch (e) { return ''; }
         }
 
-        function maskID(id) {
-            return id && id.length > 10 ? id.slice(0, 6) + '…' + id.slice(-4) : id;
-        }
-
         function showApp() {
             $('auth-overlay').classList.add('hidden');
             $('main-content').classList.remove('hidden');
-            $('qpot-id-display').textContent = maskID(currentQPotID);
         }
 
         function signedOut(message) {
@@ -2029,10 +2024,7 @@
         $('ev-next').addEventListener('click', () => { if (evHasMore) { evOffset += EV_LIMIT; loadEvents(); } });
         $('canary-form').addEventListener('submit', mintCanary);
         $('id-btn').addEventListener('click', () => openModal('id-modal'));
-        $('id-copy').addEventListener('click', () => {
-            if (!navigator.clipboard) { toast('This browser does not allow copying here.', 'error'); return; }
-            navigator.clipboard.writeText(currentQPotID).then(() => toast('QPot ID copied.', 'ok'), () => toast('Copying was refused.', 'error'));
-        });
+        $('id-change').addEventListener('click', () => { signedOut('Sign in with the other QPot ID.'); });
         $('id-signout').addEventListener('click', () => { signedOut('Signed out. Sign in again with the QPot ID.'); });
         $('confirm-ok').addEventListener('click', () => {
             const r = confirmResolve;

@@ -13,10 +13,6 @@
         try { return localStorage.getItem(KEY) || ''; } catch (e) { return ''; }
     }
 
-    function mask(id) {
-        return id.length > 10 ? id.slice(0, 6) + '…' + id.slice(-4) : id;
-    }
-
     class QPotFeed {
         constructor() {
             this.readyState = 0; // CONNECTING
@@ -103,15 +99,10 @@
     function showID() {
         const id = qpotID();
         document.querySelectorAll('#settings-qpot-id .qpot-id-text').forEach((el) => {
-            el.textContent = id ? mask(id) : 'Not signed in';
+            // the ID is the credential: no character of it is ever shown
+            el.textContent = id ? 'Signed in' : 'Not signed in';
         });
         if (!id) showSignIn();
-    }
-
-    function copyID() {
-        const id = qpotID();
-        if (!id || !navigator.clipboard) return;
-        navigator.clipboard.writeText(id).catch(() => { /* ignore */ });
     }
 
     function signOut() {
@@ -126,8 +117,8 @@
         showID();
     }
     document.addEventListener('click', (e) => {
-        if (e.target.closest('#copy-qpot-id')) copyID();
+        if (e.target.closest('#change-qpot-id')) { signOut(); showSignIn('Sign in with the other QPot ID on the QPot home page.'); }
         if (e.target.closest('#signout-qpot-id')) signOut();
     });
-    window.QPotID = { get: qpotID, refresh: showID, copy: copyID, signOut: signOut };
+    window.QPotID = { get: qpotID, refresh: showID, signOut: signOut };
 })();
