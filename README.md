@@ -134,16 +134,20 @@ another machine use an SSH tunnel: `ssh -L 8080:127.0.0.1:8080 <host>`.
 
 | Page | What it is |
 |------|------------|
-| `/` | T-Pot's landing page in QPot's colours: status, 24h counts, links, MISP export |
+| `/` | T-Pot's landing page in QPot's colours: live counts, the attack timeline, attacks per honeypot, top sources, links |
 | `/map/` | T-Pot's live attack map, fed by QPot's own database over an authenticated stream (`/api/map/stream`). The world is drawn locally (Natural Earth outlines), so the browser contacts no tile server. |
-| `/dashboard` | Honeypot controls, intelligence and the overview |
+| `/dashboard` | Honeypot controls and settings, events, intelligence, canaries, doctor checks, cluster pairing and the overview |
+
+Every API endpoint, with its answers and errors: [doc/api.md](doc/api.md).
 
 The QPot ID is entered once per browser, checked with the server, kept in that
-browser only and shown masked.
+browser only and never shown on the page.
 
-The dashboard shows live stats, per-honeypot controls, the attacker activity
-feed, ATT&CK techniques / IOCs / campaigns (with a MISP export), cluster members
-and the security posture. Its **Overview** tab adds host CPU / memory / disk /
+The dashboard shows live stats, per-honeypot controls (on/off, logs, restart,
+settings), an event browser with filters and search, ATT&CK techniques / IOCs /
+campaigns (with a MISP export), canaries and their trips, `qpot doctor`'s checks
+with their fixes, cluster members and pending join requests (approved on the host
+with the command shown), and the security posture. Its **Overview** tab adds host CPU / memory / disk /
 process load, 24-hour activity per honeypot and the latest events with a
 severity. The same view is available from the terminal, for one instance or all
 of them on the host, and nothing is sent off the machine:
