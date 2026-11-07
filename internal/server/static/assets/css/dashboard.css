@@ -1,0 +1,1000 @@
+/* QPot dashboard: the page T-Pot has no counterpart for (T-Pot uses Kibana), built from the parts
+   of T-Pot 24.04.2's attack map (map/static/index.css, loaded first): its navbar, tabs, cards,
+   tables, buttons, modals and tokens. This file only lays them out as a scrolling page and adds
+   the few controls the map has no use for (switches, forms, pager). */
+
+/* ---------- the page ---------- */
+
+/* The map's stylesheet pins html and body to the window (the map never scrolls); this page does. */
+html.qpot-page {
+    height: auto;
+    overflow-x: hidden;
+    overflow-y: auto;
+    scrollbar-width: thin;
+    scrollbar-color: var(--border-secondary) transparent;
+}
+
+body.qpot-dashboard {
+    height: auto;
+    min-height: 100vh;
+    width: auto;
+    overflow: visible;
+}
+
+.hidden {
+    display: none !important;
+}
+
+.dash-shell {
+    padding-top: 70px;
+}
+
+.navbar-brand .brand-badge {
+    width: 32px;
+    height: 37px;
+    flex: none;
+}
+
+a.navbar-brand,
+a.control-btn {
+    color: inherit;
+    text-decoration: none;
+}
+
+a.navbar-brand:hover {
+    color: var(--primary-color);
+}
+
+/* the tabs: T-Pot's bottom-panel tabs, as the page's second bar */
+.dash-tabs {
+    position: sticky;
+    top: 70px;
+    z-index: 900;
+    overflow-x: auto;
+    scrollbar-width: none;
+}
+
+.dash-tabs::-webkit-scrollbar {
+    display: none;
+}
+
+.dash-tabs .tab-btn {
+    flex: none;
+    height: 100%;
+}
+
+.dash-tabs .tab-spacer {
+    flex: 1;
+}
+
+.dash-main {
+    max-width: 1680px;
+    margin: 0 auto;
+    padding: var(--spacing-lg);
+}
+
+.dash-pane {
+    display: none;
+}
+
+.dash-pane.active {
+    display: block;
+}
+
+.dash-pane > * + * {
+    margin-top: var(--spacing-lg);
+}
+
+/* ---------- cards ---------- */
+
+.dash-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+    gap: var(--spacing-lg);
+}
+
+.dash-grid.two {
+    grid-template-columns: repeat(auto-fit, minmax(min(100%, 420px), 1fr));
+}
+
+.dash-grid.three {
+    grid-template-columns: repeat(auto-fit, minmax(min(100%, 320px), 1fr));
+}
+
+.dash-card {
+    background: var(--bg-card);
+    border: 1px solid var(--border-primary);
+    border-radius: var(--radius-lg);
+    min-width: 0;
+    transition: all var(--transition-normal);
+}
+
+.dash-card:hover {
+    border-color: var(--border-secondary);
+}
+
+.dash-card > .card-header {
+    margin: 0;
+    flex-wrap: wrap;
+    gap: var(--spacing-sm);
+}
+
+.dash-card > .card-header h4 {
+    margin: 0;
+}
+
+.card-header .card-note {
+    font-size: var(--font-xs);
+    color: var(--text-secondary);
+    font-weight: 400;
+}
+
+.card-tools {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: var(--spacing-sm);
+}
+
+.dash-card > .card-body {
+    padding: var(--spacing-md);
+}
+
+.dash-card > .card-body.flush {
+    padding: 0;
+}
+
+/* a number with its label: the stats of T-Pot's navbar, as a card */
+.stat-card {
+    padding: var(--spacing-md) var(--spacing-lg);
+}
+
+.stat-card .stat-label {
+    display: flex;
+    align-items: center;
+    gap: var(--spacing-sm);
+}
+
+.stat-card .stat-label i {
+    color: var(--primary-color);
+}
+
+.stat-card .stat-value {
+    display: block;
+    line-height: 1.2;
+    margin: var(--spacing-xs) 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.stat-card .stat-sub {
+    font-size: var(--font-xs);
+    color: var(--text-secondary);
+    min-height: 1.4em;
+}
+
+.stat-card .stat-value .flag-icon {
+    width: 28px;
+    height: auto;
+    margin-right: var(--spacing-sm);
+    vertical-align: -2px;
+    border-radius: var(--radius-sm);
+}
+
+.gauge {
+    height: 6px;
+    margin-top: var(--spacing-sm);
+    border-radius: 3px;
+    background: var(--bg-tertiary);
+    overflow: hidden;
+}
+
+.gauge > span {
+    display: block;
+    height: 100%;
+    width: 0;
+    background: var(--primary-color);
+    transition: width var(--transition-normal);
+}
+
+.gauge > span.warn { background: var(--warning-color); }
+.gauge > span.crit { background: var(--danger-color); }
+
+/* ---------- buttons, badges, switches ---------- */
+
+.btn-base {
+    padding: var(--spacing-sm) var(--spacing-md);
+    font-size: var(--font-xs);
+    font-family: var(--font-primary);
+    text-decoration: none;
+    white-space: nowrap;
+}
+
+.btn-base:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+    transform: none;
+    box-shadow: none;
+}
+
+.btn-danger {
+    background: var(--danger-color);
+    color: #fff;
+}
+
+.btn-danger:hover {
+    background: #b52b39;
+    color: #fff;
+}
+
+.btn-icon {
+    padding: var(--spacing-xs) var(--spacing-sm);
+}
+
+.actions-row {
+    display: flex;
+    flex-wrap: wrap;
+    gap: var(--spacing-sm);
+}
+
+.pill {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 1px 8px;
+    border: 1px solid var(--border-secondary);
+    border-radius: 999px;
+    font-size: 0.75rem;
+    font-weight: 600;
+    line-height: 1.5;
+    color: var(--text-secondary);
+    white-space: nowrap;
+}
+
+.pill .dot {
+    width: 7px;
+    height: 7px;
+    border-radius: 50%;
+    background: currentColor;
+}
+
+.pill.ok { color: var(--success-color); border-color: rgba(40, 167, 69, 0.45); }
+.pill.warn { color: var(--warning-color); border-color: rgba(255, 193, 7, 0.45); }
+.pill.bad { color: #ff6b6b; border-color: rgba(220, 53, 69, 0.55); }
+.pill.accent { color: var(--primary-color); border-color: rgba(182, 95, 217, 0.5); }
+.pill.muted { color: var(--text-muted); }
+
+/* the on/off switch of a honeypot */
+.switch {
+    position: relative;
+    display: inline-block;
+    flex: none;
+    width: 44px;
+    height: 24px;
+}
+
+.switch input {
+    position: absolute;
+    opacity: 0;
+    width: 100%;
+    height: 100%;
+    margin: 0;
+    cursor: pointer;
+    z-index: 1;
+}
+
+.switch .track {
+    position: absolute;
+    inset: 0;
+    border-radius: 12px;
+    background: var(--bg-tertiary);
+    border: 1px solid var(--border-secondary);
+    transition: all var(--transition-fast);
+}
+
+.switch .track::before {
+    content: "";
+    position: absolute;
+    top: 3px;
+    left: 3px;
+    width: 16px;
+    height: 16px;
+    border-radius: 50%;
+    background: var(--text-muted);
+    transition: all var(--transition-fast);
+}
+
+.switch input:checked + .track {
+    background: rgba(182, 95, 217, 0.25);
+    border-color: var(--primary-color);
+}
+
+.switch input:checked + .track::before {
+    transform: translateX(20px);
+    background: var(--primary-color);
+}
+
+.switch input:focus-visible + .track {
+    outline: 2px solid var(--primary-color);
+    outline-offset: 2px;
+}
+
+.switch input:disabled {
+    cursor: progress;
+}
+
+.switch input:disabled + .track {
+    opacity: 0.6;
+}
+
+/* ---------- honeypots ---------- */
+
+.hp-list {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+}
+
+.hp-row {
+    display: grid;
+    grid-template-columns: 40px minmax(0, 1fr) auto auto;
+    align-items: center;
+    gap: var(--spacing-md);
+    padding: var(--spacing-sm) var(--spacing-md);
+    border-bottom: 1px solid var(--border-primary);
+}
+
+.hp-row:last-child {
+    border-bottom: 0;
+}
+
+.hp-row:hover {
+    background: var(--bg-tertiary);
+}
+
+.hp-row.off .hp-name {
+    color: var(--text-secondary);
+}
+
+.hp-icon {
+    width: 40px;
+    height: 40px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    border-radius: var(--radius-md);
+    background: var(--bg-secondary);
+    border: 1px solid var(--border-primary);
+    color: var(--text-muted);
+}
+
+.hp-row.on .hp-icon {
+    color: var(--primary-color);
+    border-color: rgba(182, 95, 217, 0.4);
+}
+
+.hp-name {
+    font-weight: 600;
+    color: var(--text-primary);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.hp-meta {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 6px 10px;
+    margin-top: 2px;
+    font-size: var(--font-xs);
+    color: var(--text-secondary);
+    font-family: var(--font-mono);
+}
+
+.hp-tools {
+    display: flex;
+    gap: var(--spacing-xs);
+}
+
+/* ---------- lists of the intel panels ---------- */
+
+.rank-list {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+    max-height: 320px;
+    overflow-y: auto;
+}
+
+.rank-list li {
+    display: grid;
+    grid-template-columns: auto minmax(0, 1fr) auto;
+    align-items: baseline;
+    gap: var(--spacing-sm);
+    padding: 6px 0;
+    border-bottom: 1px solid var(--border-primary);
+    font-size: var(--font-xs);
+}
+
+.rank-list li:last-child {
+    border-bottom: 0;
+}
+
+.rank-list .tag {
+    font-family: var(--font-mono);
+    color: var(--primary-color);
+    white-space: nowrap;
+}
+
+.rank-list .what {
+    color: var(--text-primary);
+    overflow-wrap: anywhere;
+}
+
+.rank-list .num {
+    font-family: var(--font-mono);
+    color: var(--text-secondary);
+}
+
+/* ---------- tables in cards ---------- */
+
+.dash-card .table-wrapper {
+    border: 0;
+    border-radius: 0 0 var(--radius-lg) var(--radius-lg);
+    max-height: 560px;
+    scrollbar-width: thin !important;
+    scrollbar-color: var(--border-secondary) transparent;
+}
+
+.data-table td.wrap {
+    white-space: normal;
+    overflow-wrap: anywhere;
+    max-width: 420px;
+}
+
+.data-table td.time-cell {
+    white-space: nowrap;
+}
+
+/* attacker text can be any length: one line, the rest in the tooltip */
+.data-table td.clip {
+    max-width: 220px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.data-table td.wrap {
+    min-width: 180px;
+}
+
+.data-table td.mono-accent {
+    color: var(--primary-color);
+}
+
+.data-table tbody tr.clickable {
+    cursor: pointer;
+}
+
+.data-table .flag-icon {
+    width: 20px;
+}
+
+/* ---------- forms: T-Pot's search box and selects ---------- */
+
+.filter-bar {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
+    gap: var(--spacing-sm) var(--spacing-md);
+    align-items: end;
+}
+
+.field {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    min-width: 0;
+}
+
+.field > span,
+.field > label {
+    font-size: 0.75rem;
+    font-weight: 600;
+    color: var(--text-secondary);
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+}
+
+.field .search-input,
+.field .setting-select {
+    width: 100%;
+    margin: 0;
+    font-size: var(--font-xs);
+    min-height: 38px;
+}
+
+.field.wide {
+    grid-column: span 2;
+}
+
+.filter-actions {
+    grid-column: 1 / -1;
+}
+
+.card-tools .setting-select {
+    width: auto;
+    min-width: 150px;
+    margin: 0;
+}
+
+.hp-more {
+    padding: var(--spacing-sm) var(--spacing-md);
+    text-align: center;
+}
+
+.search-input::placeholder {
+    color: var(--text-muted);
+}
+
+.setting-item .search-input,
+.setting-item .setting-select {
+    width: 100%;
+}
+
+.pager {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    justify-content: space-between;
+    gap: var(--spacing-sm);
+    padding: var(--spacing-sm) var(--spacing-md);
+    border-top: 1px solid var(--border-primary);
+    font-size: var(--font-xs);
+    color: var(--text-secondary);
+}
+
+/* ---------- messages ---------- */
+
+.callout {
+    display: flex;
+    gap: var(--spacing-sm);
+    align-items: flex-start;
+    padding: var(--spacing-sm) var(--spacing-md);
+    border: 1px solid var(--border-secondary);
+    border-left: 3px solid var(--primary-color);
+    border-radius: var(--radius-md);
+    background: var(--bg-secondary);
+    font-size: var(--font-xs);
+    color: var(--text-primary);
+}
+
+.callout i {
+    margin-top: 3px;
+    color: var(--primary-color);
+}
+
+.callout.warn { border-left-color: var(--warning-color); }
+.callout.warn i { color: var(--warning-color); }
+.callout.error { border-left-color: var(--danger-color); }
+.callout.error i { color: #ff6b6b; }
+.callout.ok { border-left-color: var(--success-color); }
+.callout.ok i { color: var(--success-color); }
+
+.callout code,
+.cmd {
+    font-family: var(--font-mono);
+    color: var(--primary-color);
+    overflow-wrap: anywhere;
+}
+
+.empty-state {
+    padding: var(--spacing-xl) var(--spacing-md);
+    text-align: center;
+    color: var(--text-secondary);
+    font-size: var(--font-xs);
+}
+
+.empty-state i {
+    display: block;
+    margin-bottom: var(--spacing-sm);
+    font-size: 1.5rem;
+    color: var(--text-muted);
+}
+
+/* key / value lists (event details, a minted canary, the instance) */
+.kv {
+    display: grid;
+    grid-template-columns: minmax(110px, max-content) minmax(0, 1fr);
+    gap: 6px var(--spacing-md);
+    margin: 0;
+    font-size: var(--font-xs);
+}
+
+.kv dt {
+    color: var(--text-secondary);
+    font-weight: 500;
+}
+
+.kv dd {
+    margin: 0;
+    font-family: var(--font-mono);
+    color: var(--text-primary);
+    overflow-wrap: anywhere;
+    white-space: pre-wrap;
+}
+
+.log-view {
+    margin: 0;
+    max-height: 60vh;
+    overflow: auto;
+    padding: var(--spacing-md);
+    background: var(--bg-primary);
+    border: 1px solid var(--border-primary);
+    border-radius: var(--radius-md);
+    font-family: var(--font-mono);
+    font-size: 0.75rem;
+    line-height: 1.5;
+    color: var(--text-secondary);
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+}
+
+/* ---------- modals: T-Pot's settings modal, wider for logs ---------- */
+
+.modal-content.wide {
+    max-width: 960px;
+    width: min(94vw, 960px);
+}
+
+.modal-body .setting-item + .setting-item {
+    margin-top: var(--spacing-md);
+}
+
+.setting-item.needs .search-input {
+    border-color: var(--warning-color);
+}
+
+.setting-item .needs-note {
+    color: var(--warning-color);
+}
+
+.modal-message:empty {
+    display: none;
+}
+
+.modal-message {
+    margin-top: var(--spacing-md);
+}
+
+/* ---------- the sign-in ---------- */
+
+.qpot-signin {
+    position: fixed;
+    inset: 0;
+    z-index: var(--z-modal);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: var(--spacing-md);
+    background: var(--bg-primary);
+}
+
+.qpot-signin-box {
+    width: 100%;
+    max-width: 440px;
+    padding: var(--spacing-xl);
+    background: var(--bg-modal);
+    border: 1px solid var(--border-primary);
+    border-radius: var(--radius-lg);
+    box-shadow: 0 8px 32px var(--shadow-heavy);
+    text-align: center;
+}
+
+.qpot-signin-box img {
+    width: 96px;
+    height: auto;
+    margin-bottom: var(--spacing-md);
+}
+
+.qpot-signin-box h2 {
+    margin: 0 0 var(--spacing-sm);
+    font-size: var(--font-lg);
+    font-weight: 600;
+}
+
+.qpot-signin-box p {
+    margin: 0 0 var(--spacing-lg);
+    font-size: var(--font-xs);
+    color: var(--text-secondary);
+}
+
+.qpot-signin-box .search-input {
+    width: 100%;
+    margin-bottom: var(--spacing-md);
+    font-family: var(--font-mono);
+    text-align: center;
+}
+
+.qpot-signin-box .btn-base {
+    width: 100%;
+    justify-content: center;
+}
+
+.signin-error {
+    min-height: 1.5em;
+    margin: var(--spacing-md) 0 0 !important;
+    color: #ff8a8a !important;
+}
+
+/* ---------- toasts ---------- */
+
+.toast-container {
+    position: fixed;
+    right: var(--spacing-lg);
+    bottom: var(--spacing-lg);
+    z-index: 10000;
+    display: flex;
+    flex-direction: column;
+    gap: var(--spacing-sm);
+    max-width: min(420px, calc(100vw - 32px));
+}
+
+.toast {
+    display: flex;
+    align-items: flex-start;
+    gap: var(--spacing-sm);
+    padding: var(--spacing-sm) var(--spacing-md);
+    background: var(--bg-modal);
+    border: 1px solid var(--border-primary);
+    border-left: 3px solid var(--primary-color);
+    border-radius: var(--radius-md);
+    box-shadow: 0 8px 24px var(--shadow-heavy);
+    font-size: var(--font-xs);
+    color: var(--text-primary);
+    animation: slideIn 0.2s ease;
+}
+
+.toast.error { border-left-color: var(--danger-color); }
+.toast.ok { border-left-color: var(--success-color); }
+
+/* ---------- narrow screens ---------- */
+
+@media (max-width: 768px) {
+    .dash-main {
+        padding: var(--spacing-md);
+    }
+
+    .field.wide {
+        grid-column: auto;
+    }
+
+    .hp-row {
+        grid-template-columns: 36px minmax(0, 1fr) auto;
+        gap: var(--spacing-sm);
+    }
+
+    .hp-row .hp-tools {
+        grid-column: 2 / -1;
+        grid-row: 2;
+        flex-wrap: wrap;
+    }
+
+    .hp-row .switch {
+        grid-column: 3;
+        grid-row: 1;
+    }
+
+    .hp-icon {
+        width: 36px;
+        height: 36px;
+    }
+}
+
+@media (max-width: 480px) {
+    .dash-main {
+        padding: var(--spacing-sm);
+    }
+
+    /* all eight tabs on one row: icons share the width */
+    .dash-tabs .tab-btn {
+        flex: 1 1 0;
+        min-width: 0;
+        justify-content: center;
+        padding-left: 0;
+        padding-right: 0;
+    }
+
+    .dash-pane > * + * {
+        margin-top: var(--spacing-md);
+    }
+
+    .dash-grid {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        gap: var(--spacing-sm);
+    }
+
+    .dash-grid.two,
+    .dash-grid.three {
+        grid-template-columns: minmax(0, 1fr);
+    }
+
+    .stat-card {
+        padding: var(--spacing-sm) var(--spacing-md);
+    }
+
+    .stat-card .stat-value {
+        font-size: var(--font-lg);
+    }
+
+    .navbar-controls {
+        gap: var(--spacing-xs);
+    }
+
+    #status-text {
+        display: none;
+    }
+
+    .connection-status {
+        padding: var(--spacing-sm);
+    }
+
+    .control-btn {
+        width: 36px;
+        height: 36px;
+    }
+
+    .data-table th.optional,
+    .data-table td.optional {
+        display: none;
+    }
+
+    .data-table th,
+    .data-table td {
+        padding-left: 6px;
+        padding-right: 6px;
+        font-size: 0.75rem;
+    }
+
+    .kv {
+        grid-template-columns: minmax(0, 1fr);
+        gap: 2px;
+    }
+
+    /* buttons in table rows: the icon, the label in the tooltip */
+    .data-table .hp-tools .btn-icon span {
+        display: none;
+    }
+
+    .kv dd {
+        margin-bottom: var(--spacing-sm);
+    }
+
+    .card-header {
+        flex-wrap: wrap;
+        gap: var(--spacing-sm);
+    }
+}
+
+/* the steps a person runs on the host (Doctor, join requests): what, then the command */
+.step-list {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+    display: grid;
+    gap: var(--spacing-md);
+}
+
+.step-list li {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: var(--spacing-sm) var(--spacing-md);
+}
+
+.step-list .step-what {
+    flex: 1 1 26rem;
+    min-width: 0;
+    color: var(--text-secondary);
+}
+
+.step-list .cmd {
+    padding: 4px 10px;
+    border: 1px solid var(--border-secondary);
+    border-radius: var(--radius-sm);
+    background: var(--bg-tertiary);
+    font-size: var(--font-xs);
+    user-select: all;
+}
+
+.step-list .step-ref {
+    color: var(--text-primary);
+}
+
+.card-body > .callout + .step-list {
+    margin-top: var(--spacing-md);
+}
+
+/* Doctor: the result in its colour, the explain form on one line, QP codes link to their meaning */
+.stat-card .stat-value.good { color: var(--success-color); }
+.stat-card .stat-value.bad { color: #ff6b6b; }
+
+#explain-form {
+    grid-template-columns: minmax(0, 1fr) auto;
+}
+
+#explain-form .field.wide,
+#explain-form .filter-actions {
+    grid-column: auto;
+}
+
+#explain-message,
+#explain-result:not(:empty) {
+    margin-top: var(--spacing-md);
+}
+
+.dash-card .table-wrapper.codes-wrapper {
+    max-height: 420px;
+}
+
+.nowrap {
+    white-space: nowrap;
+}
+
+/* a real QP code stays on one line (.code-btn); anything else in the column wraps */
+.data-table td.code-cell {
+    overflow-wrap: anywhere;
+}
+
+.data-table tr.row-fail td {
+    background: rgba(220, 53, 69, 0.06);
+}
+
+.code-btn {
+    padding: 0;
+    border: 0;
+    background: none;
+    font-family: var(--font-mono);
+    font-size: var(--font-xs);
+    color: var(--primary-color);
+    text-decoration: underline dotted;
+    text-underline-offset: 3px;
+    white-space: nowrap;
+    cursor: pointer;
+}
+
+.code-btn:hover {
+    text-decoration-style: solid;
+}
+
+.code-btn:focus-visible {
+    outline: 2px solid var(--primary-color);
+    outline-offset: 2px;
+    border-radius: 2px;
+}
+
+.cell-sub {
+    margin-top: 2px;
+    font-size: 0.75rem;
+    color: var(--text-secondary);
+}
+
+.phone-only {
+    display: none;
+}
+
+@media (max-width: 480px) {
+    .phone-only {
+        display: block;
+    }
+
+    #explain-form {
+        grid-template-columns: minmax(0, 1fr);
+    }
+}
+
+/* a modal that fades out no longer takes the click meant for the page under it */
+.modal:not(.active) {
+    pointer-events: none;
+}

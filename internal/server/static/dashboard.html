@@ -1,1148 +1,2058 @@
 <!DOCTYPE html>
-<html lang="en">
+<html lang="en" data-theme="dark" class="qpot-page">
 <head>
-    <meta charset="UTF-8">
+    <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="referrer" content="no-referrer">
     <title>QPot Dashboard</title>
-    <style>
-        :root {
-            --bg-primary: #0a0e14;
-            --bg-secondary: #131920;
-            --bg-tertiary: #1c242f;
-            --text-primary: #e1e8ed;
-            --text-secondary: #8b9aae;
-            --accent: #3498db;
-            --accent-hover: #2980b9;
-            --success: #27ae60;
-            --warning: #f39c12;
-            --danger: #e74c3c;
-            --border: #2a3441;
-        }
-
-        * {
-            margin: 0;
-            padding: 0;
-            box-sizing: border-box;
-        }
-
-        body {
-            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-            background: var(--bg-primary);
-            color: var(--text-primary);
-            line-height: 1.6;
-        }
-
-        .container {
-            max-width: 1400px;
-            margin: 0 auto;
-            padding: 20px;
-        }
-
-        header {
-            display: flex;
-            justify-content: space-between;
-            align-items: center;
-            padding: 20px 0;
-            border-bottom: 1px solid var(--border);
-            margin-bottom: 30px;
-            flex-wrap: wrap;
-            gap: 15px;
-        }
-
-        .logo {
-            font-size: 24px;
-            font-weight: bold;
-            color: var(--accent);
-            letter-spacing: 2px;
-        }
-
-        .qpot-id-box {
-            background: var(--bg-tertiary);
-            border: 1px solid var(--border);
-            border-radius: 8px;
-            padding: 10px 20px;
-            font-family: 'Consolas', 'Monaco', monospace;
-            font-size: 14px;
-            cursor: pointer;
-            transition: border-color 0.2s;
-        }
-
-        .qpot-id-box:hover {
-            border-color: var(--accent);
-        }
-
-        .qpot-id-label {
-            font-size: 10px;
-            text-transform: uppercase;
-            color: var(--text-secondary);
-            margin-bottom: 2px;
-        }
-
-        .qpot-id-value {
-            color: var(--accent);
-            font-weight: bold;
-        }
-
-        .status-badge {
-            display: inline-flex;
-            align-items: center;
-            gap: 8px;
-            padding: 6px 12px;
-            border-radius: 20px;
-            font-size: 13px;
-            font-weight: 500;
-        }
-
-        .status-badge.running {
-            background: rgba(39, 174, 96, 0.15);
-            color: var(--success);
-        }
-
-        .status-badge.stopped {
-            background: rgba(231, 76, 60, 0.15);
-            color: var(--danger);
-        }
-
-        .status-dot {
-            width: 8px;
-            height: 8px;
-            border-radius: 50%;
-            background: currentColor;
-            animation: pulse 2s infinite;
-        }
-
-        @keyframes pulse {
-            0%, 100% { opacity: 1; }
-            50% { opacity: 0.4; }
-        }
-
-        .grid {
-            display: grid;
-            grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
-            gap: 20px;
-            margin-bottom: 30px;
-        }
-
-        .card {
-            background: var(--bg-secondary);
-            border: 1px solid var(--border);
-            border-radius: 12px;
-            padding: 20px;
-            transition: border-color 0.2s;
-        }
-
-        .card:hover {
-            border-color: var(--accent);
-        }
-
-        .card h2 {
-            font-size: 12px;
-            text-transform: uppercase;
-            color: var(--text-secondary);
-            margin-bottom: 12px;
-            letter-spacing: 0.5px;
-        }
-
-        .stat-value {
-            font-size: 32px;
-            font-weight: bold;
-            color: var(--text-primary);
-        }
-
-        .stat-label {
-            font-size: 13px;
-            color: var(--text-secondary);
-            margin-top: 4px;
-        }
-
-        .stat-change {
-            font-size: 12px;
-            margin-top: 8px;
-            color: var(--success);
-        }
-
-        .stat-change.negative {
-            color: var(--danger);
-        }
-
-        .honeypot-list {
-            list-style: none;
-        }
-
-        .honeypot-item {
-            display: flex;
-            align-items: center;
-            justify-content: space-between;
-            padding: 16px;
-            background: var(--bg-tertiary);
-            border-radius: 8px;
-            margin-bottom: 10px;
-            border: 1px solid var(--border);
-            transition: all 0.2s;
-        }
-
-        .honeypot-item:hover {
-            border-color: var(--accent);
-        }
-
-        .honeypot-item:last-child {
-            margin-bottom: 0;
-        }
-
-        .honeypot-info {
-            display: flex;
-            align-items: center;
-            gap: 15px;
-        }
-
-        .honeypot-icon {
-            width: 42px;
-            height: 42px;
-            background: var(--bg-secondary);
-            border-radius: 8px;
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            font-size: 18px;
-            border: 1px solid var(--border);
-        }
-
-        .honeypot-details h3 {
-            font-size: 15px;
-            margin-bottom: 4px;
-            font-weight: 600;
-        }
-
-        .honeypot-details p {
-            font-size: 12px;
-            color: var(--text-secondary);
-        }
-
-        .risk-badge {
-            font-size: 10px;
-            padding: 3px 8px;
-            border-radius: 4px;
-            text-transform: uppercase;
-            font-weight: 600;
-            letter-spacing: 0.5px;
-        }
-
-        .risk-low {
-            background: rgba(39, 174, 96, 0.15);
-            color: #2ecc71;
-        }
-
-        .risk-medium {
-            background: rgba(243, 156, 18, 0.15);
-            color: #f39c12;
-        }
-
-        .risk-high {
-            background: rgba(231, 76, 60, 0.15);
-            color: #e74c3c;
-        }
-
-        .risk-critical {
-            background: rgba(192, 57, 43, 0.25);
-            color: #ff6b5b;
-        }
-
-        .gauge-bar { height: 8px; border-radius: 4px; background: var(--border); overflow: hidden; margin-top: 10px; }
-        .gauge-fill { height: 100%; background: var(--accent); }
-        .gauge-fill.warn { background: #f39c12; }
-        .gauge-fill.crit { background: #e74c3c; }
-
-        .toggle {
-            position: relative;
-            width: 48px;
-            height: 24px;
-        }
-
-        .toggle input {
-            opacity: 0;
-            width: 0;
-            height: 0;
-        }
-
-        .toggle-slider {
-            position: absolute;
-            cursor: pointer;
-            inset: 0;
-            background: var(--bg-secondary);
-            border-radius: 24px;
-            transition: 0.3s;
-            border: 1px solid var(--border);
-        }
-
-        .toggle-slider:before {
-            content: "";
-            position: absolute;
-            height: 16px;
-            width: 16px;
-            left: 3px;
-            bottom: 3px;
-            background: var(--text-secondary);
-            border-radius: 50%;
-            transition: 0.3s;
-        }
-
-        .toggle input:checked + .toggle-slider {
-            background: rgba(52, 152, 219, 0.2);
-            border-color: var(--accent);
-        }
-
-        .toggle input:checked + .toggle-slider:before {
-            transform: translateX(24px);
-            background: var(--accent);
-        }
-
-        .btn {
-            display: inline-flex;
-            align-items: center;
-            gap: 8px;
-            padding: 10px 18px;
-            border-radius: 6px;
-            font-size: 13px;
-            font-weight: 500;
-            cursor: pointer;
-            border: none;
-            transition: all 0.2s;
-            text-decoration: none;
-        }
-
-        .btn-primary {
-            background: var(--accent);
-            color: white;
-        }
-
-        .btn-primary:hover {
-            background: var(--accent-hover);
-        }
-
-        .btn-secondary {
-            background: var(--bg-tertiary);
-            color: var(--text-primary);
-            border: 1px solid var(--border);
-        }
-
-        .btn-secondary:hover {
-            background: var(--bg-secondary);
-            border-color: var(--accent);
-        }
-
-        .actions {
-            display: flex;
-            gap: 10px;
-            margin-bottom: 24px;
-            flex-wrap: wrap;
-        }
-
-        .logs-container {
-            background: var(--bg-primary);
-            border-radius: 8px;
-            padding: 16px;
-            font-family: 'Consolas', 'Monaco', monospace;
-            font-size: 12px;
-            max-height: 400px;
-            overflow-y: auto;
-            border: 1px solid var(--border);
-        }
-
-        .log-line {
-            padding: 4px 0;
-            border-bottom: 1px solid var(--border);
-            white-space: pre-wrap;
-            word-break: break-all;
-        }
-
-        .log-line:last-child {
-            border-bottom: none;
-        }
-
-        .tabs { display: flex; gap: 6px; margin-bottom: 24px; border-bottom: 1px solid var(--border); }
-        .tab-btn { background: none; border: none; color: var(--text-secondary); padding: 10px 18px; font-size: 14px; cursor: pointer; border-bottom: 2px solid transparent; }
-        .tab-btn:hover { color: var(--text-primary); }
-        .tab-spacer { flex: 1; }
-        a.tab-link { text-decoration: none; display: inline-flex; align-items: center; }
-        @media (max-width: 640px) { .tabs { flex-wrap: wrap; } .tab-spacer { display: none; } }
-        .tab-btn.active { color: var(--accent); border-bottom-color: var(--accent); font-weight: 600; }
-
-        .intel-summary { font-size: 12px; font-weight: normal; color: var(--text-secondary); margin-left: 10px; }
-        .stats-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 16px; margin-bottom: 16px; }
-        .intel-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 16px; }
-        .intel-panel h3 { font-size: 13px; margin: 0 0 8px 0; color: var(--text-secondary); text-transform: uppercase; letter-spacing: 0.5px; }
-        .intel-list { max-height: 280px; overflow-y: auto; font-size: 12px; }
-        .intel-row { display: flex; gap: 8px; align-items: baseline; padding: 5px 0; border-bottom: 1px solid var(--border); }
-        .intel-row:last-child { border-bottom: none; }
-        .intel-tag { color: var(--accent); font-family: monospace; white-space: nowrap; }
-        .intel-name { flex: 1; word-break: break-all; }
-        .intel-count { color: var(--warning); font-weight: 600; }
-
-        .log-line {
-            display: flex;
-            gap: 10px;
-            align-items: baseline;
-        }
-        .log-time { color: var(--text-secondary); min-width: 80px; }
-        .log-hp { color: var(--accent); min-width: 80px; }
-        .log-ip { min-width: 130px; }
-        .log-evt { color: var(--warning); min-width: 150px; }
-        .log-detail { color: var(--text-secondary); flex: 1; }
-
-        .log-time-legacy {
-            color: var(--text-secondary);
-        }
-
-        .log-level-info {
-            color: var(--accent);
-        }
-
-        .log-level-warn {
-            color: var(--warning);
-        }
-
-        .log-level-error {
-            color: var(--danger);
-        }
-
-        .empty-state {
-            text-align: center;
-            padding: 60px 20px;
-            color: var(--text-secondary);
-        }
-
-        .empty-state-icon {
-            font-size: 48px;
-            margin-bottom: 16px;
-            opacity: 0.5;
-        }
-
-        .auth-overlay {
-            position: fixed;
-            inset: 0;
-            background: rgba(10, 14, 20, 0.95);
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            z-index: 1000;
-        }
-
-        .auth-box {
-            background: var(--bg-secondary);
-            border: 1px solid var(--border);
-            border-radius: 12px;
-            padding: 40px;
-            width: 100%;
-            max-width: 400px;
-            text-align: center;
-        }
-
-        .auth-box h2 {
-            margin-bottom: 10px;
-            color: var(--accent);
-        }
-
-        .auth-box p {
-            color: var(--text-secondary);
-            margin-bottom: 24px;
-            font-size: 14px;
-        }
-
-        .auth-input {
-            width: 100%;
-            padding: 12px 16px;
-            background: var(--bg-tertiary);
-            border: 1px solid var(--border);
-            border-radius: 6px;
-            color: var(--text-primary);
-            font-family: 'Consolas', monospace;
-            font-size: 16px;
-            text-align: center;
-            margin-bottom: 16px;
-        }
-
-        .auth-input:focus {
-            outline: none;
-            border-color: var(--accent);
-        }
-
-        .auth-input::placeholder {
-            color: var(--text-secondary);
-        }
-
-        .hidden {
-            display: none !important;
-        }
-
-        .toast {
-            position: fixed;
-            bottom: 20px;
-            right: 20px;
-            background: var(--bg-secondary);
-            border: 1px solid var(--border);
-            border-radius: 8px;
-            padding: 16px 20px;
-            display: flex;
-            align-items: center;
-            gap: 12px;
-            animation: slideIn 0.3s ease;
-            z-index: 1001;
-        }
-
-        @keyframes slideIn {
-            from {
-                transform: translateX(100%);
-                opacity: 0;
-            }
-            to {
-                transform: translateX(0);
-                opacity: 1;
-            }
-        }
-
-        @media (max-width: 768px) {
-            .grid {
-                grid-template-columns: 1fr;
-            }
-            
-            header {
-                flex-direction: column;
-                text-align: center;
-            }
-        }
-    </style>
+    <!-- QPot's own controls. T-Pot leaves this to Kibana, so this page is built from the parts of
+         T-Pot 24.04.2's attack map (its navbar, tabs, cards, tables, buttons and modals), in QPot's
+         colours. Everything from the API goes into the page as text (textContent, setAttribute on
+         elements made here); no markup is ever built from data. -->
+    <link rel="icon" href="/assets/img/favicon-32.png" sizes="32x32" type="image/png">
+    <link rel="icon" href="/assets/img/favicon-16.png" sizes="16x16" type="image/png">
+    <link rel="icon" href="/assets/img/favicon-48.png" sizes="48x48" type="image/png">
+    <link rel="apple-touch-icon" href="/assets/img/apple-touch-icon.png">
+    <link href="/map/static/bootstrap.min.css" rel="stylesheet" integrity="sha384-sRIl4kxILFvY47J16cr9ZwB07vP4J8+LH7qKQnuqkuIAvNWLzeN8tE5YBujZqJLB">
+    <link href="/map/static/fonts/fonts.css" rel="stylesheet" integrity="sha384-WiEXL66/E+frAZqRB5+nO/MLUoXj+VrnKxXgvK33R87imSuzxukyaFlj5lnDHV80">
+    <link href="/map/static/fontawesome/css/all.min.css" rel="stylesheet" integrity="sha384-qrALq7+6jBOZIQsNnT6xGkMDru64qD6uTlDra39xrt2SoXl4pO3FX6Roz/RpR/BS">
+    <link href="/map/static/index.css?v=8" rel="stylesheet" integrity="sha384-J3WpBksXczdCwB46r7jmA3K7xrvGwd2I06NhAgrSFtE+v3UrLSm2iRa/4Ocub7A8">
+    <link href="/assets/css/dashboard.css" rel="stylesheet" integrity="sha384-ICXGSfjDiUV0PYIvQ/ZNstL+2UOu/25t6a5kvzYCF0fKLZ4hJYihGIcnRdjDU2qV">
 </head>
-<body>
-    <div id="auth-overlay" class="auth-overlay">
-        <div class="auth-box">
-            <h2>QPot Authentication</h2>
-            <p>Enter your QPot ID to access the dashboard</p>
-            <input type="text" id="qpot-id-input" class="auth-input" placeholder="qp_xxxxxxxxxxxxxxxxxxxxxxxx" maxlength="27">
-            <button class="btn btn-primary" onclick="authenticate()" style="width: 100%;">Access Dashboard</button>
-        </div>
+<body class="qpot-dashboard">
+
+    <!-- Sign-in: the API wants this instance's QPot ID -->
+    <div id="auth-overlay" class="qpot-signin">
+        <form class="qpot-signin-box auth-box" id="auth-form" autocomplete="off">
+            <img src="/assets/img/qpot-badge.webp" alt="QPot logo" width="397" height="459">
+            <h2>Sign in to QPot</h2>
+            <p><code class="cmd">qpot id</code> prints this instance's QPot ID on the host. It stays in this browser and unlocks the home page and the attack map too.</p>
+            <input type="password" id="qpot-id-input" class="search-input" placeholder="qp_&hellip;" maxlength="27" spellcheck="false" autocapitalize="off" aria-label="QPot ID">
+            <button class="btn-base btn-primary hover-lift" type="submit"><i class="fas fa-key"></i> Sign in</button>
+            <p class="signin-error" id="auth-error" role="alert"></p>
+        </form>
     </div>
 
-    <div class="container hidden" id="main-content">
-        <header>
-            <div class="logo">QPOT</div>
-            <div class="qpot-id-box" onclick="copyQPotID()" title="Click to copy">
-                <div class="qpot-id-label">QPot ID</div>
-                <div class="qpot-id-value" id="qpot-id-display">-</div>
-            </div>
-            <div class="status-badge running" id="status-badge">
-                <span class="status-dot"></span>
-                <span id="status-text">Running</span>
-            </div>
-        </header>
+    <div class="dash-shell hidden" id="main-content">
+        <!-- The navbar of T-Pot's attack map -->
+        <nav class="top-navbar">
+            <div class="navbar-content flex-between">
+                <a class="navbar-brand flex-center" href="/" title="QPot home">
+                    <img class="brand-badge" src="/assets/img/qpot-badge-64.png" alt="QPot logo" width="64" height="74">
+                    <span>QPot Dashboard</span>
+                </a>
 
-        <nav class="tabs">
-            <button class="tab-btn active" data-tab="dashboard" onclick="switchTab('dashboard')">Dashboard</button>
-            <button class="tab-btn" data-tab="overview" onclick="switchTab('overview')">Overview</button>
-            <button class="tab-btn" data-tab="pairing" onclick="switchTab('pairing')">Pairing / Networking</button>
-            <button class="tab-btn" data-tab="security" onclick="switchTab('security')">Security</button>
-            <span class="tab-spacer"></span>
-            <a class="tab-btn tab-link" href="/map/">Attack Map</a>
-            <a class="tab-btn tab-link" href="/">Home</a>
+                <div class="navbar-stats">
+                    <div class="stats-group">
+                        <div class="stats-header-title">
+                            <i class="fas fa-satellite-dish fa-lg"></i>
+                            <span>Last 24 h</span>
+                        </div>
+                        <div class="stats-inline">
+                            <div class="stat-inline-item flex-center">
+                                <span class="stat-inline-label">Attacks</span>
+                                <span class="stat-inline-value" id="nav-attacks">-</span>
+                            </div>
+                            <div class="stat-separator">|</div>
+                            <div class="stat-inline-item flex-center">
+                                <span class="stat-inline-label">IPs</span>
+                                <span class="stat-inline-value" id="nav-ips">-</span>
+                            </div>
+                            <div class="stat-separator">|</div>
+                            <div class="stat-inline-item flex-center">
+                                <span class="stat-inline-label">Up</span>
+                                <span class="stat-inline-value" id="nav-up">-</span>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="navbar-controls">
+                    <div class="connection-status" id="status-badge" title="QPot status">
+                        <div class="status-indicator" id="status-indicator"></div>
+                        <span id="status-text">Connecting...</span>
+                    </div>
+                    <button class="btn-base control-btn flex-center-both hover-lift" id="refresh-btn" type="button" title="Refresh" aria-label="Refresh">
+                        <i class="fas fa-rotate"></i>
+                    </button>
+                    <a class="btn-base control-btn flex-center-both hover-lift" href="/map/" title="Attack map" aria-label="Attack map">
+                        <i class="fas fa-earth-europe"></i>
+                    </a>
+                    <button class="btn-base control-btn flex-center-both hover-lift" id="id-btn" type="button" title="QPot ID" aria-label="QPot ID">
+                        <i class="fas fa-fingerprint"></i>
+                    </button>
+                </div>
+            </div>
         </nav>
 
-        <div id="tab-dashboard">
-
-        <div class="grid">
-            <div class="card">
-                <h2>Total Attacks</h2>
-                <div class="stat-value" id="total-attacks">0</div>
-                <div class="stat-label">Last 24 hours</div>
-                <div class="stat-change" id="attacks-change">--</div>
-            </div>
-
-            <div class="card">
-                <h2>Unique Attackers</h2>
-                <div class="stat-value" id="unique-attackers">0</div>
-                <div class="stat-label">IP addresses</div>
-                <div class="stat-change" id="attackers-change">--</div>
-            </div>
-
-            <div class="card">
-                <h2>Active Honeypots</h2>
-                <div class="stat-value" id="active-honeypots">0</div>
-                <div class="stat-label" id="active-honeypots-sub">running</div>
-            </div>
-
-            <div class="card">
-                <h2>Top Country</h2>
-                <div class="stat-value" id="top-country">-</div>
-                <div class="stat-label">Most attacks</div>
-            </div>
+        <!-- The tabs of T-Pot's bottom panel, as the page's sections -->
+        <div class="panel-tabs dash-tabs" role="tablist">
+            <button class="tab-btn active" data-tab="dashboard" role="tab" type="button"><i class="fas fa-gauge-high"></i><span>Dashboard</span></button>
+            <button class="tab-btn" data-tab="events" role="tab" type="button"><i class="fas fa-list-ol"></i><span>Events</span></button>
+            <button class="tab-btn" data-tab="intel" role="tab" type="button"><i class="fas fa-crosshairs"></i><span>Threat Intel</span></button>
+            <button class="tab-btn" data-tab="canaries" role="tab" type="button"><i class="fas fa-dove"></i><span>Canaries</span></button>
+            <button class="tab-btn" data-tab="overview" role="tab" type="button"><i class="fas fa-chart-bar"></i><span>Overview</span></button>
+            <button class="tab-btn" data-tab="doctor" role="tab" type="button"><i class="fas fa-stethoscope"></i><span>Doctor</span></button>
+            <button class="tab-btn" data-tab="pairing" role="tab" type="button"><i class="fas fa-circle-nodes"></i><span>Pairing / Networking</span></button>
+            <button class="tab-btn" data-tab="security" role="tab" type="button"><i class="fas fa-shield-halved"></i><span>Security</span></button>
         </div>
 
-        <div class="actions">
-            <button class="btn btn-primary" onclick="refreshData()">
-                <span>Refresh</span>
-            </button>
-            <button class="btn btn-secondary" onclick="viewLogs()">
-                <span>View Logs</span>
-            </button>
-            <button class="btn btn-secondary" onclick="exportData()">
-                <span>Export IOCs (MISP)</span>
-            </button>
-        </div>
+        <main class="dash-main">
 
-        <div class="card">
-            <h2>Honeypots</h2>
-            <ul class="honeypot-list" id="honeypot-list">
-                <li class="empty-state">
-                    <div class="empty-state-icon">[ ]</div>
-                    <p>Loading honeypots...</p>
-                </li>
-            </ul>
-        </div>
-
-        <div class="card">
-            <h2>Threat Intelligence <span id="intel-summary" class="intel-summary"></span></h2>
-            <div class="intel-grid">
-                <div class="intel-panel">
-                    <h3>Top MITRE ATT&amp;CK Techniques</h3>
-                    <div id="intel-techniques" class="intel-list"><div class="empty-state"><p>No techniques observed</p></div></div>
+            <!-- ============ Dashboard ============ -->
+            <section class="dash-pane active" id="tab-dashboard">
+                <div class="dash-grid">
+                    <div class="dash-card stat-card">
+                        <div class="stat-label"><i class="fas fa-bolt"></i> Total attacks</div>
+                        <span class="stat-value" id="total-attacks">-</span>
+                        <div class="stat-sub">last 24 hours</div>
+                    </div>
+                    <div class="dash-card stat-card">
+                        <div class="stat-label"><i class="fas fa-location-dot"></i> Unique attackers</div>
+                        <span class="stat-value" id="unique-attackers">-</span>
+                        <div class="stat-sub">source IP addresses, 24 h</div>
+                    </div>
+                    <div class="dash-card stat-card">
+                        <div class="stat-label"><i class="fas fa-server"></i> Active honeypots</div>
+                        <span class="stat-value" id="active-honeypots">-</span>
+                        <div class="stat-sub" id="active-honeypots-sub"></div>
+                    </div>
+                    <div class="dash-card stat-card">
+                        <div class="stat-label"><i class="fas fa-globe"></i> Top country</div>
+                        <span class="stat-value" id="top-country">-</span>
+                        <div class="stat-sub" id="top-country-sub"></div>
+                    </div>
                 </div>
-                <div class="intel-panel">
-                    <h3>Recent IOCs</h3>
-                    <div id="intel-iocs" class="intel-list"><div class="empty-state"><p>No IOCs</p></div></div>
+
+                <div class="actions-row">
+                    <button class="btn-base btn-primary hover-lift" id="action-refresh" type="button"><i class="fas fa-rotate"></i> Refresh</button>
+                    <button class="btn-base btn-secondary hover-lift" id="action-logs" type="button"><i class="fas fa-file-lines"></i> View Logs</button>
+                    <button class="btn-base btn-secondary hover-lift" id="action-export" type="button"><i class="fas fa-file-export"></i> Export IOCs (MISP)</button>
                 </div>
-                <div class="intel-panel">
-                    <h3>Active Campaigns (TTP)</h3>
-                    <div id="intel-ttps" class="intel-list"><div class="empty-state"><p>No campaigns</p></div></div>
+
+                <div class="dash-card">
+                    <div class="card-header flex-between">
+                        <h4 class="flex-center"><i class="fas fa-server"></i> Honeypots</h4>
+                        <span class="card-note" id="honeypot-note"></span>
+                    </div>
+                    <div class="card-body flush">
+                        <ul class="hp-list" id="honeypot-list"><li class="empty-state"><i class="fas fa-spinner fa-spin"></i>Loading honeypots&hellip;</li></ul>
+                    </div>
                 </div>
-            </div>
-        </div>
 
-        <div class="card">
-            <h2>Recent Activity</h2>
-            <div class="logs-container" id="logs">
-                <div class="empty-state">
-                    <p>No recent activity</p>
+                <div class="dash-card">
+                    <div class="card-header flex-between">
+                        <h4 class="flex-center"><i class="fas fa-crosshairs"></i> Threat Intelligence</h4>
+                        <span class="card-note" id="intel-summary"></span>
+                    </div>
+                    <div class="card-body">
+                        <div class="dash-grid three">
+                            <div>
+                                <div class="stat-label">Top MITRE ATT&amp;CK techniques</div>
+                                <ul class="rank-list" id="intel-techniques"></ul>
+                            </div>
+                            <div>
+                                <div class="stat-label">Recent IOCs</div>
+                                <ul class="rank-list" id="intel-iocs"></ul>
+                            </div>
+                            <div>
+                                <div class="stat-label">Active campaigns (TTP)</div>
+                                <ul class="rank-list" id="intel-ttps"></ul>
+                            </div>
+                        </div>
+                    </div>
                 </div>
-            </div>
-        </div>
-        </div><!-- /tab-dashboard -->
 
-        <div id="tab-overview" class="hidden">
-            <div class="stats-grid">
-                <div class="card"><h2>CPU</h2><div class="stat-value" id="ov-cpu">-</div><div class="stat-label" id="ov-cpu-cap"></div><div class="gauge-bar"><div class="gauge-fill" id="ov-cpu-bar" style="width:0"></div></div></div>
-                <div class="card"><h2>Memory</h2><div class="stat-value" id="ov-mem">-</div><div class="stat-label" id="ov-mem-cap"></div><div class="gauge-bar"><div class="gauge-fill" id="ov-mem-bar" style="width:0"></div></div></div>
-                <div class="card"><h2>Disk</h2><div class="stat-value" id="ov-disk">-</div><div class="stat-label" id="ov-disk-cap"></div><div class="gauge-bar"><div class="gauge-fill" id="ov-disk-bar" style="width:0"></div></div></div>
-                <div class="card"><h2>Processes</h2><div class="stat-value" id="ov-procs">-</div><div class="stat-label" id="ov-procs-cap"></div><div class="gauge-bar"><div class="gauge-fill" id="ov-procs-bar" style="width:0"></div></div></div>
-            </div>
-            <div class="stats-grid">
-                <div class="card"><h2>Host</h2><div class="stat-value" id="ov-host">-</div><div class="stat-label" id="ov-host-sub"></div></div>
-                <div class="card"><h2>Events (24h)</h2><div class="stat-value" id="ov-events">0</div><div class="stat-label" id="ov-rate"></div></div>
-                <div class="card"><h2>Attackers (24h)</h2><div class="stat-value" id="ov-ips">0</div><div class="stat-label">unique source IPs</div></div>
-                <div class="card"><h2>Database</h2><div class="stat-value" id="ov-db">-</div><div class="stat-label" id="ov-cluster">standalone</div></div>
-            </div>
-            <div class="card">
-                <h2>Honeypot Activity (24h)</h2>
-                <ul class="honeypot-list" id="ov-honeypots"><li class="empty-state"><p>Loading...</p></li></ul>
-            </div>
-            <div class="card">
-                <h2>Recent Events</h2>
-                <ul class="honeypot-list" id="ov-events-list"><li class="empty-state"><p>Loading...</p></li></ul>
-            </div>
-        </div><!-- /tab-overview -->
+                <div class="dash-card">
+                    <div class="card-header flex-between">
+                        <h4 class="flex-center"><i class="fas fa-list-ol"></i> Recent activity</h4>
+                        <button class="btn-base btn-secondary hover-lift" type="button" data-goto="events"><i class="fas fa-magnifying-glass"></i> All events</button>
+                    </div>
+                    <div class="table-wrapper">
+                        <table class="data-table">
+                            <thead><tr><th>Time</th><th>Honeypot</th><th>Source IP</th><th class="optional">Country</th><th>Event</th><th class="optional">Detail</th></tr></thead>
+                            <tbody id="logs"></tbody>
+                        </table>
+                    </div>
+                </div>
+            </section>
 
-        <div id="tab-pairing" class="hidden">
-            <div class="stats-grid">
-                <div class="card"><h2>Group</h2><div class="stat-value" id="grp-name">-</div><div class="stat-label" id="grp-id">Not paired</div></div>
-                <div class="card"><h2>Honeypots in Group</h2><div class="stat-value" id="grp-count">0</div><div class="stat-label">paired nodes</div></div>
-                <div class="card"><h2>Online</h2><div class="stat-value" id="grp-online">0</div><div class="stat-label" id="grp-online-sub">healthy nodes</div></div>
-                <div class="card"><h2>Group Requests</h2><div class="stat-value" id="grp-events">0</div><div class="stat-label">total events</div></div>
-            </div>
-            <div class="card">
-                <h2>Paired Honeypots</h2>
-                <ul class="honeypot-list" id="pairing-list">
-                    <li class="empty-state"><div class="empty-state-icon">[ ]</div><p>This node is standalone. Pair honeypots into a group with <code>qpot cluster init</code> / <code>qpot cluster join</code>.</p></li>
-                </ul>
-            </div>
-        </div>
+            <!-- ============ Events ============ -->
+            <section class="dash-pane" id="tab-events">
+                <div class="dash-card">
+                    <div class="card-header flex-between">
+                        <h4 class="flex-center"><i class="fas fa-filter"></i> Events</h4>
+                        <span class="card-note" id="events-note"></span>
+                    </div>
+                    <div class="card-body">
+                        <form class="filter-bar" id="events-filter" autocomplete="off">
+                            <label class="field"><span>Honeypot</span><select class="setting-select" id="ev-honeypot"><option value="">All honeypots</option></select></label>
+                            <label class="field"><span>Source IP</span><input class="search-input" id="ev-ip" placeholder="203.0.113.7" maxlength="45" spellcheck="false"></label>
+                            <label class="field"><span>Event type</span><input class="search-input" id="ev-type" placeholder="login.failed" maxlength="64" spellcheck="false"></label>
+                            <label class="field"><span>Country</span><input class="search-input" id="ev-country" placeholder="CN" maxlength="2" spellcheck="false"></label>
+                            <label class="field"><span>Time</span><select class="setting-select" id="ev-range">
+                                <option value="1h">Last hour</option>
+                                <option value="24h" selected>Last 24 hours</option>
+                                <option value="7d">Last 7 days</option>
+                                <option value="all">Everything stored</option>
+                            </select></label>
+                            <label class="field wide"><span>Text (user, password, command, payload)</span><input class="search-input" id="ev-q" placeholder="wget" maxlength="200" spellcheck="false"></label>
+                            <div class="actions-row filter-actions">
+                                <button class="btn-base btn-primary hover-lift" type="submit"><i class="fas fa-magnifying-glass"></i> Search</button>
+                                <button class="btn-base btn-secondary hover-lift" type="reset" id="ev-reset"><i class="fas fa-xmark"></i> Clear</button>
+                            </div>
+                        </form>
+                        <div class="callout error modal-message" id="events-error"></div>
+                    </div>
+                    <div class="table-wrapper">
+                        <table class="data-table">
+                            <thead><tr><th>Time</th><th>Honeypot</th><th>Source IP</th><th class="optional">Country</th><th>Event</th><th class="optional">User / password</th><th>Command</th></tr></thead>
+                            <tbody id="events-body"></tbody>
+                        </table>
+                    </div>
+                    <div class="pager">
+                        <span id="events-page"></span>
+                        <div class="actions-row">
+                            <button class="btn-base btn-secondary hover-lift" id="ev-prev" type="button"><i class="fas fa-chevron-left"></i> Newer</button>
+                            <button class="btn-base btn-secondary hover-lift" id="ev-next" type="button">Older <i class="fas fa-chevron-right"></i></button>
+                        </div>
+                    </div>
+                </div>
+            </section>
 
-        <div id="tab-security" class="hidden">
-            <div class="stats-grid">
-                <div class="card"><h2>Sandbox Runtime</h2><div class="stat-value" id="sec-sandbox">-</div><div class="stat-label">container isolation</div></div>
-                <div class="card"><h2>Auth</h2><div class="stat-value" id="sec-auth">-</div><div class="stat-label">API access control</div></div>
-                <div class="card"><h2>Database</h2><div class="stat-value" id="sec-db">-</div><div class="stat-label">backend</div></div>
+            <!-- ============ Threat Intel ============ -->
+            <section class="dash-pane" id="tab-intel">
+                <div class="dash-grid">
+                    <div class="dash-card stat-card"><div class="stat-label"><i class="fas fa-crosshairs"></i> Techniques seen</div><span class="stat-value" id="ti-techniques">-</span><div class="stat-sub">MITRE ATT&amp;CK</div></div>
+                    <div class="dash-card stat-card"><div class="stat-label"><i class="fas fa-fingerprint"></i> IOCs</div><span class="stat-value" id="ti-iocs">-</span><div class="stat-sub">indicators extracted</div></div>
+                    <div class="dash-card stat-card"><div class="stat-label"><i class="fas fa-people-group"></i> Campaigns</div><span class="stat-value" id="ti-campaigns">-</span><div class="stat-sub">active attack sessions</div></div>
+                    <div class="dash-card stat-card"><div class="stat-label"><i class="fas fa-microchip"></i> Classifier</div><span class="stat-value" id="ti-worker">-</span><div class="stat-sub" id="ti-worker-sub"></div></div>
+                </div>
+
+                <div class="dash-card">
+                    <div class="card-header flex-between">
+                        <h4 class="flex-center"><i class="fas fa-crosshairs"></i> MITRE ATT&amp;CK techniques</h4>
+                    </div>
+                    <div class="table-wrapper">
+                        <table class="data-table">
+                            <thead><tr><th>Technique</th><th>Name</th><th class="optional">Tactic</th><th>Events</th></tr></thead>
+                            <tbody id="ti-tech-body"></tbody>
+                        </table>
+                    </div>
+                </div>
+
+                <div class="dash-card">
+                    <div class="card-header flex-between">
+                        <h4 class="flex-center"><i class="fas fa-fingerprint"></i> Indicators of compromise</h4>
+                        <div class="card-tools">
+                            <select class="setting-select" id="ioc-type" aria-label="IOC type"><option value="">All types</option></select>
+                            <select class="setting-select" id="ioc-honeypot" aria-label="IOC honeypot"><option value="">All honeypots</option></select>
+                            <button class="btn-base btn-secondary hover-lift" id="ioc-export" type="button"><i class="fas fa-file-export"></i> Export MISP</button>
+                        </div>
+                    </div>
+                    <div class="table-wrapper">
+                        <table class="data-table">
+                            <thead><tr><th>Type</th><th>Value</th><th class="optional">Honeypot</th><th class="optional">Source IP</th><th>Seen</th><th class="optional">Last seen</th></tr></thead>
+                            <tbody id="ti-ioc-body"></tbody>
+                        </table>
+                    </div>
+                </div>
+
+                <div class="dash-card">
+                    <div class="card-header flex-between">
+                        <h4 class="flex-center"><i class="fas fa-people-group"></i> Campaigns (TTP sessions)</h4>
+                    </div>
+                    <div class="table-wrapper">
+                        <table class="data-table">
+                            <thead><tr><th>Source</th><th>Techniques</th><th class="optional">Kill chain</th><th>Events</th><th class="optional">Last seen</th><th class="optional">Confidence</th></tr></thead>
+                            <tbody id="ti-ttp-body"></tbody>
+                        </table>
+                    </div>
+                </div>
+            </section>
+
+            <!-- ============ Canaries ============ -->
+            <section class="dash-pane" id="tab-canaries">
+                <div class="callout" id="canary-intro"><i class="fas fa-dove"></i><span>A canary is a planted secret: a web link, a document or a pair of AWS keys that nobody should ever use. When something uses it, QPot records a trip, and the memo says where you put it.</span></div>
+                <div class="dash-card">
+                    <div class="card-header flex-between">
+                        <h4 class="flex-center"><i class="fas fa-plus"></i> Mint a canary</h4>
+                    </div>
+                    <div class="card-body">
+                        <form class="filter-bar" id="canary-form" autocomplete="off">
+                            <label class="field"><span>Kind</span><select class="setting-select" id="cn-kind">
+                                <option value="web">Web link</option>
+                                <option value="file">Document (HTML file)</option>
+                                <option value="aws">AWS access keys</option>
+                            </select></label>
+                            <label class="field"><span>Name</span><input class="search-input" id="cn-name" maxlength="120" placeholder="payroll share link" required></label>
+                            <label class="field wide"><span>Memo: where you plant it</span><input class="search-input" id="cn-memo" maxlength="400" placeholder="pinned in #finance on the team chat"></label>
+                            <div class="field"><button class="btn-base btn-primary hover-lift" type="submit"><i class="fas fa-wand-magic-sparkles"></i> Mint</button></div>
+                        </form>
+                        <div class="modal-message" id="canary-result"></div>
+                    </div>
+                </div>
+
+                <div class="dash-card">
+                    <div class="card-header flex-between">
+                        <h4 class="flex-center"><i class="fas fa-dove"></i> Canaries</h4>
+                        <span class="card-note" id="canary-note"></span>
+                    </div>
+                    <div class="table-wrapper">
+                        <table class="data-table">
+                            <thead><tr><th>Name</th><th>Kind</th><th class="optional">Memo</th><th>Trips</th><th class="optional">Last trip</th><th>Actions</th></tr></thead>
+                            <tbody id="canary-body"></tbody>
+                        </table>
+                    </div>
+                </div>
+
+                <div class="dash-card">
+                    <div class="card-header flex-between">
+                        <h4 class="flex-center"><i class="fas fa-bell"></i> Trips</h4>
+                        <span class="card-note">newest first</span>
+                    </div>
+                    <div class="table-wrapper">
+                        <table class="data-table">
+                            <thead><tr><th>Time</th><th>Canary</th><th class="optional">Channel</th><th>Source IP</th><th class="optional">User agent / detail</th></tr></thead>
+                            <tbody id="trip-body"></tbody>
+                        </table>
+                    </div>
+                </div>
+            </section>
+
+            <!-- ============ Overview ============ -->
+            <section class="dash-pane" id="tab-overview">
+                <div class="dash-grid">
+                    <div class="dash-card stat-card"><div class="stat-label"><i class="fas fa-microchip"></i> CPU</div><span class="stat-value" id="ov-cpu">-</span><div class="stat-sub" id="ov-cpu-cap"></div><div class="gauge"><span id="ov-cpu-bar"></span></div></div>
+                    <div class="dash-card stat-card"><div class="stat-label"><i class="fas fa-memory"></i> Memory</div><span class="stat-value" id="ov-mem">-</span><div class="stat-sub" id="ov-mem-cap"></div><div class="gauge"><span id="ov-mem-bar"></span></div></div>
+                    <div class="dash-card stat-card"><div class="stat-label"><i class="fas fa-hard-drive"></i> Disk</div><span class="stat-value" id="ov-disk">-</span><div class="stat-sub" id="ov-disk-cap"></div><div class="gauge"><span id="ov-disk-bar"></span></div></div>
+                    <div class="dash-card stat-card"><div class="stat-label"><i class="fas fa-list-check"></i> Processes</div><span class="stat-value" id="ov-procs">-</span><div class="stat-sub" id="ov-procs-cap"></div><div class="gauge"><span id="ov-procs-bar"></span></div></div>
+                </div>
+                <div class="dash-grid">
+                    <div class="dash-card stat-card"><div class="stat-label"><i class="fas fa-desktop"></i> Host</div><span class="stat-value" id="ov-host">-</span><div class="stat-sub" id="ov-host-sub"></div></div>
+                    <div class="dash-card stat-card"><div class="stat-label"><i class="fas fa-bolt"></i> Events (24h)</div><span class="stat-value" id="ov-events">-</span><div class="stat-sub" id="ov-rate"></div></div>
+                    <div class="dash-card stat-card"><div class="stat-label"><i class="fas fa-location-dot"></i> Attackers (24h)</div><span class="stat-value" id="ov-ips">-</span><div class="stat-sub">unique source IPs</div></div>
+                    <div class="dash-card stat-card"><div class="stat-label"><i class="fas fa-database"></i> Database</div><span class="stat-value" id="ov-db">-</span><div class="stat-sub" id="ov-cluster"></div></div>
+                </div>
+                <div class="dash-grid two">
+                    <div class="dash-card">
+                        <div class="card-header"><h4 class="flex-center"><i class="fas fa-server"></i> Honeypot activity (24h)</h4></div>
+                        <div class="table-wrapper">
+                            <table class="data-table">
+                                <thead><tr><th>Honeypot</th><th>Port</th><th>Hits</th><th>State</th></tr></thead>
+                                <tbody id="ov-honeypots"></tbody>
+                            </table>
+                        </div>
+                    </div>
+                    <div class="dash-card">
+                        <div class="card-header"><h4 class="flex-center"><i class="fas fa-list-ol"></i> Recent events</h4></div>
+                        <div class="table-wrapper">
+                            <table class="data-table">
+                                <thead><tr><th>Time</th><th>Honeypot</th><th>Source</th><th class="optional">Summary</th><th>Severity</th></tr></thead>
+                                <tbody id="ov-events-list"></tbody>
+                            </table>
+                        </div>
+                    </div>
+                </div>
+                <div class="dash-grid two">
+                    <div class="dash-card">
+                        <div class="card-header flex-between">
+                            <h4 class="flex-center"><i class="fas fa-circle-info"></i> This instance</h4>
+                            <span class="card-note" id="inst-note"></span>
+                        </div>
+                        <div class="card-body"><dl class="kv" id="inst-facts"></dl></div>
+                    </div>
+                    <div class="dash-card">
+                        <div class="card-header"><h4 class="flex-center"><i class="fas fa-cubes"></i> Services</h4></div>
+                        <div class="table-wrapper">
+                            <table class="data-table">
+                                <thead><tr><th>Service</th><th>State</th><th>Health</th></tr></thead>
+                                <tbody id="inst-services"></tbody>
+                            </table>
+                        </div>
+                    </div>
+                </div>
+            </section>
+
+            <!-- ============ Doctor ============ -->
+            <section class="dash-pane" id="tab-doctor">
+                <div class="callout warn hidden" id="doctor-unavailable"><i class="fas fa-circle-exclamation"></i><span>The health checks need a newer qpot serve. They run on the host as well, with the same checks and codes (below).</span></div>
+                <div class="dash-grid" id="doctor-stats">
+                    <div class="dash-card stat-card"><div class="stat-label"><i class="fas fa-stethoscope"></i> Result</div><span class="stat-value" id="doc-result">-</span><div class="stat-sub" id="doc-result-sub"></div></div>
+                    <div class="dash-card stat-card"><div class="stat-label"><i class="fas fa-circle-xmark"></i> Failed</div><span class="stat-value" id="doc-fail">-</span><div class="stat-sub" id="doc-fail-sub"></div></div>
+                    <div class="dash-card stat-card"><div class="stat-label"><i class="fas fa-circle-exclamation"></i> Warnings</div><span class="stat-value" id="doc-warn">-</span><div class="stat-sub" id="doc-warn-sub"></div></div>
+                    <div class="dash-card stat-card"><div class="stat-label"><i class="fas fa-clock"></i> Checked</div><span class="stat-value" id="doc-ran">-</span><div class="stat-sub" id="doc-ran-sub"></div></div>
+                </div>
+                <div class="dash-card hidden" id="doctor-failure-card">
+                    <div class="card-header flex-between">
+                        <h4 class="flex-center"><i class="fas fa-triangle-exclamation"></i> Fix this first</h4>
+                        <span class="card-note" id="doctor-failure-code"></span>
+                    </div>
+                    <div class="card-body"><dl class="kv" id="doctor-failure"></dl></div>
+                </div>
+                <div class="dash-card" id="doctor-checks-card">
+                    <div class="card-header flex-between">
+                        <h4 class="flex-center"><i class="fas fa-list-check"></i> Checks</h4>
+                        <div class="card-tools">
+                            <span class="card-note">read-only: nothing is installed or changed</span>
+                            <button class="btn-base btn-secondary hover-lift" type="button" id="doctor-run"><i class="fas fa-rotate"></i> Run again</button>
+                        </div>
+                    </div>
+                    <div class="table-wrapper">
+                        <table class="data-table">
+                            <thead><tr><th class="optional">Part</th><th>Check</th><th>Result</th><th class="optional">Detail</th><th>Code</th></tr></thead>
+                            <tbody id="doctor-body"></tbody>
+                        </table>
+                    </div>
+                </div>
+                <div class="dash-grid two" id="doctor-ref">
+                    <div class="dash-card" id="explain-card">
+                        <div class="card-header"><h4 class="flex-center"><i class="fas fa-circle-question"></i> What does a code mean?</h4></div>
+                        <div class="card-body">
+                            <form class="filter-bar" id="explain-form" autocomplete="off">
+                                <label class="field wide"><span>Error code</span><input class="search-input" id="explain-code" placeholder="QP-INST-008" maxlength="32" spellcheck="false" required></label>
+                                <div class="filter-actions"><button class="btn-base btn-primary hover-lift" type="submit"><i class="fas fa-magnifying-glass"></i> Explain</button></div>
+                            </form>
+                            <div class="callout hidden" id="explain-message"></div>
+                            <dl class="kv" id="explain-result" aria-live="polite"></dl>
+                        </div>
+                    </div>
+                    <div class="dash-card" id="codes-card">
+                        <div class="card-header flex-between">
+                            <h4 class="flex-center"><i class="fas fa-book"></i> Error codes</h4>
+                            <div class="card-tools">
+                                <select class="setting-select" id="codes-category" aria-label="Category"><option value="">All categories</option></select>
+                            </div>
+                        </div>
+                        <div class="table-wrapper codes-wrapper">
+                            <table class="data-table">
+                                <thead><tr><th>Code</th><th>What it means</th><th class="optional">Exit</th></tr></thead>
+                                <tbody id="codes-body"></tbody>
+                            </table>
+                        </div>
+                    </div>
+                </div>
+                <div class="dash-card">
+                    <div class="card-header flex-between">
+                        <h4 class="flex-center"><i class="fas fa-terminal"></i> On the host</h4>
+                        <span class="card-note">the same checks and codes</span>
+                    </div>
+                    <div class="card-body">
+                        <ul class="step-list">
+                            <li><span class="step-what">Check this instance end to end: Docker, memory, disk, GeoIP file, containers, database schema, control plane and web UI. Nothing is installed or changed.</span><code class="cmd" id="doctor-cmd">qpot doctor</code></li>
+                            <li><span class="step-what">Every failed check names a code such as QP-INST-008. Explain a code in plain English, with its cause and fix:</span><code class="cmd">qpot doctor --explain QP-INST-008</code></li>
+                            <li><span class="step-what">All codes, by category, with their fixes:</span><span class="step-ref">doc/setup-errors.md in the QPot repository</span></li>
+                        </ul>
+                    </div>
+                </div>
+            </section>
+
+            <!-- ============ Pairing / Networking ============ -->
+            <section class="dash-pane" id="tab-pairing">
+                <div class="dash-grid">
+                    <div class="dash-card stat-card"><div class="stat-label"><i class="fas fa-circle-nodes"></i> Group</div><span class="stat-value" id="grp-name">-</span><div class="stat-sub" id="grp-id"></div></div>
+                    <div class="dash-card stat-card"><div class="stat-label"><i class="fas fa-server"></i> Honeypots in group</div><span class="stat-value" id="grp-count">-</span><div class="stat-sub">paired nodes</div></div>
+                    <div class="dash-card stat-card"><div class="stat-label"><i class="fas fa-heart-pulse"></i> Online</div><span class="stat-value" id="grp-online">-</span><div class="stat-sub" id="grp-online-sub"></div></div>
+                    <div class="dash-card stat-card"><div class="stat-label"><i class="fas fa-bolt"></i> Group events</div><span class="stat-value" id="grp-events">-</span><div class="stat-sub">all nodes</div></div>
+                </div>
+                <div class="dash-card">
+                    <div class="card-header flex-between"><h4 class="flex-center"><i class="fas fa-circle-nodes"></i> Paired honeypots</h4></div>
+                    <div class="table-wrapper">
+                        <table class="data-table">
+                            <thead><tr><th>Node</th><th class="optional">Address</th><th>State</th><th class="optional">Up</th><th>Events</th></tr></thead>
+                            <tbody id="pairing-list"></tbody>
+                        </table>
+                    </div>
+                </div>
+                <div class="dash-card">
+                    <div class="card-header flex-between">
+                        <h4 class="flex-center"><i class="fas fa-user-plus"></i> Join requests</h4>
+                        <span class="card-note">approved on the host</span>
+                    </div>
+                    <div class="card-body">
+                        <div class="callout warn" id="requests-unavailable"><i class="fas fa-circle-exclamation"></i><span>Pending join requests are not shown in the web UI yet: this qpot serve has no join request API. List and approve them on the first node:</span></div>
+                        <ul class="step-list">
+                            <li><span class="step-what">The requests waiting for approval, with the joining node's name and source address:</span><code class="cmd" id="requests-cmd">qpot cluster requests</code></li>
+                            <li><span class="step-what">Admit one, or turn it away:</span><code class="cmd">qpot cluster approve &lt;request-id&gt;</code><code class="cmd">qpot cluster deny &lt;request-id&gt;</code></li>
+                        </ul>
+                    </div>
+                </div>
+                <div class="callout" id="pairing-help"><i class="fas fa-terminal"></i><span>Pairing is done on the hosts: <code>qpot cluster init</code> on the first node, <code>qpot cluster join</code> on the others, and <code>qpot cluster approve</code> on the first node to admit them. Join passwords and keys never pass through this page.</span></div>
+            </section>
+
+            <!-- ============ Security ============ -->
+            <section class="dash-pane" id="tab-security">
+                <div class="dash-grid">
+                    <div class="dash-card stat-card"><div class="stat-label"><i class="fas fa-box"></i> Isolation</div><span class="stat-value" id="sec-sandbox">-</span><div class="stat-sub">one per honeypot</div></div>
+                    <div class="dash-card stat-card"><div class="stat-label"><i class="fas fa-key"></i> Auth</div><span class="stat-value" id="sec-auth">-</span><div class="stat-sub">API access control</div></div>
+                    <div class="dash-card stat-card"><div class="stat-label"><i class="fas fa-database"></i> Database</div><span class="stat-value" id="sec-db">-</span><div class="stat-sub">backend</div></div>
+                </div>
+                <div class="dash-card">
+                    <div class="card-header flex-between"><h4 class="flex-center"><i class="fas fa-shield-halved"></i> Honeypot security</h4></div>
+                    <div class="table-wrapper">
+                        <table class="data-table">
+                            <thead><tr><th>Honeypot</th><th>Risk</th><th class="optional">Port</th><th>State</th></tr></thead>
+                            <tbody id="security-list"></tbody>
+                        </table>
+                    </div>
+                </div>
+            </section>
+        </main>
+    </div>
+
+    <!-- Modals: T-Pot's settings modal -->
+    <div class="modal" id="logs-modal" role="dialog" aria-modal="true" aria-labelledby="logs-title">
+        <div class="modal-content wide">
+            <div class="modal-header flex-between">
+                <h3 class="flex-center" id="logs-title"><i class="fas fa-file-lines"></i> Logs</h3>
+                <button class="modal-close flex-center-both" type="button" data-close title="Close" aria-label="Close"><i class="fas fa-times"></i></button>
             </div>
-            <div class="card">
-                <h2>Honeypot Security</h2>
-                <ul class="honeypot-list" id="security-list">
-                    <li class="empty-state"><div class="empty-state-icon">[ ]</div><p>Loading security posture...</p></li>
-                </ul>
+            <div class="modal-body">
+                <div class="filter-bar">
+                    <label class="field"><span>Honeypot</span><select class="setting-select" id="logs-honeypot"><option value="">All honeypots</option></select></label>
+                    <label class="field"><span>Lines</span><select class="setting-select" id="logs-tail"><option>100</option><option>500</option><option>2000</option></select></label>
+                    <div class="field"><button class="btn-base btn-primary hover-lift" id="logs-load" type="button"><i class="fas fa-rotate"></i> Load</button></div>
+                </div>
+                <div class="modal-message" id="logs-message"></div>
+                <pre class="log-view" id="logs-view"></pre>
             </div>
         </div>
     </div>
 
+    <div class="modal" id="settings-modal" role="dialog" aria-modal="true" aria-labelledby="settings-title">
+        <div class="modal-content">
+            <div class="modal-header flex-between">
+                <h3 class="flex-center" id="settings-title"><i class="fas fa-sliders"></i> Settings</h3>
+                <button class="modal-close flex-center-both" type="button" data-close title="Close" aria-label="Close"><i class="fas fa-times"></i></button>
+            </div>
+            <form class="modal-body" id="settings-form" autocomplete="off">
+                <div id="settings-fields"></div>
+                <div class="modal-message" id="settings-message"></div>
+            </form>
+            <div class="modal-footer flex-between">
+                <button class="btn-base btn-secondary hover-lift" type="button" data-close><i class="fas fa-xmark"></i> Close</button>
+                <button class="btn-base btn-primary hover-lift" type="submit" form="settings-form" id="settings-save"><i class="fas fa-save"></i> Save settings</button>
+            </div>
+        </div>
+    </div>
+
+    <div class="modal" id="detail-modal" role="dialog" aria-modal="true" aria-labelledby="detail-title">
+        <div class="modal-content wide">
+            <div class="modal-header flex-between">
+                <h3 class="flex-center" id="detail-title"><i class="fas fa-circle-info"></i> Details</h3>
+                <button class="modal-close flex-center-both" type="button" data-close title="Close" aria-label="Close"><i class="fas fa-times"></i></button>
+            </div>
+            <div class="modal-body"><dl class="kv" id="detail-body"></dl></div>
+        </div>
+    </div>
+
+    <div class="modal" id="confirm-modal" role="dialog" aria-modal="true" aria-labelledby="confirm-title">
+        <div class="modal-content">
+            <div class="modal-header flex-between">
+                <h3 class="flex-center" id="confirm-title"><i class="fas fa-triangle-exclamation"></i> Are you sure?</h3>
+                <button class="modal-close flex-center-both" type="button" data-close title="Close" aria-label="Close"><i class="fas fa-times"></i></button>
+            </div>
+            <div class="modal-body"><p id="confirm-text"></p></div>
+            <div class="modal-footer flex-between">
+                <button class="btn-base btn-secondary hover-lift" type="button" data-close>Cancel</button>
+                <button class="btn-base btn-danger hover-lift" type="button" id="confirm-ok">Yes</button>
+            </div>
+        </div>
+    </div>
+
+    <div class="modal" id="id-modal" role="dialog" aria-modal="true" aria-labelledby="id-title">
+        <div class="modal-content">
+            <div class="modal-header flex-between">
+                <h3 class="flex-center" id="id-title"><i class="fas fa-fingerprint"></i> QPot ID</h3>
+                <button class="modal-close flex-center-both" type="button" data-close title="Close" aria-label="Close"><i class="fas fa-times"></i></button>
+            </div>
+            <div class="modal-body">
+                <div class="setting-item">
+                    <span class="setting-description">This browser is signed in to this QPot with the QPot ID below. It is kept in this browser only and sent with every request in the X-QPot-ID header.</span>
+                    <div class="qpot-id-box"><span class="qpot-id-text" id="qpot-id-display">-</span></div>
+                </div>
+            </div>
+            <div class="modal-footer flex-between">
+                <button class="btn-base btn-secondary hover-lift" type="button" id="id-copy"><i class="fas fa-copy"></i> Copy</button>
+                <button class="btn-base btn-warning hover-lift" type="button" id="id-signout"><i class="fas fa-right-from-bracket"></i> Sign out</button>
+            </div>
+        </div>
+    </div>
+
+    <div class="toast-container" id="toast-container" aria-live="polite"></div>
+
     <script>
+    (function () {
+        'use strict';
+
         const API_BASE = '/api';
+        const KEY = 'qpot_id';
+        const FORMAT = /^qp_[a-z0-9]{24}$/;
         let currentQPotID = '';
+        let signingOut = false;
 
-        // Check for saved QPot ID
-        function checkAuth() {
-            const savedID = localStorage.getItem('qpot_id');
-            if (savedID) {
-                currentQPotID = savedID;
-                document.getElementById('qpot-id-display').textContent = maskID(currentQPotID);
-                document.getElementById('auth-overlay').classList.add('hidden');
-                document.getElementById('main-content').classList.remove('hidden');
-                loadData();
-                startAutoRefresh();
-                openFromHash();
+        // ---------- the DOM, built from data as text only ----------
+
+        const $ = (id) => document.getElementById(id);
+
+        // h('td', {class: 'x', title: t}, 'text', child): attributes and text, never markup.
+        // Event handlers are passed as functions (onclick: fn), never as strings.
+        function h(tag, attrs, ...children) {
+            const el = document.createElement(tag);
+            for (const [k, v] of Object.entries(attrs || {})) {
+                if (v === undefined || v === null || v === false) continue;
+                if (k === 'class') el.className = v;
+                else if (k === 'text') el.textContent = String(v);
+                else if (k.startsWith('on') && typeof v === 'function') el.addEventListener(k.slice(2), v);
+                else el.setAttribute(k, v === true ? '' : String(v));
             }
-        }
-
-        // The credential is shown masked; the copy button still copies it whole.
-        function maskID(id) {
-            return id && id.length > 10 ? id.slice(0, 6) + '\u2026' + id.slice(-4) : id;
-        }
-
-        // Deep links from the home page: /dashboard#overview, #intel, #pairing, #security.
-        function openFromHash() {
-            const h = (location.hash || '').slice(1);
-            if (['overview', 'pairing', 'security'].includes(h)) { switchTab(h); }
-            if (h === 'intel') {
-                const el = document.getElementById('intel-summary');
-                if (el) { el.closest('.card').scrollIntoView({ behavior: 'smooth' }); }
+            for (const c of children.flat()) {
+                if (c === undefined || c === null || c === false) continue;
+                el.appendChild(c instanceof Node ? c : document.createTextNode(String(c)));
             }
+            return el;
         }
 
-        // Authenticate with QPot ID
-        async function authenticate() {
-            const input = document.getElementById('qpot-id-input');
-            const id = input.value.trim();
-            const reject = () => {
-                input.style.borderColor = 'var(--danger)';
-                setTimeout(() => input.style.borderColor = '', 1500);
-            };
-            if (!id || !id.startsWith('qp_') || id.length !== 27) { reject(); return; }
-            // Check the ID with the server before storing it: a typo used to be
-            // saved and every panel then failed silently.
-            try {
-                const r = await fetch(`${API_BASE}/status`, { headers: { 'X-QPot-ID': id } });
-                if (!r.ok) { reject(); return; }
-            } catch (e) { reject(); return; }
+        const icon = (name) => h('i', { class: 'fas ' + name, 'aria-hidden': 'true' });
+        const fmt = (n) => (Number(n) || 0).toLocaleString('en-US');
+        const plural = (n, one, many) => fmt(n) + ' ' + (Number(n) === 1 ? one : many);
+        const capitalize = (s) => { s = String(s || ''); return s.charAt(0).toUpperCase() + s.slice(1); };
 
-            currentQPotID = id;
-            localStorage.setItem('qpot_id', currentQPotID);
-            document.getElementById('qpot-id-display').textContent = maskID(currentQPotID);
-            document.getElementById('auth-overlay').classList.add('hidden');
-            document.getElementById('main-content').classList.remove('hidden');
-            loadData();
-            startAutoRefresh();
-            openFromHash();
+        function when(t) {
+            const d = t ? new Date(t) : null;
+            if (!d || isNaN(d) || d.getFullYear() < 2000) return '';
+            const p = (n) => String(n).padStart(2, '0');
+            return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
         }
 
-        // Copy QPot ID to clipboard
-        function copyQPotID() {
-            navigator.clipboard.writeText(currentQPotID).then(() => {
-                showToast('QPot ID copied to clipboard');
-            });
+        // the date in a span of its own, so a phone can show just the clock
+        function timeCell(t) {
+            const s = when(t);
+            const cut = s.indexOf(' ');
+            return cut > 0 ? h('td', { class: 'time-cell' }, h('span', { class: 'time-date' }, s.slice(0, cut + 1)), s.slice(cut + 1))
+                           : h('td', { class: 'time-cell' }, s);
         }
 
-        // Show toast notification
-        function showToast(message) {
-            const toast = document.createElement('div');
-            toast.className = 'toast';
-            toast.textContent = message;
-            document.body.appendChild(toast);
-            setTimeout(() => toast.remove(), 3000);
-        }
-
-        // Load initial data
-        async function loadData() {
-            try {
-                await Promise.all([
-                    loadStatus(),
-                    loadStats(),
-                    loadHoneypots(),
-                    loadEvents(),
-                    loadIntelligence()
-                ]);
-            } catch (error) {
-                console.error('Failed to load data:', error);
-            }
-        }
-
-        // escape untrusted strings (attacker-controlled event fields) before
-        // inserting into the DOM.
-        function esc(s) {
-            return String(s == null ? '' : s)
-                .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
-                .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
-        }
-
-        // Threat intelligence: MITRE ATT&CK techniques, IOCs, and TTP campaigns
-        // (QPot's headline differentiators over stock T-Pot).
-        async function loadIntelligence() {
-            const hdr = { headers: { 'X-QPot-ID': currentQPotID } };
-            const getJSON = async (p) => {
-                try { const r = await fetch(`${API_BASE}${p}`, hdr); return r.ok ? await r.json() : null; }
-                catch (e) { return null; }
-            };
-            const [summary, techs, iocs, ttps] = await Promise.all([
-                getJSON('/intelligence'), getJSON('/techniques'),
-                getJSON('/iocs?limit=15'), getJSON('/ttps')
-            ]);
-
-            if (summary) {
-                document.getElementById('intel-summary').textContent =
-                    `${summary.techniques_observed||0} techniques · ${summary.iocs_total||0} IOCs · ${summary.active_sessions||0} campaigns`;
-            }
-
-            const techEl = document.getElementById('intel-techniques');
-            if (Array.isArray(techs) && techs.length) {
-                techEl.innerHTML = techs.slice(0, 12).map(t => `<div class="intel-row">
-                    <span class="intel-tag">${esc(t.technique_id)}</span>
-                    <span class="intel-name">${esc(t.technique_name)}</span>
-                    <span class="intel-count">${esc(t.count)}</span></div>`).join('');
-            }
-            const iocEl = document.getElementById('intel-iocs');
-            if (Array.isArray(iocs) && iocs.length) {
-                iocEl.innerHTML = iocs.slice(0, 15).map(i => `<div class="intel-row">
-                    <span class="intel-tag">${esc(i.type)}</span>
-                    <span class="intel-name">${esc(i.value)}</span>
-                    <span class="intel-count">${esc(i.count)}</span></div>`).join('');
-            }
-            const ttpEl = document.getElementById('intel-ttps');
-            if (Array.isArray(ttps) && ttps.length) {
-                ttpEl.innerHTML = ttps.slice(0, 12).map(s => `<div class="intel-row">
-                    <span class="intel-tag">${esc((s.source_ips&&s.source_ips[0])||'?')}</span>
-                    <span class="intel-name">${esc((s.techniques||[]).length)} techniques · ${esc((s.kill_chain_stages||[]).join(', '))}</span>
-                    <span class="intel-count">${esc(s.event_count)}</span></div>`).join('');
-            }
-        }
-
-        // Tab switching (Dashboard / Pairing / Security). Lazy-loads tab data.
-        function switchTab(name) {
-            ['dashboard', 'overview', 'pairing', 'security'].forEach(t => {
-                document.getElementById('tab-' + t).classList.toggle('hidden', t !== name);
-            });
-            document.querySelectorAll('.tab-btn').forEach(b => {
-                b.classList.toggle('active', b.dataset.tab === name);
-            });
-            if (name === 'overview') { loadOverview(); }
-            if (name === 'pairing') { loadPairing(); }
-            if (name === 'security') { loadSecurity(); }
+        function ago(t) {
+            const d = t ? new Date(t) : null;
+            if (!d || isNaN(d) || d.getFullYear() < 2000) return 'never';
+            const s = Math.max(0, Math.round((Date.now() - d) / 1000));
+            if (s < 60) return s + ' s ago';
+            if (s < 3600) return Math.round(s / 60) + ' min ago';
+            if (s < 172800) return Math.round(s / 3600) + ' h ago';
+            return Math.round(s / 86400) + ' days ago';
         }
 
         function fmtUptime(secs) {
-            secs = Math.max(0, Math.floor(secs || 0));
-            const d = Math.floor(secs / 86400), h = Math.floor((secs % 86400) / 3600), m = Math.floor((secs % 3600) / 60);
-            if (d) return `${d}d ${h}h`;
-            if (h) return `${h}h ${m}m`;
+            secs = Math.max(0, Math.floor(Number(secs) || 0));
+            const d = Math.floor(secs / 86400), hr = Math.floor((secs % 86400) / 3600), m = Math.floor((secs % 3600) / 60);
+            if (d) return `${d}d ${hr}h`;
+            if (hr) return `${hr}h ${m}m`;
             return `${m}m`;
         }
 
-        // Overview: host resources, 24h activity and recent events, served by
-        // this instance (GET /api/overview). Nothing leaves the host.
-        function setGauge(key, g) {
-            g = g || {};
-            const pct = Math.max(0, Math.min(100, Number(g.pct) || 0));
-            document.getElementById('ov-' + key).textContent = pct + '%';
-            document.getElementById('ov-' + key + '-cap').textContent = g.caption || '';
-            const bar = document.getElementById('ov-' + key + '-bar');
-            bar.style.width = pct + '%';
-            bar.className = 'gauge-fill' + (pct >= 90 ? ' crit' : pct >= 70 ? ' warn' : '');
+        // a flag from the map's set, for a two-letter code only
+        function flag(code) {
+            const c = String(code || '').toUpperCase();
+            return /^[A-Z]{2}$/.test(c) ? h('img', { class: 'flag-icon', src: `/map/static/flags/${c}.svg`, alt: c, width: 20, height: 15, onerror: function () { this.remove(); } }) : null;
         }
 
-        async function loadOverview() {
-            let ov;
-            try {
-                const r = await fetch(`${API_BASE}/overview`, { headers: { 'X-QPot-ID': currentQPotID } });
-                ov = r.ok ? await r.json() : null;
-            } catch (e) { return; }
-            if (!ov) { return; }
-            setGauge('cpu', ov.cpu); setGauge('mem', ov.memory); setGauge('disk', ov.disk); setGauge('procs', ov.processes);
-            document.getElementById('ov-host').textContent = ov.hostname || '-';
-            const up = ov.started_at ? (Date.now() - new Date(ov.started_at).getTime()) / 1000 : 0;
-            document.getElementById('ov-host-sub').textContent = `${ov.os}/${ov.arch} · qpot ${ov.version} · up ${fmtUptime(up)}`;
-            document.getElementById('ov-events').textContent = ov.events_24h || 0;
-            document.getElementById('ov-rate').textContent = `${(Number(ov.events_per_sec) || 0).toFixed(2)} per second`;
-            document.getElementById('ov-ips').textContent = ov.unique_ips_24h || 0;
-            document.getElementById('ov-db').textContent = `${ov.database || '-'} ${ov.database_ok ? 'ok' : 'down'}`;
-            document.getElementById('ov-cluster').textContent = ov.cluster
-                ? `cluster ${ov.cluster.name}: ${ov.cluster.healthy}/${ov.cluster.nodes} healthy` : 'standalone';
-
-            const hps = (ov.honeypots || []).filter(h => h.enabled || h.hits_24h);
-            document.getElementById('ov-honeypots').innerHTML = hps.length ? hps.map(h => `<li class="honeypot-item">
-                <div class="honeypot-info"><div class="honeypot-details">
-                    <h3>${esc(h.name)}</h3><p>port ${esc(h.port)} · ${esc(h.hits_24h)} hits in 24h</p>
-                </div></div>
-                <span class="risk-badge ${h.enabled ? 'risk-low' : 'risk-medium'}">${h.enabled ? 'on' : 'off'}</span>
-            </li>`).join('') : '<li class="empty-state"><p>No honeypots enabled</p></li>';
-
-            const sevClass = { critical: 'risk-critical', warn: 'risk-medium', info: 'risk-low' };
-            const evs = ov.recent_events || [];
-            document.getElementById('ov-events-list').innerHTML = evs.length ? evs.map(e => `<li class="honeypot-item">
-                <div class="honeypot-info"><div class="honeypot-details">
-                    <h3>${esc(e.honeypot)} · ${esc(e.source_ip)}${e.country ? ' (' + esc(e.country) + ')' : ''}</h3>
-                    <p>${esc(e.time ? new Date(e.time).toLocaleString() : '')} · ${esc(e.summary)}${e.technique ? ' · ' + esc(e.technique) : ''}</p>
-                </div></div>
-                <span class="risk-badge ${sevClass[e.severity] || 'risk-low'}">${esc(e.severity)}</span>
-            </li>`).join('') : '<li class="empty-state"><p>No events yet</p></li>';
+        // The live tabs reload every 10 s. A list is rebuilt only when its data changed, so a button
+        // is never swapped out from under the pointer between pressing and releasing it.
+        const lastData = new WeakMap();
+        function unchanged(el, data) {
+            const s = JSON.stringify(data);
+            if (lastData.get(el) === s) return true;
+            lastData.set(el, s);
+            return false;
         }
 
-        // Pairing / Networking: the honeypot group (paired QPot nodes).
-        async function loadPairing() {
-            let data;
+        function emptyRow(tbody, cols, text, iconName) {
+            tbody.replaceChildren(h('tr', {}, h('td', { colspan: cols, class: 'empty-state' }, iconName ? icon(iconName) : null, text)));
+        }
+
+        function pill(text, kind) {
+            return h('span', { class: 'pill ' + (kind || '') }, h('span', { class: 'dot' }), text);
+        }
+
+        // risk levels come from the config file: a known one gets its colour, anything else is shown as text
+        const RISK = { low: 'ok', medium: 'warn', high: 'bad', critical: 'bad' };
+        function riskPill(risk) {
+            const r = String(risk || '').toLowerCase();
+            return pill((risk ? String(risk) : 'unknown') + ' risk', RISK[r] || 'muted');
+        }
+
+        function toast(message, kind) {
+            const t = h('div', { class: 'toast ' + (kind || ''), role: kind === 'error' ? 'alert' : 'status' },
+                icon(kind === 'error' ? 'fa-triangle-exclamation' : kind === 'ok' ? 'fa-check' : 'fa-circle-info'), h('span', {}, message));
+            $('toast-container').appendChild(t);
+            setTimeout(() => t.remove(), kind === 'error' ? 7000 : 3500);
+        }
+
+        function callout(el, kind, message) {
+            el.replaceChildren();
+            if (!message) return;
+            el.className = 'callout modal-message ' + (kind || '');
+            el.append(icon(kind === 'error' ? 'fa-triangle-exclamation' : kind === 'ok' ? 'fa-check' : kind === 'warn' ? 'fa-circle-exclamation' : 'fa-circle-info'), h('span', {}, message));
+        }
+
+        // ---------- the API ----------
+
+        class ApiError extends Error {
+            constructor(status, message, code, body) { super(message); this.status = status; this.code = code || ''; this.body = body; }
+        }
+
+        // what a status means, in words, when the server sends none
+        function plainStatus(status) {
+            if (status === 404) return 'QPot does not know this (404). The server may be older than this page.';
+            if (status === 405) return 'QPot does not allow this here (405).';
+            if (status === 413) return 'That is more than QPot accepts in one request.';
+            if (status === 415) return 'QPot refused the request format (415).';
+            if (status === 429) return 'Too many viewers at once. Try again in a moment.';
+            if (status === 503) return 'QPot\'s database is not reachable right now. After a start it can take a minute.';
+            if (status >= 500) return 'QPot hit an internal error (' + status + '). Its log on the host says more.';
+            return 'QPot answered ' + status + '.';
+        }
+
+        async function request(url, opts) {
+            opts = opts || {};
+            const headers = { 'X-QPot-ID': currentQPotID };
+            if (opts.body !== undefined) headers['Content-Type'] = 'application/json';
+            let r;
             try {
-                const r = await fetch(`${API_BASE}/cluster`, { headers: { 'X-QPot-ID': currentQPotID } });
-                data = r.ok ? await r.json() : null;
-            } catch (e) { return; }
-            const list = document.getElementById('pairing-list');
-            if (!data || !data.clustered) {
-                document.getElementById('grp-name').textContent = '-';
-                document.getElementById('grp-id').textContent = 'Not paired';
-                document.getElementById('grp-count').textContent = '0';
-                document.getElementById('grp-online').textContent = '0';
-                document.getElementById('grp-events').textContent = '0';
-                list.innerHTML = '<li class="empty-state"><div class="empty-state-icon">[ ]</div><p>This node is standalone. Pair honeypots into a group with <code>qpot cluster init</code> / <code>qpot cluster join</code>.</p></li>';
+                r = await fetch(url, { method: opts.method || 'GET', headers, body: opts.body !== undefined ? JSON.stringify(opts.body) : undefined,
+                    cache: 'no-store', credentials: 'same-origin', redirect: 'error' });
+            } catch (e) {
+                setReachable(false);
+                throw new ApiError(0, 'The QPot API is not reachable. Is qpot serve running?');
+            }
+            setReachable(true);
+            if ((r.status === 401 || r.status === 403) && !opts.probe) {
+                signedOut(r.status === 403 ? 'This QPot no longer accepts the saved QPot ID. Sign in again with its ID.'
+                                           : 'Sign in with this QPot\'s ID.');
+                throw new ApiError(r.status, 'Not signed in.');
+            }
+            return r;
+        }
+
+        // JSON in, JSON out; errors carry the server's plain-English message and QP code
+        async function api(url, opts) {
+            const r = await request(url, opts);
+            const text = await r.text();
+            let body = null;
+            try { body = text ? JSON.parse(text) : null; } catch (e) { body = null; }
+            if (!r.ok) {
+                const msg = body && typeof body.error === 'string' && body.error ? body.error : plainStatus(r.status);
+                throw new ApiError(r.status, msg, body && typeof body.code === 'string' ? body.code : '', body);
+            }
+            return body;
+        }
+
+        function errorText(e) {
+            if (!(e instanceof ApiError)) return 'Something went wrong in the page: ' + (e && e.message ? e.message : String(e));
+            return e.code ? `${e.message} (${e.code})` : e.message;
+        }
+
+        // a download through fetch, so the QPot ID travels in the header and never in a URL
+        async function download(url, fallbackName) {
+            const r = await request(url);
+            if (!r.ok) {
+                let msg = plainStatus(r.status);
+                try { const b = await r.json(); if (b && typeof b.error === 'string') msg = b.error; } catch (e) { /* not JSON */ }
+                throw new ApiError(r.status, msg);
+            }
+            const cd = r.headers.get('Content-Disposition') || '';
+            const m = /filename="?([^";]+)"?/i.exec(cd);
+            const name = (m ? m[1] : fallbackName).replace(/[^A-Za-z0-9._-]/g, '_').slice(0, 120) || fallbackName;
+            const blob = await r.blob();
+            const href = URL.createObjectURL(blob);
+            const a = h('a', { href, download: name, class: 'hidden' });
+            document.body.appendChild(a);
+            a.click();
+            a.remove();
+            setTimeout(() => URL.revokeObjectURL(href), 10000);
+            return { name, size: blob.size };
+        }
+
+        // ---------- signing in and out ----------
+
+        function storedID() {
+            try { return localStorage.getItem(KEY) || ''; } catch (e) { return ''; }
+        }
+
+        function maskID(id) {
+            return id && id.length > 10 ? id.slice(0, 6) + '…' + id.slice(-4) : id;
+        }
+
+        function showApp() {
+            $('auth-overlay').classList.add('hidden');
+            $('main-content').classList.remove('hidden');
+            $('qpot-id-display').textContent = maskID(currentQPotID);
+        }
+
+        function signedOut(message) {
+            if (signingOut) return;
+            signingOut = true;
+            currentQPotID = '';
+            try { localStorage.removeItem(KEY); } catch (e) { /* nothing kept */ }
+            stopRefresh();
+            closeModals();
+            $('main-content').classList.add('hidden');
+            $('auth-overlay').classList.remove('hidden');
+            $('auth-error').textContent = message || '';
+            $('qpot-id-input').focus();
+        }
+
+        async function authenticate(ev) {
+            if (ev) ev.preventDefault();
+            const input = $('qpot-id-input'), err = $('auth-error');
+            const id = input.value.trim();
+            if (!FORMAT.test(id)) {
+                err.textContent = 'A QPot ID is qp_ and 24 lowercase letters or digits. `qpot id` prints it on the host.';
                 return;
             }
-            const g = data.group || {}, nodes = data.nodes || [];
-            document.getElementById('grp-name').textContent = g.name || 'group';
-            document.getElementById('grp-id').textContent = esc(g.id || '');
-            document.getElementById('grp-count').textContent = g.node_count || nodes.length;
-            document.getElementById('grp-online').textContent = g.healthy_nodes || 0;
-            document.getElementById('grp-online-sub').textContent = `${g.suspect_nodes||0} suspect · ${g.failed_nodes||0} failed`;
-            document.getElementById('grp-events').textContent = g.total_events || 0;
-            list.innerHTML = nodes.map(n => `<li class="honeypot-item">
-                <div class="honeypot-info">
-                    <div class="honeypot-icon">${n.online ? '<>' : '><'}</div>
-                    <div class="honeypot-details">
-                        <h3>${esc(n.name)}${n.is_local ? ' (this node)' : ''}</h3>
-                        <p>${esc(n.address)} · up ${esc(fmtUptime(n.uptime_seconds))} · ${esc(n.total_events)} requests</p>
-                    </div>
-                </div>
-                <span class="risk-badge ${n.online ? 'risk-low' : 'risk-critical'}">${n.online ? 'online' : esc(n.status)}</span>
-            </li>`).join('');
-        }
-
-        // Security tab: posture summary + per-honeypot security.
-        async function loadSecurity() {
+            err.textContent = 'Checking…';
+            currentQPotID = id;
+            let r;
             try {
-                const [st, hps] = await Promise.all([
-                    fetch(`${API_BASE}/status`, { headers: { 'X-QPot-ID': currentQPotID } }).then(r => r.ok ? r.json() : null),
-                    fetch(`${API_BASE}/honeypots`, { headers: { 'X-QPot-ID': currentQPotID } }).then(r => r.ok ? r.json() : null)
-                ]);
-                document.getElementById('sec-auth').textContent = 'QPot ID';
-                document.getElementById('sec-sandbox').textContent = 'Per-container';
-                if (st && st.database) document.getElementById('sec-db').textContent = esc(st.database);
-                const list = document.getElementById('security-list');
-                if (Array.isArray(hps) && hps.length) {
-                    list.innerHTML = hps.map(hp => `<li class="honeypot-item">
-                        <div class="honeypot-info"><div class="honeypot-details">
-                            <h3>${esc(capitalize(hp.name))}</h3>
-                            <p>Isolated network · resource-limited · ${hp.enabled ? 'enabled' : 'disabled'}</p>
-                        </div></div>
-                        <span class="risk-badge risk-${esc(hp.risk)}">${esc(hp.risk)} risk</span>
-                    </li>`).join('');
-                }
-            } catch (e) { /* ignore */ }
-        }
-
-        // Live attacker-activity feed (events over time / recent attacks).
-        async function loadEvents() {
-            const container = document.getElementById('logs');
-            try {
-                const response = await fetch(`${API_BASE}/events?limit=50`, {
-                    headers: { 'X-QPot-ID': currentQPotID }
-                });
-                if (!response.ok) { return; }
-                const data = await response.json();
-                const events = (data && data.events) || [];
-                if (events.length === 0) {
-                    container.innerHTML = '<div class="empty-state"><p>No recent activity</p></div>';
-                    return;
-                }
-                container.innerHTML = events.map(e => {
-                    const ts = e.timestamp ? new Date(e.timestamp).toLocaleTimeString() : '';
-                    const detail = e.command || (e.username ? `${e.username}:${e.password || ''}` : '');
-                    return `<div class="log-line">
-                        <span class="log-time">${esc(ts)}</span>
-                        <span class="log-hp">${esc(e.honeypot)}</span>
-                        <span class="log-ip">${esc(e.source_ip)}</span>
-                        <span class="log-evt">${esc(e.event_type)}</span>
-                        <span class="log-detail">${esc(detail)}</span>
-                    </div>`;
-                }).join('');
-            } catch (err) {
-                console.error('Failed to load events:', err);
+                r = await request(`${API_BASE}/status`, { probe: true });
+            } catch (e) {
+                currentQPotID = '';
+                err.textContent = errorText(e);
+                return;
             }
+            if (r.status === 401 || r.status === 403) {
+                currentQPotID = '';
+                err.textContent = 'This QPot did not accept that ID. It belongs to another instance, or it was mistyped.';
+                return;
+            }
+            if (!r.ok) {
+                currentQPotID = '';
+                err.textContent = plainStatus(r.status);
+                return;
+            }
+            try { localStorage.setItem(KEY, id); } catch (e) { /* this tab only */ }
+            input.value = '';
+            err.textContent = '';
+            signingOut = false;
+            start();
+        }
+
+        // ---------- the status pill ----------
+
+        let reachable = true, overall = '';
+        function setReachable(ok) {
+            reachable = ok;
+            paintStatus();
+        }
+
+        function paintStatus() {
+            const dot = $('status-indicator'), text = $('status-text');
+            if (!reachable) {
+                dot.className = 'status-indicator';
+                text.textContent = 'Offline';
+                $('status-badge').title = 'The QPot API is not reachable';
+            } else if (overall === 'running') {
+                dot.className = 'status-indicator connected';
+                text.textContent = 'Running';
+                $('status-badge').title = 'QPot is running';
+            } else if (overall) {
+                dot.className = 'status-indicator idle';
+                text.textContent = 'Stopped';
+                $('status-badge').title = 'The honeypots are not running (qpot up starts them)';
+            }
+        }
+
+        // ---------- Dashboard ----------
+
+        let honeypots = [];        // GET /api/honeypots
+        let statusByName = {};     // GET /api/status, per honeypot
+        let settingsByName = {};   // GET /api/honeypots/settings
+        const busy = new Set();    // honeypots with a change in flight
+        let showOff = false;       // the list shows the honeypots that are off
+
+        const HP_ICONS = {
+            cowrie: 'fa-terminal', dionaea: 'fa-bug', conpot: 'fa-industry', adbhoney: 'fa-mobile-screen',
+            endlessh: 'fa-hourglass-half', heralding: 'fa-key', honeyaml: 'fa-code', tanner: 'fa-globe',
+            mailoney: 'fa-envelope', redishoneypot: 'fa-database', elasticpot: 'fa-magnifying-glass',
+            citrixhoneypot: 'fa-shield', ciscoasa: 'fa-network-wired', galah: 'fa-robot', beelzebub: 'fa-robot',
+            sentrypeer: 'fa-phone', dicompot: 'fa-x-ray', medpot: 'fa-notes-medical', hellpot: 'fa-fire',
+            ddospot: 'fa-bolt', ipphoney: 'fa-print', miniprint: 'fa-print', log4pot: 'fa-file-code',
+            wordpot: 'fa-blog', honeytrap: 'fa-spider', 'go-pot': 'fa-spider', 'ssh-proxy': 'fa-shuffle',
+            h0neytr4p: 'fa-bug', glutton: 'fa-filter', honeypots: 'fa-layer-group'
+        };
+
+        // the host command of the doctor, for this instance (the cluster commands are per host)
+        const INSTANCE = /^[a-z0-9][a-z0-9_-]{0,62}$/;
+        function showInstance(name) {
+            const flag = typeof name === 'string' && INSTANCE.test(name) && name !== 'default' ? ` -i ${name}` : '';
+            $('doctor-cmd').textContent = 'qpot doctor' + flag;
         }
 
         async function loadStatus() {
-            const response = await fetch(`${API_BASE}/status`, {
-                headers: { 'X-QPot-ID': currentQPotID }
-            });
-            const status = await response.json();
-            
-            const statusBadge = document.getElementById('status-badge');
-            const statusText = document.getElementById('status-text');
-            
-            if (status.overall === 'running') {
-                statusBadge.className = 'status-badge running';
-                statusText.textContent = 'Running';
-            } else {
-                statusBadge.className = 'status-badge stopped';
-                statusText.textContent = 'Stopped';
-            }
-            
-            document.getElementById('active-honeypots').textContent =
-                status.honeypots.filter(h => h.running).length;
-            document.getElementById('active-honeypots-sub').textContent =
-                `running of ${status.honeypots.filter(h => h.status !== 'disabled').length} enabled`;
+            const st = await api(`${API_BASE}/status`);
+            overall = st && st.overall === 'running' ? 'running' : 'stopped';
+            paintStatus();
+            showInstance(st && st.instance);
+            statusByName = {};
+            const list = st && Array.isArray(st.honeypots) ? st.honeypots : [];
+            list.forEach((x) => { if (x && typeof x.name === 'string') statusByName[x.name] = x; });
+            const enabled = list.filter((x) => x.status !== 'disabled');
+            const up = list.filter((x) => x.running).length;
+            $('active-honeypots').textContent = fmt(up);
+            $('active-honeypots-sub').textContent = `running of ${fmt(enabled.length)} enabled`;
+            $('nav-up').textContent = `${fmt(up)}/${fmt(enabled.length)}`;
+            if (st && typeof st.database === 'string') $('sec-db').textContent = st.database;
+            return st;
         }
 
         async function loadStats() {
-            const response = await fetch(`${API_BASE}/stats`, {
-                headers: { 'X-QPot-ID': currentQPotID }
-            });
-            const stats = await response.json();
-            
-            document.getElementById('total-attacks').textContent = 
-                stats.total_events.toLocaleString();
-            document.getElementById('unique-attackers').textContent = 
-                stats.unique_ips.toLocaleString();
-            
-            if (stats.top_countries && stats.top_countries.length > 0) {
-                document.getElementById('top-country').textContent = 
-                    stats.top_countries[0].country;
+            const s = await api(`${API_BASE}/stats`);
+            $('total-attacks').textContent = fmt(s && s.total_events);
+            $('unique-attackers').textContent = fmt(s && s.unique_ips);
+            $('nav-attacks').textContent = fmt(s && s.total_events);
+            $('nav-ips').textContent = fmt(s && s.unique_ips);
+            const top = s && Array.isArray(s.top_countries) && s.top_countries[0];
+            const tc = $('top-country');
+            tc.replaceChildren();
+            if (top && top.country) {
+                tc.append(flag(top.country) || '', String(top.country));
+                $('top-country-sub').textContent = `${plural(top.count, 'attack', 'attacks')} in 24 h`;
+            } else {
+                tc.textContent = '-';
+                $('top-country-sub').textContent = 'no attacks in 24 h';
             }
         }
 
         async function loadHoneypots() {
-            const response = await fetch(`${API_BASE}/honeypots`, {
-                headers: { 'X-QPot-ID': currentQPotID }
-            });
-            const honeypots = await response.json();
-            
-            const list = document.getElementById('honeypot-list');
-            list.innerHTML = '';
-            
-            const icons = {
-                'cowrie': '>_',
-                'dionaea': '<>',
-                'conpot': '[]',
-                'tanner': '{}',
-                'adbhoney': '@@',
-                'endlessh': '~~',
-                'heralding': '::',
-                'honeyaml': '//'
-            };
-            
-            honeypots.forEach(hp => {
-                const li = document.createElement('li');
-                li.className = 'honeypot-item';
-                li.innerHTML = `
-                    <div class="honeypot-info">
-                        <div class="honeypot-icon">${icons[hp.name] || '**'}</div>
-                        <div class="honeypot-details">
-                            <h3>${capitalize(hp.name)}</h3>
-                            <p>Port ${hp.port} ${hp.running ? '• Running' : ''}</p>
-                        </div>
-                    </div>
-                    <div style="display: flex; align-items: center; gap: 15px;">
-                        <span class="risk-badge risk-${hp.risk}">${hp.risk}</span>
-                        <label class="toggle">
-                            <input type="checkbox" 
-                                   ${hp.enabled ? 'checked' : ''} 
-                                   onchange="toggleHoneypot('${hp.name}', this.checked)">
-                            <span class="toggle-slider"></span>
-                        </label>
-                    </div>
-                `;
-                list.appendChild(li);
-            });
+            const list = await api(`${API_BASE}/honeypots`);
+            honeypots = (Array.isArray(list) ? list : []).filter((x) => x && typeof x.name === 'string');
+            // enabled ones first, then by name
+            honeypots.sort((a, b) => (Number(!!b.enabled) - Number(!!a.enabled)) || a.name.localeCompare(b.name));
+            renderHoneypots();
+            fillHoneypotSelects();
         }
 
-        async function toggleHoneypot(name, enabled) {
+        async function loadSettingsIndex() {
             try {
-                const response = await fetch(`${API_BASE}/honeypots`, {
-                    method: 'POST',
-                    headers: { 
-                        'Content-Type': 'application/json',
-                        'X-QPot-ID': currentQPotID
-                    },
-                    body: JSON.stringify({ name, enabled })
+                const all = await api(`${API_BASE}/honeypots/settings`);
+                settingsByName = {};
+                (all && Array.isArray(all.honeypots) ? all.honeypots : []).forEach((v) => {
+                    if (v && typeof v.name === 'string') settingsByName[v.name] = v;
                 });
-                
-                if (!response.ok) {
-                    throw new Error('Failed to toggle honeypot');
-                }
-                
-                showToast(`${capitalize(name)} ${enabled ? 'enabled' : 'disabled'}`);
-                setTimeout(loadData, 1000);
-            } catch (error) {
-                console.error('Error:', error);
-                showToast('Failed to toggle honeypot');
+                renderHoneypots();
+            } catch (e) {
+                if (e.status === 404) return;   // an older server: no settings from the web UI
+                throw e;
             }
         }
 
-        function refreshData() {
-            loadData();
-            showToast('Data refreshed');
+        // A row is rebuilt only between presses: a refresh that lands while a finger or a mouse button
+        // is down on the list waits for the release, so the press and the release meet the same
+        // button and its click is not lost.
+        let pressing = false, renderLater = false;
+        $('honeypot-list').addEventListener('pointerdown', () => { pressing = true; });
+        const released = () => {
+            if (!pressing) return;
+            pressing = false;
+            if (renderLater) { renderLater = false; setTimeout(renderHoneypots, 0); }
+        };
+        document.addEventListener('pointerup', released, true);
+        document.addEventListener('pointercancel', released, true);
+
+        function renderHoneypots() {
+            const ul = $('honeypot-list');
+            if (pressing) { renderLater = true; return; }
+            // what the rows show, in a fixed order (GET /api/status lists the honeypots in any order)
+            const shownStatus = Object.keys(statusByName).sort().map((k) => [k, !!statusByName[k].running]);
+            if (unchanged(ul, [honeypots, shownStatus, Object.values(settingsByName).map((v) => [v.name, v.missing]), [...busy], showOff])) return;
+            if (!honeypots.length) {
+                ul.replaceChildren(h('li', { class: 'empty-state' }, icon('fa-server'), 'No honeypots configured.'));
+                return;
+            }
+            const on = honeypots.filter((x) => x.enabled).length;
+            const off = honeypots.length - on;
+            $('honeypot-note').textContent = `${fmt(on)} of ${plural(honeypots.length, 'honeypot', 'honeypots')} on`;
+            const shown = showOff ? honeypots : honeypots.filter((x) => x.enabled);
+            const rows = shown.map((hp) => {
+                const name = hp.name;
+                const st = statusByName[name] || {};
+                const running = !!(hp.running || st.running);
+                const meta = h('div', { class: 'hp-meta' },
+                    h('span', {}, 'port ' + (Number.isInteger(hp.port) ? hp.port : '-')),
+                    riskPill(hp.risk),
+                    hp.enabled ? (running ? pill('running', 'ok') : pill('not running', 'warn')) : pill('off', 'muted'));
+                const settings = settingsByName[name];
+                if (settings && Array.isArray(settings.missing) && settings.missing.length) meta.append(pill('needs ' + settings.missing.join(', '), 'warn'));
+                const toggle = h('input', { type: 'checkbox', role: 'switch', 'aria-label': `${name} on or off`, 'data-key': name + ':switch' });
+                toggle.checked = !!hp.enabled;
+                toggle.disabled = busy.has(name);
+                toggle.addEventListener('change', () => toggleHoneypot(name, toggle.checked, toggle));
+                const tools = h('div', { class: 'hp-tools' },
+                    h('button', { class: 'btn-base btn-secondary btn-icon hover-lift', type: 'button', title: `Logs of ${name}`, 'data-key': name + ':logs', onclick: () => openLogs(name) }, icon('fa-file-lines'), h('span', {}, 'Logs')),
+                    settings ? h('button', { class: 'btn-base btn-secondary btn-icon hover-lift', type: 'button', title: `Settings of ${name}`, 'data-key': name + ':settings', onclick: () => openSettings(name) }, icon('fa-sliders'), h('span', {}, 'Settings')) : null,
+                    hp.enabled ? h('button', { class: 'btn-base btn-secondary btn-icon hover-lift', type: 'button', title: `Restart ${name}`, 'data-key': name + ':restart', disabled: busy.has(name), onclick: () => restartHoneypot(name) }, icon('fa-rotate-right'), h('span', {}, 'Restart')) : null);
+                return h('li', { class: 'hp-row ' + (hp.enabled ? 'on' : 'off') },
+                    h('div', { class: 'hp-icon' }, icon(HP_ICONS[name] || 'fa-server')),
+                    h('div', {}, h('div', { class: 'hp-name' }, capitalize(name)), meta),
+                    tools,
+                    h('label', { class: 'switch', title: hp.enabled ? `Turn ${name} off` : `Turn ${name} on` }, toggle, h('span', { class: 'track' })));
+            });
+            if (off) {
+                // the ones that are off fold away, so the page starts with what runs
+                rows.push(h('li', { class: 'hp-more' }, h('button', { class: 'btn-base btn-secondary hover-lift', type: 'button', id: 'hp-show-off', 'data-key': 'show-off',
+                    'aria-expanded': String(showOff), onclick: () => { showOff = !showOff; renderHoneypots(); } },
+                    icon(showOff ? 'fa-chevron-up' : 'fa-chevron-down'),
+                    showOff ? ` Hide the ${plural(off, 'honeypot', 'honeypots')} that are off` : ` Show the ${plural(off, 'honeypot', 'honeypots')} that are off`)));
+            }
+            // a rebuild keeps the keyboard focus on the same control
+            const had = ul.contains(document.activeElement) ? document.activeElement.getAttribute('data-key') : null;
+            ul.replaceChildren(...rows);
+            if (had) {
+                const again = ul.querySelector(`[data-key="${CSS.escape(had)}"]`);
+                if (again) again.focus({ preventScroll: true });
+            }
         }
 
-        function viewLogs() {
-            loadEvents();
-            document.getElementById('logs').scrollIntoView({ behavior: 'smooth' });
-            showToast('Refreshed recent activity');
+        async function toggleHoneypot(name, enabled, input) {
+            busy.add(name);
+            input.disabled = true;
+            try {
+                await api(`${API_BASE}/honeypots`, { method: 'POST', body: { name, enabled } });
+                toast(`${capitalize(name)} ${enabled ? 'turned on' : 'turned off'}.`, 'ok');
+            } catch (e) {
+                input.checked = !enabled;
+                if (e.status !== 401 && e.status !== 403) toast(`${capitalize(name)} was not ${enabled ? 'turned on' : 'turned off'}: ${errorText(e)}`, 'error');
+            } finally {
+                busy.delete(name);
+                refreshDashboard();
+            }
         }
 
-        // Auto-refresh the dashboard so it stays live. Started after auth.
-        let autoRefreshTimer = null;
-        function startAutoRefresh() {
-            if (autoRefreshTimer) { return; }
-            autoRefreshTimer = setInterval(() => {
-                if (currentQPotID) {
-                    loadData();
-                    if (!document.getElementById('tab-overview').classList.contains('hidden')) { loadOverview(); }
+        async function restartHoneypot(name) {
+            if (!(await confirmAction(`Restart ${capitalize(name)}? Attackers connected to it are dropped.`, 'Restart'))) return;
+            busy.add(name);
+            renderHoneypots();
+            try {
+                const r = await api(`${API_BASE}/honeypots/restart`, { method: 'POST', body: { name } });
+                toast(r && typeof r.message === 'string' ? r.message : `Restarted ${name}.`, 'ok');
+            } catch (e) {
+                if (e.status !== 401 && e.status !== 403) toast(`${capitalize(name)} was not restarted: ${errorText(e)}`, 'error');
+            } finally {
+                busy.delete(name);
+                refreshDashboard();
+            }
+        }
+
+        function fillHoneypotSelects() {
+            for (const id of ['ev-honeypot', 'logs-honeypot', 'ioc-honeypot']) {
+                const sel = $(id);
+                const keep = sel.value;
+                sel.replaceChildren(h('option', { value: '' }, 'All honeypots'),
+                    ...honeypots.map((hp) => h('option', { value: hp.name }, capitalize(hp.name) + (hp.enabled ? '' : ' (off)'))));
+                sel.value = honeypots.some((hp) => hp.name === keep) ? keep : '';
+            }
+        }
+
+        async function loadActivity() {
+            const data = await api(`${API_BASE}/events?limit=50`);
+            const events = data && Array.isArray(data.events) ? data.events : [];
+            const tbody = $('logs');
+            if (unchanged(tbody, events)) return;
+            if (!events.length) { emptyRow(tbody, 6, 'No recent activity.', 'fa-moon'); return; }
+            tbody.replaceChildren(...events.map((e) => eventRow(e, false)));
+        }
+
+        // what an event did, in one line: the command, or user:password
+        function detailOf(e) {
+            if (e.command) return String(e.command);
+            if (e.username || e.password) return `${e.username || ''}:${e.password || ''}`;
+            return e.technique_name ? String(e.technique_name) : '';
+        }
+
+        // a cell cut to one line, with the whole text in its tooltip (attacker text can be long)
+        function clipCell(text, cls) {
+            const s = String(text || '');
+            return h('td', { class: 'clip ' + (cls || ''), title: s.length > 24 ? s : null }, s);
+        }
+
+        function eventRow(e, full) {
+            const tr = h('tr', { class: 'clickable', tabindex: 0, title: 'Show the whole event' },
+                timeCell(e.timestamp),
+                clipCell(e.honeypot, 'honeypot-cell'),
+                clipCell(e.source_ip, 'ip-cell mono-accent'),
+                h('td', { class: 'optional' }, flag(e.country), ' ', String(e.country || '')),
+                clipCell(e.event_type),
+                full ? h('td', { class: 'optional wrap' }, e.username || e.password ? `${e.username || ''}:${e.password || ''}` : '') : null,
+                h('td', { class: (full ? '' : 'optional ') + 'wrap' }, full ? String(e.command || '') : detailOf(e)));
+            const open = () => showEvent(e);
+            tr.addEventListener('click', open);
+            tr.addEventListener('keydown', (ev) => { if (ev.key === 'Enter') open(); });
+            return tr;
+        }
+
+        function decodePayload(b64) {
+            try {
+                const bin = atob(String(b64));
+                const bytes = Uint8Array.from(bin, (c) => c.charCodeAt(0));
+                return new TextDecoder('utf-8', { fatal: false }).decode(bytes);
+            } catch (e) { return ''; }
+        }
+
+        function showEvent(e) {
+            const rows = [
+                ['Time', when(e.timestamp)], ['Honeypot', e.honeypot], ['Event', e.event_type],
+                ['Source', e.source_ip ? `${e.source_ip}:${e.source_port || ''}` : ''], ['Destination port', e.dest_port],
+                ['Protocol', e.protocol], ['Country', e.country], ['City', e.city], ['ASN', e.asn],
+                ['Username', e.username], ['Password', e.password], ['Command', e.command],
+                ['Technique', e.technique_id ? `${e.technique_id} ${e.technique_name || ''}` : ''],
+                ['Tactic', e.tactic_name || e.tactic_id], ['Kill chain', e.kill_chain_stage],
+                ['Payload (text)', e.payload ? decodePayload(e.payload) : ''], ['Payload (base64)', e.payload]
+            ];
+            if (e.metadata && typeof e.metadata === 'object') {
+                for (const [k, v] of Object.entries(e.metadata)) rows.push([`meta: ${k}`, v]);
+            }
+            showDetail('Event', rows);
+        }
+
+        function showDetail(title, rows) {
+            $('detail-title').replaceChildren(icon('fa-circle-info'), ' ' + title);
+            const dl = $('detail-body');
+            dl.replaceChildren();
+            for (const [k, v] of rows) {
+                if (v === undefined || v === null || v === '' || v === 0) continue;
+                dl.append(h('dt', {}, k), h('dd', {}, String(v)));
+            }
+            openModal('detail-modal');
+        }
+
+        async function loadIntelSummary() {
+            const [summary, techs, iocs, ttps] = await Promise.all([
+                api(`${API_BASE}/intelligence`).catch(() => null),
+                api(`${API_BASE}/techniques`).catch(() => null),
+                api(`${API_BASE}/iocs?limit=15`).catch(() => null),
+                api(`${API_BASE}/ttps?limit=50`).catch(() => null)
+            ]);
+            if (summary) {
+                $('intel-summary').textContent = [plural(summary.techniques_observed, 'technique', 'techniques'),
+                    plural(summary.iocs_total, 'IOC', 'IOCs'), plural(summary.active_sessions, 'campaign', 'campaigns')].join(' · ');
+            }
+            rankList($('intel-techniques'), Array.isArray(techs) ? techs.slice(0, 12) : [], (t) => [t.technique_id, t.technique_name, fmt(t.count)], 'No techniques observed yet.');
+            rankList($('intel-iocs'), Array.isArray(iocs) ? iocs.slice(0, 15) : [], (i) => [i.type, i.value, fmt(i.count)], 'No IOCs yet.');
+            rankList($('intel-ttps'), Array.isArray(ttps) ? ttps.slice(0, 12) : [], (s) => [firstIP(s), campaignText(s), fmt(s.event_count)], 'No campaigns yet.');
+            return { summary, techs, iocs, ttps };
+        }
+
+        function firstIP(s) {
+            return Array.isArray(s.source_ips) && s.source_ips.length ? String(s.source_ips[0]) + (s.source_ips.length > 1 ? ` +${s.source_ips.length - 1}` : '') : '?';
+        }
+
+        // "3 techniques: initial-access, execution" - no dangling separators, singular for one
+        function campaignText(s) {
+            const n = Array.isArray(s.techniques) ? s.techniques.length : 0;
+            const stages = Array.isArray(s.kill_chain_stages) ? s.kill_chain_stages.filter(Boolean).map(String) : [];
+            return plural(n, 'technique', 'techniques') + (stages.length ? ': ' + stages.join(', ') : '');
+        }
+
+        function rankList(ul, items, cols, emptyText) {
+            if (!items.length) { ul.replaceChildren(h('li', { class: 'empty-state' }, emptyText)); return; }
+            ul.replaceChildren(...items.map((x) => {
+                const [tag, what, num] = cols(x);
+                return h('li', {}, h('span', { class: 'tag' }, String(tag || '')), h('span', { class: 'what' }, String(what || '')), h('span', { class: 'num' }, String(num || '')));
+            }));
+        }
+
+        async function exportMISP(params) {
+            try {
+                const q = new URLSearchParams({ format: 'misp' });
+                for (const [k, v] of Object.entries(params || {})) if (v) q.set(k, v);
+                const f = await download(`${API_BASE}/iocs/export?${q}`, 'qpot-iocs-misp.json');
+                toast(`Saved ${f.name} (${fmt(f.size)} bytes).`, 'ok');
+            } catch (e) {
+                if (e.status !== 401 && e.status !== 403) toast('IOC export failed: ' + errorText(e), 'error');
+            }
+        }
+
+        let dashRunning = false;
+        async function refreshDashboard() {
+            if (dashRunning || !currentQPotID) return;
+            dashRunning = true;
+            try {
+                const results = await Promise.allSettled([loadStatus(), loadStats(), loadHoneypots(), loadActivity()]);
+                const failed = results.find((r) => r.status === 'rejected' && r.reason && r.reason.status !== 401 && r.reason.status !== 403);
+                if (failed && current === 'dashboard') toast(errorText(failed.reason), 'error');
+                renderHoneypots();
+                await loadIntelSummary();
+            } finally {
+                dashRunning = false;
+            }
+        }
+
+        // ---------- Logs ----------
+
+        function openLogs(name) {
+            $('logs-honeypot').value = name || '';
+            openModal('logs-modal');
+            loadLogs();
+        }
+
+        async function loadLogs() {
+            const name = $('logs-honeypot').value, tail = $('logs-tail').value;
+            const view = $('logs-view'), msg = $('logs-message');
+            $('logs-title').replaceChildren(icon('fa-file-lines'), ' Logs: ' + (name ? capitalize(name) : 'all honeypots'));
+            callout(msg, 'info', 'Loading…');
+            view.textContent = '';
+            try {
+                const q = new URLSearchParams({ tail });
+                if (name) q.set('honeypot', name);
+                const lines = await api(`${API_BASE}/logs?${q}`);
+                const list = Array.isArray(lines) ? lines.map(String) : [];
+                view.textContent = list.length ? list.join('\n') : '';
+                callout(msg, list.length ? '' : 'info', list.length ? '' : 'No log lines. The honeypot may not have started yet.');
+                view.scrollTop = view.scrollHeight;
+            } catch (e) {
+                if (e.status !== 401 && e.status !== 403) callout(msg, 'error', 'The logs could not be read: ' + errorText(e));
+            }
+        }
+
+        // ---------- Honeypot settings ----------
+
+        let settingsFor = '', settingsView = null;
+
+        async function openSettings(name) {
+            settingsFor = name;
+            $('settings-title').replaceChildren(icon('fa-sliders'), ' Settings: ' + capitalize(name));
+            $('settings-fields').replaceChildren(h('div', { class: 'empty-state' }, icon('fa-spinner fa-spin'), 'Loading…'));
+            callout($('settings-message'), '', '');
+            openModal('settings-modal');
+            try {
+                settingsView = await api(`${API_BASE}/honeypots/settings?name=${encodeURIComponent(name)}`);
+                renderSettings();
+            } catch (e) {
+                if (e.status !== 401 && e.status !== 403) {
+                    $('settings-fields').replaceChildren();
+                    callout($('settings-message'), 'error', 'The settings could not be read: ' + errorText(e));
                 }
+            }
+        }
+
+        function renderSettings() {
+            const v = settingsView || {};
+            const list = Array.isArray(v.settings) ? v.settings : [];
+            const box = $('settings-fields');
+            box.replaceChildren();
+            if (!v.enabled) box.append(h('div', { class: 'callout warn' }, icon('fa-circle-exclamation'), h('span', {}, `${capitalize(v.name)} is off. Changes are saved and apply when it is turned on.`)));
+            if (Array.isArray(v.missing) && v.missing.length) box.append(h('div', { class: 'callout warn' }, icon('fa-circle-exclamation'), h('span', {}, 'Still needed before it can run: ' + v.missing.join(', '))));
+            for (const s of list) {
+                if (!s || typeof s.key !== 'string') continue;
+                const id = 'set-' + s.key.replace(/[^a-z0-9_-]/gi, '_');
+                let control;
+                const def = s.effective !== undefined && s.effective !== '' ? `default (${s.effective})` : 'default';
+                if (s.type === 'choice') {
+                    control = h('select', { class: 'setting-select', id, 'data-key': s.key },
+                        h('option', { value: '' }, def),
+                        ...(Array.isArray(s.allowed) ? s.allowed : []).map((a) => h('option', { value: String(a) }, String(a))));
+                    control.value = s.value || '';
+                } else if (s.type === 'secret') {
+                    control = h('input', { class: 'search-input', id, 'data-key': s.key, type: 'password', autocomplete: 'new-password',
+                        placeholder: s.set ? 'stored (type to replace, leave empty to keep)' : 'not set', 'data-secret': '1' });
+                } else {
+                    control = h('input', { class: 'search-input', id, 'data-key': s.key,
+                        type: s.type === 'number' ? 'number' : s.type === 'url' ? 'url' : 'text',
+                        min: s.type === 'number' && s.min !== undefined ? s.min : null,
+                        max: s.type === 'number' && s.max !== undefined ? s.max : null,
+                        maxlength: s.type === 'number' ? null : 500, placeholder: def, spellcheck: 'false' });
+                    control.value = s.value || '';
+                }
+                control.dataset.orig = s.type === 'secret' ? '' : String(s.value || '');
+                const item = h('div', { class: 'setting-item' },
+                    h('label', { class: 'setting-title', for: id }, s.key, s.required ? ' (required)' : ''),
+                    s.help ? h('span', { class: 'setting-description' }, String(s.help)) : null,
+                    control);
+                if (s.type === 'secret') {
+                    item.append(h('label', { class: 'setting-description' },
+                        h('input', { type: 'checkbox', 'data-clear': s.key }), ' Remove the stored value'));
+                }
+                box.append(item);
+            }
+            if (!list.length) box.append(h('div', { class: 'empty-state' }, 'This honeypot has no settings.'));
+            // A stored key is never sent to a server it was not entered for: when the URL or provider
+            // changes, the key has to be entered again (or removed) in the same save.
+            const stored = list.filter((s) => s && s.type === 'secret' && s.set).map((s) => s.key);
+            box.querySelectorAll('[data-key]').forEach((el) => {
+                if (!KEY_FOLLOWS.includes(el.dataset.key) || !stored.length) return;
+                el.addEventListener('input', () => markNeeds(el.value.trim() !== el.dataset.orig ? stored : []));
+                el.addEventListener('change', () => markNeeds(el.value.trim() !== el.dataset.orig ? stored : []));
+            });
+        }
+
+        // settings whose change makes a stored secret go somewhere else
+        const KEY_FOLLOWS = ['llm_server_url', 'llm_provider'];
+
+        // point at the settings a save must also carry (from a change here, or the server's "needs")
+        function markNeeds(keys) {
+            $('settings-fields').querySelectorAll('.setting-item').forEach((item) => {
+                const el = item.querySelector('[data-key]');
+                const on = !!el && keys.includes(el.dataset.key);
+                item.classList.toggle('needs', on);
+                const note = item.querySelector('.needs-note');
+                if (on && !note) item.append(h('span', { class: 'setting-description needs-note' }, 'Enter this again: a stored key is not sent to a changed server. Or tick Remove.'));
+                if (!on && note) note.remove();
+            });
+        }
+
+        async function saveSettings(ev) {
+            ev.preventDefault();
+            const msg = $('settings-message');
+            const changes = {};
+            $('settings-fields').querySelectorAll('[data-key]').forEach((el) => {
+                const key = el.dataset.key;
+                if (el.dataset.secret) {
+                    const clear = $('settings-fields').querySelector(`[data-clear="${key}"]`);
+                    if (clear && clear.checked) changes[key] = '';
+                    else if (el.value) changes[key] = el.value;
+                } else if (el.value.trim() !== el.dataset.orig) {
+                    changes[key] = el.value.trim();
+                }
+            });
+            if (!Object.keys(changes).length) { callout(msg, 'info', 'Nothing changed.'); return; }
+            const save = $('settings-save');
+            save.disabled = true;
+            callout(msg, 'info', 'Saving… (a running honeypot is recreated, which can take a minute)');
+            try {
+                const r = await api(`${API_BASE}/honeypots/settings`, { method: 'PUT', body: { name: settingsFor, settings: changes } });
+                settingsView = r;
+                renderSettings();
+                callout(msg, 'ok', r && typeof r.message === 'string' ? r.message : 'Saved.');
+                toast(`${capitalize(settingsFor)}: settings saved.`, 'ok');
+                loadSettingsIndex().catch(() => {});
+            } catch (e) {
+                if (e.status === 401 || e.status === 403) return;
+                const needs = e.body && Array.isArray(e.body.needs) ? e.body.needs.map(String) : [];
+                if (needs.length) markNeeds(needs);
+                let text = errorText(e);
+                if (needs.length) text += ` Fill in ${needs.join(', ')} too (or tick its Remove box).`;
+                if (e.body && e.body.saved) text = 'Saved, but: ' + text;
+                callout(msg, e.status === 409 ? 'warn' : 'error', text);
+            } finally {
+                save.disabled = false;
+            }
+        }
+
+        // ---------- Events ----------
+
+        const EV_LIMIT = 100;
+        let evOffset = 0, evHasMore = false;
+        // Whether this server filters events by more than the honeypot. A server without the event
+        // browser's filters answers without paging fields; then only the honeypot filter is offered,
+        // so the page never shows unfiltered events as if they were filtered.
+        let evFilters = null;
+        const EV_EXTRA = ['ev-ip', 'ev-type', 'ev-country', 'ev-q', 'ev-range'];
+        const RANGES = { '1h': 3600, '24h': 86400, '7d': 604800 };
+
+        function eventQuery() {
+            const q = new URLSearchParams({ limit: EV_LIMIT });
+            const hp = $('ev-honeypot').value;
+            if (hp) q.set('honeypot', hp);
+            if (evFilters === false) return q;
+            q.set('offset', evOffset);
+            const ip = $('ev-ip').value.trim(), type = $('ev-type').value.trim();
+            const country = $('ev-country').value.trim().toUpperCase(), text = $('ev-q').value.trim(), range = $('ev-range').value;
+            if (ip) q.set('source_ip', ip);
+            if (type) q.set('event_type', type);
+            if (country) q.set('country', country);
+            if (text) q.set('q', text);
+            if (RANGES[range]) q.set('since', String(Math.floor(Date.now() / 1000) - RANGES[range]));
+            return q;
+        }
+
+        // ask once, unfiltered, whether the server pages and filters events
+        async function probeEventFilters() {
+            if (evFilters !== null) return;
+            const data = await api(`${API_BASE}/events?limit=1`);
+            evFilters = !!(data && typeof data.has_more === 'boolean');
+            EV_EXTRA.forEach((id) => { $(id).disabled = !evFilters; });
+            if (!evFilters) {
+                callout($('events-error'), 'warn', 'This QPot filters events by honeypot only and shows the newest 100. The other filters and paging need a newer qpot serve.');
+            }
+        }
+
+        async function loadEvents() {
+            const tbody = $('events-body');
+            emptyRow(tbody, 7, 'Loading…', 'fa-spinner fa-spin');
+            try {
+                await probeEventFilters();
+                if (evFilters) callout($('events-error'), '', '');
+                const data = await api(`${API_BASE}/events?${eventQuery()}`);
+                const events = data && Array.isArray(data.events) ? data.events : [];
+                evHasMore = !!(evFilters && data && data.has_more);
+                if (!events.length) emptyRow(tbody, 7, evOffset ? 'No older events.' : 'No events match.', 'fa-filter');
+                else tbody.replaceChildren(...events.map((e) => eventRow(e, true)));
+                $('events-page').textContent = !events.length ? '' : evFilters
+                    ? `Events ${fmt(evOffset + 1)}–${fmt(evOffset + events.length)}${evHasMore ? '' : ' (the oldest)'}`
+                    : `The newest ${plural(events.length, 'event', 'events')}`;
+                $('events-note').textContent = describeFilter();
+            } catch (e) {
+                evHasMore = false;
+                tbody.replaceChildren();
+                if (e.status !== 401 && e.status !== 403) callout($('events-error'), 'error', 'The events could not be read: ' + errorText(e));
+            }
+            $('ev-prev').disabled = evOffset === 0;
+            $('ev-next').disabled = !evHasMore;
+        }
+
+        function describeFilter() {
+            const parts = [];
+            if ($('ev-honeypot').value) parts.push(capitalize($('ev-honeypot').value));
+            if (!evFilters) return parts.length ? parts.join(' · ') : 'all honeypots';
+            if ($('ev-ip').value.trim()) parts.push($('ev-ip').value.trim());
+            if ($('ev-type').value.trim()) parts.push($('ev-type').value.trim());
+            if ($('ev-country').value.trim()) parts.push($('ev-country').value.trim().toUpperCase());
+            if ($('ev-q').value.trim()) parts.push('"' + $('ev-q').value.trim() + '"');
+            const range = $('ev-range');
+            parts.push(range.options[range.selectedIndex].textContent.toLowerCase());
+            return parts.join(' · ');
+        }
+
+        // links from the home page: #events?honeypot=cowrie&range=24h, #events?source_ip=...
+        function applyEventLink(params) {
+            $('events-filter').reset();
+            if (params.get('honeypot')) $('ev-honeypot').value = params.get('honeypot');
+            if (params.get('source_ip')) $('ev-ip').value = params.get('source_ip');
+            if (params.get('event_type')) $('ev-type').value = params.get('event_type');
+            if (params.get('country')) $('ev-country').value = params.get('country');
+            if (params.get('q')) $('ev-q').value = params.get('q');
+            const r = params.get('range');
+            $('ev-range').value = r === '1m' || r === '1h' ? '1h' : r === '7d' || r === 'all' ? r : '24h';
+        }
+
+        // ---------- Threat Intel ----------
+
+        async function loadIntel() {
+            const { summary, techs, ttps } = await loadIntelSummary();
+            if (summary) {
+                $('ti-techniques').textContent = fmt(summary.techniques_observed);
+                $('ti-iocs').textContent = fmt(summary.iocs_total);
+                $('ti-campaigns').textContent = fmt(summary.active_sessions);
+                $('ti-worker').textContent = summary.worker_enabled ? 'On' : 'Off';
+                $('ti-worker-sub').textContent = summary.attck_loaded ? 'ATT&CK data loaded' : 'ATT&CK data not loaded';
+            }
+            const tb = $('ti-tech-body');
+            const tl = Array.isArray(techs) ? techs : [];
+            if (!tl.length) emptyRow(tb, 4, 'No techniques observed yet.', 'fa-crosshairs');
+            else tb.replaceChildren(...tl.map((t) => h('tr', {},
+                h('td', { class: 'mono-accent' }, String(t.technique_id || '')), h('td', { class: 'wrap' }, String(t.technique_name || '')),
+                h('td', { class: 'optional' }, String(t.tactic_name || '')), h('td', {}, fmt(t.count)))));
+            const sb = $('ti-ttp-body');
+            const sl = Array.isArray(ttps) ? ttps : [];
+            if (!sl.length) emptyRow(sb, 6, 'No campaigns yet.', 'fa-people-group');
+            else sb.replaceChildren(...sl.map((s) => h('tr', {},
+                h('td', { class: 'mono-accent wrap' }, Array.isArray(s.source_ips) ? s.source_ips.map(String).join(', ') : ''),
+                h('td', {}, plural(Array.isArray(s.techniques) ? s.techniques.length : 0, 'technique', 'techniques')),
+                h('td', { class: 'optional wrap' }, Array.isArray(s.kill_chain_stages) ? s.kill_chain_stages.filter(Boolean).map(String).join(' → ') : ''),
+                h('td', {}, fmt(s.event_count)),
+                h('td', { class: 'optional' }, ago(s.last_seen)),
+                h('td', { class: 'optional' }, Number.isFinite(Number(s.confidence)) ? Math.round(Number(s.confidence) * 100) + ' %' : ''))));
+            await loadIOCTable();
+        }
+
+        async function loadIOCTable() {
+            const type = $('ioc-type').value, hp = $('ioc-honeypot').value;
+            const q = new URLSearchParams({ limit: 200 });
+            if (type) q.set('type', type);
+            if (hp) q.set('honeypot', hp);
+            const tb = $('ti-ioc-body');
+            try {
+                const list = await api(`${API_BASE}/iocs?${q}`);
+                const iocs = Array.isArray(list) ? list : [];
+                if (!type) {
+                    // the types seen, for the filter
+                    const sel = $('ioc-type');
+                    const types = [...new Set(iocs.map((i) => String(i.type || '')).filter((t) => /^[a-z0-9_.-]{1,40}$/i.test(t)))].sort();
+                    sel.replaceChildren(h('option', { value: '' }, 'All types'), ...types.map((t) => h('option', { value: t }, t)));
+                }
+                if (!iocs.length) { emptyRow(tb, 6, 'No IOCs match.', 'fa-fingerprint'); return; }
+                tb.replaceChildren(...iocs.map((i) => h('tr', {},
+                    h('td', { class: 'mono-accent' }, String(i.type || '')), h('td', { class: 'wrap' }, String(i.value || '')),
+                    h('td', { class: 'optional' }, String(i.honeypot || '')), h('td', { class: 'optional' }, String(i.source_ip || '')),
+                    h('td', {}, fmt(i.count)), h('td', { class: 'optional' }, ago(i.last_seen)))));
+            } catch (e) {
+                if (e.status !== 401 && e.status !== 403) emptyRow(tb, 6, 'The IOCs could not be read: ' + errorText(e), 'fa-triangle-exclamation');
+            }
+        }
+
+        // ---------- Canaries ----------
+
+        const KIND = { web: 'web link', file: 'document', aws: 'AWS keys', credential: 'credential', 'ssh-key': 'SSH key' };
+
+        async function loadCanaries() {
+            const body = $('canary-body'), trips = $('trip-body');
+            let list, tl;
+            try {
+                [list, tl] = await Promise.all([api(`${API_BASE}/canaries`), api(`${API_BASE}/canaries/trips?limit=200`)]);
+            } catch (e) {
+                if (e.status === 401 || e.status === 403) return;
+                const text = e.status === 404 ? 'Canaries are turned off in this instance (canary.enabled in its config).' : 'The canaries could not be read: ' + errorText(e);
+                emptyRow(body, 6, text, 'fa-dove');
+                trips.replaceChildren();
+                lastData.delete(body);
+                lastData.delete(trips);
+                $('canary-form').querySelectorAll('input, select, button').forEach((el) => { el.disabled = e.status === 404; });
+                return;
+            }
+            const canaries = list && Array.isArray(list.canaries) ? list.canaries : [];
+            const planted = canaries.filter((c) => c.planted).length;
+            $('canary-note').textContent = `${plural(canaries.length, 'canary', 'canaries')}${planted ? `, ${fmt(planted)} planted in the honeypots` : ''}`;
+            if (unchanged(body, canaries)) { /* as shown */ }
+            else if (!canaries.length) emptyRow(body, 6, 'No canaries yet. Mint one above.', 'fa-dove');
+            else body.replaceChildren(...canaries.map(canaryRow));
+            const tripList = tl && Array.isArray(tl.trips) ? tl.trips : [];
+            if (unchanged(trips, tripList)) return;
+            if (!tripList.length) emptyRow(trips, 5, 'No trips. Nothing has touched a canary.', 'fa-bell-slash');
+            else trips.replaceChildren(...tripList.map((t) => h('tr', {},
+                timeCell(t.time),
+                h('td', { class: 'wrap' }, String(t.name || t.canary_id || ''), t.repeats ? h('span', { class: 'pill muted' }, `+${fmt(t.repeats)}`) : null),
+                h('td', { class: 'optional' }, String(t.channel || '')),
+                h('td', { class: 'mono-accent' }, String(t.source_ip || '')),
+                h('td', { class: 'optional wrap' }, [t.user_agent, t.detail].filter(Boolean).map(String).join(' · ')))));
+        }
+
+        function canaryRow(c) {
+            const kind = KIND[c.kind] || String(c.kind || '');
+            const actions = h('div', { class: 'hp-tools' },
+                h('button', { class: 'btn-base btn-secondary btn-icon hover-lift', type: 'button', title: 'Show the canary', onclick: () => showCanary(c) }, icon('fa-eye'), h('span', {}, 'Show')),
+                c.kind === 'file' ? h('button', { class: 'btn-base btn-secondary btn-icon hover-lift', type: 'button', title: 'Download the document', onclick: () => downloadArtifact(c) }, icon('fa-download'), h('span', {}, 'Document')) : null,
+                h('button', { class: 'btn-base btn-secondary btn-icon hover-lift', type: 'button', title: c.planted ? 'Planted by QPot: turned off with bait=off' : 'Delete the canary', onclick: () => deleteCanary(c) }, icon('fa-trash-can'), h('span', {}, 'Delete')));
+            return h('tr', {},
+                h('td', { class: 'wrap' }, String(c.name || c.id || ''), c.planted ? h('div', {}, pill('planted', 'accent'), ' ', h('span', { class: 'setting-description' }, 'turn off with bait=off')) : null),
+                h('td', {}, kind),
+                h('td', { class: 'optional wrap' }, String(c.memo || '')),
+                h('td', {}, c.trips ? pill(fmt(c.trips), 'bad') : '0'),
+                h('td', { class: 'optional' }, c.trips ? ago(c.last_trip) : 'never'),
+                h('td', {}, actions));
+        }
+
+        function canaryRows(c) {
+            const rows = [['Name', c.name], ['Kind', KIND[c.kind] || c.kind], ['Memo', c.memo], ['ID', c.id], ['Created', when(c.created_at)],
+                ['Trips', fmt(c.trips)], ['Last trip', c.trips ? when(c.last_trip) : '']];
+            if (c.url) rows.push(['Beacon URL', c.url]);
+            if (c.access_key_id) rows.push(['AWS access key ID', c.access_key_id], ['AWS secret access key', c.secret_access_key]);
+            if (Array.isArray(c.values)) c.values.forEach((v, i) => rows.push([`Watched value ${i + 1}`, v]));
+            if (c.public_key) rows.push(['Public key', c.public_key]);
+            if (c.planted) rows.push(['Planted', 'by QPot in its own honeypots (Cowrie bait). Turn it off with qpot honeypot set cowrie bait=off.']);
+            return rows;
+        }
+
+        function showCanary(c) {
+            showDetail('Canary', canaryRows(c));
+        }
+
+        async function mintCanary(ev) {
+            ev.preventDefault();
+            const out = $('canary-result');
+            const kind = $('cn-kind').value, name = $('cn-name').value.trim(), memo = $('cn-memo').value.trim();
+            if (!name) { callout(out, 'warn', 'Give the canary a name.'); return; }
+            callout(out, 'info', 'Minting…');
+            try {
+                const c = await api(`${API_BASE}/canaries`, { method: 'POST', body: { kind, name, memo } });
+                out.replaceChildren();
+                out.className = 'modal-message';
+                const dl = h('dl', { class: 'kv' });
+                for (const [k, v] of canaryRows(c || {})) if (v) dl.append(h('dt', {}, k), h('dd', {}, String(v)));
+                out.append(h('div', { class: 'callout ok' }, icon('fa-check'), h('span', {},
+                    kind === 'web' ? 'Minted. Plant the beacon URL where only an intruder would open it.' :
+                    kind === 'file' ? 'Minted. Download the document and leave it where an intruder would open it.' :
+                                      'Minted. Plant the keys where an intruder would try them.')), dl);
+                if (c && c.kind === 'file') out.append(h('div', { class: 'actions-row' }, h('button', { class: 'btn-base btn-primary hover-lift', type: 'button', onclick: () => downloadArtifact(c) }, icon('fa-download'), ' Download the document')));
+                $('canary-form').reset();
+                loadCanaries();
+            } catch (e) {
+                if (e.status !== 401 && e.status !== 403) callout(out, 'error', 'The canary was not minted: ' + errorText(e));
+            }
+        }
+
+        async function downloadArtifact(c) {
+            try {
+                const f = await download(`${API_BASE}/canaries/artifact?id=${encodeURIComponent(c.id)}`, 'canary.html');
+                toast(`Saved ${f.name}.`, 'ok');
+            } catch (e) {
+                if (e.status !== 401 && e.status !== 403) toast('The document could not be downloaded: ' + errorText(e), 'error');
+            }
+        }
+
+        async function deleteCanary(c) {
+            if (!(await confirmAction(`Delete the canary "${c.name || c.id}"? Its trips stay in the list.`, 'Delete'))) return;
+            try {
+                await api(`${API_BASE}/canaries?id=${encodeURIComponent(c.id)}`, { method: 'DELETE' });
+                toast('Canary deleted.', 'ok');
+            } catch (e) {
+                if (e.status === 401 || e.status === 403) return;
+                if (e.status === 409) toast(`${e.message} It is planted in the honeypots: turn it off with qpot honeypot set cowrie bait=off.`, 'error');
+                else toast('The canary was not deleted: ' + errorText(e), 'error');
+            }
+            loadCanaries();
+        }
+
+        // ---------- Overview ----------
+
+        function setGauge(key, g) {
+            g = g || {};
+            const pct = Math.max(0, Math.min(100, Number(g.pct) || 0));
+            $('ov-' + key).textContent = pct + '%';
+            $('ov-' + key + '-cap').textContent = typeof g.caption === 'string' ? g.caption : '';
+            const bar = $('ov-' + key + '-bar');
+            bar.style.width = pct + '%';
+            bar.className = pct >= 90 ? 'crit' : pct >= 70 ? 'warn' : '';
+        }
+
+        const SEVERITY = { critical: 'bad', warn: 'warn', info: 'ok' };
+
+        async function loadOverview() {
+            const ov = await api(`${API_BASE}/overview`);
+            if (!ov) return;
+            setGauge('cpu', ov.cpu); setGauge('mem', ov.memory); setGauge('disk', ov.disk); setGauge('procs', ov.processes);
+            $('ov-host').textContent = String(ov.hostname || '-');
+            const up = ov.started_at ? (Date.now() - new Date(ov.started_at).getTime()) / 1000 : 0;
+            $('ov-host-sub').textContent = `${ov.os || ''}/${ov.arch || ''} · qpot ${ov.version || ''} · up ${fmtUptime(up)}`;
+            $('ov-events').textContent = fmt(ov.events_24h);
+            $('ov-rate').textContent = `${(Number(ov.events_per_sec) || 0).toFixed(2)} per second`;
+            $('ov-ips').textContent = fmt(ov.unique_ips_24h);
+            $('ov-db').textContent = String(ov.database || '-');
+            $('ov-cluster').textContent = (ov.database_ok ? 'connected' : 'not reachable') + ' · ' +
+                (ov.cluster ? `cluster ${ov.cluster.name}: ${fmt(ov.cluster.healthy)}/${fmt(ov.cluster.nodes)} healthy` : 'standalone');
+            const hps = (Array.isArray(ov.honeypots) ? ov.honeypots : []).filter((x) => x && (x.enabled || x.hits_24h))
+                .sort((a, b) => (Number(b.hits_24h) || 0) - (Number(a.hits_24h) || 0));
+            const tb = $('ov-honeypots');
+            if (!hps.length) emptyRow(tb, 4, 'No honeypots enabled.', 'fa-server');
+            else tb.replaceChildren(...hps.map((x) => h('tr', {},
+                h('td', { class: 'honeypot-cell' }, capitalize(x.name)), h('td', {}, Number.isInteger(x.port) ? String(x.port) : '-'),
+                h('td', {}, fmt(x.hits_24h)), h('td', {}, x.enabled ? pill('on', 'ok') : pill('off', 'muted')))));
+            const evs = Array.isArray(ov.recent_events) ? ov.recent_events : [];
+            const eb = $('ov-events-list');
+            if (!evs.length) emptyRow(eb, 5, 'No events yet.', 'fa-moon');
+            else eb.replaceChildren(...evs.map((e) => h('tr', {},
+                timeCell(e.time), clipCell(e.honeypot, 'honeypot-cell'),
+                h('td', { class: 'clip mono-accent', title: String(e.source_ip || '').length > 24 ? String(e.source_ip) : null }, flag(e.country), e.country ? ' ' : '', String(e.source_ip || '')),
+                h('td', { class: 'optional wrap' }, String(e.summary || ''), e.technique ? ' · ' + String(e.technique) : ''),
+                h('td', {}, pill(String(e.severity || 'info'), SEVERITY[e.severity] || 'muted')))));
+        }
+
+        // ---------- This instance (GET /api/instance) ----------
+
+        const AUTH = { 'qpot-id': 'QPot ID', basic: 'user name and password', none: 'none (open to anyone who can reach it)' };
+
+        function factRow(dl, label, ...value) {
+            dl.append(h('dt', {}, label), h('dd', {}, ...value));
+        }
+
+        async function loadInstance() {
+            const dl = $('inst-facts'), tb = $('inst-services');
+            let inst;
+            try {
+                inst = await api(`${API_BASE}/instance`);
+            } catch (e) {
+                if (e.status === 401 || e.status === 403) return;
+                dl.replaceChildren(h('div', { class: 'callout ' + (e.status === 404 ? 'warn' : 'error') }, icon('fa-circle-exclamation'),
+                    h('span', {}, e.status === 404 ? 'The instance facts need a newer qpot serve.' : 'The instance facts could not be read: ' + errorText(e))));
+                tb.replaceChildren();
+                lastData.delete(dl);
+                return;
+            }
+            if (!inst || unchanged(dl, inst)) return;
+            dl.replaceChildren();
+            const status = String(inst.status || 'unknown');
+            $('inst-note').textContent = String(inst.version || '');
+            factRow(dl, 'Name', String(inst.name || ''));
+            factRow(dl, 'Status', pill(status, status === 'running' ? 'ok' : status === 'stopped' ? 'warn' : 'bad'),
+                inst.services_error ? h('span', { class: 'setting-description' }, ' ' + String(inst.services_error)) : null);
+            const w = inst.web_ui || {};
+            factRow(dl, 'Web UI', `${String(w.bind_addr || '')}:${Number.isInteger(w.port) ? w.port : ''}`, ' · sign-in: ' + (AUTH[w.auth] || String(w.auth || '')));
+            const db = inst.database || {};
+            factRow(dl, 'Database', String(db.type || ''), ' ', db.healthy ? pill('healthy', 'ok') : pill('not healthy', 'bad'),
+                Number.isInteger(db.schema_version) ? ` schema ${db.schema_version}` : '', db.error ? h('div', { class: 'setting-description' }, String(db.error)) : null);
+            const g = inst.geoip || {};
+            const geo = g.present ? `${String(g.file || '')}, updated ${when(g.updated).slice(0, 10)}${Number.isFinite(g.age_days) ? ` (${plural(g.age_days, 'day', 'days')} ago)` : ''}`
+                : g.configured ? 'the file is missing' : 'not set up';
+            factRow(dl, 'GeoIP', geo, g.update_command ? h('div', {}, h('code', { class: 'cmd' }, String(g.update_command))) : null,
+                g.attribution ? h('div', { class: 'setting-description' }, String(g.attribution)) : null);
+            const am = inst.attack_map || {};
+            factRow(dl, 'Sensor on the map', flag(am.country) || '', ' ', String(am.country || "from the host's time zone"));
+            const cn = inst.canary || {};
+            factRow(dl, 'Canaries', cn.enabled ? pill('on', 'ok') : pill('off', 'muted'), cn.base_url ? ' ' + String(cn.base_url) : '');
+            const it = inst.intelligence || {};
+            factRow(dl, 'Threat intel', it.enabled ? pill('on', 'ok') : pill('off', 'muted'), it.enabled ? (it.worker_running ? ' classifier running' : ' classifier not running') : '');
+            const al = inst.alerts || {};
+            factRow(dl, 'Alerts', al.enabled ? pill('on', 'ok') : pill('off', 'muted'),
+                ` webhook ${al.webhook_configured ? 'set' : 'not set'} · ${plural(al.response_hooks, 'response hook', 'response hooks')}`);
+            const cl = inst.cluster || {};
+            factRow(dl, 'Cluster', cl.clustered ? `${String(cl.name || '')}: ${fmt(cl.healthy)} of ${plural(cl.nodes, 'node', 'nodes')} healthy` : 'standalone');
+            const svc = Array.isArray(inst.services) ? inst.services : [];
+            if (!svc.length) emptyRow(tb, 3, status === 'unknown' ? 'Docker did not answer.' : 'No services: the instance is stopped (qpot up starts it).', 'fa-cubes');
+            else tb.replaceChildren(...svc.map((s) => h('tr', {},
+                h('td', { class: 'honeypot-cell' }, String(s.name || '')),
+                h('td', {}, pill(String(s.state || 'unknown'), s.state === 'running' ? 'ok' : 'warn')),
+                h('td', {}, s.health ? pill(String(s.health), s.health === 'healthy' ? 'ok' : s.health === 'starting' ? 'warn' : 'bad') : ''))));
+        }
+
+        // ---------- Doctor ----------
+
+        // qpot doctor's checks, read-only (GET /api/doctor: one run at a time, reused for 10 s);
+        // every QP code links to its explanation (GET /api/doctor/explain)
+        const LEVEL = { ok: ['ok', 'ok'], warn: ['warning', 'warn'], fail: ['failed', 'bad'] };
+        const QP_CODE = /^QP-[A-Z]+-\d{3}$/;
+        let doctorBusy = false;
+        let doctorRan = null;
+        let codesLoaded = false;
+        let allCodes = [];
+
+        // the age of the last run, kept current by the 10 s timer (the checks themselves are not re-run)
+        function doctorAgo() {
+            if (!doctorRan) return;
+            $('doc-ran-sub').textContent = ago(doctorRan.at) + (doctorRan.cached ? ' · the last run, reused for 10 s' : '');
+        }
+
+        function codeButton(code) {
+            const c = String(code || '');
+            return QP_CODE.test(c) ? h('button', { type: 'button', class: 'code-btn', title: `What ${c} means`, onclick: () => explainCode(c) }, c) : c;
+        }
+
+        function showMessage(el, kind, text) {
+            callout(el, kind, text);
+            el.classList.toggle('hidden', !text);
+        }
+
+        // an older qpot serve has no doctor API: the host commands below still work
+        function doctorUnavailable(on) {
+            $('doctor-unavailable').classList.toggle('hidden', !on);
+            ['doctor-stats', 'doctor-checks-card', 'doctor-ref'].forEach((id) => $(id).classList.toggle('hidden', on));
+            if (on) $('doctor-failure-card').classList.add('hidden');
+        }
+
+        async function loadDoctor(again) {
+            if (doctorBusy) return;
+            doctorBusy = true;
+            const btn = $('doctor-run'), body = $('doctor-body');
+            btn.disabled = true;
+            if (again || !lastData.has(body)) {
+                $('doc-result').textContent = 'Checking';
+                $('doc-result').className = 'stat-value';
+                $('doc-result-sub').textContent = 'usually a second; a minute or two at worst';
+            }
+            let rep;
+            try {
+                rep = await api(`${API_BASE}/doctor`);
+            } catch (e) {
+                if (e.status === 401 || e.status === 403) return;
+                if (e.status === 404 && !e.code) { doctorUnavailable(true); return; }
+                $('doc-result').textContent = '-';
+                $('doc-result-sub').textContent = '';
+                emptyRow(body, 5, 'The checks could not run: ' + errorText(e), 'fa-triangle-exclamation');
+                lastData.delete(body);
+                return;
+            } finally {
+                doctorBusy = false;
+                btn.disabled = false;
+            }
+            doctorUnavailable(false);
+            renderDoctor(rep || {});
+        }
+
+        function renderDoctor(rep) {
+            const checks = Array.isArray(rep.checks) ? rep.checks : [];
+            const of = (lv) => checks.filter((c) => c.level === lv);
+            const failed = of('fail'), warned = of('warn');
+            const names = (list) => list.slice(0, 2).map((c) => String(c.name || '')).join(', ') + (list.length > 2 ? ` and ${fmt(list.length - 2)} more` : '');
+            const res = $('doc-result');
+            res.textContent = rep.ok ? 'Healthy' : 'Needs a fix';
+            res.className = 'stat-value ' + (rep.ok ? 'good' : 'bad');
+            $('doc-result-sub').replaceChildren(rep.ok ? `${plural(checks.length, 'check', 'checks')} passed`
+                : h('span', {}, 'first: ', h('span', { class: 'nowrap' }, String(rep.first_fail_code || ''))));
+            $('doc-fail').textContent = fmt(failed.length);
+            $('doc-fail-sub').textContent = failed.length ? names(failed) : 'none';
+            $('doc-warn').textContent = fmt(warned.length);
+            $('doc-warn-sub').textContent = warned.length ? names(warned) : 'none';
+            $('doc-ran').textContent = when(rep.ran_at).slice(11) || '-';
+            doctorRan = { at: rep.ran_at, cached: !!rep.cached };
+            doctorAgo();
+
+            const f = rep.failure;
+            $('doctor-failure-card').classList.toggle('hidden', !f);
+            if (f) {
+                $('doctor-failure-code').replaceChildren(codeButton(f.code));
+                const dl = $('doctor-failure');
+                dl.replaceChildren();
+                factRow(dl, 'What', String(f.title || ''));
+                factRow(dl, 'Cause', String(f.cause || ''));
+                factRow(dl, 'Fix', String(f.fix || ''));
+            }
+
+            const body = $('doctor-body');
+            if (unchanged(body, checks)) return;
+            if (!checks.length) { emptyRow(body, 5, 'No checks ran.', 'fa-list-check'); return; }
+            body.replaceChildren(...checks.map((c) => {
+                const [word, kind] = LEVEL[c.level] || [String(c.level || 'unknown'), 'muted'];
+                const detail = String(c.detail || '');
+                return h('tr', { class: c.level === 'fail' ? 'row-fail' : null },
+                    h('td', { class: 'optional' }, capitalize(c.section)),
+                    h('td', { class: 'wrap' }, String(c.name || ''),
+                        c.level !== 'ok' && detail ? h('div', { class: 'cell-sub phone-only' }, detail) : null),
+                    h('td', {}, pill(word, kind)),
+                    h('td', { class: 'optional wrap' }, detail),
+                    h('td', { class: 'code-cell', title: c.title ? String(c.title) : null }, codeButton(c.code)));
+            }));
+        }
+
+        async function loadCodes() {
+            if (codesLoaded) return;
+            let data;
+            try {
+                data = await api(`${API_BASE}/doctor/codes`);
+            } catch (e) {
+                if (e.status === 401 || e.status === 403) return;
+                emptyRow($('codes-body'), 3, e.status === 404 && !e.code ? 'The code list needs a newer qpot serve.' : 'The code list could not be read: ' + errorText(e), 'fa-book');
+                return;
+            }
+            codesLoaded = true;
+            allCodes = Array.isArray(data && data.codes) ? data.codes : [];
+            const cats = Array.isArray(data && data.categories) ? data.categories : [];
+            $('codes-category').replaceChildren(h('option', { value: '' }, 'All categories'),
+                ...cats.map((c) => h('option', { value: String(c.key || '') }, String(c.name || c.key || ''))));
+            renderCodes();
+        }
+
+        function renderCodes() {
+            const cat = $('codes-category').value;
+            const list = allCodes.filter((c) => !cat || c.category === cat);
+            if (!list.length) { emptyRow($('codes-body'), 3, 'No codes.', 'fa-book'); return; }
+            $('codes-body').replaceChildren(...list.map((c) => h('tr', {},
+                h('td', { class: 'code-cell' }, codeButton(c.code)),
+                h('td', { class: 'wrap' }, String(c.title || '')),
+                h('td', { class: 'optional' }, Number.isInteger(c.exit_status) ? String(c.exit_status) : ''))));
+        }
+
+        async function explainCode(code) {
+            const input = $('explain-code'), out = $('explain-result'), msg = $('explain-message');
+            if (code !== undefined) input.value = code;
+            const c = input.value.trim();
+            if (!c) { input.reportValidity(); return; }
+            out.replaceChildren();
+            showMessage(msg, '', '');
+            try {
+                const x = await api(`${API_BASE}/doctor/explain?code=${encodeURIComponent(c)}`);
+                if (!x) return;
+                factRow(out, 'Code', String(x.code || ''));
+                factRow(out, 'What', String(x.title || ''));
+                factRow(out, 'Category', String(x.category_name || x.category || '') + (Number.isInteger(x.exit_status) ? ` (exit status ${x.exit_status})` : ''));
+                factRow(out, 'Cause', String(x.cause || ''));
+                factRow(out, 'Fix', String(x.fix || ''));
+            } catch (e) {
+                if (e.status === 401 || e.status === 403) return;
+                showMessage(msg, 'error', e.status === 404 && !e.code ? 'Explaining codes needs a newer qpot serve.' : errorText(e));
+            }
+            if (code !== undefined) {
+                const still = matchMedia('(prefers-reduced-motion: reduce)').matches;
+                $('explain-card').scrollIntoView({ behavior: still ? 'auto' : 'smooth', block: 'nearest' });
+            }
+        }
+
+        // ---------- Pairing / Networking ----------
+
+        async function loadPairing() {
+            const data = await api(`${API_BASE}/cluster`);
+            const list = $('pairing-list');
+            if (!data || !data.clustered) {
+                $('grp-name').textContent = 'None';
+                $('grp-id').textContent = 'standalone node';
+                $('grp-count').textContent = '0';
+                $('grp-online').textContent = '0';
+                $('grp-online-sub').textContent = 'healthy nodes';
+                $('grp-events').textContent = '0';
+                emptyRow(list, 5, 'This node is standalone. Pair honeypots into a group with qpot cluster init / qpot cluster join on the hosts.', 'fa-circle-nodes');
+                return;
+            }
+            const g = data.group || {}, nodes = Array.isArray(data.nodes) ? data.nodes : [];
+            $('grp-name').textContent = String(g.name || 'group');
+            $('grp-id').textContent = String(g.id || '');
+            $('grp-count').textContent = fmt(g.node_count || nodes.length);
+            $('grp-online').textContent = fmt(g.healthy_nodes);
+            $('grp-online-sub').textContent = `${fmt(g.suspect_nodes)} suspect · ${fmt(g.failed_nodes)} failed`;
+            $('grp-events').textContent = fmt(g.total_events);
+            if (!nodes.length) { emptyRow(list, 5, 'No nodes yet.', 'fa-circle-nodes'); return; }
+            list.replaceChildren(...nodes.map((n) => h('tr', {},
+                h('td', {}, String(n.name || ''), n.is_local ? h('span', { class: 'setting-description' }, ' (this node)') : null),
+                h('td', { class: 'optional mono-accent' }, String(n.address || '')),
+                h('td', {}, n.online ? pill('online', 'ok') : pill(String(n.status || 'offline'), 'bad')),
+                h('td', { class: 'optional' }, fmtUptime(n.uptime_seconds)),
+                h('td', {}, fmt(n.total_events)))));
+        }
+
+        // ---------- Security ----------
+
+        async function loadSecurity() {
+            await Promise.all([loadStatus(), loadHoneypots()]);
+            $('sec-auth').textContent = 'QPot ID';
+            $('sec-sandbox').textContent = 'Containers';
+            const tb = $('security-list');
+            if (!honeypots.length) { emptyRow(tb, 4, 'No honeypots configured.', 'fa-shield-halved'); return; }
+            tb.replaceChildren(...honeypots.map((hp) => h('tr', {},
+                h('td', { class: 'honeypot-cell' }, capitalize(hp.name)),
+                h('td', {}, riskPill(hp.risk)),
+                h('td', { class: 'optional' }, Number.isInteger(hp.port) ? String(hp.port) : ''),
+                h('td', {}, hp.enabled ? pill('enabled', 'ok') : pill('disabled', 'muted')))));
+        }
+
+        // ---------- modals ----------
+
+        // A closing dialog fades out for 0.3 s; inert takes it out of the page's clicks and focus at
+        // once, so a tap meant for the page under it is not caught by the fading dialog.
+        function openModal(id) {
+            const m = $(id);
+            m.inert = false;
+            m.classList.add('active');
+            const focus = m.querySelector('select, input, button:not([data-close])') || m.querySelector('button');
+            if (focus) setTimeout(() => focus.focus(), 30);
+        }
+
+        function closeModals() {
+            document.querySelectorAll('.modal.active').forEach((m) => { m.classList.remove('active'); m.inert = true; });
+            if (confirmResolve) { confirmResolve(false); confirmResolve = null; }
+        }
+
+        let confirmResolve = null;
+        function confirmAction(text, okLabel) {
+            $('confirm-text').textContent = text;
+            $('confirm-ok').textContent = okLabel || 'Yes';
+            openModal('confirm-modal');
+            return new Promise((resolve) => { confirmResolve = resolve; });
+        }
+
+        // ---------- tabs and refresh ----------
+
+        const TABS = ['dashboard', 'events', 'intel', 'canaries', 'overview', 'doctor', 'pairing', 'security'];
+        let current = 'dashboard';
+        let refreshTimer = null;
+
+        async function loadTab(name) {
+            try {
+                if (name === 'dashboard') await refreshDashboard();
+                else if (name === 'events') await loadEvents();
+                else if (name === 'intel') await loadIntel();
+                else if (name === 'canaries') await loadCanaries();
+                else if (name === 'overview') await Promise.all([loadOverview(), loadInstance()]);
+                else if (name === 'doctor') await Promise.all([loadStatus(), loadDoctor(false), loadCodes()]);
+                else if (name === 'pairing') await loadPairing();
+                else if (name === 'security') await loadSecurity();
+            } catch (e) {
+                if (e.status !== 401 && e.status !== 403) toast(errorText(e), 'error');
+            }
+        }
+
+        function switchTab(name, opts) {
+            if (!TABS.includes(name)) name = 'dashboard';
+            current = name;
+            TABS.forEach((t) => $('tab-' + t).classList.toggle('active', t === name));
+            document.querySelectorAll('.dash-tabs .tab-btn').forEach((b) => {
+                const on = b.dataset.tab === name;
+                b.classList.toggle('active', on);
+                b.setAttribute('aria-selected', String(on));
+            });
+            if (!(opts && opts.keepHash)) history.replaceState(null, '', name === 'dashboard' ? location.pathname : '#' + name);
+            loadTab(name);
+        }
+
+        // #overview, #pairing, #security, #intel, #canaries, #events?honeypot=cowrie&range=24h
+        function openFromHash() {
+            const raw = (location.hash || '').slice(1);
+            const [name, query] = raw.split('?');
+            if (name === 'events' && query !== undefined) applyEventLink(new URLSearchParams(query));
+            evOffset = 0;
+            switchTab(TABS.includes(name) ? name : 'dashboard', { keepHash: true });
+        }
+
+        // the navbar's numbers and status pill, whatever tab is open
+        function loadHeader() {
+            return Promise.allSettled([loadStatus(), loadStats()]);
+        }
+
+        function stopRefresh() {
+            clearInterval(refreshTimer);
+            refreshTimer = null;
+        }
+
+        function startRefresh() {
+            stopRefresh();
+            // the live tabs again every 10 s; the event browser only when asked
+            refreshTimer = setInterval(() => {
+                if (!currentQPotID || document.hidden) return;
+                if (document.querySelector('.modal.active')) return;
+                if (['dashboard', 'overview', 'canaries', 'pairing'].includes(current)) loadTab(current);
+                if (current === 'doctor') doctorAgo();
+                if (current !== 'dashboard') loadHeader();
             }, 10000);
         }
 
-        // Download the extracted IOCs as a MISP event (GET /api/iocs/export).
-        async function exportData() {
-            try {
-                const r = await fetch(`${API_BASE}/iocs/export?format=misp`, { headers: { 'X-QPot-ID': currentQPotID } });
-                if (!r.ok) { showToast('Export failed'); return; }
-                const url = URL.createObjectURL(await r.blob());
-                const a = document.createElement('a');
-                a.href = url;
-                a.download = 'qpot-iocs-misp.json';
-                document.body.appendChild(a);
-                a.click();
-                a.remove();
-                URL.revokeObjectURL(url);
-            } catch (e) { showToast('Export failed'); }
+        async function start() {
+            currentQPotID = storedID();
+            if (!currentQPotID) { signedOut(''); signingOut = false; return; }
+            signingOut = false;
+            showApp();
+            startRefresh();
+            loadSettingsIndex().catch(() => {});
+            loadHeader();
+            // the honeypot lists first, so a link like #events?honeypot=cowrie can select its honeypot
+            await loadHoneypots().catch(() => {});
+            if (!currentQPotID) return;
+            openFromHash();
         }
 
-        function capitalize(str) {
-            return str.charAt(0).toUpperCase() + str.slice(1);
-        }
+        // ---------- wiring (handlers by addEventListener only) ----------
 
-        // Handle Enter key in auth input
-        document.getElementById('qpot-id-input').addEventListener('keypress', function(e) {
-            if (e.key === 'Enter') {
-                authenticate();
-            }
+        $('auth-form').addEventListener('submit', authenticate);
+        document.querySelectorAll('.dash-tabs .tab-btn').forEach((b) => b.addEventListener('click', () => { evOffset = 0; switchTab(b.dataset.tab); }));
+        document.querySelectorAll('[data-goto]').forEach((b) => b.addEventListener('click', () => { evOffset = 0; switchTab(b.dataset.goto); }));
+        $('refresh-btn').addEventListener('click', () => { loadTab(current); toast('Refreshed.'); });
+        $('action-refresh').addEventListener('click', () => { refreshDashboard(); toast('Refreshed.'); });
+        $('action-logs').addEventListener('click', () => openLogs(''));
+        $('action-export').addEventListener('click', () => exportMISP());
+        $('ioc-export').addEventListener('click', () => exportMISP({ type: $('ioc-type').value, honeypot: $('ioc-honeypot').value }));
+        $('ioc-type').addEventListener('change', loadIOCTable);
+        $('ioc-honeypot').addEventListener('change', loadIOCTable);
+        $('logs-load').addEventListener('click', loadLogs);
+        $('logs-honeypot').addEventListener('change', loadLogs);
+        $('settings-form').addEventListener('submit', saveSettings);
+        $('doctor-run').addEventListener('click', () => loadDoctor(true));
+        $('explain-form').addEventListener('submit', (ev) => { ev.preventDefault(); explainCode(); });
+        $('codes-category').addEventListener('change', renderCodes);
+        $('events-filter').addEventListener('submit', (ev) => { ev.preventDefault(); evOffset = 0; loadEvents(); });
+        $('ev-reset').addEventListener('click', () => { setTimeout(() => { evOffset = 0; loadEvents(); }, 0); });
+        $('ev-prev').addEventListener('click', () => { evOffset = Math.max(0, evOffset - EV_LIMIT); loadEvents(); });
+        $('ev-next').addEventListener('click', () => { if (evHasMore) { evOffset += EV_LIMIT; loadEvents(); } });
+        $('canary-form').addEventListener('submit', mintCanary);
+        $('id-btn').addEventListener('click', () => openModal('id-modal'));
+        $('id-copy').addEventListener('click', () => {
+            if (!navigator.clipboard) { toast('This browser does not allow copying here.', 'error'); return; }
+            navigator.clipboard.writeText(currentQPotID).then(() => toast('QPot ID copied.', 'ok'), () => toast('Copying was refused.', 'error'));
         });
+        $('id-signout').addEventListener('click', () => { signedOut('Signed out. Sign in again with the QPot ID.'); });
+        $('confirm-ok').addEventListener('click', () => {
+            const r = confirmResolve;
+            confirmResolve = null;
+            $('confirm-modal').classList.remove('active');
+            $('confirm-modal').inert = true;
+            if (r) r(true);
+        });
+        document.querySelectorAll('.modal').forEach((m) => {
+            m.addEventListener('click', (ev) => { if (ev.target === m || ev.target.closest('[data-close]')) closeModals(); });
+        });
+        document.addEventListener('keydown', (ev) => { if (ev.key === 'Escape') closeModals(); });
+        window.addEventListener('hashchange', openFromHash);
+        window.addEventListener('storage', (ev) => { if (ev.key === KEY && !ev.newValue && currentQPotID) signedOut('Signed out in another tab.'); });
 
-        // Auto-refresh every 30 seconds
-        setInterval(() => {
-            if (currentQPotID) {
-                loadData();
-            }
-        }, 30000);
+        // test hook, as the old page had: switchTab('overview') from the console or a test
+        window.switchTab = (name) => switchTab(name);
 
-        // Check auth on load
-        checkAuth();
+        start();
+    })();
     </script>
 </body>
 </html>
