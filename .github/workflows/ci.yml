@@ -30,6 +30,8 @@ name: CI
 #                  Fedora, Rocky, openSUSE, and musl-based Alpine) - catches
 #                  runtime-portability breaks a cross-compile cannot.
 #   coverage     - reports total/per-package coverage and guards a low floor.
+#   install-windows - scripts/install.ps1 against a local fake release, on
+#                  PowerShell 7 and Windows PowerShell 5.1.
 # (CodeQL semantic analysis runs from its own workflow, codeql.yml; deeper
 #  scheduled fuzzing runs from fuzz.yml.)
 
@@ -561,3 +563,21 @@ jobs:
             coverage.out
             coverage.txt
           if-no-files-found: warn
+
+  install-windows:
+    name: Windows installer against a local fake release
+    runs-on: windows-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: install.ps1 on PowerShell 7
+        shell: pwsh
+        run: ./scripts/test-install.ps1
+      - name: install.ps1 on Windows PowerShell 5.1
+        shell: pwsh
+        run: powershell -NoProfile -ExecutionPolicy Bypass -File ./scripts/test-install.ps1

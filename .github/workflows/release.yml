@@ -1,0 +1,107 @@
+name: Release
+
+# Publishes a QPot release when a maintainer pushes a version tag (v0.1.0).
+# Nothing else starts it: no schedule, no branch push.
+#
+# What it publishes, and what the installers check:
+#   qpot_<version>_<os>_<arch>.tar.gz / .zip   the program, LICENSE, README
+#   SHA256SUMS                                  one checksum per archive;
+#       scripts/install.sh and install.ps1 refuse an archive that does not
+#       match its entry, a missing entry or a malformed list
+#   qpot_<version>_provenance.sigstore.json     a signed SLSA build-provenance
+#       attestation for every archive (GitHub artifact attestations, keyless
+#       through Sigstore). The installers verify it with the GitHub CLI when
+#       it is installed:
+#         gh attestation verify <archive> --bundle <this file> \
+#           --repo YurilLAB/QPot --signer-workflow YurilLAB/QPot/.github/workflows/release.yml \
+#           --source-ref refs/tags/v<version> --deny-self-hosted-runners
+#       It is also stored on GitHub: gh attestation verify <archive> --repo YurilLAB/QPot
+#
+# The archives are reproducible: rebuilding the tag's commit with the same Go
+# gives byte-identical files (go run ./cmd/qpot-release pack), so anyone can
+# compare them with SHA256SUMS.
+#
+# Before tagging, make the tag match the version the installers download
+# (QPOT_VERSION in scripts/install.sh and install.ps1, VERSION in the
+# Makefile); the first step refuses a tag that does not. After the release,
+# set QPOT_SOURCE_COMMIT_PINNED in both installers to the tag's commit.
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    name: Build, attest and publish
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: write      # create the release and upload its files
+      id-token: write      # sign the provenance with the workflow's identity
+      attestations: write  # store the provenance attestation on GitHub
+    steps:
+      # Actions are pinned to commits (a tag can be moved); the comment names
+      # the release each commit is.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          # No build cache: a release is built from the tag alone.
+          cache: false
+
+      - name: Check the tag matches the installers' version
+        env:
+          TAG: ${{ github.ref_name }}
+        run: go run ./cmd/qpot-release check-version -tag "$TAG"
+
+      - name: Test the release tools and the installers' checks
+        run: |
+          go test ./internal/release/... ./cmd/qpot-release/...
+          bash scripts/test-install.sh
+
+      - name: Build the archives and SHA256SUMS
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          go run ./cmd/qpot-release pack -version "${TAG#v}" -commit "$GITHUB_SHA" -out dist
+          (cd dist && sha256sum -c SHA256SUMS)
+
+      - name: Attest build provenance
+        id: attest
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-checksums: dist/SHA256SUMS
+
+      - name: Check the provenance the way the installers do
+        env:
+          TAG: ${{ github.ref_name }}
+          BUNDLE: ${{ steps.attest.outputs.bundle-path }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          prov="dist/qpot_${TAG#v}_provenance.sigstore.json"
+          cp "$BUNDLE" "$prov"
+          for f in dist/qpot_*.tar.gz dist/qpot_*.zip; do
+            gh attestation verify "$f" --bundle "$prov" --repo "$GITHUB_REPOSITORY" \
+              --signer-workflow "$GITHUB_REPOSITORY/.github/workflows/release.yml" \
+              --source-ref "$GITHUB_REF" --deny-self-hosted-runners
+          done
+
+      - name: Publish the release
+        env:
+          TAG: ${{ github.ref_name }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$TAG" --verify-tag --title "QPot $TAG" --generate-notes \
+            dist/qpot_* dist/SHA256SUMS

@@ -53,6 +53,17 @@ The installers offer to run `qpot setup` straight away (`QPOT_NO_SETUP=1`
 installs the program only; `QPOT_SETUP_ARGS="--yes --install-docker"` runs
 setup without questions).
 
+Before they install anything, the installers check what they downloaded: the
+release archive must match its line in the release's `SHA256SUMS`, downloads
+may only come from GitHub's release servers (a redirect elsewhere stops
+them), and with the [GitHub CLI](https://cli.github.com) installed they also
+verify the archive's build provenance (`QPOT_REQUIRE_PROVENANCE=1` makes that
+check mandatory). Until a release is published they build from source
+instead, but only the one commit they pin, which git checks by its hash; Go
+checks every dependency against that commit's `go.sum`. Any
+failed check stops with a coded error ([doc/setup-errors.md](doc/setup-errors.md))
+and installs nothing.
+
 Set up and start an instance:
 
 ```bash
@@ -464,6 +475,33 @@ docker/              honeypot images, ssh-proxy/ssh-backend, Kibana connector
 
 CI runs build, gofmt, vet, staticcheck, race tests, fuzzing, govulncheck,
 gosec, gitleaks and a multi-distro smoke test on every push.
+
+### Releases
+
+Pushing a version tag (`v0.1.0`) runs `.github/workflows/release.yml`, which:
+
+1. refuses a tag that is not the version the installers download
+   (`QPOT_VERSION` in `scripts/install.sh` and `install.ps1`, `VERSION` in the
+   Makefile);
+2. builds the archives with `go run ./cmd/qpot-release pack`, reproducibly:
+   the same commit and Go give byte-identical files;
+3. writes `SHA256SUMS` and a signed SLSA build-provenance attestation for every
+   archive (GitHub artifact attestations, keyless through Sigstore), published
+   as `qpot_<version>_provenance.sigstore.json`;
+4. checks that provenance the way the installers do, then publishes the
+   release.
+
+To check a download yourself:
+
+```bash
+sha256sum -c --ignore-missing SHA256SUMS
+gh attestation verify qpot_0.1.0_linux_amd64.tar.gz --repo YurilLAB/QPot \
+  --signer-workflow YurilLAB/QPot/.github/workflows/release.yml --source-ref refs/tags/v0.1.0
+```
+
+After a release, set `QPOT_SOURCE_COMMIT_PINNED` in both installers to the
+tag's commit. Until the first release it is a `main` commit that passed CI; a
+test checks both installers pin the same commit from this repository's history.
 
 ---
 

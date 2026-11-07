@@ -5,11 +5,27 @@
 # Installs the qpot program, then hands over to `qpot setup`, which checks the
 # computer, installs Docker when you agree, and starts your first honeypot.
 #
+# What it installs is checked before anything is put in place:
+#   - the release's SHA256SUMS list is downloaded, and the archive for this
+#     computer must match its entry there (a mismatch, a missing entry or a
+#     malformed list stops the install);
+#   - downloads come only from GitHub's release servers: a redirect anywhere
+#     else stops the install;
+#   - when the GitHub CLI (gh) is installed, the archive's build provenance is
+#     verified as well: it must have been built by QPot's release workflow
+#     from the tag of this version (QPOT_REQUIRE_PROVENANCE=1 makes this
+#     check mandatory);
+#   - without a published release (no SHA256SUMS) it builds from source, but
+#     only the commit pinned below, which git checks by its hash.
+#
 # Environment:
 #   QPOT_NO_SETUP=1        install the program only; do not offer `qpot setup`
 #   QPOT_SETUP_ARGS="..."  run `qpot setup` with these arguments right away,
 #                          without asking (for scripts), e.g.
 #                          QPOT_SETUP_ARGS="--yes --install-docker --docker-group"
+#   QPOT_REQUIRE_PROVENANCE=1  stop unless gh verified the build provenance
+#   QPOT_DOWNLOAD_BASE=URL the releases' download address (a mirror; must be
+#                          https://, plain http only to this computer)
 #
 # Every failure prints an error code (QP-...) explained in doc/setup-errors.md
 # and exits with that code's category status, the same as `qpot setup`.
@@ -19,7 +35,16 @@ set -Eeuo pipefail
 
 QPOT_VERSION="0.1.0"
 QPOT_REPO="https://github.com/YurilLAB/QPot"
+QPOT_GH_REPO="YurilLAB/QPot"
+# The one commit the installer builds when no release is published: a main
+# commit that passed CI until the first release, then the tag's commit (see
+# "Releases" in README.md). git checks the checkout is exactly this commit;
+# a test checks both installers pin the same commit from main's history.
+QPOT_SOURCE_COMMIT_PINNED="c285a2e1cd5e5b6a9d3675619698b804c3e3c209"
 INSTALL_DIR="${HOME}/.local/bin"
+DOWNLOAD_BASE="${QPOT_DOWNLOAD_BASE:-${QPOT_REPO}/releases/download}"
+SOURCE_REPO="${QPOT_SOURCE_REPO:-${QPOT_REPO}.git}"
+SOURCE_COMMIT="${QPOT_SOURCE_COMMIT:-${QPOT_SOURCE_COMMIT_PINNED}}"
 # Minimum Go (major.minor) required to build from source. go.mod pins a newer
 # `go` directive, but Go >= 1.21 with the default GOTOOLCHAIN=auto transparently
 # downloads the exact toolchain go.mod asks for, so 1.21 is the real floor (it
@@ -86,8 +111,6 @@ on_error() {
         "A command in the install script failed in a way it does not explain; see the messages above." \
         "Run the installer again. If it happens again, report it at ${QPOT_REPO}/issues"
 }
-trap cleanup EXIT
-trap on_error ERR
 
 detect_os() {
     local os arch
@@ -131,11 +154,172 @@ check_prerequisites() {
     log_success "Docker found and running"
 }
 
-# Build QPot from source. Used as a fallback when no prebuilt release is
-# available for this platform (or the download fails). Requires Go and git.
-build_from_source() {
-    local temp_dir=$1
+# url_origin URL prints the URL's origin (scheme://host[:port], lower case).
+# Only http and https URLs without user names are accepted.
+url_origin() {
+    local LC_ALL=C re='^([Hh][Tt][Tt][Pp][Ss]?://[][A-Za-z0-9.:-]+)(/|$)'
+    if [[ $1 =~ $re ]]; then
+        printf '%s\n' "${BASH_REMATCH[1]}" | tr '[:upper:]' '[:lower:]'
+        return 0
+    fi
+    return 1
+}
 
+# The origins downloads may come from: the download base, and for GitHub its
+# two release-asset servers (github.com answers a release download with a
+# redirect to one of them).
+ALLOWED_ORIGINS=""
+CURL_PROTO="=https"
+check_download_base() {
+    local origin
+    if ! origin=$(url_origin "$DOWNLOAD_BASE"); then
+        die "QP-INPUT-012" "QPOT_DOWNLOAD_BASE (${DOWNLOAD_BASE}) is not a usable web address." \
+            "It must be an https:// address such as ${QPOT_REPO}/releases/download" \
+            "Unset QPOT_DOWNLOAD_BASE, or set it to the https:// address of a mirror of QPot's releases."
+    fi
+    case "$origin" in
+        https://*) ;;
+        http://127.0.0.1|http://127.0.0.1:*|http://localhost|http://localhost:*|http://\[::1\]|http://\[::1\]:*)
+            # Plain http only to this computer (a local mirror or the tests).
+            CURL_PROTO="=http,https" ;;
+        *) die "QP-INPUT-012" "QPOT_DOWNLOAD_BASE (${DOWNLOAD_BASE}) is not an https:// address." \
+            "Downloads over plain http can be changed by anyone on the network." \
+            "Unset QPOT_DOWNLOAD_BASE, or use the https:// address of the mirror." ;;
+    esac
+    ALLOWED_ORIGINS=" ${origin} "
+    if [ "$origin" = "https://github.com" ]; then
+        ALLOWED_ORIGINS="${ALLOWED_ORIGINS}https://objects.githubusercontent.com https://release-assets.githubusercontent.com "
+    fi
+}
+
+# fetch URL DEST downloads URL to DEST with curl, following redirects one at a
+# time and only to allowed origins. It returns 0 when downloaded, 10 when the
+# server has no such file, 11 when a redirect pointed elsewhere, and 12 for
+# any other failure; FETCH_DETAIL says what happened.
+FETCH_DETAIL=""
+fetch() {
+    local url=$1 dest=$2 hops=0 origin out code location rc
+    FETCH_DETAIL=""
+    while :; do
+        if ! origin=$(url_origin "$url") || [[ $ALLOWED_ORIGINS != *" ${origin} "* ]]; then
+            FETCH_DETAIL="redirected to ${url%%\?*}"
+            rm -f "$dest"
+            return 11
+        fi
+        rc=0
+        # -q first: ignore ~/.curlrc, which could add -L or -k.
+        out=$(curl -q -sS --proto "$CURL_PROTO" --connect-timeout 20 --max-time 300 \
+            -o "$dest" -w '%{http_code} %{redirect_url}' "$url" 2>"${dest}.err") || rc=$?
+        if [ "$rc" -ne 0 ]; then
+            FETCH_DETAIL="curl exit status ${rc}: $(tail -n 1 "${dest}.err" 2>/dev/null)"
+            rm -f "$dest" "${dest}.err"
+            return 12
+        fi
+        rm -f "${dest}.err"
+        code=${out%% *}
+        location=${out#* }
+        case "$code" in
+            200) return 0 ;;
+            301|302|303|307|308)
+                hops=$((hops + 1))
+                if [ "$hops" -gt 5 ] || [ -z "$location" ] || [ "$location" = "$code" ]; then
+                    FETCH_DETAIL="too many redirects"
+                    rm -f "$dest"
+                    return 12
+                fi
+                url=$location ;;
+            404|410) rm -f "$dest"; return 10 ;;
+            *) FETCH_DETAIL="the server answered HTTP ${code}"; rm -f "$dest"; return 12 ;;
+        esac
+    done
+}
+
+# file_sha256 FILE prints the file's SHA-256 in lower-case hex.
+file_sha256() {
+    local sum
+    if command -v sha256sum >/dev/null 2>&1; then
+        sum=$(sha256sum < "$1")
+    elif command -v shasum >/dev/null 2>&1; then
+        sum=$(shasum -a 256 < "$1")
+    else
+        sum=$(openssl dgst -sha256 -r < "$1")
+    fi
+    sum=${sum%% *}
+    printf '%s\n' "$sum" | tr '[:upper:]' '[:lower:]'
+}
+
+have_sha256_tool() {
+    command -v sha256sum >/dev/null 2>&1 || command -v shasum >/dev/null 2>&1 || command -v openssl >/dev/null 2>&1
+}
+
+# sums_lookup FILE NAME prints the checksum the SHA256SUMS list FILE gives for
+# NAME. It returns 1 when the list breaks the format (then nothing in it is
+# trusted) and 2 when it has no entry for NAME. The rules are the same as
+# internal/release.ParseSums; a Go test runs both on the same inputs.
+sums_lookup() {
+    local LC_ALL=C file=$1 want=$2 size line n=0 hash="" name seen=" " found=""
+    local re='^([0123456789abcdef]{64})(  | \*)([A-Za-z0-9][A-Za-z0-9._+-]*)$'
+    size=$(wc -c < "$file" | tr -d ' \t')
+    [ "$size" -le 65536 ] || return 1
+    # bash cannot see NUL bytes, so count them by removing them.
+    [ "$(tr -d '\000' < "$file" | wc -c | tr -d ' \t')" = "$size" ] || return 1
+    while IFS= read -r line || [ -n "$line" ]; do
+        n=$((n + 1))
+        [ "$n" -le 256 ] || return 1
+        if [[ ! $line =~ $re ]]; then
+            return 1
+        fi
+        name=${BASH_REMATCH[3]}
+        [ "${#name}" -le 128 ] || return 1
+        [[ $name != *..* ]] || return 1
+        [[ $seen != *" ${name} "* ]] || return 1
+        seen="${seen}${name} "
+        if [ "$name" = "$want" ]; then
+            hash=${BASH_REMATCH[1]}
+            found=1
+        fi
+    done < "$file"
+    [ "$n" -gt 0 ] || return 1
+    [ -n "$found" ] || return 2
+    printf '%s\n' "$hash"
+}
+
+# verify_provenance ARCHIVE BUNDLE checks with the GitHub CLI that QPot's
+# release workflow built ARCHIVE from the tag of this version. The bundle is
+# the release's attestation file, so gh needs no GitHub login for it.
+verify_provenance() {
+    local archive=$1 bundle=$2 out
+    if ! out=$(GH_PROMPT_DISABLED=1 GH_NO_UPDATE_NOTIFIER=1 gh attestation verify "$archive" \
+        --bundle "$bundle" --repo "$QPOT_GH_REPO" \
+        --signer-workflow "${QPOT_GH_REPO}/.github/workflows/release.yml" \
+        --source-ref "refs/tags/v${QPOT_VERSION}" --deny-self-hosted-runners 2>&1); then
+        printf '%s\n' "$out" | tail -n 5 >&2
+        die "QP-NET-012" "The build provenance of the QPot download could not be verified." \
+            "The GitHub CLI could not confirm that QPot's release workflow built this file from tag v${QPOT_VERSION}. Nothing was installed." \
+            "Run the installer again. If it fails again, do not use this download; report it at ${QPOT_REPO}/issues"
+    fi
+}
+
+# have_gh_attestation reports whether gh can check the provenance the way
+# verify_provenance asks: an older gh without these flags cannot pin the
+# workflow and the tag, so it counts as not installed.
+have_gh_attestation() {
+    local help
+    command -v gh >/dev/null 2>&1 || return 1
+    help=$(GH_PROMPT_DISABLED=1 GH_NO_UPDATE_NOTIFIER=1 gh attestation verify --help 2>&1) || return 1
+    [[ $help == *--bundle* && $help == *--signer-workflow* && $help == *--source-ref* && $help == *--deny-self-hosted-runners* ]]
+}
+
+# Build QPot from source, at the pinned commit only. Used when no release is
+# published for this version. Requires Go and git.
+build_from_source() {
+    local temp_dir=$1 src="$1/src" head file_proto=never
+
+    if ! [[ $SOURCE_COMMIT =~ ^[0123456789abcdef]{40}$ ]]; then
+        die "QP-NET-013" "QPot v${QPOT_VERSION} has no published release the installer can check." \
+            "There is no SHA256SUMS for v${QPOT_VERSION} at ${DOWNLOAD_BASE}, and this installer has no pinned source commit to build instead." \
+            "Install a published release from ${QPOT_REPO}/releases, or build from a checkout you have reviewed: git clone ${QPOT_REPO}.git && cd QPot && go build -o qpot ./cmd/qpot"
+    fi
     if ! command -v go &> /dev/null; then
         die "QP-HOST-006" "No ready-made QPot download exists for this computer, and Go is not installed to build it." \
             "Building QPot from source needs Go ${GO_MIN_VERSION} or newer and git." \
@@ -159,17 +343,36 @@ build_from_source() {
             "QPot needs Go ${GO_MIN_VERSION} or newer (newer Go downloads the exact version QPot pins by itself)." \
             "Update Go from https://go.dev/dl/ or install a release from ${QPOT_REPO}/releases, then run the installer again."
     fi
-    # Building may need to fetch the toolchain go.mod pins; make sure that path
-    # is enabled rather than failing on a 'go.mod requires go >= ...' error.
-    export GOTOOLCHAIN="${GOTOOLCHAIN:-auto}"
 
-    log_info "Building QPot from source (Go $(go version | awk '{print $3}'))..."
-    if ! git clone --depth 1 "${QPOT_REPO}.git" "${temp_dir}/src" >/dev/null 2>&1; then
+    log_info "Building QPot from source, commit ${SOURCE_COMMIT} (Go $(go version | awk '{print $3}'))..."
+    # Fetch exactly the pinned commit. git names every object by its hash,
+    # so a checkout whose HEAD is that commit has exactly that commit's files.
+    # Only https (and a local folder when QPOT_SOURCE_REPO is one) may be used.
+    case "$SOURCE_REPO" in
+        https://*) ;;
+        /*|file://*) file_proto=always ;;
+        *) die "QP-INPUT-012" "QPOT_SOURCE_REPO (${SOURCE_REPO}) is not an https:// address." \
+            "The source code must come over https." "Unset QPOT_SOURCE_REPO, or set it to an https:// git address." ;;
+    esac
+    if ! { git init -q "$src" && git -C "$src" -c protocol.allow=never -c protocol.https.allow=always \
+        -c protocol.file.allow="$file_proto" -c transfer.fsckObjects=true \
+        fetch -q --depth 1 "$SOURCE_REPO" "$SOURCE_COMMIT" && git -C "$src" checkout -q --detach FETCH_HEAD; } >/dev/null 2>&1; then
         die "QP-NET-007" "The QPot source code could not be downloaded." \
-            "git could not reach ${QPOT_REPO}.git (no internet connection, or GitHub is blocked)." \
+            "git could not fetch commit ${SOURCE_COMMIT} from ${SOURCE_REPO} (no internet connection, GitHub is blocked, or the commit does not exist there)." \
             "Check the internet connection and run the installer again."
     fi
-    if ! ( cd "${temp_dir}/src" && go build -o "${temp_dir}/qpot" ./cmd/qpot ); then
+    head=$(git -C "$src" rev-parse HEAD)
+    if [ "$head" != "$SOURCE_COMMIT" ]; then
+        die "QP-NET-014" "The downloaded source code is not the commit the installer expects." \
+            "git checked out ${head}, but the installer pins ${SOURCE_COMMIT}. Nothing was built." \
+            "Run the installer again. If it happens again, report it at ${QPOT_REPO}/issues"
+    fi
+    # Dependencies are checked against go.sum (part of the pinned commit): the
+    # build may not change go.mod or go.sum, and with GOSUMDB on and the
+    # opt-outs cleared nothing unchecked can be fetched.
+    if ! ( cd "$src" && env -u GONOSUMDB -u GONOSUMCHECK -u GONOVERIFY -u GOINSECURE -u GOPRIVATE \
+        GOFLAGS=-mod=readonly GOSUMDB=sum.golang.org GOTOOLCHAIN="${GOTOOLCHAIN:-auto}" \
+        go build -trimpath -o "${temp_dir}/qpot" ./cmd/qpot ); then
         die "QP-HOST-008" "Building QPot from source failed." \
             "The Go build stopped with an error (shown above); an old Go or no internet access for Go's downloads are the usual reasons." \
             "Read the build output above, update Go if it is old, and run the installer again."
@@ -177,36 +380,125 @@ build_from_source() {
     log_success "Built QPot from source"
 }
 
+# download_release PLATFORM downloads this version's archive for PLATFORM,
+# checks it against SHA256SUMS (and its provenance when gh is installed) and
+# leaves the qpot program in TEMP_DIR. It returns 1 when no release is
+# published (no SHA256SUMS), so the caller builds from source.
+download_release() {
+    local platform=$1 rel archive want got rc
+    rel="${DOWNLOAD_BASE}/v${QPOT_VERSION}"
+    archive="qpot_${QPOT_VERSION}_${platform}.tar.gz"
+
+    log_info "Downloading the checksum list of QPot v${QPOT_VERSION}..."
+    rc=0
+    fetch "${rel}/SHA256SUMS" "${TEMP_DIR}/SHA256SUMS" || rc=$?
+    case "$rc" in
+        0) ;;
+        10) log_warn "No published release v${QPOT_VERSION} (no SHA256SUMS); building from source"
+            return 1 ;;
+        11) die_redirect ;;
+        *) die "QP-NET-007" "The QPot checksum list could not be downloaded." \
+            "${FETCH_DETAIL} (${rel}/SHA256SUMS)" \
+            "Check the internet connection and run the installer again." ;;
+    esac
+    rc=0
+    want=$(sums_lookup "${TEMP_DIR}/SHA256SUMS" "$archive") || rc=$?
+    case "$rc" in
+        0) ;;
+        2) die "QP-NET-010" "The release's checksum list has no entry for ${archive}." \
+            "Without an entry the download cannot be checked, so nothing was installed." \
+            "Run the installer again later. If it keeps happening, report it at ${QPOT_REPO}/issues" ;;
+        *) die "QP-NET-010" "The release's checksum list (SHA256SUMS) is not valid." \
+            "It is not in the format the release writes, so none of it is trusted and nothing was installed." \
+            "Run the installer again later. If it keeps happening, report it at ${QPOT_REPO}/issues" ;;
+    esac
+
+    log_info "Downloading ${archive}..."
+    rc=0
+    fetch "${rel}/${archive}" "${TEMP_DIR}/${archive}" || rc=$?
+    case "$rc" in
+        0) ;;
+        10) die "QP-NET-007" "The QPot download failed." \
+            "The release lists ${archive}, but the file is missing." \
+            "Run the installer again later. If it keeps happening, report it at ${QPOT_REPO}/issues" ;;
+        11) die_redirect ;;
+        *) die "QP-NET-007" "The QPot download failed." "${FETCH_DETAIL} (${archive}). Nothing was installed." \
+            "Check the internet connection and run the installer again." ;;
+    esac
+    got=$(file_sha256 "${TEMP_DIR}/${archive}")
+    if [ "$got" != "$want" ]; then
+        die "QP-NET-009" "The QPot download does not match its published checksum." \
+            "${archive} has SHA-256 ${got}, but SHA256SUMS says ${want}. It was damaged or changed on the way; nothing was installed." \
+            "Run the installer again. If it happens again, do not install from this network; report it at ${QPOT_REPO}/issues"
+    fi
+    log_success "Checksum matches SHA256SUMS (${got})"
+
+    if have_gh_attestation; then
+        local bundle="qpot_${QPOT_VERSION}_provenance.sigstore.json"
+        rc=0
+        fetch "${rel}/${bundle}" "${TEMP_DIR}/${bundle}" || rc=$?
+        case "$rc" in
+            0) ;;
+            11) die_redirect ;;
+            *) die "QP-NET-012" "The build provenance of the QPot download could not be verified." \
+                "The release's provenance file (${bundle}) could not be downloaded: ${FETCH_DETAIL:-it is missing}. Nothing was installed." \
+                "Run the installer again. If it keeps happening, report it at ${QPOT_REPO}/issues" ;;
+        esac
+        verify_provenance "${TEMP_DIR}/${archive}" "${TEMP_DIR}/${bundle}"
+        log_success "Build provenance verified: built by ${QPOT_GH_REPO}'s release workflow from tag v${QPOT_VERSION}"
+    elif [ "${QPOT_REQUIRE_PROVENANCE:-}" = "1" ]; then
+        die "QP-NET-012" "The build provenance of the QPot download could not be verified." \
+            "QPOT_REQUIRE_PROVENANCE=1 is set, but the GitHub CLI (gh) is not installed, or is too old to check the workflow and the tag (its gh attestation verify has no --source-ref). Nothing was installed." \
+            "Install or update the GitHub CLI (https://cli.github.com), or unset QPOT_REQUIRE_PROVENANCE, then run the installer again."
+    else
+        log_info "Build provenance not checked (the GitHub CLI 'gh' is not installed, or is too old). To check it yourself:"
+        log_info "  gh attestation verify ${archive} --repo ${QPOT_GH_REPO}"
+    fi
+
+    # Take only the program out of the checked archive.
+    mkdir "${TEMP_DIR}/x"
+    if ! tar -xzf "${TEMP_DIR}/${archive}" -C "${TEMP_DIR}/x" qpot 2>/dev/null \
+        || [ ! -f "${TEMP_DIR}/x/qpot" ] || [ -L "${TEMP_DIR}/x/qpot" ]; then
+        die "QP-HOST-007" "The QPot download could not be unpacked." \
+            "${archive} matched its checksum but holds no qpot program." \
+            "Report it at ${QPOT_REPO}/issues"
+    fi
+    mv "${TEMP_DIR}/x/qpot" "${TEMP_DIR}/qpot"
+    log_success "Downloaded and checked QPot v${QPOT_VERSION}"
+}
+
+die_redirect() {
+    die "QP-NET-011" "A download was redirected to a server QPot does not publish from." \
+        "${FETCH_DETAIL}. QPot releases come only from ${DOWNLOAD_BASE} and GitHub's download servers, so the installer stopped. Nothing was installed." \
+        "Check for a proxy or a captive portal on this network, then run the installer again from a trusted network."
+}
+
 download_qpot() {
     local platform=$1
-    local binary_name="qpot_${QPOT_VERSION}_${platform}"
-    local download_url="${QPOT_REPO}/releases/download/v${QPOT_VERSION}/${binary_name}.tar.gz"
     TEMP_DIR=$(mktemp -d)
-    local temp_dir="$TEMP_DIR"
 
-    log_info "Downloading QPot v${QPOT_VERSION}..."
-
-    local downloaded=0
-    if command -v curl &> /dev/null; then
-        curl -fsSL --max-time 300 "$download_url" -o "${temp_dir}/qpot.tar.gz" && downloaded=1
-    elif command -v wget &> /dev/null; then
-        wget -q --timeout=300 "$download_url" -O "${temp_dir}/qpot.tar.gz" && downloaded=1
+    check_download_base
+    if ! command -v curl &> /dev/null; then
+        die "QP-HOST-011" "curl is not installed." \
+            "The installer downloads QPot and its checksum list with curl." \
+            "Install curl (for example: sudo apt-get install curl), then run the installer again."
+    fi
+    if ! have_sha256_tool; then
+        die "QP-HOST-010" "No program to check a download's checksum was found." \
+            "The installer checks the QPot download with sha256sum, shasum or openssl, and none of them is installed." \
+            "Install coreutils (sha256sum) or openssl, then run the installer again."
+    fi
+    if ! download_release "$platform"; then
+        build_from_source "$TEMP_DIR"
     fi
 
-    if [[ "$downloaded" == "1" ]] && tar -xzf "${temp_dir}/qpot.tar.gz" -C "$temp_dir" 2>/dev/null; then
-        log_success "Downloaded prebuilt binary"
-    else
-        log_warn "No prebuilt binary for ${platform} (v${QPOT_VERSION}); building from source"
-        build_from_source "$temp_dir"
-    fi
-
-    if [ ! -f "${temp_dir}/qpot" ]; then
+    if [ ! -f "${TEMP_DIR}/qpot" ]; then
         die "QP-HOST-008" "No qpot program was produced." \
             "The download or build finished without leaving the qpot program behind." \
             "Run the installer again; if it happens again, report it at ${QPOT_REPO}/issues"
     fi
 
-    if ! mkdir -p "$INSTALL_DIR" || ! cp "${temp_dir}/qpot" "$INSTALL_DIR/" || ! chmod +x "${INSTALL_DIR}/qpot"; then
+    if ! mkdir -p "$INSTALL_DIR" || ! cp "${TEMP_DIR}/qpot" "$INSTALL_DIR/" || ! chmod +x "${INSTALL_DIR}/qpot"; then
         die "QP-PERM-007" "The qpot program could not be copied to ${INSTALL_DIR}." \
             "That folder is not writable, or the disk is full." \
             "Check that you can write to ${INSTALL_DIR} (and df -h ${HOME}), then run the installer again."
@@ -317,6 +609,8 @@ hand_off() {
 }
 
 main() {
+    trap cleanup EXIT
+    trap on_error ERR
     print_banner
 
     local platform
@@ -329,4 +623,8 @@ main() {
     hand_off
 }
 
-main "$@"
+# QPOT_INSTALL_FUNCTIONS_ONLY=1 loads the functions without installing
+# anything (the tests check the checksum parser this way).
+if [ "${QPOT_INSTALL_FUNCTIONS_ONLY:-}" != "1" ]; then
+    main "$@"
+fi

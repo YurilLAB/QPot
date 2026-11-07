@@ -194,6 +194,20 @@ Exit status 0 means success; 1 is a usage error (an unknown flag).
 - Why: Setup expected apt-get, dnf, zypper or pacman for this distribution, but the command is missing.
 - Fix: Install Docker Engine and the Compose plugin by hand (https://docs.docker.com/engine/install/), then run qpot setup again.
 
+### QP-HOST-010
+
+**No program to check a download's checksum was found.**
+
+- Why: The installer checks the QPot download against the release's SHA256SUMS with sha256sum, shasum or openssl, and none of them is installed.
+- Fix: Install coreutils (sha256sum) or openssl, then run the installer again.
+
+### QP-HOST-011
+
+**curl is not installed.**
+
+- Why: The installer downloads QPot and the release's checksum list with curl.
+- Fix: Install curl (for example: sudo apt-get install curl), then run the installer again.
+
 ## Permissions and sudo (`PERM`, exit 12)
 
 ### QP-PERM-001
@@ -323,6 +337,48 @@ Exit status 0 means success; 1 is a usage error (an unknown flag).
 
 - Why: The download site could not be reached. QPot works without it, but events get no country and the attack map draws no lines.
 - Fix: Run this later to add it: qpot geoip update
+
+### QP-NET-009
+
+**The QPot download does not match its published checksum.**
+
+- Why: The file's SHA-256 differs from the one in the release's SHA256SUMS: it was damaged, cut short or changed on the way. Nothing was installed.
+- Fix: Run the installer again. If it happens again, do not install from this network, and report it at https://github.com/YurilLAB/QPot/issues
+
+### QP-NET-010
+
+**The release's checksum list cannot be used.**
+
+- Why: SHA256SUMS is not in the format the release writes, or it has no entry for this computer's download, so the download cannot be checked. Nothing was installed.
+- Fix: Run the installer again later. If it keeps happening, report it at https://github.com/YurilLAB/QPot/issues
+
+### QP-NET-011
+
+**A download was redirected to a server QPot does not publish from.**
+
+- Why: QPot's releases come only from GitHub (github.com and its download servers). Something sent the download elsewhere, so the installer stopped before contacting it. Nothing was installed.
+- Fix: Check for a proxy or a captive portal on this network, then run the installer again from a trusted network.
+
+### QP-NET-012
+
+**The build provenance of the QPot download could not be verified.**
+
+- Why: The GitHub CLI could not confirm that QPot's release workflow built the file from the version's tag, or provenance was required (QPOT_REQUIRE_PROVENANCE=1) and gh is not installed or too old to check the tag. Nothing was installed.
+- Fix: Run the installer again. If it fails again, do not use the download and report it at https://github.com/YurilLAB/QPot/issues . For the check, install or update the GitHub CLI (https://cli.github.com).
+
+### QP-NET-013
+
+**No QPot release the installer can check was found.**
+
+- Why: The version has no published release (no SHA256SUMS), and the installer has no pinned source commit to build instead.
+- Fix: Install a published release from https://github.com/YurilLAB/QPot/releases , or build from a checkout you have reviewed: git clone https://github.com/YurilLAB/QPot.git && cd QPot && go build -o qpot ./cmd/qpot
+
+### QP-NET-014
+
+**The downloaded source code is not the commit the installer expects.**
+
+- Why: git checked out a different commit than the one the installer pins, so nothing was built.
+- Fix: Run the installer again. If it happens again, report it at https://github.com/YurilLAB/QPot/issues
 
 ## Package manager (`PKG`, exit 14)
 
