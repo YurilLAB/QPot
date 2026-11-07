@@ -679,6 +679,17 @@ class HoneyPotBaseProtocol(insults.TerminalProtocol, TimeoutMixin):
             self.end_process(0)
 
 
+def qpot_shell_variables(shell) -> None:
+    """QPot: the shell variables of the persona's bash (coreutils.qpot_bash_variables); a missing module
+    or an unknown persona leaves the shell as Cowrie made it."""
+    try:
+        from cowrie.commands.coreutils import qpot_bash_variables
+
+        qpot_bash_variables(shell)
+    except Exception:  # noqa: BLE001 - never stop a login over it
+        pass
+
+
 class HoneyPotExecProtocol(HoneyPotBaseProtocol):
     _log = Logger()
 
@@ -714,6 +725,8 @@ class HoneyPotExecProtocol(HoneyPotBaseProtocol):
         HoneyPotBaseProtocol.connectionMade(self)
         self.setTimeout(60)
         self.cmdstack = [honeypot.HoneyPotShell(self, interactive=False)]
+        # QPot: the variables bash sets for the command it runs (BASH_VERSION ...)
+        qpot_shell_variables(self.cmdstack[0])
         # The parser treats newlines as statement separators, so a multi-line
         # exec payload (including loops/conditionals) is run as written.
         self.cmdstack[0].lineReceived(self.execcmd)
@@ -870,6 +883,8 @@ class HoneyPotInteractiveProtocol(HoneyPotBaseProtocol, recvline.HistoricRecvLin
         self.qpot_read_history()
 
         self.cmdstack = [honeypot.HoneyPotShell(self)]
+        # QPot: the variables bash sets in the login shell (BASH_VERSION ...)
+        qpot_shell_variables(self.cmdstack[0])
         # Show the first prompt now that the interactive shell is on the stack.
         self.cmdstack[0].showPrompt()
 

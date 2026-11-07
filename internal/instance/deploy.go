@@ -116,6 +116,12 @@ const cowriePatchVersion = "24.04.2"
 // coreutils.py: stat (GNU's of the release, or BusyBox's) and gzip -l, -t,
 // -d and compression (GNU's, or BusyBox's), with the values ls shows
 // (recorded from coreutils 9.7, gzip 1.13 and BusyBox 1.37).
+//
+// bashparse.py, protocol.py and coreutils.py: the variables bash sets
+// ($BASH_VERSION, BASH_VERSINFO, MACHTYPE ...) and help as the persona's bash
+// prints it (recorded from bash 5.2.37), where Cowrie printed bash 4.2.37's
+// on every persona; ash, which keeps no arrays, refuses a line with
+// ${NAME[INDEX]}.
 var (
 	//go:embed honeypotfiles/cowrie/protocol.py
 	cowrieProtocolPy []byte

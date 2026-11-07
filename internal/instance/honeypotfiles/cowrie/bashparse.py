@@ -738,7 +738,7 @@ sq: SQ
 SQ: /'[^']*'/
 
 dollar_brace: "${" BRACE_NAME "}"
-BRACE_NAME: /[_a-zA-Z0-9]+|[?@$#!*]/
+BRACE_NAME: /[_a-zA-Z][_a-zA-Z0-9]*\[(?:[0-9]{1,9}|[@*])\]|[_a-zA-Z0-9]+|[?@$#!*]/
 
 dollar_var: DOLLAR_NAME | DOLLAR_SPECIAL
 DOLLAR_NAME: /\$[_a-zA-Z0-9]+/
@@ -1186,6 +1186,24 @@ class _Cursor:
         return token
 
 
+
+def qpot_subscript(context, name: str) -> str:
+    """QPot: ${NAME[INDEX]} of a shell that keeps no arrays: a set variable is element 0 (and all of
+    [@] and [*]), BASH_VERSINFO the parts of BASH_VERSION and MACHTYPE, as bash sets it."""
+    base, _, index = name[:-1].partition("[")
+    if base == "BASH_VERSINFO":
+        version = context.get_variable("BASH_VERSION") or ""
+        found = re.match(r"([0-9]+)\.([0-9]+)\.([0-9]+)\(([0-9]+)\)-([a-z]+)", version)
+        items = list(found.groups()) + [context.get_variable("MACHTYPE") or ""] if found else []
+    else:
+        value = context.get_variable(base)
+        items = [value] if value is not None else []
+    if index in ("@", "*"):
+        return " ".join(items)
+    position = int(index)
+    return items[position] if position < len(items) else ""
+
+
 class BashParser:
     """Parse a command line into a list of statements for the shell to run."""
 
@@ -1256,6 +1274,11 @@ class BashParser:
             ]
         except (LarkError, ParseTimeoutError):
             return [SyntaxError_(token="", lineno=self._end_line(line))]
+        if CowrieConfig.get("shell", "not_found_style", fallback="bash") != "bash":
+            # QPot: ash and msh keep no arrays: a ${NAME[INDEX]} fails the whole line (BusyBox 1.37: "bad
+            #   substitution", status 2, nothing of the line run)
+            for token in tree.scan_values(lambda v: isinstance(v, Token) and v.type == "BRACE_NAME" and "[" in v):
+                return [SyntaxError_(token="", lineno=self._node_line(token))]
         statements = self._split_statements(line, tree)
         if statements and isinstance(statements[-1], SyntaxError_):
             return statements
@@ -2341,7 +2364,12 @@ class BashParser:
         special = self._special_param(node)
         if special is not None:
             return special
-        value = self.context.get_variable(self._var_name(node)[0])
+        name = self._var_name(node)[0]
+        if name.endswith("]"):
+            # QPot: ${NAME[N]}, ${NAME[@]}: the shell keeps no arrays, so a variable is its own element 0
+            #   (as in bash); BASH_VERSINFO's elements come from BASH_VERSION and MACHTYPE
+            return qpot_subscript(self.context, name)
+        value = self.context.get_variable(name)
         if value is None:
             return ""
         return value

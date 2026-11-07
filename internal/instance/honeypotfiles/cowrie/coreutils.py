@@ -1722,8 +1722,9 @@ BASH_RELEASES = {("ubuntu", 24): ("5.2.21(1)-release", 2022), ("ubuntu", 22): ("
                  ("rhel", 9): ("5.1.8(1)-release", 2020), ("centos", 7): ("4.2.46(2)-release", 2011)}
 
 
-def qpot_bash_version(tree) -> str | None:
-    """What `bash --version` prints on the persona, None where it is not known."""
+def qpot_bash_info(tree) -> tuple[str, int, str] | None:
+    """(version, copyright year, MACHTYPE) of the persona's bash, None where it is not known: what
+    `bash --version`, help, $BASH_VERSION and $MACHTYPE show."""
     os_id, version = qpot_os_release(tree)
     release = BASH_RELEASES.get((os_id, version[0] if version else 0))
     if release is None:
@@ -1739,6 +1740,33 @@ def qpot_bash_version(tree) -> str | None:
         platform = "arm-unknown-linux-gnueabihf"
     else:
         platform = f"{machine}-unknown-linux-gnu"
+    return release[0], release[1], platform
+
+
+def qpot_bash_variables(shell) -> None:
+    """The variables bash sets in the persona's login shell and does not export: BASH_VERSION,
+    BASH_VERSINFO (its first element, what $BASH_VERSINFO reads: the shell keeps no arrays), MACHTYPE,
+    HOSTTYPE, OSTYPE, BASH. None on ash, msh, or a bash this does not know."""
+    if CowrieConfig.get("shell", "not_found_style", fallback="bash") != "bash":
+        return
+    info = qpot_bash_info(shell.protocol.fs)
+    if info is None:
+        return
+    version, _, machtype = info
+    machine, _, rest = machtype.partition("-")
+    values = {"BASH_VERSION": version, "BASH_VERSINFO": version.split(".")[0], "MACHTYPE": machtype,
+              "HOSTTYPE": machine, "OSTYPE": rest.split("-", 1)[1] if rest.count("-") else "linux-gnu",
+              "BASH": CowrieConfig.get("shell", "login_shell", fallback="") or "/bin/bash"}
+    for name, value in values.items():
+        shell.environ.setdefault(name, value)
+
+
+def qpot_bash_version(tree) -> str | None:
+    """What `bash --version` prints on the persona, None where it is not known."""
+    info = qpot_bash_info(tree)
+    if info is None:
+        return None
+    release, platform = (info[0], info[1]), info[2]
     return (f"GNU bash, version {release[0]} ({platform})\n"
             f"Copyright (C) {release[1]} Free Software Foundation, Inc.\n"
             "License GPLv3+: GNU GPL version 3 or later <http://gnu.org/licenses/gpl.html>\n\n"
@@ -2159,6 +2187,275 @@ class Command_gzip(Command_zcat):
         if not keep:
             self.fs.remove(path)
         return 0
+
+
+# --- help: bash's builtins (BusyBox ash's on its personas) ---------------------------------
+
+# the short docs of bash's builtins in the order help shows them: bash 5.1 and 5.2 (recorded from 5.2.37
+#   with COLUMNS=512; a doc ending in > is longer than the 125 characters help ever shows) and 4.2 (the
+#   4.2.37 list Cowrie printed at 190 columns, the three docs it cut completed from bash 4.2's builtins)
+QPOT_HELP_BASH5 = (
+    "job_spec [&]",
+    "(( expression ))",
+    ". filename [arguments]",
+    ":",
+    "[ arg... ]",
+    "[[ expression ]]",
+    "alias [-p] [name[=value] ... ]",
+    "bg [job_spec ...]",
+    "bind [-lpsvPSVX] [-m keymap] [-f filename] [-q name] [-u name] [-r keyseq] [-x keyseq:shell-command] [keyseq:readline-functio>",
+    "break [n]",
+    "builtin [shell-builtin [arg ...]]",
+    "caller [expr]",
+    "case WORD in [PATTERN [| PATTERN]...) COMMANDS ;;]... esac",
+    "cd [-L|[-P [-e]] [-@]] [dir]",
+    "command [-pVv] command [arg ...]",
+    "compgen [-abcdefgjksuv] [-o option] [-A action] [-G globpat] [-W wordlist] [-F function] [-C command] [-X filterpat] [-P pref>",
+    "complete [-abcdefgjksuv] [-pr] [-DEI] [-o option] [-A action] [-G globpat] [-W wordlist] [-F function] [-C command] [-X filte>",
+    "compopt [-o|+o option] [-DEI] [name ...]",
+    "continue [n]",
+    "coproc [NAME] command [redirections]",
+    "declare [-aAfFgiIlnrtux] [name[=value] ...] or declare -p [-aAfFilnrtux] [name ...]",
+    "dirs [-clpv] [+N] [-N]",
+    "disown [-h] [-ar] [jobspec ... | pid ...]",
+    "echo [-neE] [arg ...]",
+    "enable [-a] [-dnps] [-f filename] [name ...]",
+    "eval [arg ...]",
+    "exec [-cl] [-a name] [command [argument ...]] [redirection ...]",
+    "exit [n]",
+    "export [-fn] [name[=value] ...] or export -p",
+    "false",
+    "fc [-e ename] [-lnr] [first] [last] or fc -s [pat=rep] [command]",
+    "fg [job_spec]",
+    "for NAME [in WORDS ... ] ; do COMMANDS; done",
+    "for (( exp1; exp2; exp3 )); do COMMANDS; done",
+    "function name { COMMANDS ; } or name () { COMMANDS ; }",
+    "getopts optstring name [arg ...]",
+    "hash [-lr] [-p pathname] [-dt] [name ...]",
+    "help [-dms] [pattern ...]",
+    "history [-c] [-d offset] [n] or history -anrw [filename] or history -ps arg [arg...]",
+    "if COMMANDS; then COMMANDS; [ elif COMMANDS; then COMMANDS; ]... [ else COMMANDS; ] fi",
+    "jobs [-lnprs] [jobspec ...] or jobs -x command [args]",
+    "kill [-s sigspec | -n signum | -sigspec] pid | jobspec ... or kill -l [sigspec]",
+    "let arg [arg ...]",
+    "local [option] name[=value] ...",
+    "logout [n]",
+    "mapfile [-d delim] [-n count] [-O origin] [-s count] [-t] [-u fd] [-C callback] [-c quantum] [array]",
+    "popd [-n] [+N | -N]",
+    "printf [-v var] format [arguments]",
+    "pushd [-n] [+N | -N | dir]",
+    "pwd [-LP]",
+    "read [-ers] [-a array] [-d delim] [-i text] [-n nchars] [-N nchars] [-p prompt] [-t timeout] [-u fd] [name ...]",
+    "readarray [-d delim] [-n count] [-O origin] [-s count] [-t] [-u fd] [-C callback] [-c quantum] [array]",
+    "readonly [-aAf] [name[=value] ...] or readonly -p",
+    "return [n]",
+    "select NAME [in WORDS ... ;] do COMMANDS; done",
+    "set [-abefhkmnptuvxBCEHPT] [-o option-name] [--] [-] [arg ...]",
+    "shift [n]",
+    "shopt [-pqsu] [-o] [optname ...]",
+    "source filename [arguments]",
+    "suspend [-f]",
+    "test [expr]",
+    "time [-p] pipeline",
+    "times",
+    "trap [-lp] [[arg] signal_spec ...]",
+    "true",
+    "type [-afptP] name [name ...]",
+    "typeset [-aAfFgiIlnrtux] name[=value] ... or typeset -p [-aAfFilnrtux] [name ...]",
+    "ulimit [-SHabcdefiklmnpqrstuvxPRT] [limit]",
+    "umask [-p] [-S] [mode]",
+    "unalias [-a] name [name ...]",
+    "unset [-f] [-v] [-n] [name ...]",
+    "until COMMANDS; do COMMANDS-2; done",
+    "variables - Names and meanings of some shell variables",
+    "wait [-fn] [-p var] [id ...]",
+    "while COMMANDS; do COMMANDS-2; done",
+    "{ COMMANDS ; }",
+)
+QPOT_HELP_BASH4 = (
+    "job_spec [&]",
+    "(( expression ))",
+    ". filename [arguments]",
+    ":",
+    "[ arg... ]",
+    "[[ expression ]]",
+    "alias [-p] [name[=value] ... ]",
+    "bg [job_spec ...]",
+    "bind [-lpvsPVS] [-m keymap] [-f filename] [-q name] [-u name] [-r keyseq] [-x keyseq:shell-command] [keyseq:readline-function or readline-command]",
+    "break [n]",
+    "builtin [shell-builtin [arg ...]]",
+    "caller [expr]",
+    "case WORD in [PATTERN [| PATTERN]...) COMMANDS ;;]... esac",
+    "cd [-L|[-P [-e]]] [dir]",
+    "command [-pVv] command [arg ...]",
+    "compgen [-abcdefgjksuv] [-o option]  [-A action] [-G globpat] [-W wordlist]  [-F function] [-C command] [-X filterpat] [-P prefix] [-S suffix] [word]",
+    "complete [-abcdefgjksuv] [-pr] [-DE] [-o option] [-A action] [-G globpat] [-W wordlist]  [-F function] [-C command] [-X filterpat] [-P prefix] [-S suffix] [name ...]",
+    "compopt [-o|+o option] [-DE] [name ...]",
+    "continue [n]",
+    "coproc [NAME] command [redirections]",
+    "declare [-aAfFgilrtux] [-p] [name[=value] ...]",
+    "dirs [-clpv] [+N] [-N]",
+    "disown [-h] [-ar] [jobspec ...]",
+    "echo [-neE] [arg ...]",
+    "enable [-a] [-dnps] [-f filename] [name ...]",
+    "eval [arg ...]",
+    "exec [-cl] [-a name] [command [arguments ...]] [redirection ...]",
+    "exit [n]",
+    "export [-fn] [name[=value] ...] or export -p",
+    "false",
+    "fc [-e ename] [-lnr] [first] [last] or fc -s [pat=rep] [command]",
+    "fg [job_spec]",
+    "for NAME [in WORDS ... ] ; do COMMANDS; done",
+    "for (( exp1; exp2; exp3 )); do COMMANDS; done",
+    "function name { COMMANDS ; } or name () { COMMANDS ; }",
+    "getopts optstring name [arg]",
+    "hash [-lr] [-p pathname] [-dt] [name ...]",
+    "help [-dms] [pattern ...]",
+    "history [-c] [-d offset] [n] or history -anrw [filename] or history -ps arg [arg...]",
+    "if COMMANDS; then COMMANDS; [ elif COMMANDS; then COMMANDS; ]... [ else COMMANDS; ] fi",
+    "jobs [-lnprs] [jobspec ...] or jobs -x command [args]",
+    "kill [-s sigspec | -n signum | -sigspec] pid | jobspec ... or kill -l [sigspec]",
+    "let arg [arg ...]",
+    "local [option] name[=value] ...",
+    "logout [n]",
+    "mapfile [-n count] [-O origin] [-s count] [-t] [-u fd] [-C callback] [-c quantum] [array]",
+    "popd [-n] [+N | -N]",
+    "printf [-v var] format [arguments]",
+    "pushd [-n] [+N | -N | dir]",
+    "pwd [-LP]",
+    "read [-ers] [-a array] [-d delim] [-i text] [-n nchars] [-N nchars] [-p prompt] [-t timeout] [-u fd] [name ...]",
+    "readarray [-n count] [-O origin] [-s count] [-t] [-u fd] [-C callback] [-c quantum] [array]",
+    "readonly [-aAf] [name[=value] ...] or readonly -p",
+    "return [n]",
+    "select NAME [in WORDS ... ;] do COMMANDS; done",
+    "set [-abefhkmnptuvxBCHP] [-o option-name] [--] [arg ...]",
+    "shift [n]",
+    "shopt [-pqsu] [-o] [optname ...]",
+    "source filename [arguments]",
+    "suspend [-f]",
+    "test [expr]",
+    "time [-p] pipeline",
+    "times",
+    "trap [-lp] [[arg] signal_spec ...]",
+    "true",
+    "type [-afptP] name [name ...]",
+    "typeset [-aAfFgilrtux] [-p] name[=value] ...",
+    "ulimit [-SHacdefilmnpqrstuvx] [limit]",
+    "umask [-p] [-S] [mode]",
+    "unalias [-a] name [name ...]",
+    "unset [-f] [-v] [name ...]",
+    "until COMMANDS; do COMMANDS; done",
+    "variables - Names and meanings of some shell variables",
+    "wait [id]",
+    "while COMMANDS; do COMMANDS; done",
+    "{ COMMANDS ; }",
+)
+QPOT_HELP_HEAD = (
+    "These shell commands are defined internally.  Type `help' to see this list.\n"
+    "Type `help name' to find out more about the function `name'.\n"
+    "Use `info bash' to find out more about the shell in general.\n"
+    "Use `man -k' or `info' to find out more about commands not in this list.\n"
+    "\n"
+    "A star (*) next to a name means that the command is disabled.\n"
+    "\n"
+)
+# the builtins of BusyBox ash: 1.19 (recorded from the Archer C7 v5, the persona engine's table) and
+#   1.37 (recorded from Debian's 1.37.0)
+QPOT_ASH_BUILTINS_OLD = (".", ":", "[", "[[", "alias", "bg", "break", "cd", "chdir", "command", "continue", "echo",
+                         "eval", "exec", "exit", "export", "false", "fg", "getopts", "hash", "help", "jobs", "kill",
+                         "let", "local", "printf", "pwd", "read", "readonly", "return", "set", "shift", "source",
+                         "test", "times", "trap", "true", "type", "ulimit", "umask", "unalias", "unset", "wait")
+QPOT_ASH_BUILTINS_NEW = (".", ":", "[", "[[", "alias", "bg", "break", "cd", "chdir", "command", "continue", "echo",
+                         "eval", "exec", "exit", "export", "false", "fg", "getopts", "hash", "help", "history",
+                         "jobs", "kill", "let", "local", "printf", "pwd", "read", "readonly", "return", "set",
+                         "shift", "source", "test", "times", "trap", "true", "type", "ulimit", "umask", "unalias",
+                         "unset", "wait")
+
+
+def qpot_help_columns(docs: tuple[str, ...], columns: int) -> str:
+    """The two columns of bash's help (help.def: dispcolumn): half the terminal's width per column, at most
+    128; a doc that does not fit is cut and ends in >."""
+    width = columns // 2
+    if width > 128:
+        width = 128
+    if width <= 3:
+        width = 40
+    count = len(docs)
+    height = (count + 1) // 2
+
+    def cell(doc: str, room: int) -> str:
+        longer = doc.endswith(">")
+        text = doc[:-1] if longer else doc
+        if longer or len(text) >= room:
+            return " " + text[:room] + ">"
+        return " " + text
+
+    out = []
+    for i in range(height):
+        first = cell(docs[i], width - 3)
+        if 2 * i >= count or i + height >= count:
+            out.append(first + "\n")
+            continue
+        out.append(first.ljust(width) + cell(docs[i + height], width - 4) + "\n")
+    return "".join(out)
+
+
+def qpot_ash_help(builtins: tuple[str, ...], old: bool) -> str:
+    """help of BusyBox ash (helpcmd of shell/ash.c): the names after a tab or a blank, a new line once the
+    column passes 60; 1.19 ends with a blank line, later releases with the line's end."""
+    out, col = "Built-in commands:\n------------------\n", 0
+    for name in builtins:
+        piece = ("\t" if col == 0 else " ") + name
+        out += piece
+        col += len(piece)
+        if col > 60:
+            out += "\n"
+            col = 0
+    if old:
+        return out + ("\n" if col else "") + "\n"
+    return out + ("\n" if col else "")
+
+
+try:
+    from cowrie.commands.base import Command_help as QpotHelpBase
+except ImportError:  # pragma: no cover - the image always has it
+    QpotHelpBase = None
+
+if QpotHelpBase is not None:
+
+    class Command_help(QpotHelpBase):
+        """help as the persona's shell prints it: bash's banner and builtins of its release, laid out for the
+        terminal's width (Cowrie printed bash 4.2.37's at 190 columns everywhere), BusyBox ash's builtins on
+        an ash persona; msh's and an unknown bash stay as before."""
+
+        def call(self) -> None:
+            style = CowrieConfig.get("shell", "not_found_style", fallback="bash")
+            if style == "ash":
+                found = re.match(r"(\d+)\.(\d+)", CowrieConfig.get("shell", "text_version", fallback="") or "")
+                old = not found or (int(found.group(1)), int(found.group(2))) < (1, 30)
+                self.write(qpot_ash_help(QPOT_ASH_BUILTINS_OLD if old else QPOT_ASH_BUILTINS_NEW, old))
+                return
+            info = qpot_bash_info(self.fs) if style == "bash" else None
+            if info is None:
+                super().call()
+                return
+            # help lays itself out for the terminal it writes to (bash keeps COLUMNS at its width); piped or
+            #   redirected, for 80 columns whatever COLUMNS says (recorded from 5.2.37)
+            targets = getattr(getattr(self, "pp", None), "targets", None) or {}
+            width = 0
+            if (targets.get(1) or ("",))[0] == "terminal" and not hasattr(self.protocol, "execcmd"):
+                columns = self.environ.get("COLUMNS", "")
+                width = int(columns) if columns.isdigit() and len(columns) <= 5 else 0
+                if not width:
+                    try:
+                        width = int(self.protocol.user.windowSize[1])
+                    except (AttributeError, TypeError, ValueError, IndexError):
+                        width = 0
+            docs = QPOT_HELP_BASH4 if info[0].startswith("4.") else QPOT_HELP_BASH5
+            self.write(f"GNU bash, version {info[0]} ({info[2]})\n" + QPOT_HELP_HEAD
+                       + qpot_help_columns(docs, width or 80))
+
+    commands["help"] = Command_help
 
 
 for qpot_cls, qpot_names in (
