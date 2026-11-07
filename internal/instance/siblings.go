@@ -80,9 +80,12 @@ func collectComposeReservations(data []byte, ports map[int]bool, subnets map[str
 	}
 }
 
-// ownHostPorts returns the host port each (service, container port) pair has
+// ownHostPorts returns the host port each (honeypot, container port) pair has
 // in the instance's own compose file, by portKey: the ports its running
-// services hold. A missing or unparsable file gives none.
+// services hold. A service publishes for the honeypot its qpot.honeypot
+// label names, else for itself: tanner's port is published by its snare
+// companion, and read back as snare's it was never kept. A missing or
+// unparsable file gives none.
 func ownHostPorts(composePath string) map[string]int {
 	data, err := os.ReadFile(composePath)
 	if err != nil {
@@ -90,7 +93,8 @@ func ownHostPorts(composePath string) map[string]int {
 	}
 	var doc struct {
 		Services map[string]struct {
-			Ports []string `yaml:"ports"`
+			Ports  []string  `yaml:"ports"`
+			Labels yaml.Node `yaml:"labels"`
 		} `yaml:"services"`
 	}
 	if yaml.Unmarshal(data, &doc) != nil {
@@ -98,6 +102,10 @@ func ownHostPorts(composePath string) map[string]int {
 	}
 	out := map[string]int{}
 	for name, svc := range doc.Services {
+		var labels map[string]string
+		if svc.Labels.Decode(&labels) == nil && labels["qpot.honeypot"] != "" {
+			name = labels["qpot.honeypot"]
+		}
 		for _, spec := range svc.Ports {
 			host := publishedHostPort(spec)
 			bare, _, _ := strings.Cut(spec, "/")
