@@ -32,6 +32,10 @@ name: CI
 #   coverage     - reports total/per-package coverage and guards a low floor.
 #   install-windows - scripts/install.ps1 against a local fake release, on
 #                  PowerShell 7 and Windows PowerShell 5.1.
+#
+# The tool versions and gosec's exclude list live in .github/ci-tools.env,
+# which every job that needs them loads first; scripts/ci-local.sh runs these
+# same jobs locally with the same file, so a local pass means a CI pass.
 # (CodeQL semantic analysis runs from its own workflow, codeql.yml; deeper
 #  scheduled fuzzing runs from fuzz.yml.)
 
@@ -50,13 +54,6 @@ concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: true
 
-env:
-  # Pin the security tools so a tool-side change can't silently alter results.
-  GOVULNCHECK_VERSION: v1.1.4
-  GOSEC_VERSION: v2.22.7
-  STATICCHECK_VERSION: "2025.1.1"
-  ACTIONLINT_VERSION: v1.7.7
-
 jobs:
   build-test:
     name: Build, vet, fmt, staticcheck & race tests
@@ -70,6 +67,11 @@ jobs:
         with:
           go-version-file: go.mod
           cache: true
+
+      - name: Load the pinned tool versions
+        # Pinned so a tool-side change cannot silently alter results;
+        # scripts/ci-local.sh reads the same file.
+        run: grep -E '^[A-Z][A-Z0-9_]*=' .github/ci-tools.env >> "$GITHUB_ENV"
 
       - name: go build
         run: go build ./...
@@ -209,6 +211,10 @@ jobs:
         with:
           go-version-file: go.mod
           cache: true
+      - name: Load the pinned tool versions
+        # Pinned so a tool-side change cannot silently alter results;
+        # scripts/ci-local.sh reads the same file.
+        run: grep -E '^[A-Z][A-Z0-9_]*=' .github/ci-tools.env >> "$GITHUB_ENV"
       - name: Run govulncheck (source + binary)
         run: |
           set -euo pipefail
@@ -238,26 +244,26 @@ jobs:
         with:
           go-version-file: go.mod
           cache: true
+      - name: Load the pinned tool versions
+        # Pinned so a tool-side change cannot silently alter results;
+        # scripts/ci-local.sh reads the same file.
+        run: grep -E '^[A-Z][A-Z0-9_]*=' .github/ci-tools.env >> "$GITHUB_ENV"
       - name: Run gosec
-        # Excluded rules are systematic false positives for a Docker-orchestrating
-        # honeypot: G204 (we exec docker by design, args are validated),
-        # G301/G302/G306 (honeypot dirs/decoy configs are intentionally readable
-        # by the non-root container uid; the real secret qpot.id is written 0600),
-        # G101 (the *fake* honeypot /etc/passwd), G117 (we deliberately store the
-        # attacker-supplied passwords the honeypot captures), G115 (intentional
-        # FNV hash truncation), G104 (noisy unhandled-error check), G304 (internal,
-        # non-web-controlled file paths). All high-signal rules - SQL injection,
+        # The excluded rules (GOSEC_EXCLUDES in .github/ci-tools.env, with the
+        # reason for each) are systematic false positives for a
+        # Docker-orchestrating honeypot. All high-signal rules - SQL injection,
         # weak crypto, TLS misconfig, blocklisted imports, template injection -
-        # stay enabled.
+        # stay enabled. gosec honours only "// #nosec Gxxx -- reason" to
+        # silence a line; //nolint:gosec does nothing.
         run: |
           set -uo pipefail
           go install "github.com/securego/gosec/v2/cmd/gosec@${GOSEC_VERSION}"
           GOSEC="$(go env GOPATH)/bin/gosec"
-          EXCLUDES="G104,G115,G204,G304,G301,G302,G306,G101,G117,G118"
           # Write SARIF for the Security tab (note: -quiet would suppress the
-          # file on a clean run, so it is omitted) and fail on any finding.
+          # file on a clean run, so it is omitted), print the findings too,
+          # and fail on any finding.
           GOSEC_RC=0
-          "$GOSEC" -exclude="$EXCLUDES" -fmt sarif -out gosec.sarif ./... || GOSEC_RC=$?
+          "$GOSEC" -exclude="$GOSEC_EXCLUDES" -fmt sarif -out gosec.sarif -stdout -verbose=text ./... || GOSEC_RC=$?
           echo "gosec exit: ${GOSEC_RC}"
           exit "${GOSEC_RC}"
       - name: Upload gosec SARIF
@@ -278,9 +284,14 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0   # full history so committed-then-removed secrets are caught
+      - name: Load the pinned tool versions
+        # Pinned so a tool-side change cannot silently alter results;
+        # scripts/ci-local.sh reads the same file.
+        run: grep -E '^[A-Z][A-Z0-9_]*=' .github/ci-tools.env >> "$GITHUB_ENV"
       - name: Run gitleaks
         uses: gitleaks/gitleaks-action@v2
         env:
+          GITLEAKS_VERSION: ${{ env.GITLEAKS_VERSION }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GITLEAKS_ENABLE_COMMENTS: "false"
           GITLEAKS_ENABLE_UPLOAD_ARTIFACT: "false"
@@ -376,6 +387,19 @@ jobs:
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@v4
+      - name: Load the pinned tool versions
+        # Pinned so a tool-side change cannot silently alter results;
+        # scripts/ci-local.sh reads the same file.
+        run: grep -E '^[A-Z][A-Z0-9_]*=' .github/ci-tools.env >> "$GITHUB_ENV"
+      - name: Install the pinned ShellCheck
+        run: |
+          set -euo pipefail
+          tarball="$RUNNER_TEMP/shellcheck.tar.xz"
+          curl -fsSL --retry 3 -o "$tarball" \
+            "https://github.com/koalaman/shellcheck/releases/download/${SHELLCHECK_VERSION}/shellcheck-${SHELLCHECK_VERSION}.linux.x86_64.tar.xz"
+          echo "${SHELLCHECK_SHA256}  $tarball" | sha256sum -c -
+          tar -xJf "$tarball" -C "$RUNNER_TEMP"
+          echo "$RUNNER_TEMP/shellcheck-${SHELLCHECK_VERSION}" >> "$GITHUB_PATH"
       - name: ShellCheck QPot's install & operational scripts
         # The installer (curl | bash) and the ops scripts are the first thing
         # every user runs - a shell bug here breaks adoption on a whole distro
@@ -387,9 +411,11 @@ jobs:
         run: |
           set -euo pipefail
           shellcheck --version
+          shellcheck --version | grep -qx "version: ${SHELLCHECK_VERSION#v}"
           shellcheck -S error \
             install.sh deploy.sh update.sh uninstall.sh genuser.sh \
             scripts/install.sh scripts/distro-smoke.sh scripts/test-makefile.sh scripts/test-install.sh \
+            scripts/ci-local.sh \
             docker/ssh-backend/files/entrypoint.sh \
             docker/ssh-backend/files/rec-shell.sh
           echo "shellcheck (error level) clean"
@@ -405,6 +431,19 @@ jobs:
         with:
           go-version-file: go.mod
           cache: true
+      - name: Load the pinned tool versions
+        # Pinned so a tool-side change cannot silently alter results;
+        # scripts/ci-local.sh reads the same file.
+        run: grep -E '^[A-Z][A-Z0-9_]*=' .github/ci-tools.env >> "$GITHUB_ENV"
+      - name: Install the pinned ShellCheck
+        run: |
+          set -euo pipefail
+          tarball="$RUNNER_TEMP/shellcheck.tar.xz"
+          curl -fsSL --retry 3 -o "$tarball" \
+            "https://github.com/koalaman/shellcheck/releases/download/${SHELLCHECK_VERSION}/shellcheck-${SHELLCHECK_VERSION}.linux.x86_64.tar.xz"
+          echo "${SHELLCHECK_SHA256}  $tarball" | sha256sum -c -
+          tar -xJf "$tarball" -C "$RUNNER_TEMP"
+          echo "$RUNNER_TEMP/shellcheck-${SHELLCHECK_VERSION}" >> "$GITHUB_PATH"
       - name: Run actionlint
         # The CI workflows are code too: a bug in an embedded run: script (bad
         # quoting, an undefined var, a wrong redirect) can make a check silently
