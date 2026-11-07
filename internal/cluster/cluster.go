@@ -864,10 +864,12 @@ func (m *Manager) Stop() error {
 		m.apiServer.Close()
 	}
 
-	m.cluster.isRunning = false
+	// Saved while still marked running: a cluster.json removed by `qpot
+	// cluster leave` in another process is not written again.
 	if err := m.saveClusterLocked(); err != nil {
 		slog.Warn("Failed to persist cluster state on stop", "error", err)
 	}
+	m.cluster.isRunning = false
 	slog.Info("Cluster manager stopped")
 
 	return nil
@@ -885,12 +887,15 @@ func (m *Manager) GetStatus() *ClusterStatus {
 	status := &ClusterStatus{
 		ID:        m.cluster.ID,
 		Name:      m.cluster.Name,
-		NodeCount: len(m.cluster.Nodes),
 		IsRunning: m.cluster.isRunning,
 	}
 
 	var totalEvents int64
 	for _, node := range m.cluster.Nodes {
+		if node.Status == NodeStatusLeft {
+			continue
+		}
+		status.NodeCount++
 		switch node.Status {
 		case NodeStatusHealthy:
 			status.HealthyNodes++
@@ -916,7 +921,16 @@ func (m *Manager) GetNodes() []*Node {
 		return nil
 	}
 
-	return m.snapshotNodesLocked()
+	// Nodes that left are kept only to stop them coming back (see
+	// mergeDigestNodeLocked); they are not members.
+	nodes := m.snapshotNodesLocked()
+	members := nodes[:0]
+	for _, n := range nodes {
+		if n.Status != NodeStatusLeft {
+			members = append(members, n)
+		}
+	}
+	return members
 }
 
 // GetCluster returns the cluster
@@ -1521,10 +1535,18 @@ func (m *Manager) handleLeaveHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	m.mu.Lock()
-	if m.cluster != nil {
-		if node, ok := m.cluster.Nodes[req.NodeID]; ok {
+	// The node is kept, marked left, and saved: deleted from memory only, it
+	// came back from cluster.json at the next start, and a member that missed
+	// the leave gossiped it straight back in. A node leaves by itself: this
+	// one is never marked left on another's word.
+	if m.cluster != nil && (m.cluster.LocalNode == nil || req.NodeID != m.cluster.LocalNode.ID) {
+		if node, ok := m.cluster.Nodes[req.NodeID]; ok && node.Status != NodeStatusLeft {
 			node.Status = NodeStatusLeft
-			delete(m.cluster.Nodes, req.NodeID)
+			node.LastSeen = time.Now()
+			m.pruneLeftLocked(node.LastSeen)
+			if err := m.saveClusterLocked(); err != nil {
+				slog.Warn("Failed to persist cluster membership", "error", err)
+			}
 			slog.Info("Node left cluster", "node_id", req.NodeID)
 		}
 	}
@@ -1564,6 +1586,9 @@ func (m *Manager) syncLoop(stop <-chan struct{}, tick <-chan time.Time) {
 // gossip sends a heartbeat/state-digest to each known peer node and merges
 // any updated node information returned in the response.
 func (m *Manager) gossip() {
+	if m.stopIfLeftElsewhere() {
+		return
+	}
 	m.mu.RLock()
 	if m.cluster == nil || m.cluster.LocalNode == nil {
 		m.mu.RUnlock()
@@ -1676,31 +1701,12 @@ func (m *Manager) gossip() {
 		}
 		discovered := false
 		for _, peerNode := range peerMsg.NodeDigest {
-			if peerNode == nil || peerNode.ID == localID {
-				continue
-			}
-			existing, ok := m.cluster.Nodes[peerNode.ID]
-			if !ok {
-				// New node discovered via gossip. Bound the member map and
-				// reject records that can't yield a usable peer URL.
-				if len(m.cluster.Nodes) >= maxClusterNodes {
-					continue
-				}
-				if !validPeerNode(peerNode) {
-					continue
-				}
-				m.cluster.Nodes[peerNode.ID] = peerNode
-				slog.Info("Gossip: discovered new node", "node_id", peerNode.ID, "name", peerNode.Name)
+			if m.mergeDigestNodeLocked(peerNode, localID, now) {
 				discovered = true
-			} else if peerNode.LastSeen.After(existing.LastSeen) {
-				// Peer has fresher info about this node.
-				existing.Status = peerNode.Status
-				existing.LastSeen = peerNode.LastSeen
-				existing.Stats = peerNode.Stats
 			}
 		}
 		// Mark the responding peer as healthy and update its last-seen time.
-		if node, ok := m.cluster.Nodes[peer.id]; ok {
+		if node, ok := m.cluster.Nodes[peer.id]; ok && node.Status != NodeStatusLeft {
 			node.Status = NodeStatusHealthy
 			node.LastSeen = now
 		}
@@ -1759,6 +1765,91 @@ func validPeerNode(n *Node) bool {
 	if n.Port < 1 || n.Port > 65535 {
 		return false
 	}
+	return true
+}
+
+// leftRetention is how long a node that left is remembered as left (see
+// mergeDigestNodeLocked) before its record is dropped.
+const leftRetention = 30 * 24 * time.Hour
+
+// mergeDigestNodeLocked merges one record of a peer's gossip digest into the
+// member map and reports whether the map gained or changed a record to save.
+// Records that cannot yield a usable peer URL (nil, empty ID, bad address or
+// port) are skipped, as is this node's own. A node that left stays left: its
+// record is kept as a tombstone, so a member that missed the leave, or the
+// node itself still running, cannot gossip it back in; a peer's left record
+// marks it left here too. Caller holds m.mu.
+func (m *Manager) mergeDigestNodeLocked(n *Node, localID string, now time.Time) bool {
+	if !validPeerNode(n) || n.ID == localID {
+		return false
+	}
+	existing, ok := m.cluster.Nodes[n.ID]
+	switch {
+	case !ok:
+		if len(m.cluster.Nodes) >= maxClusterNodes {
+			return false
+		}
+		if n.Status == NodeStatusLeft {
+			n.LastSeen = now
+		}
+		m.cluster.Nodes[n.ID] = n
+		slog.Info("Gossip: discovered node", "node_id", n.ID, "name", n.Name, "status", n.Status)
+		return true
+	case existing.Status == NodeStatusLeft:
+		return false
+	case n.Status == NodeStatusLeft:
+		existing.Status = NodeStatusLeft
+		existing.LastSeen = now
+		m.pruneLeftLocked(now)
+		return true
+	case n.LastSeen.After(existing.LastSeen):
+		existing.Status = n.Status
+		existing.LastSeen = n.LastSeen
+		existing.Stats = n.Stats
+	}
+	return false
+}
+
+// pruneLeftLocked drops the records of nodes that left longer than
+// leftRetention ago. Caller holds m.mu.
+func (m *Manager) pruneLeftLocked(now time.Time) {
+	for id, n := range m.cluster.Nodes {
+		if n.Status == NodeStatusLeft && now.Sub(n.LastSeen) > leftRetention {
+			delete(m.cluster.Nodes, id)
+		}
+	}
+}
+
+// errLeftElsewhere: cluster.json was removed while this manager ran.
+var errLeftElsewhere = errors.New("this node left the cluster (cluster.json was removed)")
+
+// stopIfLeftElsewhere ends a running membership whose cluster.json is gone:
+// `qpot cluster leave`, in another process, removed it after telling the
+// peers. Gossiping on as the node that left put it back in their member
+// lists, and saving wrote the file again, so the next start rejoined. It
+// reports whether it stopped.
+func (m *Manager) stopIfLeftElsewhere() bool {
+	if _, err := os.Stat(filepath.Join(m.dataPath, "cluster.json")); !errors.Is(err, os.ErrNotExist) {
+		return false
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.cluster == nil || !m.cluster.isRunning {
+		return false
+	}
+	m.stopOnce.Do(func() { close(m.stopCh) })
+	if m.gossipTicker != nil {
+		m.gossipTicker.Stop()
+	}
+	if m.syncTicker != nil {
+		m.syncTicker.Stop()
+	}
+	if m.apiServer != nil {
+		_ = m.apiServer.Close()
+	}
+	m.cluster = nil
+	m.plainPassword = ""
+	slog.Warn("Cluster membership stopped", "reason", errLeftElsewhere)
 	return true
 }
 
@@ -1918,33 +2009,25 @@ func (m *Manager) handleGossipHTTP(w http.ResponseWriter, r *http.Request) {
 
 	now := time.Now()
 	m.mu.Lock()
+	// A node that left and still gossips (its control plane kept running)
+	// is told so, and nothing it sends is taken.
 	if m.cluster != nil {
-		// Merge the sender's node digest. Validate each entry first: a peer
-		// (or anyone replaying its credential) can send a digest containing a
-		// JSON null (decodes to a nil *Node, which would nil-deref) or a node
-		// with an empty ID / blank address / out-of-range port, which would
-		// either panic the handler or pollute the membership table with a junk
-		// entry (e.g. keyed by ""). Skip anything validPeerNode rejects.
+		if sender, ok := m.cluster.Nodes[incoming.SenderID]; ok && sender.Status == NodeStatusLeft {
+			m.mu.Unlock()
+			http.Error(w, "this node left the cluster", http.StatusGone)
+			return
+		}
+	}
+	if m.cluster != nil {
+		// Merge the sender's node digest (see mergeDigestNodeLocked).
 		discovered := false
+		var localID string
+		if m.cluster.LocalNode != nil {
+			localID = m.cluster.LocalNode.ID
+		}
 		for _, node := range incoming.NodeDigest {
-			if !validPeerNode(node) {
-				continue
-			}
-			if m.cluster.LocalNode != nil && node.ID == m.cluster.LocalNode.ID {
-				continue
-			}
-			existing, ok := m.cluster.Nodes[node.ID]
-			if !ok {
-				if len(m.cluster.Nodes) >= maxClusterNodes {
-					continue
-				}
-				m.cluster.Nodes[node.ID] = node
-				slog.Info("Gossip: discovered node via ping", "node_id", node.ID)
+			if m.mergeDigestNodeLocked(node, localID, now) {
 				discovered = true
-			} else if node.LastSeen.After(existing.LastSeen) {
-				existing.Status = node.Status
-				existing.LastSeen = node.LastSeen
-				existing.Stats = node.Stats
 			}
 		}
 		// Update the sender's own record.
@@ -2044,6 +2127,11 @@ func (m *Manager) saveClusterLocked() error {
 	}
 
 	clusterPath := filepath.Join(m.dataPath, "cluster.json")
+	if m.cluster.isRunning {
+		if _, err := os.Stat(clusterPath); errors.Is(err, os.ErrNotExist) {
+			return errLeftElsewhere
+		}
+	}
 	if err := os.MkdirAll(m.dataPath, 0750); err != nil {
 		return err
 	}
