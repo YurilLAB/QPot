@@ -106,6 +106,12 @@ const cowriePatchVersion = "24.04.2"
 // checked (coreutils.py's qpot_fetch, and FTP's control and data connections),
 // never to a second lookup of the name: upstream's fetch looked the name up
 // again, and Twisted's FTP client connected to any host a PASV answer named.
+//
+// ssh.py: scp and sftp of OpenSSH's client (Cowrie had only scp's server
+// side): their options and config read as ssh reads them, the key they would
+// offer logged as ssh's is, and OpenSSH's messages and exit statuses for a
+// host that times out, refuses or asks for a password (recorded from OpenSSH
+// 10.0p2, the older releases' from their sources).
 var (
 	//go:embed honeypotfiles/cowrie/protocol.py
 	cowrieProtocolPy []byte
