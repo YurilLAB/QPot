@@ -365,6 +365,11 @@ qpot cluster approve <request-id> --password '...'       # (or deny)
 qpot cluster status
 ```
 
+By default a joining node trusts only the cluster's own CA, which the cluster
+ID pins. If the seed serves a certificate from your own or a public CA
+(`tls_cert_path` in `cluster.json`), add `--operator-cert`, or
+`--ca-file <bundle.pem>` to check it against a specific CA bundle.
+
 Joining needs the password **and** the host's approval (`require_approval`,
 on by default). Traffic between nodes is TLS-encrypted automatically, with no
 certificates to manage: `cluster init` makes a certificate authority for the
