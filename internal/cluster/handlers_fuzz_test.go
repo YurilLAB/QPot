@@ -64,8 +64,8 @@ func TestGossipHandlerRejectsMalformedNodes(t *testing.T) {
 }
 
 // TestReadEndpointsRequireAuth verifies the cluster /nodes and /status HTTP
-// endpoints reject unauthenticated callers - /nodes returns every node's QPotID
-// (the management credential) and address, so it must never be public.
+// endpoints reject unauthenticated callers - /nodes returns every node's ID
+// and address, so it must never be public.
 func TestReadEndpointsRequireAuth(t *testing.T) {
 	m := newInitializedManager(t)
 	const pw = "correct-horse-battery"

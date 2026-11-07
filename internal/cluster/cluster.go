@@ -154,11 +154,16 @@ func sanitizeClusterConfig(c *ClusterConfig) *ClusterConfig {
 
 // Node represents a cluster member
 type Node struct {
-	ID           string            `json:"id" yaml:"id"`
-	Name         string            `json:"name" yaml:"name"`
-	Address      string            `json:"address" yaml:"address"`
-	Port         int               `json:"port" yaml:"port"`
-	QPotID       string            `json:"qpot_id" yaml:"qpot_id"`
+	ID      string `json:"id" yaml:"id"`
+	Name    string `json:"name" yaml:"name"`
+	Address string `json:"address" yaml:"address"`
+	Port    int    `json:"port" yaml:"port"`
+	// QPotID is always empty and never sent or stored: the QPot ID is the
+	// instance's web API credential, and gossip, the join answer and
+	// cluster.json handed every member the others'. An older node's is
+	// dropped when read. Mark the local node by its ID (Manager.LocalNodeID);
+	// the field goes once nothing reads it.
+	QPotID       string            `json:"-" yaml:"-"`
 	InstanceName string            `json:"instance_name" yaml:"instance_name"`
 	Status       NodeStatus        `json:"status" yaml:"status"`
 	LastSeen     time.Time         `json:"last_seen" yaml:"last_seen"`
@@ -223,7 +228,6 @@ type JoinRequest struct {
 	NodeName     string            `json:"node_name"`
 	NodeAddress  string            `json:"node_address"`
 	NodePort     int               `json:"node_port"`
-	QPotID       string            `json:"qpot_id"`
 	InstanceName string            `json:"instance_name"`
 	Metadata     map[string]string `json:"metadata,omitempty"`
 	Capabilities []string          `json:"capabilities,omitempty"`
@@ -625,7 +629,6 @@ func (m *Manager) attemptJoin(seedAddr, clusterID, password string, localNode *N
 		NodeName:     localNode.Name,
 		NodeAddress:  localNode.Address,
 		NodePort:     localNode.Port,
-		QPotID:       localNode.QPotID,
 		InstanceName: localNode.InstanceName,
 		Metadata:     localNode.Metadata,
 		Capabilities: localNode.Capabilities,
@@ -1111,7 +1114,6 @@ func (m *Manager) admitNodeLocked(req *JoinRequest) (*JoinResponse, error) {
 		Name:         req.NodeName,
 		Address:      req.NodeAddress,
 		Port:         req.NodePort,
-		QPotID:       req.QPotID,
 		InstanceName: req.InstanceName,
 		Status:       NodeStatusHealthy,
 		LastSeen:     now,
@@ -1278,7 +1280,7 @@ func (m *Manager) apiHandler() http.Handler {
 	// join verifies the password internally via HandleJoinRequest.
 	mux.HandleFunc("/api/v1/cluster/join", m.handleJoinHTTP)
 	// Read-only endpoints are authenticated too: /nodes returns every node's
-	// QPotID (the management-API credential) and address, and /status leaks the
+	// ID and address, and /status leaks the
 	// cluster ID and topology that help an attacker target a join/password
 	// brute-force. Nothing internal depends on them being public - the local
 	// web UI and CLI read cluster state through in-process method calls, not
@@ -2073,6 +2075,9 @@ func (m *Manager) LoadCluster() (*Cluster, error) {
 	if err := json.Unmarshal(data, &cluster); err != nil {
 		return nil, err
 	}
+	// An older node wrote the members' QPot IDs (web API credentials) into
+	// the file; they were dropped when it was read. Rewrite it without them.
+	scrub := bytes.Contains(data, []byte(`"qpot_id"`))
 
 	// Clamp the persisted config: it may have been written by an older/buggy
 	// version or tampered with on disk, and feeds tickers/deadlines.
@@ -2092,7 +2097,22 @@ func (m *Manager) LoadCluster() (*Cluster, error) {
 	m.cluster = &cluster
 	m.mu.Unlock()
 
+	if scrub {
+		if err := m.saveCluster(); err != nil {
+			return nil, fmt.Errorf("remove the QPot IDs an older version stored: %w", err)
+		}
+	}
 	return &cluster, nil
+}
+
+// LocalNodeID returns this node's ID in the cluster, "" when it is in none.
+func (m *Manager) LocalNodeID() string {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	if m.cluster == nil || m.cluster.LocalNode == nil {
+		return ""
+	}
+	return m.cluster.LocalNode.ID
 }
 
 // LeaveCluster removes this node from the cluster.

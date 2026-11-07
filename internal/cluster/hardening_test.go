@@ -438,7 +438,7 @@ func TestThrottleTableFullKeepsBlocks(t *testing.T) {
 // host's approval", but the gossip, intel, leave, nodes and status endpoints
 // only checked the password, which every joiner has. A joiner the host denied
 // could post a gossip digest naming its own node and was a member, could read
-// every member's QPot ID from /nodes, and could remove members via /leave.
+// the member list from /nodes, and could remove members via /leave.
 func TestDeniedJoinerCannotGossipItselfIn(t *testing.T) {
 	const pw = "correct-horse-battery"
 	host := NewManager(t.TempDir())
@@ -446,9 +446,6 @@ func TestDeniedJoinerCannotGossipItselfIn(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	host.mu.Lock()
-	host.cluster.LocalNode.QPotID = "qp_hostsecretidhostsecretid"
-	host.mu.Unlock()
 	jr := host.HandleJoinRequest(&JoinRequest{ClusterID: cl.ID, Password: pw, PollSecret: testPollSecret, NodeName: "evil",
 		NodeAddress: "10.6.6.6", NodePort: 7946}, "10.6.6.6")
 	if jr.Status != "pending" {
@@ -476,8 +473,8 @@ func TestDeniedJoinerCannotGossipItselfIn(t *testing.T) {
 			t.Fatal("the denied joiner added itself to the membership through gossip")
 		}
 	}
-	if rec := send(http.MethodGet, "/api/v1/cluster/nodes", nil); strings.Contains(rec.Body.String(), "qp_hostsecretid") {
-		t.Fatal("the denied joiner read the members' QPot IDs from /nodes")
+	if rec := send(http.MethodGet, "/api/v1/cluster/nodes", nil); rec.Code == http.StatusOK || strings.Contains(rec.Body.String(), cl.LocalNode.ID) {
+		t.Fatalf("the denied joiner read the member list from /nodes: %d %s", rec.Code, rec.Body)
 	}
 	send(http.MethodPost, "/api/v1/cluster/leave", map[string]string{"node_id": cl.LocalNode.ID})
 	if len(host.GetNodes()) != 1 {

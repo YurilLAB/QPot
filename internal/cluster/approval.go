@@ -62,7 +62,6 @@ type PendingJoin struct {
 	// taken from the HTTP layer - not trusted from the request body).
 	SourceIP     string            `json:"source_ip"`
 	NodePort     int               `json:"node_port"`
-	QPotID       string            `json:"qpot_id"`
 	InstanceName string            `json:"instance_name"`
 	Metadata     map[string]string `json:"metadata,omitempty"`
 	Capabilities []string          `json:"capabilities,omitempty"`
@@ -100,7 +99,7 @@ func (o *JoinOutcome) pollMatches(secret string) bool {
 
 // queuePendingJoinLocked records a pending join and returns a "pending"
 // response. Caller must hold m.mu. A re-request from the same joiner (same
-// source IP, hostname, QPot ID and poll secret) reuses the existing request ID
+// source IP, hostname, instance name and poll secret) reuses the existing request ID
 // so a retrying joiner does not spawn duplicate entries; another sender with
 // the same source and names is not given that ID.
 func (m *Manager) queuePendingJoinLocked(req *JoinRequest, sourceIP string) *JoinResponse {
@@ -114,7 +113,7 @@ func (m *Manager) queuePendingJoinLocked(req *JoinRequest, sourceIP string) *Joi
 
 	m.pruneJoinsLocked(time.Now())
 	for _, p := range m.pendingJoins {
-		if p.SourceIP == sourceIP && p.NodeName == req.NodeName && p.QPotID == req.QPotID &&
+		if p.SourceIP == sourceIP && p.NodeName == req.NodeName && p.InstanceName == req.InstanceName &&
 			subtle.ConstantTimeCompare(p.pollHash[:], pollHash[:]) == 1 {
 			return &JoinResponse{Success: false, Status: "pending", RequestID: p.RequestID,
 				Error: "awaiting host approval"}
@@ -145,7 +144,6 @@ func (m *Manager) queuePendingJoinLocked(req *JoinRequest, sourceIP string) *Joi
 		ClaimedAddress: req.NodeAddress,
 		SourceIP:       sourceIP,
 		NodePort:       req.NodePort,
-		QPotID:         req.QPotID,
 		InstanceName:   req.InstanceName,
 		Metadata:       req.Metadata,
 		Capabilities:   req.Capabilities,

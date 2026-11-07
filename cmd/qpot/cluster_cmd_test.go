@@ -4,6 +4,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -130,5 +131,36 @@ func TestClusterInitAdvertisesReachableAddress(t *testing.T) {
 			t.Errorf("bind %q: advertise_addr %q differs from the local node address %q", bind, c.Config.AdvertiseAddr, addr)
 		}
 		_ = os.RemoveAll(filepath.Dir(dir))
+	}
+}
+
+// TestClusterJoinSendsNoQPotID: `qpot cluster join` read the instance's QPot
+// ID (its web API credential) and sent it in the join request, before any
+// approval, for the host to store and gossip to every member.
+func TestClusterJoinSendsNoQPotID(t *testing.T) {
+	clusterHome(t)
+	_, id, err := loadInstance("default")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got []byte
+	seed := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		got, _ = io.ReadAll(r.Body)
+		http.Error(w, "denied", http.StatusForbidden)
+	}))
+	defer seed.Close()
+	cmd := newClusterCommand()
+	cmd.SetArgs([]string{"join", "--id", "qc_test", "--password", "correct-horse-battery",
+		"--seed", seed.URL, "--node-addr", "127.0.0.1"})
+	cmd.SetOut(io.Discard)
+	cmd.SetErr(io.Discard)
+	if err := cmd.Execute(); err == nil {
+		t.Fatal("the join was accepted by a seed that refused it")
+	}
+	if len(got) == 0 {
+		t.Fatal("no join request reached the seed")
+	}
+	if strings.Contains(string(got), id.ID) || strings.Contains(string(got), "qpot_id") {
+		t.Fatalf("the join request carries the instance's QPot ID: %s", got)
 	}
 }

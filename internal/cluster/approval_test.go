@@ -198,7 +198,7 @@ func TestJoinOutcomeGoesOnlyToTheJoiner(t *testing.T) {
 	}
 	join := func(secret string) *JoinResponse {
 		return host.HandleJoinRequest(&JoinRequest{ClusterID: cl.ID, Password: pw, PollSecret: secret,
-			NodeName: "sensor-7", QPotID: "qp_sensor7", NodeAddress: "10.9.9.9", NodePort: 7946}, "10.9.9.9")
+			NodeName: "sensor-7", NodeAddress: "10.9.9.9", NodePort: 7946}, "10.9.9.9")
 	}
 	if r := join(""); r.Status == "pending" || r.RequestID != "" || r.Error != errNoPollSecret {
 		t.Fatalf("a join without a poll secret: %+v", r)

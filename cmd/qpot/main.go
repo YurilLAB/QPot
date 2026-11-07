@@ -995,14 +995,8 @@ func newClusterJoinCommand() *cobra.Command {
 				password = string(pwBytes)
 			}
 
-			// Load instance info if available
 			if instanceName == "" {
 				instanceName = "default"
-			}
-
-			idObj, _ := instance.LoadID(instanceName)
-			if idObj != nil {
-				qpotID = idObj.ID
 			}
 
 			// Auto-detect node address if not provided
@@ -1021,7 +1015,6 @@ func newClusterJoinCommand() *cobra.Command {
 				Name:         nodeName,
 				Address:      nodeAddr,
 				Port:         nodePort,
-				QPotID:       qpotID,
 				InstanceName: instanceName,
 				Metadata:     make(map[string]string),
 				Capabilities: []string{"honeypot", "sensor"},
@@ -1056,7 +1049,12 @@ func newClusterJoinCommand() *cobra.Command {
 	cmd.Flags().StringVar(&nodeName, "node-name", "", "Name for this node (default: hostname)")
 	cmd.Flags().StringVar(&nodeAddr, "node-addr", "", "Address for this node (auto-detected if not set)")
 	cmd.Flags().IntVar(&nodePort, "node-port", cluster.DefaultClusterPort, "Port for cluster communication")
-	cmd.Flags().StringVar(&qpotID, "qpot-id", "", "QPot ID (auto-detected if not set)")
+	// The QPot ID is the instance's web API credential: it is no longer sent
+	// to the cluster, and the flag is accepted so older scripts still run.
+	cmd.Flags().StringVar(&qpotID, "qpot-id", "", "unused")
+	if err := cmd.Flags().MarkDeprecated("qpot-id", "the QPot ID is no longer sent to the cluster"); err != nil {
+		panic(fmt.Errorf("cluster join: deprecate --qpot-id: %w", err))
+	}
 	cmd.Flags().StringVar(&instanceName, "instance", "default", "QPot instance name")
 	if err := cmd.MarkFlagRequired("id"); err != nil {
 		panic(fmt.Errorf("cluster join: mark --id required: %w", err))
