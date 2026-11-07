@@ -7,6 +7,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"net/netip"
 	"os"
 	"path/filepath"
 	"strings"
@@ -28,6 +29,15 @@ type fakeHPRunner struct {
 	restarted []string
 	// cfgs are the configs the server asked for a runner for.
 	cfgs []*config.Config
+	// states / statesErr answer ServiceStates.
+	states    map[string]instance.ServiceState
+	statesErr error
+}
+
+func (f *fakeHPRunner) ServiceStates(context.Context) (map[string]instance.ServiceState, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.states, f.statesErr
 }
 
 func (f *fakeHPRunner) IsRunning(context.Context) bool {
@@ -94,8 +104,27 @@ func newAPITestServer(t testing.TB, name string, prep func(*config.Config)) *api
 		r.mu.Unlock()
 		return r
 	}
+	s.api.lookup = testLookup
 	s.setupRoutes()
 	return &apiTestServer{s: s, h: securityHeaders(s.authMiddleware(s.mux)), runner: r, cfg: cfg}
+}
+
+// testLookup resolves a few names for endpoint checks without the network.
+func testLookup(_ context.Context, host string) ([]netip.Addr, error) {
+	addrs := map[string]string{
+		"localhost": "127.0.0.1", "ollama.lan": "10.0.0.5", "llm.example.net": "203.0.113.7",
+		"meta.evil.test": "169.254.169.254", "v6meta.evil.test": "fd00:ec2::254",
+		"mapped.evil.test": "::ffff:169.254.169.254", "mixed.evil.test": "203.0.113.8",
+	}
+	a, ok := addrs[host]
+	if !ok {
+		return nil, errors.New("no such host")
+	}
+	out := []netip.Addr{netip.MustParseAddr(a)}
+	if host == "mixed.evil.test" {
+		out = append(out, netip.MustParseAddr("169.254.170.2"))
+	}
+	return out, nil
 }
 
 // do sends a request through the full middleware chain with the QPot ID and,

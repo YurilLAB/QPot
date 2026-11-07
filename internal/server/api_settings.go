@@ -144,8 +144,19 @@ func (s *Server) putHoneypotSettings(w http.ResponseWriter, r *http.Request) {
 		s.sendAPIError(w, http.StatusInternalServerError, "QP-INST-002", "The instance settings could not be read.")
 		return
 	}
-	// Validate first, so a bad request never needs Docker.
+	// Validate first, so a bad request never needs Docker. The web UI's own
+	// rules (a secret's endpoint changes only with the secret; no metadata
+	// or link-local endpoints) come on top of the CLI's.
 	if _, err := instance.ValidateSettings(cfg, req.Name, changes); err != nil {
+		s.settingsError(w, req.Name, err)
+		return
+	}
+	if err := instance.CheckRemoteSettings(r.Context(), cfg, req.Name, changes, s.api.lookup); err != nil {
+		var sre *instance.SecretRequiredError
+		if errors.As(err, &sre) {
+			writeJSON(w, http.StatusBadRequest, apiError{Error: err.Error(), Code: "QP-INPUT-012", Needs: sre.Secrets})
+			return
+		}
 		s.settingsError(w, req.Name, err)
 		return
 	}

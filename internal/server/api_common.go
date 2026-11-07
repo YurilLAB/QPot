@@ -31,6 +31,9 @@ type apiState struct {
 	// runner, when set, replaces the Manager a honeypot change uses for
 	// cfg (tests).
 	runner func(cfg *config.Config) instance.HoneypotRunner
+	// lookup, when set, replaces the host's resolver for the endpoint
+	// settings check (tests).
+	lookup instance.LookupFunc
 
 	// cfgMu guards the parsed config file cache readConfig keeps.
 	cfgMu  sync.Mutex
@@ -45,6 +48,9 @@ type apiError struct {
 	// Saved is set when the change was saved although the request failed
 	// afterwards (e.g. the honeypot did not restart).
 	Saved bool `json:"saved,omitempty"`
+	// Needs names settings the request must also carry (a secret to enter
+	// again).
+	Needs []string `json:"needs,omitempty"`
 }
 
 // sendAPIError answers with a plain-English error and, when one fits, the
