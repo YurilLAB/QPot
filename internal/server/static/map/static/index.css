@@ -2685,6 +2685,51 @@ html[data-theme="light"] #map.leaflet-container {
     line-height: 1.5;
 }
 
+/* T-Pot's compact credit (MapLibre's compact attribution): the (i) button at the right end of
+   the pill; folded, only the round button is left (map.js compactCredit) */
+.leaflet-control-attribution.qpot-compact {
+    position: relative;
+    min-height: 20px;
+    padding: 2px 28px 2px 8px !important;
+    border-radius: 12px;
+    box-sizing: content-box;
+}
+
+.leaflet-control-attribution.qpot-compact:not(.qpot-compact-show) {
+    padding: 2px 24px 2px 0 !important;
+}
+
+.leaflet-control-attribution.qpot-compact:not(.qpot-compact-show) .qpot-attrib-inner {
+    display: none;
+}
+
+.qpot-attrib-button {
+    position: absolute;
+    top: 0;
+    right: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 24px;
+    height: 24px;
+    padding: 0;
+    border: 0;
+    border-radius: 12px;
+    background: rgba(255, 255, 255, 0.5);
+    color: #000;
+    font-size: 14px;
+    cursor: pointer;
+}
+
+.qpot-compact-show .qpot-attrib-button {
+    background: rgba(0, 0, 0, 0.05);
+}
+
+.qpot-attrib-button:focus-visible {
+    outline: none;
+    box-shadow: 0 0 2px 2px var(--primary-color);
+}
+
 /* Initial hidden states for elements toggled by JS */
 #cache-status,
 #sound-options {

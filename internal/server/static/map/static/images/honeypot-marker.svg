@@ -2,17 +2,17 @@
   <defs>
     <!-- Enhanced 3D gradient with depth -->
     <linearGradient id="markerGradient" x1="0%" y1="0%" x2="0%" y2="100%">
-      <stop offset="0%" style="stop-color:#FF6BB3;stop-opacity:1" />
-      <stop offset="30%" style="stop-color:#FF47A3;stop-opacity:1" />
-      <stop offset="70%" style="stop-color:#E20074;stop-opacity:1" />
-      <stop offset="100%" style="stop-color:#A8005A;stop-opacity:1" />
+      <stop offset="0%" style="stop-color:#D58BEE;stop-opacity:1" />
+      <stop offset="30%" style="stop-color:#C474E4;stop-opacity:1" />
+      <stop offset="70%" style="stop-color:#B65FD9;stop-opacity:1" />
+      <stop offset="100%" style="stop-color:#7B2A9C;stop-opacity:1" />
     </linearGradient>
     
     <!-- Radial gradient for 3D sphere effect -->
     <radialGradient id="sphereGradient" cx="30%" cy="25%" r="70%">
-      <stop offset="0%" style="stop-color:#FFADD6;stop-opacity:0.8" />
-      <stop offset="50%" style="stop-color:#FF47A3;stop-opacity:0.6" />
-      <stop offset="100%" style="stop-color:#E20074;stop-opacity:0.3" />
+      <stop offset="0%" style="stop-color:#ECCBF7;stop-opacity:0.8" />
+      <stop offset="50%" style="stop-color:#C474E4;stop-opacity:0.6" />
+      <stop offset="100%" style="stop-color:#B65FD9;stop-opacity:0.3" />
     </radialGradient>
     
     <!-- Enhanced shadow with multiple layers -->
@@ -63,21 +63,21 @@
   <!-- Inner rim of the hole for 3D depth -->
   <circle cx="24" cy="20" r="7" 
           fill="none" 
-          stroke="#A8005A" 
+          stroke="#7B2A9C" 
           stroke-width="1.5" 
           opacity="0.8"/>
   
   <!-- Outer edge highlight for 3D rim effect -->
   <circle cx="24" cy="20" r="8.5" 
           fill="none" 
-          stroke="#FF6BB3" 
+          stroke="#D58BEE" 
           stroke-width="0.5" 
           opacity="0.6"/>
   
   <!-- Pulse ring -->
   <circle cx="24" cy="20" r="12" 
           fill="none" 
-          stroke="#E20074" 
+          stroke="#B65FD9" 
           stroke-width="1" 
           opacity="0.4" 
           class="pulse-ring"/>

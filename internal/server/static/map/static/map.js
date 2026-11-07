@@ -192,7 +192,61 @@ function noteHome(lat, lng, iso) {
 });
 map.on('resize', scheduleWorldFit);
 window.addEventListener('load', scheduleWorldFit);
+// The bottom panel grows to its height after the start (a CSS transition, and T-Pot's own resize
+// call can come before the map exists); on a quiet sensor no attack re-places the credit, so
+// follow the panel itself.
+if (window.ResizeObserver) {
+    var panelWatch = new ResizeObserver(function () { scheduleWorldFit(); });
+    ['bottom-panel', 'map'].forEach(function (id) {
+        var el = document.getElementById(id);
+        if (el) panelWatch.observe(el);
+    });
+}
 window.__worldFit = { credit: placeCredit, apply: applyWorldFit, isAuto: function () { return autoWorldView; }, home: function () { return homeLatLng; } };
+
+// T-Pot 24.04.2's credit is MapLibre's compact attribution: a pill with an (i) button that folds
+// it away, folded as soon as the map is dragged. QPot's credit is longer than T-Pot's one line,
+// so on a phone-width map it starts folded; the (i) opens it. Leaflet rewrites the control's
+// content when the layers change, so the text is wrapped and the button put back each time.
+(function compactCredit() {
+    var box = map.attributionControl.getContainer();
+    var open = map.getContainer().clientWidth > 640;
+    var button = document.createElement('button');
+    button.type = 'button';
+    button.className = 'qpot-attrib-button';
+    button.title = 'Map credits';
+    button.setAttribute('aria-label', 'Map credits');
+    button.appendChild(document.createElement('i')).className = 'fas fa-circle-info';
+    function show(on) {
+        open = on;
+        box.classList.toggle('qpot-compact-show', on);
+        button.setAttribute('aria-expanded', String(on));
+    }
+    function wrap() {
+        var loose = Array.prototype.filter.call(box.childNodes, function (n) {
+            return n !== button && !(n.classList && n.classList.contains('qpot-attrib-inner'));
+        });
+        if (loose.length) {
+            var inner = document.createElement('span');
+            inner.className = 'qpot-attrib-inner';
+            loose.forEach(function (n) { inner.appendChild(n); });
+            box.querySelectorAll('.qpot-attrib-inner').forEach(function (old) { old.remove(); });
+            box.insertBefore(inner, box.firstChild);
+        }
+        if (button.parentNode !== box || box.lastChild !== button) box.appendChild(button);
+    }
+    button.addEventListener('click', function (e) {
+        e.preventDefault();
+        e.stopPropagation();
+        show(!open);
+    });
+    L.DomEvent.disableClickPropagation(button);
+    box.classList.add('qpot-compact');
+    wrap();
+    show(open);
+    new MutationObserver(wrap).observe(box, { childList: true });
+    map.on('dragstart', function () { if (open) show(false); });
+})();
 
 // ---------------------------------------------------------------------------
 // Activity shading (T-Pot 24.04.2's choropleth): countries shaded by their share
@@ -1220,7 +1274,7 @@ function createHoneypotPopup(honeypotData) {
     titleDiv.className = 'popup-title';
     
     const h4 = document.createElement('h4');
-    h4.textContent = 'T-Pot Honeypot';
+    h4.textContent = 'QPot Honeypot';
     
     const subtitle = document.createElement('span');
     subtitle.className = 'popup-subtitle';
@@ -1371,6 +1425,9 @@ const messageHandlers = {
             lastUpdate: new Date()
         };
     }
+    // QPot: the sensor's pin may come first from a Stats message, which has no IP or host name
+    if (!markerAttackData[dstKey].hostname) markerAttackData[dstKey].hostname = msg.tpot_hostname;
+    if (!markerAttackData[dstKey].dst_ip) markerAttackData[dstKey].dst_ip = msg.dst_ip;
 
     Promise.all([
         addCircle(msg.country, msg.iso_code, msg.src_ip, msg.ip_rep, msg.color, srcLatLng, msg.protocol),
@@ -1458,8 +1515,23 @@ const messageHandlers = {
   },
   Stats: (msg) => {
     handleStats(msg);
+    sensorPlace(msg);
   },
 };
+
+// QPot: Stats also carries the sensor's own place (Traffic's dst_* fields; absent when it is not
+// known), so a quiet sensor gets its pin and the start view keeps it in sight before the first attack.
+function sensorPlace(msg) {
+    if (typeof msg.dst_lat !== 'number' || typeof msg.dst_long !== 'number') return;
+    var lat = msg.dst_lat, lng = msg.dst_long;
+    if (!isFinite(lat) || !isFinite(lng) || Math.abs(lat) > 90 || Math.abs(lng) > 180) return;
+    var place = L.latLng(lat, lng);
+    if (!homeLatLng) {
+        homeLatLng = place;
+        scheduleWorldFit();
+    }
+    addMarker(String(msg.dst_country_name || ''), String(msg.dst_iso_code || 'XX'), '', '', place);
+}
 
 // Enhanced WebSocket handling with dashboard integration
 function connectWebSocket() {
