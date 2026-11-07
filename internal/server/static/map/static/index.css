@@ -2913,6 +2913,23 @@ a.navbar-brand:hover {
         min-width: 0;
     }
 
+    /* a long protocol (POSTGRESQL, ELASTICSEARCH) or honeypot name (redishoneypot) ends in an
+       ellipsis instead of pushing the feed past the screen's edge */
+    #live-attacks-table .honeypot-cell {
+        max-width: 9ch;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+    }
+
+    #live-attacks-table .protocol-badge {
+        max-width: 8ch;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+        vertical-align: middle;
+    }
+
     .table-wrapper {
         scrollbar-width: thin !important;
         scrollbar-color: var(--border-secondary) transparent;
