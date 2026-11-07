@@ -54,6 +54,9 @@ var apiRoutes = []apiRoute{
 	{method: http.MethodPut, path: "/api/honeypots/settings", body: `{"name":"cowrie","settings":{"nosuch":"x"}}`},
 	{method: http.MethodPost, path: "/api/honeypots/restart", body: `{"name":"nosuch"}`},
 	{method: http.MethodGet, path: "/api/instance"},
+	{method: http.MethodGet, path: "/api/doctor"},
+	{method: http.MethodGet, path: "/api/doctor/explain?code=QP-INST-005"},
+	{method: http.MethodGet, path: "/api/doctor/codes"},
 }
 
 func routePath(p string) string {

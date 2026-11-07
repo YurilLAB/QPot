@@ -35,6 +35,13 @@ type apiState struct {
 	// settings check (tests).
 	lookup instance.LookupFunc
 
+	// doctorMu runs GET /api/doctor's checks one at a time; doctorLast is
+	// the last report (reused for doctorReuse); doctor replaces the check
+	// runs (tests).
+	doctorMu   sync.Mutex
+	doctorLast *doctorReport
+	doctor     doctorChecks
+
 	// cfgMu guards the parsed config file cache readConfig keeps.
 	cfgMu  sync.Mutex
 	cfgSum [sha256.Size]byte
