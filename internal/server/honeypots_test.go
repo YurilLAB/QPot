@@ -84,3 +84,74 @@ func TestHoneypotListQueriesDockerOnce(t *testing.T) {
 		t.Fatalf("GET /api/honeypots ran docker %d times for %d honeypots, want at most 2", calls, len(list))
 	}
 }
+
+// TestHoneypotPortsAreTheHostPorts: the dashboard, the overview and the
+// security list showed each honeypot's config port (cowrie's 2222), which no
+// attacker reaches: the host publishes cowrie's 22 and 23 on ports the
+// instance allocates. /api/honeypots and /api/overview give those host ports.
+func TestHoneypotPortsAreTheHostPorts(t *testing.T) {
+	cfg := config.Default("hp-ports")
+	cfg.DataPath = t.TempDir()
+	cfg.QPotID = validTestID
+	cfg.WebUI.QPotIDAuth = true
+	cfg.EnableHoneypot("cowrie")
+	cfg.DisableHoneypot("dionaea")
+	s := &Server{config: cfg, database: &fakeDB{}, mux: http.NewServeMux()}
+	s.setupRoutes()
+	want := instance.HostPortMappings(cfg)["cowrie"]
+	if len(want) < 2 {
+		t.Fatalf("cowrie publishes %v, want its ssh and telnet ports", want)
+	}
+	type hp struct {
+		Name      string                 `json:"name"`
+		HostPorts []instance.PortMapping `json:"host_ports"`
+	}
+	check := func(what string, list []hp) {
+		t.Helper()
+		seen := 0
+		for _, h := range list {
+			switch h.Name {
+			case "cowrie":
+				seen++
+				if len(h.HostPorts) != len(want) {
+					t.Fatalf("%s: cowrie host_ports = %v, want %v", what, h.HostPorts, want)
+				}
+				for i := range want {
+					if h.HostPorts[i] != want[i] {
+						t.Errorf("%s: cowrie host_ports = %v, want %v", what, h.HostPorts, want)
+					}
+				}
+			case "dionaea":
+				seen++
+				if h.HostPorts == nil || len(h.HostPorts) != 0 {
+					t.Errorf("%s: a honeypot that is off publishes nothing: host_ports = %#v, want []", what, h.HostPorts)
+				}
+			}
+		}
+		if seen != 2 {
+			t.Errorf("%s: listed %d of cowrie and dionaea", what, seen)
+		}
+	}
+
+	rec := httptest.NewRecorder()
+	s.mux.ServeHTTP(rec, authReq(http.MethodGet, "/api/honeypots", ""))
+	var list []hp
+	if err := json.Unmarshal(rec.Body.Bytes(), &list); err != nil || rec.Code != http.StatusOK {
+		t.Fatalf("GET /api/honeypots: %d %v %s", rec.Code, err, rec.Body.String())
+	}
+	check("/api/honeypots", list)
+
+	rec = httptest.NewRecorder()
+	s.mux.ServeHTTP(rec, authReq(http.MethodGet, "/api/overview", ""))
+	var ov struct {
+		Instance  string `json:"instance"`
+		Honeypots []hp   `json:"honeypots"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &ov); err != nil || rec.Code != http.StatusOK {
+		t.Fatalf("GET /api/overview: %d %v %s", rec.Code, err, rec.Body.String())
+	}
+	if ov.Instance != "hp-ports" {
+		t.Errorf("the overview lost its other fields: instance %q", ov.Instance)
+	}
+	check("/api/overview", ov.Honeypots)
+}

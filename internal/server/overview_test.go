@@ -52,3 +52,32 @@ func TestHandleOverview(t *testing.T) {
 		t.Errorf("POST: status %d, want 405", rec.Code)
 	}
 }
+
+// TestOverviewReadsTheConfigFile: a honeypot turned off with the CLI (qpot
+// honeypot disable, which stops it) stayed "on" in the overview, which read
+// the server's start-up copy of the config; the honeypot list and the
+// security list read the file and said it was off.
+func TestOverviewReadsTheConfigFile(t *testing.T) {
+	a := newAPITestServer(t, "ov-file", func(c *config.Config) { c.EnableHoneypot("adbhoney") })
+	changeConfigFile(t, a, func(c *config.Config) { c.DisableHoneypot("adbhoney") })
+	rec := a.do(http.MethodGet, "/api/overview", "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status %d: %s", rec.Code, rec.Body.String())
+	}
+	var ov overview.Overview
+	if err := json.Unmarshal(rec.Body.Bytes(), &ov); err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, h := range ov.Honeypots {
+		if h.Name == "adbhoney" {
+			found = true
+			if h.Enabled {
+				t.Error("the overview says adbhoney is on; the config file says it is off")
+			}
+		}
+	}
+	if !found {
+		t.Error("adbhoney is not in the overview")
+	}
+}

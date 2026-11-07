@@ -820,15 +820,19 @@ func (s *Server) handleHoneypots(w http.ResponseWriter, r *http.Request) {
 			names = append(names, name)
 		}
 		sort.Strings(names) // one order every time (the UI redraws on a change)
+		// "port" is the honeypot's own setting; attackers reach the host
+		// ports the instance publishes for it (none while it is off).
+		ports := instance.HostPortMappings(cfg)
 		var list []map[string]interface{}
 		for _, name := range names {
 			hp := hps[name]
 			list = append(list, map[string]interface{}{
-				"name":    name,
-				"enabled": hp.Enabled,
-				"running": running[name],
-				"port":    hp.Port,
-				"risk":    hp.RiskLevel,
+				"name":       name,
+				"enabled":    hp.Enabled,
+				"running":    running[name],
+				"port":       hp.Port,
+				"host_ports": hostPortsOf(ports, name),
+				"risk":       hp.RiskLevel,
 			})
 		}
 		s.sendJSON(w, list)
@@ -1235,7 +1239,41 @@ func (s *Server) handleOverview(w http.ResponseWriter, r *http.Request) {
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
 	defer cancel()
-	s.sendJSON(w, overview.Build(ctx, s.config, s.database, cl, Version))
+	// The config file as it is now: the CLI may have turned honeypots on or
+	// off since this server started (the honeypot list reads it the same way).
+	cfg, err := s.readConfig()
+	if err != nil {
+		cfg = s.config
+	}
+	ov := overview.Build(ctx, cfg, s.database, cl, Version)
+	ports := instance.HostPortMappings(cfg)
+	out := overviewAnswer{Overview: ov, Honeypots: make([]overviewHoneypot, 0, len(ov.Honeypots))}
+	for _, h := range ov.Honeypots {
+		out.Honeypots = append(out.Honeypots, overviewHoneypot{Honeypot: h, HostPorts: hostPortsOf(ports, h.Name)})
+	}
+	s.sendJSON(w, out)
+}
+
+// overviewAnswer is the overview with the host ports each honeypot publishes:
+// its Honeypots field takes the place of the embedded overview's in the JSON
+// (the shallower field wins).
+type overviewAnswer struct {
+	*overview.Overview
+	Honeypots []overviewHoneypot `json:"honeypots"`
+}
+
+type overviewHoneypot struct {
+	overview.Honeypot
+	HostPorts []instance.PortMapping `json:"host_ports"`
+}
+
+// hostPortsOf is a honeypot's published host ports, an empty list (not null)
+// when it publishes none.
+func hostPortsOf(ports map[string][]instance.PortMapping, name string) []instance.PortMapping {
+	if p := ports[name]; p != nil {
+		return p
+	}
+	return []instance.PortMapping{}
 }
 
 func (s *Server) handleCluster(w http.ResponseWriter, r *http.Request) {

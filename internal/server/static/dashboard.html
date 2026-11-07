@@ -339,7 +339,7 @@
                         <div class="card-header"><h4 class="flex-center"><i class="fas fa-server"></i> Honeypot activity (24h)</h4></div>
                         <div class="table-wrapper">
                             <table class="data-table">
-                                <thead><tr><th>Honeypot</th><th>Port</th><th>Hits</th><th>State</th></tr></thead>
+                                <thead><tr><th>Honeypot</th><th>Ports</th><th>Hits</th><th>State</th></tr></thead>
                                 <tbody id="ov-honeypots"></tbody>
                             </table>
                         </div>
@@ -497,7 +497,7 @@
                     <div class="card-header flex-between"><h4 class="flex-center"><i class="fas fa-shield-halved"></i> Honeypot security</h4></div>
                     <div class="table-wrapper">
                         <table class="data-table">
-                            <thead><tr><th>Honeypot</th><th>Risk</th><th class="optional">Port</th><th>State</th></tr></thead>
+                            <thead><tr><th>Honeypot</th><th>Risk</th><th class="optional">Ports</th><th>State</th></tr></thead>
                             <tbody id="security-list"></tbody>
                         </table>
                     </div>
@@ -686,6 +686,28 @@
         function riskPill(risk) {
             const r = String(risk || '').toLowerCase();
             return pill((risk ? String(risk) : 'unknown') + ' risk', RISK[r] || 'muted');
+        }
+
+        // The ports attackers reach: the host ports the instance publishes for a honeypot (host_ports,
+        // by container port; none while it is off). The honeypot's own port setting is not one of them,
+        // and is shown only by an older server that does not send host_ports.
+        function hostPorts(hp) {
+            if (!Array.isArray(hp.host_ports)) return { list: Number.isInteger(hp.port) ? [hp.port] : [], title: null };
+            const maps = hp.host_ports.filter((p) => p && Number.isInteger(p.host_port));
+            return {
+                list: [...new Set(maps.map((p) => p.host_port))],
+                title: maps.map((p) => `host port ${p.host_port} → ${Number.isInteger(p.container_port) ? p.container_port : '?'}/${String(p.protocol || 'tcp')}`).join('\n') || null,
+            };
+        }
+
+        // a few ports, then how many more (heralding and dionaea publish over a dozen)
+        function portsText(list) {
+            return list.length > 3 ? `${list.slice(0, 3).join(', ')} +${list.length - 3}` : list.join(', ');
+        }
+
+        function portsCell(hp, attrs) {
+            const p = hostPorts(hp);
+            return h('td', { ...attrs, title: p.title }, p.list.length ? portsText(p.list) : '-');
         }
 
         function toast(message, kind) {
@@ -979,8 +1001,9 @@
                 const name = hp.name;
                 const st = statusByName[name] || {};
                 const running = !!(hp.running || st.running);
+                const ports = hostPorts(hp);
                 const meta = h('div', { class: 'hp-meta' },
-                    h('span', {}, 'port ' + (Number.isInteger(hp.port) ? hp.port : '-')),
+                    ports.list.length ? h('span', { title: ports.title }, (ports.list.length > 1 ? 'ports ' : 'port ') + portsText(ports.list)) : null,
                     riskPill(hp.risk),
                     hp.enabled ? (running ? pill('running', 'ok') : pill('not running', 'warn')) : pill('off', 'muted'));
                 const settings = settingsByName[name];
@@ -1263,6 +1286,9 @@
                         type: s.type === 'number' ? 'number' : s.type === 'url' ? 'url' : 'text',
                         min: s.type === 'number' && s.min !== undefined ? s.min : null,
                         max: s.type === 'number' && s.max !== undefined ? s.max : null,
+                        // without a step the browser allows whole numbers only (step 1) and refused a
+                        // temperature of 0.5; the server says when a setting takes whole numbers only
+                        step: s.type === 'number' ? 'any' : null,
                         maxlength: s.type === 'number' ? null : 500, placeholder: def, spellcheck: 'false' });
                     control.value = s.value || '';
                 }
@@ -1627,7 +1653,7 @@
             const tb = $('ov-honeypots');
             if (!hps.length) emptyRow(tb, 4, 'No honeypots enabled.', 'fa-server');
             else tb.replaceChildren(...hps.map((x) => h('tr', {},
-                h('td', { class: 'honeypot-cell' }, capitalize(x.name)), h('td', {}, Number.isInteger(x.port) ? String(x.port) : '-'),
+                h('td', { class: 'honeypot-cell' }, capitalize(x.name)), portsCell(x, {}),
                 h('td', {}, fmt(x.hits_24h)), h('td', {}, x.enabled ? pill('on', 'ok') : pill('off', 'muted')))));
             const evs = Array.isArray(ov.recent_events) ? ov.recent_events : [];
             const eb = $('ov-events-list');
@@ -1979,7 +2005,7 @@
             tb.replaceChildren(...honeypots.map((hp) => h('tr', {},
                 h('td', { class: 'honeypot-cell' }, capitalize(hp.name)),
                 h('td', {}, riskPill(hp.risk)),
-                h('td', { class: 'optional' }, Number.isInteger(hp.port) ? String(hp.port) : ''),
+                portsCell(hp, { class: 'optional' }),
                 h('td', {}, hp.enabled ? pill('enabled', 'ok') : pill('disabled', 'muted')))));
         }
 
