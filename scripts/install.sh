@@ -40,7 +40,7 @@ QPOT_GH_REPO="YurilLAB/QPot"
 # commit that passed CI until the first release, then the tag's commit (see
 # "Releases" in README.md). git checks the checkout is exactly this commit;
 # a test checks both installers pin the same commit from main's history.
-QPOT_SOURCE_COMMIT_PINNED="c285a2e1cd5e5b6a9d3675619698b804c3e3c209"
+QPOT_SOURCE_COMMIT_PINNED="70936398106b427e7dcf9eaba851edb5d9731694"
 INSTALL_DIR="${HOME}/.local/bin"
 DOWNLOAD_BASE="${QPOT_DOWNLOAD_BASE:-${QPOT_REPO}/releases/download}"
 SOURCE_REPO="${QPOT_SOURCE_REPO:-${QPOT_REPO}.git}"
