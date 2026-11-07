@@ -492,39 +492,22 @@ func newHoneypotCommand() *cobra.Command {
 				return fmt.Errorf("failed to load config: %w", err)
 			}
 
-			// Reject unknown honeypot names up front. Without this, a typo (e.g.
-			// "cowrei") was silently written into the config as an enabled
-			// honeypot, then `qpot up` would try to deploy a honeypot with no
-			// image/profile - a confusing late failure. ValidateHoneypot only
-			// reads the supported list, so a bare generator is enough.
-			if err := (&instance.ComposeGenerator{Config: cfg}).ValidateHoneypot(hpName); err != nil {
+			// The web API's POST /api/honeypots makes the same change
+			// (instance.SetHoneypotEnabled): unknown names and LLM honeypots
+			// without a provider are refused, and a running instance
+			// starts the honeypot.
+			res, err := instance.SaveHoneypotEnabled(cfg, hpName, true)
+			if err != nil {
 				return err
 			}
-			// LLM-backed honeypots exit at start without a provider; enabling
-			// one unconfigured only produced a crash-looping container.
-			hpCfg, _ := cfg.GetHoneypotConfig(hpName)
-			if missing := instance.MissingLLMConfig(hpName, hpCfg.CustomConfig); len(missing) > 0 {
-				return fmt.Errorf("%s needs an LLM provider; set %s first, e.g.:\n  qpot honeypot set %s -i %s %s",
-					hpName, strings.Join(missing, ", "), hpName, instanceName, llmExample(hpName))
-			}
-
-			cfg.EnableHoneypot(hpName)
-			if err := config.Save(cfg); err != nil {
-				return fmt.Errorf("failed to save config: %w", err)
-			}
-
 			fmt.Printf("[OK] Enabled honeypot '%s' for instance '%s'\n", hpName, instanceName)
 			fmt.Println("     Run 'qpot up' to apply changes")
-
-			// Auto-start if instance is running
-			mgr, _ := instance.NewManager(cfg)
-			if mgr != nil && mgr.IsRunning(ctx) {
-				if err := mgr.StartHoneypot(ctx, hpName); err != nil {
-					return fmt.Errorf("failed to start honeypot: %w", err)
-				}
+			if err := instance.ApplyHoneypotEnabled(ctx, cfg, res, nil); err != nil {
+				return err
+			}
+			if res.Applied {
 				fmt.Printf("[OK] Started honeypot '%s'\n", hpName)
 			}
-
 			return nil
 		},
 	}
@@ -543,27 +526,19 @@ func newHoneypotCommand() *cobra.Command {
 				return fmt.Errorf("failed to load config: %w", err)
 			}
 
-			// A typo used to print "[OK] Disabled" and save the config, so the
-			// operator believed a honeypot was off when nothing had changed.
-			if _, ok := cfg.SnapshotHoneypots()[hpName]; !ok {
-				return fmt.Errorf("unknown honeypot %q (see: qpot honeypot list)", hpName)
+			// Unknown names are refused (a typo once reported "Disabled"),
+			// and a running instance stops the honeypot.
+			res, err := instance.SaveHoneypotEnabled(cfg, hpName, false)
+			if err != nil {
+				return err
 			}
-			cfg.DisableHoneypot(hpName)
-			if err := config.Save(cfg); err != nil {
-				return fmt.Errorf("failed to save config: %w", err)
-			}
-
 			fmt.Printf("[OK] Disabled honeypot '%s' for instance '%s'\n", hpName, instanceName)
-
-			// Auto-stop if instance is running
-			mgr, _ := instance.NewManager(cfg)
-			if mgr != nil && mgr.IsRunning(ctx) {
-				if err := mgr.StopHoneypot(ctx, hpName); err != nil {
-					return fmt.Errorf("failed to stop honeypot: %w", err)
-				}
+			if err := instance.ApplyHoneypotEnabled(ctx, cfg, res, nil); err != nil {
+				return err
+			}
+			if res.Applied {
 				fmt.Printf("[OK] Stopped honeypot '%s'\n", hpName)
 			}
-
 			return nil
 		},
 	}
@@ -2433,15 +2408,4 @@ func truncField(v interface{}, n int) string {
 		return s[:n]
 	}
 	return s
-}
-
-// llmExample is a ready-to-edit `qpot honeypot set` example for an LLM honeypot.
-func llmExample(name string) string {
-	switch name {
-	case "beelzebub":
-		return "llm_provider=ollama llm_model=llama3.1 llm_host=http://OLLAMA_HOST:11434/api/chat"
-	case "galah":
-		return "llm_provider=ollama llm_server_url=http://OLLAMA_HOST:11434 llm_model=llama3.1"
-	}
-	return "key=value"
 }

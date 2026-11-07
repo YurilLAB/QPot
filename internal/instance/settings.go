@@ -38,6 +38,8 @@ type SettingsError struct {
 	Kind error
 	Msg  string
 	Err  error
+	// Missing names the settings a honeypot needs first (ErrNeedsSettings).
+	Missing []string
 }
 
 func (e *SettingsError) Error() string { return e.Msg }

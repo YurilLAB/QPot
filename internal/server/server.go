@@ -800,8 +800,14 @@ func (s *Server) handleHoneypots(w http.ResponseWriter, r *http.Request) {
 				}
 			}
 		}
+		// The config file as it is now: the CLI may have turned honeypots
+		// on or off since this server started.
+		cfg, err := s.readConfig()
+		if err != nil {
+			cfg = s.config
+		}
 		var list []map[string]interface{}
-		for name, hp := range s.config.SnapshotHoneypots() {
+		for name, hp := range cfg.SnapshotHoneypots() {
 			list = append(list, map[string]interface{}{
 				"name":    name,
 				"enabled": hp.Enabled,
@@ -813,47 +819,8 @@ func (s *Server) handleHoneypots(w http.ResponseWriter, r *http.Request) {
 		s.sendJSON(w, list)
 
 	case http.MethodPost:
-		// Enable/disable honeypot
-		var req struct {
-			Name    string `json:"name"`
-			Enabled bool   `json:"enabled"`
-		}
-		r.Body = http.MaxBytesReader(w, r.Body, 4096)
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			s.sendError(w, http.StatusBadRequest, "Invalid request")
-			return
-		}
-
-		// Validate the name against the configured honeypots before it ever
-		// reaches a `docker compose <subcommand> <name>` argv. Without this an
-		// authenticated caller could pass a "-"-prefixed value that docker
-		// interprets as a flag (argument injection) or trigger spurious
-		// compose invocations on arbitrary strings.
-		if !s.isKnownHoneypot(req.Name) {
-			s.sendError(w, http.StatusBadRequest, "unknown honeypot")
-			return
-		}
-
-		if req.Enabled {
-			s.config.EnableHoneypot(req.Name)
-			if err := s.manager.StartHoneypot(ctx, req.Name); err != nil {
-				s.sendInternalError(w, "start honeypot failed", err)
-				return
-			}
-		} else {
-			s.config.DisableHoneypot(req.Name)
-			if err := s.manager.StopHoneypot(ctx, req.Name); err != nil {
-				s.sendInternalError(w, "stop honeypot failed", err)
-				return
-			}
-		}
-
-		if err := config.Save(s.config); err != nil {
-			s.sendInternalError(w, "save config failed", err)
-			return
-		}
-
-		s.sendJSON(w, map[string]string{"status": "ok"})
+		// Turn a honeypot on or off (api_honeypots.go), as the CLI does.
+		s.handleHoneypotToggle(w, r)
 
 	default:
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)

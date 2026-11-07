@@ -15,6 +15,7 @@ import (
 type fakeRunner struct {
 	running   bool
 	startErr  error
+	stopErr   error
 	started   []string
 	stopped   []string
 	restarted []string
@@ -27,7 +28,7 @@ func (f *fakeRunner) StartHoneypot(_ context.Context, name string) error {
 }
 func (f *fakeRunner) StopHoneypot(_ context.Context, name string) error {
 	f.stopped = append(f.stopped, name)
-	return nil
+	return f.stopErr
 }
 func (f *fakeRunner) RestartHoneypot(_ context.Context, name string) error {
 	f.restarted = append(f.restarted, name)
