@@ -362,22 +362,26 @@ func runDoctor(ctx context.Context, w io.Writer, instanceName string) error {
 	if !mgr.IsRunning(ctx) {
 		cs := []check{{Name: "containers", Level: "fail", Detail: "not running (qpot up -d" + iflagFor(instanceName) + ")", Code: "QP-INST-007"}}
 		printChecksTo(w, "Instance "+instanceName, cs)
-		code := doctor.FirstFailCode(host)
-		if code == "" {
-			code = "QP-INST-007"
-		}
-		return hostsetup.E(code).WithWhy("Instance %q is not running.", instanceName)
+		return stoppedInstanceError(instanceName, hostFailed, host, cs)
 	}
 	cs := healthChecks(ctx, cfg, mgr, !systemdManaged(cfg))
-	if printChecksTo(w, "Instance "+instanceName, cs) || hostFailed {
-		code := doctor.FirstFailCode(host)
-		if code == "" {
-			code = doctor.FirstFailCode(cs)
-		}
-		return hostsetup.E(code).WithWhy("Some checks failed (see above).")
+	printChecksTo(w, "Instance "+instanceName, cs)
+	if e := doctor.Failure(host, cs); e != nil {
+		return e
 	}
 	fmt.Fprintln(w, "\nAll checks passed.")
 	return nil
+}
+
+// stoppedInstanceError is doctor's error for a stopped instance: the first
+// failed check's own Why and Fix (doctor.Failure), naming the instance when
+// it is the only failure.
+func stoppedInstanceError(instanceName string, hostFailed bool, host, cs []check) *hostsetup.Error {
+	e := doctor.Failure(host, cs)
+	if !hostFailed { // the stopped instance is the only failure
+		e.WithWhy("Instance %q is not running.", instanceName).WithFix("Start it with: qpot up -d%s", iflagFor(instanceName))
+	}
+	return e
 }
 
 // serviceName is the systemd unit name for an instance.
