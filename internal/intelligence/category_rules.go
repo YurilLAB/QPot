@@ -54,12 +54,18 @@ var (
 	// every honeypot's name for "someone opened a connection" (dionaea
 	// connection.accept, cowrie session.connect, dicompot connection_from,
 	// conpot new_connection).
-	catConnectEvent  = regexp.MustCompile(`(?:^|[._-])(?:connection|connect|probe)(?:$|[._-])|new_connection|session\.connect`)
-	catUploadEvent   = regexp.MustCompile(`(?:^|[._-])(?:file[._-]?)?upload(?:$|[._-])`)
-	catDownloadEvent = regexp.MustCompile(`(?:^|[._-])file[._-]?download(?:$|[._-])`)
-	// catICSCommand is a conpot request in an industrial protocol, not a
-	// bare connection to it (see the conpot event names in compose.go).
-	catICSCommand = regexp.MustCompile(`^(?:command|conpot\.(?:modbus|s7comm|bacnet|enip|iec104|guardian_ast|kamstrup_protocol|kamstrup_management_protocol)\.command)$`)
+	catConnectEvent = regexp.MustCompile(`(?:^|[._-])(?:connection|connect|probe)(?:$|[._-])|new_connection|session\.connect`)
+	// catDisconnectEvent is the end of a connection (conpot connection_lost,
+	// connection_terminated, connection_closed): not a new probe.
+	catDisconnectEvent = regexp.MustCompile(`(?:^|[._-])(?:connection[._-]?(?:lost|terminated|closed)|disconnect(?:ed)?)(?:$|[._-])`)
+	catUploadEvent     = regexp.MustCompile(`(?:^|[._-])(?:file[._-]?)?upload(?:$|[._-])`)
+	catDownloadEvent   = regexp.MustCompile(`(?:^|[._-])file[._-]?download(?:$|[._-])`)
+	// catICSCommand is a conpot operation in an industrial protocol: a read,
+	// a control write or another request, not a bare connection to it (see
+	// the conpot event names in compose.go). Reading a controller is part of
+	// an industrial attack even when it proves no command (ATT&CK stays
+	// unmapped for reads). IPMI is server management, not process control.
+	catICSCommand = regexp.MustCompile(`^(?:command|conpot\.(?:modbus|s7comm|bacnet|enip|iec104|dnp3|guardian_ast|kamstrup_protocol|kamstrup_management_protocol|ads|opcua|opc_ua|hart_ip|hart|knx|iccp)\.(?:command|read|request))$`)
 	catCVEText    = regexp.MustCompile(`\bcve[-_ ]?(\d{4})[-_](\d{4,7})\b`)
 	catIDSScan    = regexp.MustCompile(`^(?:et|etpro|gpl)\s+scan\b`)
 )
@@ -120,7 +126,7 @@ func catByEvent(in *catInput, s *catSet) {
 	if catLoginEvent.MatchString(et) || ((in.user != "" || in.pass != "") && !strings.Contains(et, "command")) {
 		s.add(CatBruteForce)
 	}
-	if catConnectEvent.MatchString(et) && in.user == "" {
+	if catConnectEvent.MatchString(et) && !catDisconnectEvent.MatchString(et) && in.user == "" {
 		s.add(CatScanning)
 	}
 	if strings.Contains(et, "direct-tcpip") {

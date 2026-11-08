@@ -230,6 +230,44 @@ func TestCategorizeHoneypotContext(t *testing.T) {
 	}
 }
 
+// TestCategorizeConpotOperations: what a live conpot PLC logs, through the
+// collector. Reading a controller (the FC43 device identification first of
+// all) is an industrial attack as much as a write; other industrial protocols
+// count too, server management (IPMI) and conpot's web page do not. The end of
+// a connection is not another probe.
+func TestCategorizeConpotOperations(t *testing.T) {
+	ics := []string{
+		"conpot.modbus.read", "conpot.modbus.command", "conpot.modbus.request",
+		"conpot.dnp3.read", "conpot.s7comm.request", "conpot.bacnet.request",
+		"conpot.opcua.request", "conpot.ads.request", "conpot.hart_ip.request",
+		"conpot.knx.request", "conpot.iccp.request", "conpot.iec104.request",
+	}
+	for _, et := range ics {
+		ev := &database.Event{Honeypot: "conpot", EventType: et, SourceIP: "203.0.113.9",
+			Metadata: map[string]string{"function_code": "43", "operation": "read"}}
+		if got := Categorize(ev); !catHas(got, CatICSAttack) {
+			t.Errorf("%s: %v, want ics-attack", et, got)
+		}
+	}
+	for _, et := range []string{"conpot.ipmi.request", "conpot.http.request", "conpot.snmp.request", "conpot.modbus.readx"} {
+		if got := Categorize(&database.Event{Honeypot: "conpot", EventType: et, SourceIP: "203.0.113.9"}); catHas(got, CatICSAttack) {
+			t.Errorf("%s: %v, want no ics-attack", et, got)
+		}
+	}
+	for _, et := range []string{"conpot.modbus.connection_lost", "conpot.modbus.connection_terminated",
+		"conpot.s7comm.connection_closed", "conpot.http.connection_lost"} {
+		if got := Categorize(&database.Event{Honeypot: "conpot", EventType: et, SourceIP: "203.0.113.9"}); len(got) != 0 {
+			t.Errorf("%s: %v, want no category for the end of a connection", et, got)
+		}
+	}
+	for _, et := range []string{"conpot.modbus.new_connection", "dionaea.connection.accept", "dicompot.connection_from"} {
+		hp := strings.SplitN(et, ".", 2)[0]
+		if got := Categorize(&database.Event{Honeypot: hp, EventType: et, SourceIP: "203.0.113.9"}); !catHas(got, CatScanning) {
+			t.Errorf("%s: %v, want scanning", et, got)
+		}
+	}
+}
+
 // TestCategorizeOrderAndBounds: categories come most-specific first, and the
 // count is bounded.
 func TestCategorizeOrderAndBounds(t *testing.T) {
