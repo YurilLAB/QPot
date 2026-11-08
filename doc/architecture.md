@@ -86,11 +86,15 @@ Docker host, cloud metadata services or any other private address. See
 each honeypot's own format into one common event: who connected, from where,
 to which honeypot and port, and what they sent, such as credentials, commands
 and download links. It adds the attacker's country from the local GeoIP
-database and writes the events to the database.
+database and writes the events to the database. It sees only the honeypot,
+sensor and GeoIP folders and its backup folder, never the rest of the instance
+folder: the logs it parses are written by attackers, and a compromised
+honeypot could plant a link in its logs folder pointing at a secret.
 
 **Database.** ClickHouse by default, or TimescaleDB. It sits on an internal
 Docker network that honeypots cannot reach, and is published on the host only
-on `127.0.0.1`. Events are kept for 90 days.
+on `127.0.0.1`. Events are kept for 90 days. The database and collector images
+are pinned to tested versions, like the honeypot images.
 
 **HiFi mode.** With the `hifi` profile, an SSH broker accepts attackers and
 passes each connection to a real OpenSSH server on a network with no outbound

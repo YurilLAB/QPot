@@ -31,7 +31,7 @@ func vectorRunner(t *testing.T, dir string) []string {
 	if err != nil {
 		t.Skip("neither vector nor docker available")
 	}
-	const img = "timberio/vector:latest-alpine"
+	const img = CollectorImage
 	if exec.Command(docker, "image", "inspect", img).Run() != nil {
 		t.Skip("vector image not present locally")
 	}

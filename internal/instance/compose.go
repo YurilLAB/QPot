@@ -8,6 +8,7 @@ import (
 	"hash/fnv"
 	"net"
 	"net/url"
+	"path"
 	"sort"
 	"strconv"
 	"strings"
@@ -486,7 +487,7 @@ secrets:
 services:
   # Database - {{.Config.Database.Type}}
   {{if eq .Config.Database.Type "clickhouse"}}database:
-    image: clickhouse/clickhouse-server:latest
+    image: {{clickhouseImage}}
     container_name: {{.Config.InstanceName}}_db
     restart: unless-stopped
     labels:
@@ -517,7 +518,7 @@ services:
       # not count, so dependants (the collector) wait instead of failing.
       start_period: 2m
 {{else if eq .Config.Database.Type "timescaledb"}}database:
-    image: timescale/timescaledb:latest-pg15
+    image: {{timescaleImage}}
     container_name: {{.Config.InstanceName}}_db
     restart: unless-stopped
     labels:
@@ -549,7 +550,7 @@ services:
 
   # Log collector (Vector) with QPot ID tagging
   collector:
-    image: timberio/vector:latest-alpine
+    image: {{collectorImage}}
     container_name: {{.Config.InstanceName}}_collector
     restart: unless-stopped
 {{- if or (eq .Config.Database.Type "clickhouse") (eq .Config.Database.Type "timescaledb")}}
@@ -569,10 +570,11 @@ services:
       QPOT_INSTANCE: {{.Config.InstanceName}}
     volumes:
       - {{.Config.DataPath}}/vector.yaml:/etc/vector/vector.yaml:ro
-      - {{.Config.DataPath}}:/data:ro
-      # The only writable path: the file_backup sink. Everything else under
-      # /data stays read-only (it holds attacker-influenced honeypot logs).
-      - {{.Config.DataPath}}/backup:/data/backup
+      # Only the folders the collector reads, read-only, and its writable
+      # backup folder; never the whole instance folder (see collectorMounts).
+{{- range collectorMounts .Config}}
+      - {{.Host}}:{{.Container}}{{if .ReadOnly}}:ro{{end}}
+{{- end}}
       - {{.Config.DataPath}}/qpot.id:/run/secrets/qpot_id:ro
     networks:
       - qpot_internal
@@ -1078,6 +1080,10 @@ services:
 			return a < b
 		},
 		"GetHoneypotImage":       GetHoneypotImage,
+		"clickhouseImage":        func() string { return ClickHouseImage },
+		"timescaleImage":         func() string { return TimescaleDBImage },
+		"collectorImage":         func() string { return CollectorImage },
+		"collectorMounts":        collectorMounts,
 		"refrigerationBuildPath": refrigerationBuildPath,
 		"subnetFor":              subnetForNetwork,
 		"bridgeName":             bridgeName,
@@ -1560,7 +1566,7 @@ transforms:
         orig = downcase(to_string(.event_type) ?? "")
         orig = replace(orig, r'[^a-z0-9_.]+', "_")
         orig = truncate(replace(orig, r'^_+|_+$', ""), 64)
-        dt = string!(.protocol)
+        dt = .protocol
         if dt == "" {
           dt = "unknown"
         }
@@ -1702,8 +1708,8 @@ transforms:
         if includes([{{range $i, $id := conpotIDs}}{{if $i}}, {{end}}{{vrlStr $id}}{{end}}], profile) {
           md.device_profile = profile
         }
-        if conpot_fc >= 0 { md.function_code = to_string!(conpot_fc) }
-        if conpot_unit >= 0 { md.unit_id = to_string!(conpot_unit) }
+        if conpot_fc >= 0 { md.function_code = to_string(conpot_fc) }
+        if conpot_unit >= 0 { md.unit_id = to_string(conpot_unit) }
         if conpot_operation != "" { md.operation = conpot_operation }
         response = downcase(to_string(.response) ?? "")
         if .protocol == "modbus" && match(response, r'^b\x27[89a-f][0-9a-f][0-9a-f]{2}\x27$') {
@@ -2012,6 +2018,65 @@ sinks:
 
 	return buf.String(), nil
 }
+
+// collectorMount is one bind mount of the collector (Vector) container.
+type collectorMount struct {
+	Host, Container string
+	ReadOnly        bool
+	// Dir is set when Host is a folder QPot must create before starting:
+	// Docker would create a missing one owned by root.
+	Dir bool
+}
+
+// collectorMounts lists the instance folders the collector reads, read-only,
+// and its writable backup folder. It never mounts the whole instance folder,
+// which also holds the database password, canary tokens and keys: Vector
+// parses attacker-written logs and follows the symlinks that a compromised
+// honeypot can plant in its own logs folder.
+func collectorMounts(cfg *config.Config) []collectorMount {
+	mounts := []collectorMount{{Host: cfg.DataPath + "/honeypots", Container: "/data/honeypots", ReadOnly: true, Dir: true}}
+	covered := []string{"honeypots", "backup"}
+	c := cfg.Collector
+	for _, s := range []struct {
+		on  bool
+		dir string
+	}{{c.IngestSuricata, "suricata/log"}, {c.IngestP0f, "p0f/log"}, {c.IngestFatt, "fatt/log"}} {
+		if s.on {
+			mounts = append(mounts, collectorMount{Host: cfg.DataPath + "/" + s.dir, Container: "/data/" + s.dir, ReadOnly: true, Dir: true})
+			covered = append(covered, s.dir)
+		}
+	}
+	// The GeoIP setting is a path inside the collector; under /data/ it names
+	// a file in the instance folder (qpot geoip puts it in geoip/).
+	if rest, ok := strings.CutPrefix(path.Clean(c.GeoIPDBPath), "/data/"); ok {
+		dir := path.Dir(rest)
+		inside := false
+		for _, cv := range covered {
+			if dir == cv || strings.HasPrefix(dir, cv+"/") {
+				inside = true
+			}
+		}
+		switch {
+		case inside:
+		case dir == ".":
+			mounts = append(mounts, collectorMount{Host: cfg.DataPath + "/" + rest, Container: "/data/" + rest, ReadOnly: true})
+		default:
+			mounts = append(mounts, collectorMount{Host: cfg.DataPath + "/" + dir, Container: "/data/" + dir, ReadOnly: true, Dir: true})
+		}
+	}
+	return append(mounts, collectorMount{Host: cfg.DataPath + "/backup", Container: "/data/backup", Dir: true})
+}
+
+// The images of the instance's own services, pinned like the honeypot images.
+// A moving tag would run versions QPot was never tested with, and a database
+// that moves on to a newer image cannot go back to an older one with the same
+// data. CI's ClickHouse integration job runs ClickHouseImage (see
+// TestCIClickHouseImageMatchesCompose).
+const (
+	ClickHouseImage  = "clickhouse/clickhouse-server:26.10.3.7@sha256:739e099abd1157390960a59e4532d21781d8fde57e6e4151cb920ea02c30b1ce"
+	TimescaleDBImage = "timescale/timescaledb:2.28.3-pg15@sha256:6343bdc87ca132c6b53acb26113a6bad1821d188fa39975a745f32ddd9757634"
+	CollectorImage   = "timberio/vector:0.61.0-alpine@sha256:3bb7ed5152910ed51729e256937b1d8a4bf67ff624e9d565e8e5877bffd015c7"
+)
 
 // TPotVersion is the T-Pot CE release whose honeypot images QPot runs. It is
 // the newest T-Pot build published on ghcr.io/telekom-security (there is no

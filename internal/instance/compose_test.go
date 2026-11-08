@@ -231,8 +231,8 @@ func TestDefaultDatabasePasswordIsRandom(t *testing.T) {
 	}
 }
 
-// The collector's /data is read-only; its file_backup sink needs a writable
-// /data/backup or every backup write fails.
+// The collector's other mounts are read-only; its file_backup sink needs a
+// writable /data/backup or every backup write fails.
 func TestComposeCollectorBackupWritable(t *testing.T) {
 	c := serviceBlock(renderCompose(t), "collector")
 	if !strings.Contains(c, "/backup:/data/backup\n") {
@@ -346,8 +346,8 @@ func TestComposeUsesDirectBindMounts(t *testing.T) {
 		if !strings.Contains(serviceBlock(out, "database"), "- "+cfg.GetDatabasePath()+":/var/lib/") {
 			t.Errorf("%s: database does not bind-mount %s", dbType, cfg.GetDatabasePath())
 		}
-		if !strings.Contains(serviceBlock(out, "collector"), "- "+cfg.DataPath+":/data:ro\n") {
-			t.Errorf("%s: collector does not bind-mount %s read-only", dbType, cfg.DataPath)
+		if !strings.Contains(serviceBlock(out, "collector"), "- "+cfg.DataPath+"/honeypots:/data/honeypots:ro\n") {
+			t.Errorf("%s: collector does not bind-mount %s/honeypots read-only", dbType, cfg.DataPath)
 		}
 	}
 }

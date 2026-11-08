@@ -690,12 +690,15 @@ func (m *Manager) generateServiceConfigs() error {
 		Sandbox: m.sandbox,
 	}
 
-	// The collector's writable /data/backup is a bind mount nested inside its
-	// read-only /data mount, so the mount point must already exist on the host:
-	// runc cannot create it inside the read-only mount and the collector would
-	// fail to start ("make mountpoint ... read-only file system").
-	if err := os.MkdirAll(filepath.Join(m.config.DataPath, "backup"), 0750); err != nil {
-		return fmt.Errorf("failed to create collector backup dir: %w", err)
+	// The collector's folders must exist before it starts: Docker would create
+	// a missing one owned by root.
+	for _, cm := range collectorMounts(m.config) {
+		if !cm.Dir {
+			continue
+		}
+		if err := os.MkdirAll(filepath.FromSlash(cm.Host), 0750); err != nil {
+			return fmt.Errorf("failed to create collector folder %s: %w", cm.Host, err)
+		}
 	}
 
 	// Vector collector pipeline config.
@@ -990,7 +993,7 @@ func writeSecretFile(path string, data []byte) error {
 // ownershipHelperImage is used to chown host directories for images that run
 // as a non-root user (see prepareOwnership). It is the collector image, which
 // every instance pulls anyway.
-const ownershipHelperImage = "timberio/vector:latest-alpine"
+const ownershipHelperImage = CollectorImage
 
 // prepareOwnership hands a honeypot's OwnedSubdirs to the image's user, like
 // T-Pot's tpotinit does for its data dirs. A non-root host user cannot chown
