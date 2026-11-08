@@ -378,7 +378,7 @@ func validNodeID(id string) bool {
 // when the cluster names no CA bundle (a variable so tests can stand one in).
 var systemRoots = x509.SystemCertPool
 
-// clusterTLSClientConfig verifies a peer by the cluster CA (automatic TLS: the
+// peerTLSClientConfig verifies a peer by the cluster CA (automatic TLS: the
 // CA is pinned by clusterID) and, only when operatorCerts is set, also accepts
 // a peer serving an operator certificate, verified against caPool (nil =
 // system roots) with the normal hostname check against dialHost - the host
@@ -392,15 +392,12 @@ var systemRoots = x509.SystemCertPool
 // and accepting the system roots as well sent the password and member key to
 // anyone holding a publicly trusted certificate for a member's address (an
 // on-path attacker can get one for a name or an IP it intercepts).
-func clusterTLSClientConfig(clusterID string, caPool *x509.CertPool, dialHost string, operatorCerts bool) *tls.Config {
-	return peerTLSClientConfig(clusterID, caPool, dialHost, operatorCerts, nil)
-}
-
-// peerTLSClientConfig is clusterTLSClientConfig that also hands the node ID a
-// cluster-CA certificate names to expect, which refuses the connection by
-// returning an error: a member contacting another checks that the node
-// answering is the one it dialled, and still a member. A peer serving an
-// operator certificate names no node and is checked by its host name alone.
+//
+// expect, when not nil, is handed the node ID a cluster-CA certificate names
+// and refuses the connection by returning an error: a member contacting
+// another checks that the node answering is the one it dialled, and still a
+// member. A peer serving an operator certificate names no node and is
+// checked by its host name alone.
 func peerTLSClientConfig(clusterID string, caPool *x509.CertPool, dialHost string, operatorCerts bool, expect func(nodeID string) error) *tls.Config {
 	return &tls.Config{
 		MinVersion: tls.VersionTLS12,
@@ -450,7 +447,7 @@ func peerTLSClientConfig(clusterID string, caPool *x509.CertPool, dialHost strin
 }
 
 // clusterHTTPClient returns an HTTP client that trusts cluster peers as
-// described for clusterTLSClientConfig and presents no certificate of its own
+// described for peerTLSClientConfig and presents no certificate of its own
 // (a joiner, which has none yet).
 func clusterHTTPClient(timeout time.Duration, clusterID string, caPool *x509.CertPool, operatorCerts bool) *http.Client {
 	return clusterPeerClient(timeout, clusterID, caPool, operatorCerts, nil, nil)
@@ -464,7 +461,7 @@ func clusterHTTPClient(timeout time.Duration, clusterID string, caPool *x509.Cer
 func clusterPeerClient(timeout time.Duration, clusterID string, caPool *x509.CertPool, operatorCerts bool, node *tls.Certificate, expect func(nodeID string) error) *http.Client {
 	transport := http.DefaultTransport.(*http.Transport).Clone()
 	// Dial TLS ourselves so each connection verifies against the host it was
-	// actually opened to (see clusterTLSClientConfig).
+	// actually opened to (see peerTLSClientConfig).
 	transport.DialTLSContext = func(ctx context.Context, network, addr string) (net.Conn, error) {
 		host, _, err := net.SplitHostPort(addr)
 		if err != nil {
