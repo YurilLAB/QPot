@@ -1824,7 +1824,8 @@
                 $('ti-iocs').textContent = fmt(summary.iocs_total);
                 $('ti-campaigns').textContent = fmt(summary.active_sessions);
                 $('ti-worker').textContent = summary.worker_enabled ? 'On' : 'Off';
-                $('ti-worker-sub').textContent = summary.attck_loaded ? 'ATT&CK data loaded' : 'ATT&CK data not loaded';
+                // offline, the classifier runs on its built-in technique list, not on nothing
+                $('ti-worker-sub').textContent = summary.attck_loaded ? 'Full ATT&CK dataset' : 'Built-in ATT&CK list (offline)';
             }
             // attack types seen, most first (equal counts keep the catalogue's order)
             const cats = (await loadCategories(true)).filter((c) => Number(c.count) > 0)

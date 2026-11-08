@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 )
@@ -100,6 +101,19 @@ func TestToEvent(t *testing.T) {
 	}
 	if ev.Metadata["canary_memo"] != c.Memo {
 		t.Fatalf("memo not propagated")
+	}
+}
+
+// Canary trips sit in the same ATT&CK tables as classified events, whose
+// tactics are ATT&CK short names ("credential-access"): a title-case name
+// stood out as a different tactic in the dashboard.
+func TestCanaryTacticsUseATTCKShortNames(t *testing.T) {
+	short := regexp.MustCompile(`^[a-z]+(?:-[a-z]+)*$`)
+	for _, k := range []Kind{KindWeb, KindFile, KindAWS, KindCredential, KindSSHKey} {
+		ev := (&Trip{ID: "trip_x", Kind: k, SourceIP: "203.0.113.5"}).ToEvent()
+		if !short.MatchString(ev.TacticName) || ev.TacticID == "" {
+			t.Errorf("%s: tactic %q %q, want an ATT&CK short name", k, ev.TacticID, ev.TacticName)
+		}
 	}
 }
 

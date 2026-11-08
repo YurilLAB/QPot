@@ -381,19 +381,20 @@ func sanitizeFilename(s string) string {
 
 // attckFor maps a canary kind to an ATT&CK technique/tactic so canary trips are
 // classified consistently with the rest of the pipeline. These are policy
-// labels for triage, not proof that the named technique occurred.
+// labels for triage, not proof that the named technique occurred. Tactics use
+// ATT&CK's short names, as the classifier does, so both read alike in the UI.
 func attckFor(k Kind) (techID, techName, tacticID, tacticName string) {
 	switch k {
 	case KindAWS:
-		return "T1078.004", "Valid Accounts: Cloud Accounts", "TA0005", "Defense Evasion"
+		return "T1078.004", "Valid Accounts: Cloud Accounts", "TA0005", "defense-evasion"
 	case KindCredential:
-		return "T1552.001", "Unsecured Credentials: Credentials In Files", "TA0006", "Credential Access"
+		return "T1552.001", "Unsecured Credentials: Credentials In Files", "TA0006", "credential-access"
 	case KindSSHKey:
-		return "T1552.004", "Unsecured Credentials: Private Keys", "TA0006", "Credential Access"
+		return "T1552.004", "Unsecured Credentials: Private Keys", "TA0006", "credential-access"
 	case KindFile:
-		return "T1530", "Data from Cloud Storage", "TA0009", "Collection"
+		return "T1530", "Data from Cloud Storage", "TA0009", "collection"
 	default: // KindWeb
-		return "T1213", "Data from Information Repositories", "TA0009", "Collection"
+		return "T1213", "Data from Information Repositories", "TA0009", "collection"
 	}
 }
 
