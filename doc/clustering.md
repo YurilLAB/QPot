@@ -1,8 +1,9 @@
 # Clusters
 
 Pair several QPot nodes into a cluster that shares each node's health:
-uptime, event counts and active attackers. Each node keeps its own events and
-dashboard.
+uptime, event counts and active attackers. Each node also shares its 20 most
+active sources of the last hour, which `GET /api/cluster` merges
+(`shared_attackers`). Each node keeps its own events and dashboard.
 
 - [Quick start](#quick-start)
 - [How joining works](#how-joining-works)

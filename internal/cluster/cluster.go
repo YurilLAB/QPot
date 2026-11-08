@@ -2074,6 +2074,10 @@ func (m *Manager) mergeDigestLocked(digest []*Node, localID, from string, now ti
 				members--
 				changed = true
 			}
+		case n.ID == from:
+			// The node's own numbers, from the node itself: taken whatever
+			// its clock says, which may run behind this node's.
+			existing.Stats = n.Stats
 		case n.LastSeen.After(existing.LastSeen):
 			existing.Status = n.Status
 			existing.LastSeen = n.LastSeen
@@ -2258,15 +2262,13 @@ func (m *Manager) sync() {
 					m.mu.Unlock()
 					return
 				}
-				m.storePeerIntelLocked(&peerIntel)
-				// Update event count for this peer node based on intel total.
-				if node, ok := m.cluster.Nodes[peer.id]; ok {
-					var total int64
-					for _, ip := range peerIntel.TopSourceIPs {
-						total += ip.Count
+				// The answer is the peer's own intel. Its event count is not
+				// derived from it: the node's own count comes with its gossip.
+				if peerIntel.NodeID == peer.id {
+					m.storePeerIntelLocked(&peerIntel)
+					if node, ok := m.cluster.Nodes[peer.id]; ok {
+						node.Stats.LastSync = time.Now()
 					}
-					node.Stats.TotalEvents = total
-					node.Stats.LastSync = time.Now()
 				}
 				m.mu.Unlock()
 			}
@@ -2419,8 +2421,11 @@ func (m *Manager) storePeerIntelLocked(intel *ThreatIntel) {
 	if m.cluster == nil || intel.NodeID == "" {
 		return
 	}
-	if _, member := m.cluster.Nodes[intel.NodeID]; !member {
+	if n, member := m.cluster.Nodes[intel.NodeID]; !member || n.Status == NodeStatusLeft || m.revokedLocked(intel.NodeID) {
 		return
+	}
+	if len(intel.TopSourceIPs) > maxIntelSources {
+		intel.TopSourceIPs = intel.TopSourceIPs[:maxIntelSources]
 	}
 	m.peerIntel[intel.NodeID] = intel
 }

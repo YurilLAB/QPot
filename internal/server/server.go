@@ -542,6 +542,7 @@ func (s *Server) updateNodeStats(ctx context.Context) {
 	}
 	s.nodeStats.LastSync = now
 	cm.UpdateNodeStats(s.nodeStats)
+	s.updateClusterIntel(ctx, cm, now)
 }
 
 // alertThresholdExceeded reports whether the last-minute stats cross the
@@ -1445,6 +1446,9 @@ func (s *Server) handleCluster(w http.ResponseWriter, r *http.Request) {
 		"live":  live,
 		"group": status,
 		"nodes": views,
+		// The most active sources of the last hour the nodes share (see
+		// updateClusterIntel), those seen by the most nodes first.
+		"shared_attackers": cm.SharedAttackers(sharedAttackersShown),
 	})
 }
 

@@ -92,32 +92,6 @@ func TestGossipHandlerEnforcesNodeCap(t *testing.T) {
 	}
 }
 
-// sync() must replace a peer's last-hour total, not add it up every tick.
-func TestSyncReplacesPeerTotal(t *testing.T) {
-	m := NewManager(t.TempDir())
-	cfg := DefaultClusterConfig()
-	cfg.EnableEncryption = false
-	m.InitCluster("c", "password123", cfg)
-	peer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		json.NewEncoder(w).Encode(ThreatIntel{NodeID: "qn_peer", Timestamp: time.Now(),
-			TopSourceIPs: []IPCount{{IP: "1.2.3.4", Count: 100}}})
-	}))
-	defer peer.Close()
-	h, p := peerAddr(t, peer.URL)
-	m.mu.Lock()
-	m.cluster.Nodes["qn_peer"] = &Node{ID: "qn_peer", Address: h, Port: p, Status: NodeStatusHealthy}
-	m.mu.Unlock()
-	m.UpdateThreatIntel([]IPCount{{IP: "5.6.7.8", Count: 1}})
-	for i := 0; i < 3; i++ {
-		m.sync()
-	}
-	got := m.GetCluster().Nodes["qn_peer"].Stats.TotalEvents
-	t.Logf("peer reports constant 100 last-hour hits; after 3 syncs TotalEvents=%d", got)
-	if got != 100 {
-		t.Errorf("TotalEvents accumulates snapshot counts: %d", got)
-	}
-}
-
 // A cluster restored from disk has only the password hash: Start must refuse
 // until UnlockPassword supplies the right password, and gossip must then
 // authenticate with it.

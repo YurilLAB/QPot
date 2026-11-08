@@ -404,11 +404,16 @@ Retained trip records are unaffected by deletion.
 {"clustered": true, "live": true,
  "group": {"id": "qc_...", "name": "lab", "node_count": 2, "healthy_nodes": 2, "...": "..."},
  "nodes": [{"name": "sensor-1", "address": "10.0.0.1:7946", "online": true, "status": "healthy",
-            "uptime_seconds": 3600, "total_events": 0, "active_attacks": 0, "is_local": true}]}
+            "uptime_seconds": 3600, "total_events": 0, "active_attacks": 0, "is_local": true}],
+ "shared_attackers": [{"ip": "198.51.100.7", "events": 52, "nodes": 2}]}
 ```
 
 Standalone: `{"clustered": false, "live": false}`. `nodes` are sorted by name;
-`is_local` marks this node.
+`is_local` marks this node. `shared_attackers` merges the most active sources
+of the last hour that each node shares with the cluster (its top 20, sent
+every 30 seconds): `events` is the nodes' total, `nodes` how many saw the
+source. Those seen by the most nodes come first, at most 20; intel older than
+two hours, or from a node that left, is left out.
 
 `live` is true when this control plane runs the cluster, so members and health
 are current. It is false when another instance's control plane on this host
