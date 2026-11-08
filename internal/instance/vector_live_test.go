@@ -180,6 +180,7 @@ func TestVectorRemapLive(t *testing.T) {
 		"/data/honeypots/refrigeration/logs/events.json\t" + `{"event_type":"refrigeration.read","src_ip":"203.0.113.84","src_port":42002,"protocol":"http","action":"metadata","method":"GET","path":"/metadata","request":"/metadata","metadata":{"request_uri":"/metadata","user_agent":"fleet-agent ` + nativeArchivePassword + `"}}`,
 		"/data/honeypots/refrigeration/logs/events.json\t" + `{"event_type":"refrigeration.malformed","src_ip":"203.0.113.85","src_port":42003,"protocol":"http","action":"http.method","method":"POST","path":"/unknown","success":false,"request":"/unknown?probe=1","metadata":{"request_uri":"/unknown?probe=1","query":"probe=1","user_agent":"method-probe","reason":"method"}}`,
 		"/data/honeypots/refrigeration/logs/events.json\t" + `{"event_type":"refrigeration.read","src_ip":"203.0.113.86","src_port":42004,"protocol":"http","action":"not_found","method":"GET","path":"/unknown","request":"/unknown?archive=` + nativeArchivePassword + `","metadata":{"request_uri":"/unknown?archive=` + nativeArchivePassword + `","query":"archive=` + nativeArchivePassword + `"}}`,
+		"/data/honeypots/refrigeration/logs/events.json\t" + `{"event_type":"refrigeration.overload","src_ip":"203.0.113.87","src_port":42005,"protocol":"http","action":"http","method":"GET","path":"/metadata.json","success":false,"request":"/metadata.json","metadata":{"reason":"busy"}}`,
 	}, "\n") + "\n"
 
 	cmd := exec.Command(run[0], append(run[1:], "--quiet", "--config", cfgPath)...)
@@ -226,8 +227,8 @@ func TestVectorRemapLive(t *testing.T) {
 	// and the lines without an attacker address (dicompot's finished line,
 	// hellpot's/log4pot's startup lines, wordpot's profile state) must be
 	// dropped.
-	if len(rows) != 53 {
-		t.Fatalf("got %d events, want 53: %+v", len(rows), rows)
+	if len(rows) != 54 {
+		t.Fatalf("got %d events, want 54: %+v", len(rows), rows)
 	}
 	if r := rows[48]; len(r.Username) != 256 || len(r.Payload) != 4096 || len(r.Metadata["reason"]) != 256 || len(r.Metadata["request_uri"]) != 2048 || len(r.Metadata["query"]) != 1024 || len(r.Metadata["user_agent"]) != 512 {
 		t.Errorf("native event fields escaped their size bounds: username=%d payload=%d reason=%d URI=%d query=%d user_agent=%d", len(r.Username), len(r.Payload), len(r.Metadata["reason"]), len(r.Metadata["request_uri"]), len(r.Metadata["query"]), len(r.Metadata["user_agent"]))
@@ -240,6 +241,10 @@ func TestVectorRemapLive(t *testing.T) {
 	}
 	if r := rows[51]; r.EventType != "refrigeration.malformed" || r.Metadata["method"] != "POST" || r.Metadata["path"] != "/unknown" || r.Metadata["action"] != "http.method" || r.Metadata["reason"] != "method" || r.Payload != "/unknown?probe=1" || r.SourceIP != "203.0.113.85" {
 		t.Errorf("unsupported HTTP method observation was discarded or mislabeled: %+v", r)
+	}
+	// A busy rejection the supervisor recorded keeps its own event type.
+	if r := rows[53]; r.EventType != "refrigeration.overload" || r.Metadata["reason"] != "busy" || r.SourceIP != "203.0.113.87" {
+		t.Errorf("overload row: %+v", r)
 	}
 	if r := rows[52]; r.Payload != "/unknown?archive="+nativeArchivePassword || r.Metadata["request_uri"] != r.Payload || r.Metadata["query"] != "archive="+nativeArchivePassword || r.SourceIP != "203.0.113.86" {
 		t.Error("literal canary credential in an unknown GET target was discarded")

@@ -14,6 +14,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"math"
 	"net"
 	"net/http"
 	"net/url"
@@ -36,11 +37,24 @@ type Config struct {
 	SiteProfile string
 	Now         func() time.Time
 	Logger      *slog.Logger
+	// WriteRate and WriteBurst bound the state-changing writes accepted per
+	// second, after a burst. Each accepted write rewrites and syncs the state
+	// file, so without a bound a logged-in flood writes megabytes a second to
+	// the host disk. Zero means no limit (tests); the service sets one.
+	WriteRate  float64
+	WriteBurst int
 }
+
+// The service's write budget: a person at the console stays far below it.
+const (
+	serviceWriteRate  = 2
+	serviceWriteBurst = 8
+)
 
 // ConfigFromEnv reads the finite standalone runtime contract.
 func ConfigFromEnv() (Config, error) {
-	c := Config{ListenAddr: os.Getenv("LISTEN_ADDR"), StateDir: os.Getenv("STATE_DIR"), EventLog: os.Getenv("EVENT_LOG"), DeviceSeed: os.Getenv("DEVICE_SEED"), SiteProfile: os.Getenv("SITE_PROFILE")}
+	c := Config{ListenAddr: os.Getenv("LISTEN_ADDR"), StateDir: os.Getenv("STATE_DIR"), EventLog: os.Getenv("EVENT_LOG"), DeviceSeed: os.Getenv("DEVICE_SEED"), SiteProfile: os.Getenv("SITE_PROFILE"),
+		WriteRate: serviceWriteRate, WriteBurst: serviceWriteBurst}
 	return normalizeConfig(c)
 }
 
@@ -81,6 +95,12 @@ func normalizeConfig(c Config) (Config, error) {
 	if c.Now == nil {
 		c.Now = time.Now
 	}
+	if c.WriteRate < 0 || math.IsNaN(c.WriteRate) || math.IsInf(c.WriteRate, 0) {
+		return c, errors.New("the write rate must be zero or a positive number")
+	}
+	if c.WriteRate > 0 && c.WriteBurst < 1 {
+		c.WriteBurst = 1
+	}
 	if c.Logger == nil {
 		c.Logger = slog.New(slog.NewJSONHandler(os.Stderr, nil))
 	}
@@ -103,6 +123,70 @@ type Server struct {
 	closed   bool
 	failure  error
 	fatal    chan error
+	// writes is the write budget (guarded by mu); saves counts state saves.
+	writes writeBudget
+	saves  uint64
+	// clock is real time for the write budget and busy notes: the simulated
+	// clock (cfg.Now) can stand still in tests.
+	clock    func() time.Time
+	busyMu   sync.Mutex
+	busySeen map[string]int64
+}
+
+// writeBudget is a token bucket over real time: at most rate writes a
+// second after a burst. A zero rate never refuses.
+type writeBudget struct {
+	rate, burst, tokens float64
+	last                time.Time
+}
+
+func (b *writeBudget) take(now time.Time) bool {
+	if b.rate <= 0 {
+		return true
+	}
+	if b.last.IsZero() {
+		b.tokens = b.burst
+		b.last = now
+	} else if now.After(b.last) {
+		b.tokens = math.Min(b.burst, b.tokens+now.Sub(b.last).Seconds()*b.rate)
+		b.last = now
+	}
+	if b.tokens < 1 {
+		return false
+	}
+	b.tokens--
+	return true
+}
+
+// maxBusySources bounds the sources remembered for busy notes.
+const maxBusySources = 1024
+
+// noteBusy records the first request each source has turned away as busy in
+// a second. A flood that fills every request slot otherwise leaves no trace
+// of the other sources it hides, while one event per source and second keeps
+// the flood itself from becoming the cost.
+func (s *Server) noteBusy(r *http.Request) {
+	s.mu.Lock()
+	down := s.closed || s.failure != nil
+	s.mu.Unlock()
+	if down {
+		return
+	}
+	host, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err != nil {
+		host = r.RemoteAddr
+	}
+	second := s.clock().Unix()
+	s.busyMu.Lock()
+	if len(s.busySeen) >= maxBusySources {
+		clear(s.busySeen)
+	}
+	first := s.busySeen[host] != second
+	s.busySeen[host] = second
+	s.busyMu.Unlock()
+	if first {
+		s.record(r, "overload", "http", "", "", "", false, 0, map[string]any{"reason": "busy"})
+	}
 }
 
 //go:embed assets/*
@@ -122,7 +206,8 @@ func New(cfg Config) (*Server, error) {
 	if err != nil {
 		return nil, err
 	}
-	s := &Server{cfg: cfg, sessions: map[string]session{}, events: j, inflight: make(chan struct{}, 32), fatal: make(chan error, 1)}
+	s := &Server{cfg: cfg, sessions: map[string]session{}, events: j, inflight: make(chan struct{}, 32), fatal: make(chan error, 1),
+		writes: writeBudget{rate: cfg.WriteRate, burst: float64(cfg.WriteBurst)}, clock: time.Now, busySeen: map[string]int64{}}
 	if err = s.load(); err != nil {
 		j.close()
 		return nil, err
@@ -145,7 +230,7 @@ func Run(ctx context.Context, cfg Config) (err error) {
 	if err != nil {
 		return fmt.Errorf("listen refrigeration: %w", err)
 	}
-	listener = limitConnections(listener, 64)
+	listener = limitConnections(listener, 64, 8)
 	h := &http.Server{Handler: s, ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 10 * time.Second, WriteTimeout: 15 * time.Second, IdleTimeout: 10 * time.Second, MaxHeaderBytes: 8 << 10}
 	// The documented XML transport uses one request per TCP connection.
 	h.SetKeepAlivesEnabled(false)
@@ -190,6 +275,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	case s.inflight <- struct{}{}:
 		defer func() { <-s.inflight }()
 	default:
+		s.noteBusy(r)
 		http.Error(w, "Busy", http.StatusServiceUnavailable)
 		return
 	}
@@ -642,6 +728,11 @@ type connectionLimiter struct {
 	slots chan struct{}
 	done  chan struct{}
 	once  sync.Once
+	// perSource caps one source's open connections, so a single host cannot
+	// hold every slot (zero: no cap).
+	perSource int
+	mu        sync.Mutex
+	bySource  map[string]int
 }
 type limitedConn struct {
 	net.Conn
@@ -649,22 +740,47 @@ type limitedConn struct {
 	once    sync.Once
 }
 
-func limitConnections(listener net.Listener, max int) net.Listener {
-	return &connectionLimiter{Listener: listener, slots: make(chan struct{}, max), done: make(chan struct{})}
+func limitConnections(listener net.Listener, max, perSource int) net.Listener {
+	return &connectionLimiter{Listener: listener, slots: make(chan struct{}, max), done: make(chan struct{}),
+		perSource: perSource, bySource: map[string]int{}}
 }
 
 func (l *connectionLimiter) Accept() (net.Conn, error) {
-	select {
-	case l.slots <- struct{}{}:
-	case <-l.done:
-		return nil, net.ErrClosed
+	for {
+		select {
+		case l.slots <- struct{}{}:
+		case <-l.done:
+			return nil, net.ErrClosed
+		}
+		conn, err := l.Listener.Accept()
+		if err != nil {
+			<-l.slots
+			return nil, err
+		}
+		source, _, err := net.SplitHostPort(conn.RemoteAddr().String())
+		if err != nil {
+			source = conn.RemoteAddr().String()
+		}
+		l.mu.Lock()
+		if l.perSource > 0 && l.bySource[source] >= l.perSource {
+			l.mu.Unlock()
+			// Over its share: close at once and wait for the next caller.
+			_ = conn.Close()
+			<-l.slots
+			continue
+		}
+		l.bySource[source]++
+		l.mu.Unlock()
+		release := func() {
+			l.mu.Lock()
+			if l.bySource[source]--; l.bySource[source] <= 0 {
+				delete(l.bySource, source)
+			}
+			l.mu.Unlock()
+			<-l.slots
+		}
+		return &limitedConn{Conn: conn, release: release}, nil
 	}
-	conn, err := l.Listener.Accept()
-	if err != nil {
-		<-l.slots
-		return nil, err
-	}
-	return &limitedConn{Conn: conn, release: func() { <-l.slots }}, nil
 }
 
 func (l *connectionLimiter) Close() error {

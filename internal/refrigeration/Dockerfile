@@ -13,5 +13,7 @@ COPY --from=build /out/refrigeration /refrigeration
 USER 65532:65532
 EXPOSE 8080
 ENV LISTEN_ADDR=:8080 EVENT_LOG=/var/log/refrigeration/events.json STATE_DIR=/var/lib/refrigeration SITE_PROFILE=retail
+# Collect garbage before the container's 128 MB limit, not at an OOM kill.
+ENV GOMEMLIMIT=96MiB
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 CMD ["/refrigeration", "healthcheck"]
 ENTRYPOINT ["/refrigeration"]

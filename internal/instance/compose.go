@@ -1610,7 +1610,7 @@ transforms:
         # A successful write changes simulated state only; it is not evidence
         # of a physical process change or an attributed attack campaign.
         native_event = to_string(.event_type) ?? ""
-        if includes(["refrigeration.auth.failed", "refrigeration.auth.success", "refrigeration.read", "refrigeration.write.attempt", "refrigeration.write.success", "refrigeration.write.denied", "refrigeration.malformed", "refrigeration.exploit.attempt", "refrigeration.export", "refrigeration.alarm"], native_event) {
+        if includes(["refrigeration.auth.failed", "refrigeration.auth.success", "refrigeration.read", "refrigeration.write.attempt", "refrigeration.write.success", "refrigeration.write.denied", "refrigeration.malformed", "refrigeration.exploit.attempt", "refrigeration.export", "refrigeration.alarm", "refrigeration.overload"], native_event) {
           et = native_event
         } else {
           et = "refrigeration.request"

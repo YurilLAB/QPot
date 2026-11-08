@@ -154,7 +154,7 @@ func (s *Server) record(r *http.Request, kind, action, user, password, request s
 	} else if request == "" {
 		request = r.URL.RequestURI()
 	}
-	e := event{Timestamp: s.now(), Type: "refrigeration." + kind, SourceIP: bounded(host, 128), SourcePort: number, Protocol: "http", Action: bounded(action, 64), Method: r.Method, Path: bounded(r.URL.Path, 512), Username: bounded(user, 128), Password: bounded(password, 256), Success: success, Request: bounded(request, 4096), Metadata: metadata}
+	e := event{Timestamp: s.now(), Type: "refrigeration." + kind, SourceIP: bounded(host, 128), SourcePort: number, Protocol: "http", Action: bounded(action, 64), Method: bounded(r.Method, 32), Path: bounded(r.URL.Path, 512), Username: bounded(user, 128), Password: bounded(password, 256), Success: success, Request: bounded(request, 4096), Metadata: metadata}
 	e.DestinationPort = destination
 	if node > 0 {
 		e.DeviceID = strconv.Itoa(node)

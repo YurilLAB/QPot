@@ -136,6 +136,19 @@ have explicit bounds. Scene state is versioned and staged before replacement;
 invalid state is reported rather than silently reset. The controller never
 connects to real equipment or executes supplied operating-system commands.
 
+Floods are bounded so they cannot wear out the host disk or hide other visitors:
+
+- **Writes:** every accepted control write is saved to disk before it is
+  acknowledged, so the service accepts at most 2 state-changing writes a second
+  after a burst of 8. Writes over that are refused with a busy reply and logged
+  as `write.denied` with reason `rate`. A write that changes nothing, such as
+  setting the value a parameter already has, saves nothing and is never refused.
+- **Connections:** one source address keeps at most 8 of the 64 connections open;
+  further connections from it are closed at once.
+- **Busy service:** when every request slot is taken, the first request each
+  source has turned away in a second is logged as `refrigeration.overload`, so a
+  flood from one address does not make the others disappear.
+
 This is a documented management subset with original browser assets, not a
 complete vendor firmware image. It does not reproduce every StoreView action,
 proprietary backup format, fieldbus, hardware fingerprint or disclosed exploit.

@@ -123,6 +123,7 @@ func (s *Server) statePath() string {
 }
 
 func (s *Server) saveLocked() error {
+	s.saves++
 	data, err := json.Marshal(s.plant)
 	if err != nil {
 		return fmt.Errorf("encode refrigeration state: %w", err)

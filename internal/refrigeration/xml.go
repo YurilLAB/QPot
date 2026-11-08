@@ -318,6 +318,14 @@ func (s *Server) handleXML(w http.ResponseWriter, r *http.Request) {
 	advanced := s.plant.advance(s.now())
 	localIP, localPort := s.localEndpoint(r)
 	result, code, changed, node := s.dispatch(cmd, auth, localIP, localPort)
+	limited := false
+	if code == 0 && changed && !s.writes.take(s.clock()) {
+		// Over the write budget: the change is undone and nothing is saved.
+		s.plant = old
+		changed, advanced, limited = false, false, true
+		code = 4
+		result = response(action, code)
+	}
 	if code == 0 && (changed || advanced) {
 		if err = s.saveLocked(); err != nil {
 			if !stateCommitted(err) {
@@ -345,8 +353,17 @@ func (s *Server) handleXML(w http.ResponseWriter, r *http.Request) {
 	if action == "write_alarm_ack" && code == 0 {
 		kind = "alarm"
 	}
-	if !s.record(r, kind, action, auth.User, "", raw, code == 0, node, map[string]any{"role": auth.Role, "result": code}) {
+	meta := map[string]any{"role": auth.Role, "result": code}
+	if limited {
+		meta["reason"] = "rate"
+	}
+	if !s.record(r, kind, action, auth.User, "", raw, code == 0, node, meta) {
 		s.xmlResponse(w, r, response(action, 4), "0", http.StatusServiceUnavailable)
+		return
+	}
+	if limited {
+		w.Header().Set("Retry-After", "1")
+		s.xmlResponse(w, r, result, "0", http.StatusServiceUnavailable)
 		return
 	}
 	if err != nil {
@@ -604,8 +621,10 @@ func (s *Server) dispatch(cmd xmlElement, auth session, localIP string, localPor
 			picks = append(picks, selected{d, p, v, value})
 		}
 		node := 0
+		changed := false
 		for _, pick := range picks {
 			if action == "write_val" {
+				changed = changed || pick.d.Setpoint != pick.value || pick.p.Value != pick.value
 				pick.d.Setpoint = pick.value
 				pick.p.Value = pick.value
 			}
@@ -616,7 +635,7 @@ func (s *Server) dispatch(cmd xmlElement, auth session, localIP string, localPor
 			out.Children = append(out.Children, e)
 			node = pick.d.Node
 		}
-		return out, 0, action == "write_val", node
+		return out, 0, changed, node
 	case "set_defrost", "set_main_switch":
 		if auth.Role != "supervisor" {
 			return fail(15, 0)
@@ -635,6 +654,7 @@ func (s *Server) dispatch(cmd xmlElement, auth session, localIP string, localPor
 		if len(cmd.Children) > 0 {
 			return fail(3, d.Node)
 		}
+		before := *d
 		if action == "set_defrost" {
 			if operation == "1" && !d.MainSwitch {
 				return fail(2, d.Node)
@@ -657,7 +677,9 @@ func (s *Server) dispatch(cmd xmlElement, auth session, localIP string, localPor
 		out.Attrs = append(out.Attrs, deviceAttrs(d.Node)...)
 		out.Attrs = append(out.Attrs, attr("operation", operation))
 		out.Children = []xmlElement{element("operation", "Success")}
-		return out, 0, true, d.Node
+		changed := d.Defrost != before.Defrost || d.MainSwitch != before.MainSwitch ||
+			d.Compressor != before.Compressor || !d.DefrostUntil.Equal(before.DefrostUntil)
+		return out, 0, changed, d.Node
 	case "read_date_time":
 		out.Children = dateFields(s.now())
 	case "alarm_summary", "read_device_alarms":
@@ -673,7 +695,7 @@ func (s *Server) dispatch(cmd xmlElement, auth session, localIP string, localPor
 		if raw != "all" && (err != nil || ref < 1) {
 			return fail(12, 0)
 		}
-		found := false
+		found, changed := false, false
 		for i := range s.plant.Alarms {
 			a := &s.plant.Alarms[i]
 			if raw != "all" && a.Ref != ref {
@@ -684,13 +706,14 @@ func (s *Server) dispatch(cmd xmlElement, auth session, localIP string, localPor
 			if a.Acknowledged {
 				text = "acknowledged"
 			}
+			changed = changed || !a.Acknowledged
 			a.Acknowledged = true
 			out.Children = append(out.Children, element("alarm", text, attr("ref", strconv.Itoa(a.Ref))))
 		}
 		if !found && raw != "all" {
 			return fail(12, 0)
 		}
-		return out, 0, found, 0
+		return out, 0, changed, 0
 	case "read_history":
 		return s.history(cmd)
 	default:

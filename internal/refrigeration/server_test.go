@@ -547,7 +547,7 @@ func TestConnectionLimiterReleasesAndShutdownUnblocks(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	listener := limitConnections(base, 1)
+	listener := limitConnections(base, 1, 0)
 	defer listener.Close()
 	client, err := net.DialTimeout("tcp", base.Addr().String(), time.Second)
 	if err != nil {
