@@ -268,6 +268,40 @@ func TestCategorizeConpotOperations(t *testing.T) {
 	}
 }
 
+// miniprint events as the collector stores them (T-Pot 24.04.2 log): the PJL
+// keyword as the command, the request line (payload_preview) or the rejected
+// path (virtual_path) as the payload.
+func TestCategorizeMiniprintEvents(t *testing.T) {
+	ev := func(et, cmd, payload string) *database.Event {
+		return &database.Event{Honeypot: "miniprint", EventType: et, SourceIP: "203.0.113.9", Protocol: "pjl",
+			Command: cmd, Payload: []byte(payload)}
+	}
+	cases := []struct {
+		ev      *database.Event
+		want    string
+		without []string
+	}{
+		{ev("miniprint.command_received", "INFO", `@PJL INFO ID\r\n`), CatScanning, []string{CatPathTraversal}},
+		{ev("miniprint.command_received", "FSDIRLIST", `@PJL FSDIRLIST NAME="0:/../../../" ENTRY=1 COUNT=99\r\n`), CatPathTraversal, nil},
+		{ev("miniprint.command_received", "FSUPLOAD", `@PJL FSUPLOAD NAME="0:/../../etc/passwd" OFFSET=0 SIZE=4096\r\n`), CatPathTraversal, nil},
+		{ev("miniprint.path_traversal", "", "/../../etc/passwd"), CatPathTraversal, nil},
+		{ev("miniprint.command_received", "FSDOWNLOAD", `@PJL FSDOWNLOAD FORMAT:BINARY NAME="0:/webServer/x.js" SIZE=12\r\n`), CatFileUpload, []string{CatPathTraversal}},
+		// Listing the printer's own folder is no traversal.
+		{ev("miniprint.command_received", "FSDIRLIST", `@PJL FSDIRLIST NAME="0:/" ENTRY=1 COUNT=99\r\n`), "", []string{CatPathTraversal}},
+	}
+	for _, c := range cases {
+		got := Categorize(c.ev)
+		if c.want != "" && !catHas(got, c.want) {
+			t.Errorf("%s %q: %v, want %s", c.ev.EventType, c.ev.Payload, got, c.want)
+		}
+		for _, no := range c.without {
+			if catHas(got, no) {
+				t.Errorf("%s %q: %v, must not be %s", c.ev.EventType, c.ev.Payload, got, no)
+			}
+		}
+	}
+}
+
 // TestCategorizeOrderAndBounds: categories come most-specific first, and the
 // count is bounded.
 func TestCategorizeOrderAndBounds(t *testing.T) {

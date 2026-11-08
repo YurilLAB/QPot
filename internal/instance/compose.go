@@ -1520,9 +1520,10 @@ transforms:
       if dp == 0 {
         dp = to_int(.destination_port) ?? 0
       }
-      # Honeypots that do not log the port they listen on (as T-Pot adds it).
+      # Honeypots that do not log the port they listen on (as T-Pot adds it);
+      # adbhoney names it only on session.connect, not on its commands.
       if dp == 0 {
-        dp = to_int(get({"tanner": 80, "hellpot": 80, "endlessh": 22, "citrixhoneypot": 443, "medpot": 2575, "dicompot": 11112, "sentrypeer": 5060, "redishoneypot": 6379, "mailoney": 25, "refrigeration": 8080}, [hp]) ?? 0) ?? 0
+        dp = to_int(get({"tanner": 80, "hellpot": 80, "endlessh": 22, "citrixhoneypot": 443, "medpot": 2575, "dicompot": 11112, "sentrypeer": 5060, "redishoneypot": 6379, "mailoney": 25, "refrigeration": 8080, "adbhoney": 5555}, [hp]) ?? 0) ?? 0
       }
       if sp < 0 || sp > 65535 {
         sp = 0
@@ -1685,6 +1686,13 @@ transforms:
       }
       .payload = pl
       if hp == "refrigeration" { .payload = truncate(pl, 4096) }
+      # miniprint logs the PJL request line as payload_preview and a rejected
+      # path as virtual_path; its "command" is only the PJL keyword.
+      if hp == "miniprint" && pl == "" {
+        pl = to_string(.payload_preview) ?? ""
+        if pl == "" { pl = to_string(.virtual_path) ?? "" }
+        .payload = truncate(pl, 4096)
+      }
 
       # metadata is Map(String, String) / JSONB: rebuild it from a fixed set
       # of string-coerced keys so an odd honeypot field type can never make the

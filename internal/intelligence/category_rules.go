@@ -778,7 +778,8 @@ func catPrinter(in *catInput, s *catSet) {
 	if catPJLInfo.MatchString(in.printer) {
 		s.add(CatScanning)
 	}
-	if catPJLTraversal.MatchString(in.printer) {
+	// miniprint's own verdict: the event carries only the rejected path.
+	if catPJLTraversal.MatchString(in.printer) || in.et == "miniprint.path_traversal" {
 		s.add(CatPathTraversal)
 	}
 	if catPJLWrite.MatchString(in.printer) {

