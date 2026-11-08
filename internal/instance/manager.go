@@ -379,28 +379,26 @@ func (m *Manager) Status(ctx context.Context) (*Status, error) {
 		Database:  m.config.Database.Type,
 	}
 
-	if !m.IsRunning(ctx) {
-		return status, nil
+	// Every configured honeypot is listed, also while the instance is down:
+	// callers count the enabled ones from this list (the dashboard said
+	// "0 running of 0 enabled" while ten honeypots were on).
+	entries := map[string]composePSEntry{}
+	if m.IsRunning(ctx) {
+		status.Overall = "running"
+		composeFile := m.config.GetDockerComposePath()
+		cmd := exec.CommandContext(ctx, "docker", "compose", "-f", composeFile, "ps", "--format", "json")
+		cmd.Dir = m.config.DataPath
+		output, err := cmd.Output()
+		if err != nil {
+			return nil, fmt.Errorf("failed to get container status: %w", err)
+		}
+		// Parse container status by matching the exact compose service name
+		// and its reported state. A previous substring match on the raw JSON
+		// blob produced false positives (one honeypot's name appearing inside
+		// another container's name/image/label) and reported
+		// stopped-but-present containers as healthy.
+		entries = parseComposePS(output)
 	}
-
-	status.Overall = "running"
-
-	// Get container statuses
-	composeFile := m.config.GetDockerComposePath()
-	cmd := exec.CommandContext(ctx, "docker", "compose", "-f", composeFile, "ps", "--format", "json")
-	cmd.Dir = m.config.DataPath
-
-	output, err := cmd.Output()
-	if err != nil {
-		return nil, fmt.Errorf("failed to get container status: %w", err)
-	}
-
-	// Parse container status by matching the exact compose service name and
-	// its reported state. A previous substring match on the raw JSON blob
-	// produced false positives (one honeypot's name appearing inside another
-	// container's name/image/label) and reported stopped-but-present
-	// containers as healthy.
-	entries := parseComposePS(output)
 	// Snapshot under the config lock: Status is served by the web server
 	// concurrently with POST /api/honeypots, which mutates the map.
 	for name, hp := range m.config.SnapshotHoneypots() {
