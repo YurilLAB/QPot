@@ -126,10 +126,17 @@ func serveTLS(t *testing.T, m *Manager) *httptest.Server {
 }
 
 // servePeerTLS serves handler over TLS as a node of host's cluster (a
-// certificate from host's CA), for a fake peer that members accept.
+// certificate from host's CA for a new node ID).
 func servePeerTLS(t *testing.T, host *Manager, handler http.Handler) *httptest.Server {
 	t.Helper()
-	chain, key := issueFor(t, host, testNodeID(t))
+	return servePeerAs(t, host, testNodeID(t), handler)
+}
+
+// servePeerAs serves handler over TLS as node nodeID of host's cluster, for a
+// fake peer that members accept as that node.
+func servePeerAs(t *testing.T, host *Manager, nodeID string, handler http.Handler) *httptest.Server {
+	t.Helper()
+	chain, key := issueFor(t, host, nodeID)
 	cert, err := tls.X509KeyPair([]byte(chain), []byte(key))
 	if err != nil {
 		t.Fatal(err)

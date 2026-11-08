@@ -488,3 +488,192 @@ func TestRevocationNeedsTheClusterCA(t *testing.T) {
 		t.Fatal("the removed node is authenticated after a restart")
 	}
 }
+
+// TestLeaveReachesAMemberThatMissedIt: a leave was only a request to the
+// members the node reached; one that was offline kept the node as a member
+// and took its certificate, and its gossip could put the node back where it
+// was unknown. A leave is now a revocation signed with the leaving node's own
+// key, which every member checks and gossips on.
+func TestLeaveReachesAMemberThatMissedIt(t *testing.T) {
+	host, c, hostPort := idHost(t)
+	b, _ := idMember(t, c, hostPort, "b")
+	x, xID := idMember(t, c, hostPort, "x")
+	credsX := credsOf(t, x)
+	bPort := b.GetCluster().LocalNode.Port
+	eventuallyTrue(t, "b does not know x", func() bool { return isMember(b, xID) })
+
+	// b goes offline; x leaves; b comes back.
+	_ = b.Stop()
+	_ = x.Stop()
+	_ = x.LeaveCluster() // b is not reached
+	if isMember(host, xID) {
+		t.Fatal("x is still a member at the host after leaving")
+	}
+	if err := b.Start(); err != nil {
+		t.Fatal(err)
+	}
+	waitListening(t, bPort)
+	eventuallyTrue(t, "b still lists x as a member after gossiping with the host", func() bool { return !isMember(b, xID) })
+	if code, _ := peerCall(t, bPort, "/api/v1/cluster/nodes", nil, credsX); !refused(code) {
+		t.Errorf("x, which left, is answered by b, which missed the leave: %d", code)
+	}
+}
+
+// TestGossipAnswerOnlyFromTheNodeDialled: a member checked only that the node
+// it gossiped with had a certificate from the cluster CA, so any node with
+// one - a node that left or was removed, or another member - answering at a
+// member's address had its answer taken as that member's: it could say the
+// member left, add nodes, or post intel in its name.
+func TestGossipAnswerOnlyFromTheNodeDialled(t *testing.T) {
+	m := NewManager(t.TempDir())
+	if _, err := m.InitCluster("prod", idPassword, DefaultClusterConfig()); err != nil {
+		t.Fatal(err)
+	}
+	m.UpdateThreatIntel([]IPCount{{IP: "203.0.113.5", Count: 1}})
+	y := addMember(m, testNodeID(t), "127.0.0.1", 1)
+	evil := &Node{ID: "qn_evil0000000000", Name: "evil", Address: "127.0.0.1", Port: 7999, Status: NodeStatusHealthy, LastSeen: time.Now()}
+	// Another node of the cluster answers at y's address.
+	impostor := servePeerTLS(t, m, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, "/intel") {
+			_ = json.NewEncoder(w).Encode(ThreatIntel{NodeID: y.ID, Timestamp: time.Now(), TopSourceIPs: []IPCount{{IP: "198.51.100.66", Count: 999}}})
+			return
+		}
+		_ = json.NewEncoder(w).Encode(GossipMessage{SenderID: y.ID, Timestamp: time.Now(), NodeDigest: []*Node{
+			{ID: y.ID, Name: "y", Address: "127.0.0.1", Port: 1, Status: NodeStatusLeft, LastSeen: time.Now().Add(time.Hour)}, evil}})
+	}))
+	m.mu.Lock()
+	y.Address, y.Port = urlHostPort(t, impostor.URL)
+	m.mu.Unlock()
+
+	m.gossip()
+	m.sync()
+	if !isMember(m, y.ID) {
+		t.Error("another node answering at y's address said y left, and was believed")
+	}
+	if isMember(m, evil.ID) {
+		t.Error("another node answering at y's address added a node")
+	}
+	for _, in := range m.GetThreatIntel() {
+		if in.NodeID == y.ID {
+			t.Error("another node answering at y's address posted intel as y")
+		}
+	}
+
+	// Negative control: y itself, at its address, is heard.
+	m2 := NewManager(t.TempDir())
+	if _, err := m2.InitCluster("prod", idPassword, DefaultClusterConfig()); err != nil {
+		t.Fatal(err)
+	}
+	real := addMember(m2, testNodeID(t), "127.0.0.1", 1)
+	chain, key := issueFor(t, m2, real.ID)
+	cert, err := tls.X509KeyPair([]byte(chain), []byte(key))
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(GossipMessage{SenderID: real.ID, Timestamp: time.Now(), NodeDigest: []*Node{
+			{ID: "qn_0123456789abcdef", Name: "new", Address: "127.0.0.1", Port: 7998, Status: NodeStatusHealthy, LastSeen: time.Now()}}})
+	}))
+	srv.TLS = &tls.Config{MinVersion: tls.VersionTLS12, Certificates: []tls.Certificate{cert}}
+	srv.StartTLS()
+	defer srv.Close()
+	m2.mu.Lock()
+	real.Address, real.Port = urlHostPort(t, srv.URL)
+	m2.mu.Unlock()
+	m2.gossip()
+	if !isMember(m2, "qn_0123456789abcdef") {
+		t.Error("the node dialled, answering for itself, was not heard")
+	}
+}
+
+// selfLeave is a leave of nodeID signed with key, carrying chain's leaf.
+func selfLeave(t *testing.T, clusterID, nodeID, chain, key string, at time.Time) Revocation {
+	t.Helper()
+	m := &Manager{cluster: &Cluster{ID: clusterID, NodeCertificate: chain, NodeKey: key, LocalNode: &Node{ID: nodeID}}}
+	rv, err := m.leaveRevocationLocked(at)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return rv
+}
+
+// TestSignedLeaveOnlyFromTheNodeItself: a leave gossiped on is taken only
+// when the node that left signed it, with a certificate from the cluster CA;
+// a member that never knew the node then does not take it from gossip.
+func TestSignedLeaveOnlyFromTheNodeItself(t *testing.T) {
+	m := plainCluster(t)
+	y := addMember(m, testNodeID(t), "10.0.0.6", 7946)
+	xID := testNodeID(t)
+	m.mu.RLock()
+	clusterID := m.cluster.ID
+	m.mu.RUnlock()
+	xChain, xKey := issueFor(t, m, xID)
+	yChain, yKey := issueFor(t, m, y.ID)
+	now := time.Now()
+
+	other := plainCluster(t) // another cluster's CA
+	oChain, oKey := issueFor(t, other, xID)
+	future := selfLeave(t, clusterID, xID, xChain, xKey, now.Add(48*time.Hour))
+	swapped := selfLeave(t, clusterID, xID, xChain, xKey, now)
+	swapped.Certificate = selfLeave(t, clusterID, y.ID, yChain, yKey, now).Certificate
+	for name, rv := range map[string]Revocation{
+		"y's key, naming x":        func() Revocation { r := selfLeave(t, clusterID, y.ID, yChain, yKey, now); r.NodeID = xID; return r }(),
+		"another CA's certificate": selfLeave(t, clusterID, xID, oChain, oKey, now),
+		"dated two days ahead":     future,
+		"y's certificate":          swapped,
+	} {
+		pushGossip(t, m, GossipMessage{SenderID: y.ID, Timestamp: now, Revocations: []Revocation{rv}})
+		m.mu.RLock()
+		got := m.revokedLocked(xID)
+		m.mu.RUnlock()
+		if got {
+			t.Fatalf("a leave of x with %s was taken", name)
+		}
+	}
+
+	// x's own signed leave, gossiped on by y: x was never known here, and
+	// gossip does not add it afterwards.
+	pushGossip(t, m, GossipMessage{SenderID: y.ID, Timestamp: now, Revocations: []Revocation{selfLeave(t, clusterID, xID, xChain, xKey, now)}})
+	pushGossip(t, m, GossipMessage{SenderID: y.ID, Timestamp: now, NodeDigest: []*Node{
+		{ID: xID, Name: "x", Address: "10.0.0.5", Port: 7946, Status: NodeStatusHealthy, LastSeen: now.Add(time.Hour)}}})
+	if isMember(m, xID) {
+		t.Fatal("gossip added a node whose signed leave this node holds")
+	}
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/cluster/nodes", nil)
+	req.TLS = nodeTLS(t, m, xID)
+	if _, err := m.authenticatePeer(req); err == nil {
+		t.Fatal("a node that left is authenticated")
+	}
+}
+
+// TestManyRevocationsAllGossiped: past revocationsPerMessage, successive
+// gossip messages carry the rest in turn.
+func TestManyRevocationsAllGossiped(t *testing.T) {
+	m := plainCluster(t)
+	m.mu.RLock()
+	clusterID, caKey := m.cluster.ID, m.cluster.CAKey
+	m.mu.RUnlock()
+	now := time.Now()
+	var all []Revocation
+	for i := 0; i < 3*revocationsPerMessage+5; i++ {
+		all = append(all, signedRevocation(t, clusterID, caKey, testNodeID(t), now))
+	}
+	m.mu.Lock()
+	m.cluster.Revocations = all
+	m.mu.Unlock()
+	seen := map[string]bool{}
+	for round := 0; round < 4; round++ {
+		m.mu.RLock()
+		msg := m.revocationsLocked()
+		m.mu.RUnlock()
+		if len(msg) > revocationsPerMessage {
+			t.Fatalf("a message carries %d revocations", len(msg))
+		}
+		for _, rv := range msg {
+			seen[rv.NodeID] = true
+		}
+	}
+	if len(seen) != len(all) {
+		t.Fatalf("four messages carried %d of %d revocations", len(seen), len(all))
+	}
+}

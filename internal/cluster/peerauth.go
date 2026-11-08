@@ -14,13 +14,19 @@ package cluster
 //
 // Removing a node is the enrollment host's decision: it signs a revocation
 // with the cluster CA key, which the members check against the CA their
-// cluster ID names, so no member can forge one. Gossip carries revocations
-// to every member, and each saves them. Records of nodes that left or were
-// removed are kept for longer than any certificate they hold is valid.
+// cluster ID names, so no member can forge one. A node that leaves signs a
+// revocation of itself with its own node key, carrying its certificate. Gossip
+// carries revocations to every member, also one that was offline when the
+// node left or was removed, and each saves them; a revoked node is never
+// taken back from another member's gossip. Revocations are kept for longer
+// than any certificate the node holds is valid.
 
 import (
 	"context"
+	"crypto/ecdsa"
 	"crypto/ed25519"
+	"crypto/rand"
+	"crypto/sha256"
 	"crypto/x509"
 	"encoding/base64"
 	"encoding/json"
@@ -36,23 +42,39 @@ import (
 	"github.com/qpot/qpot/internal/hostsetup"
 )
 
-// Revocation is the enrollment host's signed statement that a node is no
-// longer a member of the cluster.
+// Revocation is a signed statement that a node is no longer a member of the
+// cluster: the enrollment host's removal, signed by the cluster CA, or the
+// node's own leave, signed with its node key.
 type Revocation struct {
 	NodeID    string    `json:"node_id"`
 	RevokedAt time.Time `json:"revoked_at"`
-	// Signature is the cluster CA's Ed25519 signature of revocationMessage,
-	// base64.
+	// Signature is base64: the cluster CA's Ed25519 signature of
+	// revocationMessage, or, with Certificate, the leaving node's ECDSA
+	// (ASN.1) signature of its SHA-256.
 	Signature string `json:"signature"`
+	// Certificate is the leaving node's certificate (base64 DER) on its own
+	// leave, from the cluster CA and naming NodeID.
+	Certificate string `json:"certificate,omitempty"`
 }
 
 const (
 	// revocationRetention is how long a revocation is kept and gossiped:
-	// longer than a certificate issued before it can be valid.
+	// longer than a certificate issued before it can be valid. Revocations
+	// cannot be forged (each needs the CA key or the node's own key), so only
+	// nodes the host admitted can add them.
 	revocationRetention = leftRetention
-	// maxRevocations bounds the revocations kept and gossiped, the newest
-	// kept. The removed nodes' left records refuse them as well.
-	maxRevocations = 1024
+	// maxRevocations is a safety bound on the revocations kept, the newest
+	// kept: more nodes than the cluster holds at once leaving or removed
+	// within revocationRetention. A node record marked left refuses the node
+	// as well.
+	maxRevocations = 8192
+	// revocationsPerMessage bounds the revocations one gossip message
+	// carries; with more, successive messages carry the next ones in turn.
+	revocationsPerMessage = 32
+	// revocationClockSkew is how far in the future a revocation may be dated.
+	revocationClockSkew = 24 * time.Hour
+	// maxRevocationCert bounds a leave's certificate (base64).
+	maxRevocationCert = 4096
 )
 
 // peerNodeKey is the request context key for the authenticated node ID.
@@ -123,17 +145,15 @@ func revocationMessage(clusterID string, rv Revocation) []byte {
 		rv.RevokedAt.UTC().Format(time.RFC3339Nano))
 }
 
-// caPublicKeyLocked returns the public key of this cluster's CA: from the CA
+// caCertLocked returns this cluster's CA certificate: rebuilt from the CA
 // key on the enrollment host, else from this node's certificate chain, where
 // it is the certificate whose key gives the cluster ID. nil when neither
 // yields it. Caller holds m.mu.
-func (m *Manager) caPublicKeyLocked() ed25519.PublicKey {
+func (m *Manager) caCertLocked() *x509.Certificate {
 	c := m.cluster
 	if c.CAKey != "" {
-		if key, _, err := clusterCA(c.CAKey); err == nil {
-			if pub := key.Public().(ed25519.PublicKey); clusterIDFor(pub) == c.ID {
-				return pub
-			}
+		if key, ca, err := clusterCA(c.CAKey); err == nil && clusterIDFor(key.Public().(ed25519.PublicKey)) == c.ID {
+			return ca
 		}
 	}
 	rest := []byte(c.NodeCertificate)
@@ -148,42 +168,105 @@ func (m *Manager) caPublicKeyLocked() ed25519.PublicKey {
 			continue
 		}
 		if pub, ok := cert.PublicKey.(ed25519.PublicKey); ok && clusterIDFor(pub) == c.ID {
-			return pub
+			return cert
 		}
 	}
 }
 
-// applyRevocationsLocked takes the revocations in revs that the cluster CA
-// signed and this node does not have yet: it keeps them and marks the nodes
-// they name left. It reports whether anything changed (to save). Caller holds
+// verifyRevocation reports whether rv is signed for clusterID: by the CA
+// (ca), or on a leave by the node it names, with a certificate from that CA
+// valid when it left.
+func verifyRevocation(clusterID string, ca *x509.Certificate, rv Revocation) bool {
+	sig, err := base64.StdEncoding.DecodeString(rv.Signature)
+	if err != nil {
+		return false
+	}
+	msg := revocationMessage(clusterID, rv)
+	if rv.Certificate == "" {
+		pub, ok := ca.PublicKey.(ed25519.PublicKey)
+		return ok && ed25519.Verify(pub, msg, sig)
+	}
+	if len(rv.Certificate) > maxRevocationCert {
+		return false
+	}
+	der, err := base64.StdEncoding.DecodeString(rv.Certificate)
+	if err != nil {
+		return false
+	}
+	leaf, err := x509.ParseCertificate(der)
+	if err != nil {
+		return false
+	}
+	id, err := verifyClusterClient(clusterID, []*x509.Certificate{leaf, ca}, rv.RevokedAt)
+	if err != nil || id != rv.NodeID {
+		return false
+	}
+	pub, ok := leaf.PublicKey.(*ecdsa.PublicKey)
+	digest := sha256.Sum256(msg)
+	return ok && ecdsa.VerifyASN1(pub, digest[:], sig)
+}
+
+// leaveRevocationLocked is this node's own leave, signed with its node key.
+// Caller holds m.mu.
+func (m *Manager) leaveRevocationLocked(now time.Time) (Revocation, error) {
+	c := m.cluster
+	if c.LocalNode == nil {
+		return Revocation{}, errors.New("no local node")
+	}
+	certBlock, _ := pem.Decode([]byte(c.NodeCertificate))
+	keyBlock, _ := pem.Decode([]byte(c.NodeKey))
+	if certBlock == nil || keyBlock == nil {
+		return Revocation{}, errors.New("this node's certificate or key is unreadable")
+	}
+	key, err := x509.ParseECPrivateKey(keyBlock.Bytes)
+	if err != nil {
+		return Revocation{}, err
+	}
+	rv := Revocation{NodeID: c.LocalNode.ID, RevokedAt: now.UTC(), Certificate: base64.StdEncoding.EncodeToString(certBlock.Bytes)}
+	digest := sha256.Sum256(revocationMessage(c.ID, rv))
+	sig, err := ecdsa.SignASN1(rand.Reader, key, digest[:])
+	if err != nil {
+		return Revocation{}, err
+	}
+	rv.Signature = base64.StdEncoding.EncodeToString(sig)
+	return rv, nil
+}
+
+// applyRevocationsLocked takes the revocations in revs that are signed (see
+// verifyRevocation) and that this node does not have yet: it keeps them and
+// marks the nodes they name left, also nodes it never knew, which gossip then
+// never adds. It reports whether anything changed (to save). Caller holds
 // m.mu for writing.
 func (m *Manager) applyRevocationsLocked(revs []Revocation, now time.Time) bool {
-	if len(revs) > maxRevocations {
-		revs = revs[:maxRevocations]
+	if len(revs) > revocationsPerMessage {
+		revs = revs[:revocationsPerMessage]
 	}
-	var pub ed25519.PublicKey
+	var ca *x509.Certificate
 	changed := false
 	for _, rv := range revs {
 		if !validNodeID(rv.NodeID) || rv.RevokedAt.IsZero() || now.Sub(rv.RevokedAt) > revocationRetention ||
-			m.revokedLocked(rv.NodeID) {
+			rv.RevokedAt.After(now.Add(revocationClockSkew)) || m.revokedLocked(rv.NodeID) {
 			continue
 		}
-		if pub == nil {
-			if pub = m.caPublicKeyLocked(); pub == nil {
+		if ca == nil {
+			if ca = m.caCertLocked(); ca == nil {
 				return changed
 			}
 		}
-		sig, err := base64.StdEncoding.DecodeString(rv.Signature)
-		if err != nil || !ed25519.Verify(pub, revocationMessage(m.cluster.ID, rv), sig) {
+		if !verifyRevocation(m.cluster.ID, ca, rv) {
 			continue
 		}
 		m.cluster.Revocations = append(m.cluster.Revocations, rv)
 		if n, ok := m.cluster.Nodes[rv.NodeID]; ok && n.Status != NodeStatusLeft {
 			n.Status, n.LastSeen = NodeStatusLeft, now
 		}
-		if m.cluster.LocalNode != nil && rv.NodeID == m.cluster.LocalNode.ID {
+		delete(m.peerIntel, rv.NodeID)
+		switch {
+		case rv.Certificate != "":
+			slog.Info("Node left the cluster", "node_id", rv.NodeID)
+		case m.cluster.LocalNode != nil && rv.NodeID == m.cluster.LocalNode.ID:
 			slog.Warn("The enrollment host removed this node from the cluster; the other members refuse it now")
-		} else {
+		default:
 			slog.Info("Node removed from the cluster by the enrollment host", "node_id", rv.NodeID)
 		}
 		changed = true
@@ -211,10 +294,20 @@ func (m *Manager) pruneRevocationsLocked(now time.Time) {
 	m.cluster.Revocations = kept
 }
 
-// revocationsLocked returns a copy of the revocations to gossip. Caller holds
-// m.mu.
+// revocationsLocked returns the revocations for the next gossip message: all
+// of them, or with more than revocationsPerMessage, the next ones in turn.
+// Caller holds m.mu.
 func (m *Manager) revocationsLocked() []Revocation {
-	return append([]Revocation(nil), m.cluster.Revocations...)
+	all := m.cluster.Revocations
+	if len(all) <= revocationsPerMessage {
+		return append([]Revocation(nil), all...)
+	}
+	start := int(m.revocationTurn.Add(revocationsPerMessage)-revocationsPerMessage) % len(all)
+	out := make([]Revocation, 0, revocationsPerMessage)
+	for i := 0; i < revocationsPerMessage; i++ {
+		out = append(out, all[(start+i)%len(all)])
+	}
+	return out
 }
 
 // Errors of RemoveNode.

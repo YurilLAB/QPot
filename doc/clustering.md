@@ -57,7 +57,10 @@ Every request between nodes also carries the sender's own node certificate,
 so a node knows which member is asking:
 
 - A node that left, or that the host removed, is refused, whatever credentials
-  it kept.
+  it kept. Its leave (signed with its own key) or removal (signed by the
+  cluster CA) spreads through gossip to members that were offline.
+- A node contacting another checks that the node answering is the one it
+  dialled.
 - A node speaks only for itself: no member can remove another, or send gossip
   or intel in another's name.
 - Removing a node is the enrollment host's decision: `qpot cluster remove
@@ -101,7 +104,8 @@ signing keys are never trusted by the upgraded cluster.
   only by you, or read from the `QPOT_CLUSTER_PASSWORD` environment variable.
 - **Nodes that leave or are removed** are remembered for a year and a day,
   longer than their certificates are valid, so gossip from a member that
-  missed the leave cannot bring them back.
+  missed the leave cannot bring them back. At most 8,192 such records are
+  kept, the newest first.
 - **Remove a node** that is compromised or gone for good with
   `qpot cluster remove <node-id>` on the enrollment host. Every member refuses
   it from then on, also after restarts.

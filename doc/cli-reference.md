@@ -657,13 +657,15 @@ qpot cluster leave [flags]
 |------|-------------|
 | `-f, --force` | Skip the confirmation prompt. |
 
-The node tells every member it can reach that it left, then removes its
-`cluster.json`; a `qpot serve` still running for it stops its cluster
-membership at its next gossip round instead of carrying on. Members that got
-the leave keep the node as *left* for a year and a day, longer than its
-certificate is valid, and refuse it: no other member's gossip can bring it
-back, and copies of its credentials no longer work. A member that was offline
-still lists it, as failed once it cannot reach it.
+The node tells every member it can reach that it left, with the leave signed
+by its own node key, then removes its `cluster.json`; a `qpot serve` still
+running for it stops its cluster membership at its next gossip round instead
+of carrying on. The members that got the leave pass it on through gossip, so a
+member that was offline learns it when it is back. Every member keeps the
+leave for a year and a day, longer than the node's certificate is valid, and
+refuses the node: no member's gossip can bring it back, and copies of its
+credentials no longer work. A leave that reached no member at all reaches none
+later; remove such a node on the enrollment host (`qpot cluster remove`).
 To come back, the node joins again and is approved like a new one; it gets a
 new node ID.
 
@@ -689,7 +691,9 @@ Every admitted member holds the cluster password, the member key and a node
 certificate of its own (never the CA key). Each peer request presents the
 sender's node certificate in the TLS handshake, and is served only while that
 node is a member: a node that left, or that the enrollment host removed, is
-refused whatever credentials it kept. A request speaks only for its sender:
+refused whatever credentials it kept. A member contacting another checks that
+the node answering presents that node's own certificate, so another node at
+its address is not believed. A request speaks only for its sender:
 gossip and intel must carry the sender's own node ID, and a leave must name
 the node that sends it, so no member can remove another or post intel in its
 name. Removing another node is the enrollment host's decision

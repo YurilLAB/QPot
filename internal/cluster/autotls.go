@@ -335,15 +335,29 @@ func verifyClusterChain(clusterID string, certs []*x509.Certificate, now time.Ti
 // a leaf from the CA of clusterID, for client use, naming one node. The TLS
 // handshake has already checked that the client holds the leaf's key.
 func verifyClusterClient(clusterID string, certs []*x509.Certificate, now time.Time) (string, error) {
-	if err := verifyClusterChain(clusterID, certs, now, x509.ExtKeyUsageClientAuth); err != nil {
+	return verifyClusterNode(clusterID, certs, now, x509.ExtKeyUsageClientAuth)
+}
+
+// verifyClusterNode returns the node a chain from the CA of clusterID names,
+// for usage.
+func verifyClusterNode(clusterID string, certs []*x509.Certificate, now time.Time, usage x509.ExtKeyUsage) (string, error) {
+	if err := verifyClusterChain(clusterID, certs, now, usage); err != nil {
 		return "", err
 	}
-	leaf := certs[0]
-	id, ok := strings.CutPrefix(leaf.Subject.CommonName, "qpot-node ")
-	if !ok || leaf.IsCA || !validNodeID(id) {
+	id, ok := leafNodeID(certs[0])
+	if !ok {
 		return "", errors.New("cluster TLS: the peer's certificate names no node")
 	}
 	return id, nil
+}
+
+// leafNodeID returns the node ID a node certificate names.
+func leafNodeID(leaf *x509.Certificate) (string, bool) {
+	id, ok := strings.CutPrefix(leaf.Subject.CommonName, "qpot-node ")
+	if !ok || leaf.IsCA || !validNodeID(id) {
+		return "", false
+	}
+	return id, true
 }
 
 // validNodeID reports whether id has the form generateNodeID gives.
@@ -379,6 +393,15 @@ var systemRoots = x509.SystemCertPool
 // anyone holding a publicly trusted certificate for a member's address (an
 // on-path attacker can get one for a name or an IP it intercepts).
 func clusterTLSClientConfig(clusterID string, caPool *x509.CertPool, dialHost string, operatorCerts bool) *tls.Config {
+	return peerTLSClientConfig(clusterID, caPool, dialHost, operatorCerts, nil)
+}
+
+// peerTLSClientConfig is clusterTLSClientConfig that also hands the node ID a
+// cluster-CA certificate names to expect, which refuses the connection by
+// returning an error: a member contacting another checks that the node
+// answering is the one it dialled, and still a member. A peer serving an
+// operator certificate names no node and is checked by its host name alone.
+func peerTLSClientConfig(clusterID string, caPool *x509.CertPool, dialHost string, operatorCerts bool, expect func(nodeID string) error) *tls.Config {
 	return &tls.Config{
 		MinVersion: tls.VersionTLS12,
 		// Verification is done in VerifyConnection: the cluster-CA path skips
@@ -391,7 +414,14 @@ func clusterTLSClientConfig(clusterID string, caPool *x509.CertPool, dialHost st
 				return errors.New("cluster TLS: peer sent no certificate")
 			}
 			if err := verifyClusterPeer(clusterID, certs); err == nil || !operatorCerts {
-				return err
+				if err != nil || expect == nil {
+					return err
+				}
+				id, ok := leafNodeID(certs[0])
+				if !ok {
+					return errors.New("cluster TLS: the peer's certificate names no node")
+				}
+				return expect(id)
 			}
 			roots := caPool
 			if roots == nil {
@@ -423,13 +453,15 @@ func clusterTLSClientConfig(clusterID string, caPool *x509.CertPool, dialHost st
 // described for clusterTLSClientConfig and presents no certificate of its own
 // (a joiner, which has none yet).
 func clusterHTTPClient(timeout time.Duration, clusterID string, caPool *x509.CertPool, operatorCerts bool) *http.Client {
-	return clusterPeerClient(timeout, clusterID, caPool, operatorCerts, nil)
+	return clusterPeerClient(timeout, clusterID, caPool, operatorCerts, nil, nil)
 }
 
 // clusterPeerClient is clusterHTTPClient presenting node, this node's
 // certificate, when a peer asks for one: peers serve a member's request only
-// when it comes with the member's own certificate (see peerauth.go).
-func clusterPeerClient(timeout time.Duration, clusterID string, caPool *x509.CertPool, operatorCerts bool, node *tls.Certificate) *http.Client {
+// when it comes with the member's own certificate (see peerauth.go). expect,
+// when not nil, checks the node the peer's certificate names (see
+// peerTLSClientConfig).
+func clusterPeerClient(timeout time.Duration, clusterID string, caPool *x509.CertPool, operatorCerts bool, node *tls.Certificate, expect func(nodeID string) error) *http.Client {
 	transport := http.DefaultTransport.(*http.Transport).Clone()
 	// Dial TLS ourselves so each connection verifies against the host it was
 	// actually opened to (see clusterTLSClientConfig).
@@ -438,7 +470,7 @@ func clusterPeerClient(timeout time.Duration, clusterID string, caPool *x509.Cer
 		if err != nil {
 			return nil, err
 		}
-		cfg := clusterTLSClientConfig(clusterID, caPool, host, operatorCerts)
+		cfg := peerTLSClientConfig(clusterID, caPool, host, operatorCerts, expect)
 		if node != nil {
 			cfg.Certificates = []tls.Certificate{*node}
 		}

@@ -106,7 +106,7 @@ func TestAutoTLSServesAndVerifies(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if code, err := get(clusterPeerClient(3*time.Second, c.ID, nil, true, &own)); err != nil || code != http.StatusOK {
+	if code, err := get(clusterPeerClient(3*time.Second, c.ID, nil, true, &own, nil)); err != nil || code != http.StatusOK {
 		t.Fatalf("member client: code=%d err=%v", code, err)
 	}
 	// Without a node certificate the password and member key are not enough.

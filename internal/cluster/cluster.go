@@ -370,6 +370,9 @@ type Manager struct {
 	// certificate is unusable (Unix seconds), so a round every 200 ms does
 	// not repeat it.
 	certWarned atomic.Int64
+	// revocationTurn picks the revocations the next gossip message carries
+	// (see revocationsLocked).
+	revocationTurn atomic.Uint64
 }
 
 // NewManager creates a new cluster manager
@@ -409,6 +412,27 @@ func (m *Manager) schemeLocked() string {
 	return "http"
 }
 
+// peerClientFor is peerHTTPClient for a request to node peerID: the node
+// answering must present that node's certificate (or an operator one), and
+// be a member still. Anything else answering at its address is refused
+// before the request is sent.
+func (m *Manager) peerClientFor(timeout time.Duration, peerID string) *http.Client {
+	return m.peerClient(timeout, func(id string) error {
+		if id != peerID {
+			return fmt.Errorf("cluster TLS: node %s answered for node %s", id, peerID)
+		}
+		m.mu.RLock()
+		defer m.mu.RUnlock()
+		if m.cluster == nil {
+			return errNotAMember
+		}
+		if n, ok := m.cluster.Nodes[id]; !ok || n.Status == NodeStatusLeft || m.revokedLocked(id) {
+			return fmt.Errorf("cluster TLS: node %s: %w", id, errNotAMember)
+		}
+		return nil
+	})
+}
+
 // peerHTTPClient builds an HTTP client suitable for talking to other
 // cluster members. When TLS is enabled it verifies peers by the cluster CA.
 // A cluster that names an operator certificate (TLSCertPath) or a CA bundle
@@ -418,6 +442,10 @@ func (m *Manager) schemeLocked() string {
 // verification failures. One that names neither runs on cluster-CA
 // certificates alone and accepts nothing else.
 func (m *Manager) peerHTTPClient(timeout time.Duration) *http.Client {
+	return m.peerClient(timeout, nil)
+}
+
+func (m *Manager) peerClient(timeout time.Duration, expect func(nodeID string) error) *http.Client {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	if m.cluster == nil || m.cluster.Config == nil || !m.cluster.Config.EnableEncryption {
@@ -451,7 +479,7 @@ func (m *Manager) peerHTTPClient(timeout time.Duration) *http.Client {
 			slog.Warn("Cluster TLS: this node's certificate is unusable; peers will refuse its requests", "error", err)
 		}
 	}
-	return clusterPeerClient(timeout, m.cluster.ID, pool, operatorCerts, node)
+	return clusterPeerClient(timeout, m.cluster.ID, pool, operatorCerts, node, expect)
 }
 
 // HTTPClient returns a client for talking to this cluster's API (e.g. the
@@ -1732,6 +1760,10 @@ func (m *Manager) handleLeaveHTTP(w http.ResponseWriter, r *http.Request) {
 
 	var req struct {
 		NodeID string `json:"node_id"`
+		// Revocation is the node's leave signed with its own key, which this
+		// node keeps and gossips to the members the leaving node did not
+		// reach.
+		Revocation *Revocation `json:"revocation,omitempty"`
 	}
 	if err := json.Unmarshal(body, &req); err != nil || req.NodeID == "" {
 		http.Error(w, "Invalid JSON or missing node_id", http.StatusBadRequest)
@@ -1752,9 +1784,20 @@ func (m *Manager) handleLeaveHTTP(w http.ResponseWriter, r *http.Request) {
 	// the leave gossiped it straight back in.
 	m.mu.Lock()
 	if m.cluster != nil {
+		now := time.Now()
+		changed := false
+		if req.Revocation != nil && req.Revocation.NodeID == sender && req.Revocation.Certificate != "" {
+			changed = m.applyRevocationsLocked([]Revocation{*req.Revocation}, now)
+			if !changed && !m.revokedLocked(sender) {
+				slog.Warn("A leave came with a revocation that does not verify; it is not gossiped", "node_id", sender)
+			}
+		}
 		if node, ok := m.cluster.Nodes[req.NodeID]; ok && node.Status != NodeStatusLeft {
-			m.markLeftLocked(node, time.Now())
+			m.markLeftLocked(node, now)
 			delete(m.peerIntel, req.NodeID)
+			changed = true
+		}
+		if changed {
 			if err := m.saveClusterLocked(); err != nil {
 				slog.Warn("Failed to persist cluster membership", "error", err)
 			}
@@ -1867,10 +1910,6 @@ func (m *Manager) gossip() {
 	m.mu.RUnlock()
 	memberKey := m.memberKey()
 
-	gossipClient := m.peerHTTPClient(5 * time.Second)
-	// Each round builds its own transport; close its pooled connections when
-	// the round ends or every round leaves one idle TLS connection per peer.
-	defer gossipClient.CloseIdleConnections()
 	for _, peer := range peers {
 		gossipURL := peerURL(scheme, peer.address, peer.port, "/api/v1/cluster/gossip")
 		req, err := http.NewRequest(http.MethodPost, gossipURL, bytes.NewReader(body))
@@ -1879,7 +1918,12 @@ func (m *Manager) gossip() {
 		}
 		req.Header.Set("Content-Type", "application/json")
 		setPeerAuth(req, plainPwd, memberKey)
+		// A client per peer: the node answering must be this one. Each round
+		// builds its own; its pooled connection is closed when it is done, or
+		// every round would leave one idle TLS connection per peer.
+		gossipClient := m.peerClientFor(5*time.Second, peer.id)
 		resp, err := gossipClient.Do(req)
+		gossipClient.CloseIdleConnections()
 		if err != nil {
 			slog.Debug("Gossip: peer unreachable", "node_id", peer.id, "error", err)
 			m.markSuspect(peer.id)
@@ -2182,9 +2226,6 @@ func (m *Manager) sync() {
 	m.mu.RUnlock()
 	syncMemberKey := m.memberKey()
 
-	syncClient := m.peerHTTPClient(10 * time.Second)
-	defer syncClient.CloseIdleConnections()
-
 	// Share local intel with peers and collect theirs.
 	if localIntel != nil {
 		intelBody, err := json.Marshal(localIntel)
@@ -2197,7 +2238,9 @@ func (m *Manager) sync() {
 				}
 				intelReq.Header.Set("Content-Type", "application/json")
 				setPeerAuth(intelReq, syncPlainPwd, syncMemberKey)
+				syncClient := m.peerClientFor(10*time.Second, peer.id)
 				resp, err := syncClient.Do(intelReq)
+				syncClient.CloseIdleConnections()
 				if err != nil {
 					slog.Debug("Sync: failed to send intel to peer", "node_id", peer.id, "error", err)
 					continue
@@ -2704,7 +2747,7 @@ func (m *Manager) LeaveCluster() error {
 	}
 	peers := make([]peerInfo, 0, len(m.cluster.Nodes))
 	for _, node := range m.cluster.Nodes {
-		if node.ID == localNodeID {
+		if node.ID == localNodeID || node.Status == NodeStatusLeft || m.revokedLocked(node.ID) {
 			continue
 		}
 		peers = append(peers, peerInfo{id: node.ID, address: node.Address, port: node.Port})
@@ -2712,13 +2755,19 @@ func (m *Manager) LeaveCluster() error {
 	plainPwd := m.plainPassword
 	leaveMemberKey := m.cluster.MemberKey
 	leaveScheme := m.schemeLocked()
+	// The leave, signed with this node's key: the members it reaches gossip
+	// it on to those it does not (see peerauth.go).
+	leave := map[string]any{"node_id": localNodeID}
+	if rv, err := m.leaveRevocationLocked(time.Now()); err == nil {
+		leave["revocation"] = rv
+	} else {
+		slog.Warn("LeaveCluster: cannot sign the leave; only the members reached now will know", "error", err)
+	}
 	m.mu.RUnlock()
 
 	// Notify other nodes with a short timeout so a dead peer doesn't block.
-	leaveClient := m.peerHTTPClient(3 * time.Second)
-	defer leaveClient.CloseIdleConnections()
 	var unreached []string
-	leaveBody, err := json.Marshal(map[string]string{"node_id": localNodeID})
+	leaveBody, err := json.Marshal(leave)
 	if err != nil {
 		return fmt.Errorf("marshal leave body: %w", err)
 	}
@@ -2734,7 +2783,9 @@ func (m *Manager) LeaveCluster() error {
 		// reject the notification and silently keep the node in their member
 		// list as 'suspect'.
 		setPeerAuth(req, plainPwd, leaveMemberKey)
+		leaveClient := m.peerClientFor(3*time.Second, peer.id)
 		resp, err := leaveClient.Do(req)
+		leaveClient.CloseIdleConnections()
 		if err != nil {
 			slog.Debug("LeaveCluster: failed to notify peer", "node_id", peer.id, "error", err)
 			unreached = append(unreached, fmt.Sprintf("%s:%d (%v)", peer.address, peer.port, err))
