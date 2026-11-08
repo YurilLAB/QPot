@@ -17,7 +17,7 @@
     <link href="/map/static/fonts/fonts.css" rel="stylesheet" integrity="sha384-WiEXL66/E+frAZqRB5+nO/MLUoXj+VrnKxXgvK33R87imSuzxukyaFlj5lnDHV80">
     <link href="/map/static/fontawesome/css/all.min.css" rel="stylesheet" integrity="sha384-qrALq7+6jBOZIQsNnT6xGkMDru64qD6uTlDra39xrt2SoXl4pO3FX6Roz/RpR/BS">
     <link href="/map/static/index.css?v=8" rel="stylesheet" integrity="sha384-F4gdNU3u74uMqjmFBLqfUI0IMwkZi07wpwIdoGzPWeWF6/qEGw/uaeb0plLpu7pT">
-    <link href="/assets/css/dashboard.css" rel="stylesheet" integrity="sha384-PXqTzj/rPLlqbTava5w8Va91XSWAPtLsd9OgM7YsobQrdnpu888ay4yhUTc21Gbi">
+    <link href="/assets/css/dashboard.css" rel="stylesheet" integrity="sha384-Eei4PIT9CxhH77UrYFMztiY74+nKrDJ6/S492NoqLCIpPlbxxntUi/aB//mfiyi4">
 </head>
 <body class="qpot-dashboard">
 
@@ -418,6 +418,30 @@
                             <table class="data-table">
                                 <thead><tr><th>Service</th><th>State</th><th>Health</th></tr></thead>
                                 <tbody id="inst-services"></tbody>
+                            </table>
+                        </div>
+                    </div>
+                </div>
+                <div class="dash-card" id="cleanup-card">
+                    <div class="card-header flex-between">
+                        <h4 class="flex-center"><i class="fas fa-broom"></i> Disk cleanup</h4>
+                        <span class="card-note" id="cleanup-note"></span>
+                    </div>
+                    <div class="card-body">
+                        <form class="filter-bar" id="cleanup-form" autocomplete="off">
+                            <div class="field cleanup-switch"><span>Automatic cleanup</span><label class="switch" title="Clean up every hour"><input type="checkbox" role="switch" id="cleanup-enabled" aria-label="Automatic cleanup on or off"><span class="track"></span></label></div>
+                            <label class="field"><span>Keep files (days)</span><input class="search-input" id="cleanup-age" type="number" min="1" max="3650" step="1" required></label>
+                            <label class="field"><span>Empty logs over (MB)</span><input class="search-input" id="cleanup-log" type="number" min="1" step="1" required></label>
+                            <label class="field"><span>Backup limit (MB)</span><input class="search-input" id="cleanup-backup" type="number" min="1" step="1" required></label>
+                            <div class="field"><button class="btn-base btn-primary hover-lift" id="cleanup-save" type="submit"><i class="fas fa-save"></i> Save</button></div>
+                            <div class="field"><button class="btn-base btn-secondary hover-lift" id="cleanup-run" type="button"><i class="fas fa-broom"></i> Clean up now</button></div>
+                        </form>
+                        <p class="setting-description" id="cleanup-limits"></p>
+                        <div class="modal-message hidden" id="cleanup-message"></div>
+                        <div class="table-wrapper">
+                            <table class="data-table">
+                                <thead><tr><th>Folder</th><th>On disk</th><th>Limit</th><th>Freed</th><th class="optional">Removed</th><th class="optional">Emptied</th></tr></thead>
+                                <tbody id="cleanup-areas"></tbody>
                             </table>
                         </div>
                     </div>
@@ -2100,6 +2124,130 @@
                 h('td', {}, s.health ? pill(String(s.health), s.health === 'healthy' ? 'ok' : s.health === 'starting' ? 'warn' : 'bad') : ''))));
         }
 
+        // ---------- Disk cleanup (GET and PUT /api/cleanup, POST /api/cleanup/run) ----------
+
+        // n bytes in the largest unit that keeps it at least 1
+        function bytesText(n) {
+            let v = Number(n) || 0, i = 0;
+            const units = ['B', 'KB', 'MB', 'GB', 'TB'];
+            while (v >= 1024 && i < units.length - 1) { v /= 1024; i++; }
+            return (i ? v.toFixed(v < 10 ? 1 : 0) : String(v)) + ' ' + units[i];
+        }
+
+        // the form has unsaved changes: the 10 s refresh leaves it alone
+        let cleanupEdited = false;
+        let cleanupBusy = false;
+
+        function fillCleanupForm(set) {
+            if (cleanupEdited) return;
+            $('cleanup-enabled').checked = !!set.enabled;
+            $('cleanup-age').value = String(Number(set.max_age_days) || '');
+            $('cleanup-log').value = String(Number(set.max_log_mb) || '');
+            $('cleanup-backup').value = String(Number(set.max_backup_mb) || '');
+        }
+
+        function cleanupSummary(rep, preview) {
+            const r = rep || {};
+            let text = (preview ? 'This would free ' : 'Freed ') + bytesText(r.freed_bytes) + ': ' +
+                plural(r.removed, 'file', 'files') + (preview ? ' to remove, ' : ' removed, ') +
+                plural(r.emptied, 'log', 'logs') + (preview ? ' to empty.' : ' emptied.');
+            const notes = Array.isArray(r.notes) ? r.notes : [];
+            const errors = Array.isArray(r.errors) ? r.errors : [];
+            if (notes.length) text += ' ' + notes.map(String).join(' ');
+            if (errors.length) text += ' Not done: ' + errors.map(String).join('; ');
+            return text;
+        }
+
+        async function loadCleanup() {
+            const msg = $('cleanup-message');
+            let v;
+            try {
+                v = await api(`${API_BASE}/cleanup`);
+            } catch (e) {
+                if (e.status === 401 || e.status === 403) return;
+                showMessage(msg, e.status === 404 ? 'warn' : 'error', e.status === 404 ? 'Disk cleanup needs a newer qpot serve.' : 'The cleanup settings could not be read: ' + errorText(e));
+                return;
+            }
+            if (!v) return;
+            const set = v.settings || {};
+            fillCleanupForm(set);
+            const own = Object.entries(v.honeypot_limits_gb || {}).sort().map(([n, g]) => `${capitalize(n)} ${fmt(g)} GB`);
+            $('cleanup-limits').textContent = `Each honeypot's folder is kept under ${fmt(v.honeypot_limit_gb)} GB` +
+                (own.length ? ` (${own.join(', ')})` : '') + ': its oldest captured files go first, its state and settings never. ' +
+                'A log is emptied only while the collector runs, once its events are stored.';
+            const last = v.last;
+            $('cleanup-note').textContent = (set.enabled ? (v.next_run ? 'next run at ' + when(v.next_run).slice(11, 16) : 'on') : 'automatic cleanup off') +
+                (v.running ? ' · running now' : last ? ' · last run ' + ago(last.started) : '');
+            const tb = $('cleanup-areas');
+            const areas = last && Array.isArray(last.areas) ? last.areas : [];
+            if (!areas.length) emptyRow(tb, 6, last ? 'No honeypot folders yet.' : 'No cleanup has run since qpot serve started.', 'fa-broom');
+            else tb.replaceChildren(...areas.map((a) => h('tr', {},
+                h('td', { class: 'honeypot-cell' }, a.name === 'backup' ? 'Collector backup' : capitalize(a.name)),
+                h('td', {}, bytesText(a.bytes), a.over_limit ? ' ' : '', a.over_limit ? pill('over limit', 'bad') : null),
+                h('td', {}, a.limit_bytes ? bytesText(a.limit_bytes) : 'none'),
+                h('td', {}, a.freed_bytes ? bytesText(a.freed_bytes) : '-'),
+                h('td', { class: 'optional' }, fmt(a.removed)),
+                h('td', { class: 'optional' }, fmt(a.emptied)))));
+        }
+
+        function cleanupButtons(disabled) {
+            ['cleanup-save', 'cleanup-run'].forEach((id) => { $(id).disabled = disabled; });
+        }
+
+        async function saveCleanup(ev) {
+            ev.preventDefault();
+            if (cleanupBusy) return;
+            const msg = $('cleanup-message');
+            const body = { enabled: $('cleanup-enabled').checked, max_age_days: Number($('cleanup-age').value),
+                max_log_mb: Number($('cleanup-log').value), max_backup_mb: Number($('cleanup-backup').value) };
+            if (![body.max_age_days, body.max_log_mb, body.max_backup_mb].every((n) => Number.isInteger(n) && n >= 1)) {
+                showMessage(msg, 'error', 'Enter whole numbers of at least 1.');
+                return;
+            }
+            cleanupBusy = true;
+            cleanupButtons(true);
+            try {
+                const v = await api(`${API_BASE}/cleanup`, { method: 'PUT', body });
+                cleanupEdited = false;
+                const set = (v && v.settings) || {};
+                fillCleanupForm(set);
+                showMessage(msg, 'ok', `Saved. ${set.enabled ? 'Cleanup runs every hour' : 'Automatic cleanup is off'}; captured files and backup days are kept ${plural(set.max_age_days, 'day', 'days')}.`);
+                await loadCleanup();
+            } catch (e) {
+                if (e.status !== 401 && e.status !== 403) showMessage(msg, 'error', 'Not saved: ' + errorText(e));
+            } finally {
+                cleanupBusy = false;
+                cleanupButtons(false);
+            }
+        }
+
+        // a preview first, then the run once confirmed
+        async function cleanUpNow() {
+            if (cleanupBusy) return;
+            const msg = $('cleanup-message');
+            cleanupBusy = true;
+            cleanupButtons(true);
+            try {
+                showMessage(msg, '', 'Working out what cleanup would remove...');
+                const preview = await api(`${API_BASE}/cleanup/run?dry_run=1`, { method: 'POST', body: {} });
+                if (!preview || (!preview.removed && !preview.emptied)) {
+                    showMessage(msg, 'ok', 'Nothing to clean up: every folder is within its limits. ' + cleanupSummary(preview, true));
+                    return;
+                }
+                showMessage(msg, '', cleanupSummary(preview, true));
+                if (!(await confirmAction(cleanupSummary(preview, true) + ' Clean up now?', 'Clean up'))) return;
+                showMessage(msg, '', 'Cleaning up...');
+                const done = await api(`${API_BASE}/cleanup/run`, { method: 'POST', body: {} });
+                showMessage(msg, done && done.errors && done.errors.length ? 'warn' : 'ok', cleanupSummary(done, false));
+                await loadCleanup();
+            } catch (e) {
+                if (e.status !== 401 && e.status !== 403) showMessage(msg, 'error', 'Cleanup did not run: ' + errorText(e));
+            } finally {
+                cleanupBusy = false;
+                cleanupButtons(false);
+            }
+        }
+
         // ---------- Doctor ----------
 
         // qpot doctor's checks, read-only (GET /api/doctor: one run at a time, reused for 10 s);
@@ -2429,7 +2577,7 @@
                 else if (name === 'events') await loadEvents();
                 else if (name === 'intel') await loadIntel();
                 else if (name === 'canaries') await loadCanaries();
-                else if (name === 'overview') await Promise.all([loadOverview(), loadInstance()]);
+                else if (name === 'overview') await Promise.all([loadOverview(), loadInstance(), loadCleanup()]);
                 else if (name === 'doctor') await Promise.all([loadStatus(), loadDoctor(false), loadCodes()]);
                 else if (name === 'pairing') await Promise.all([loadPairing(), loadJoinRequests()]);
                 else if (name === 'security') await loadSecurity();
@@ -2511,6 +2659,9 @@
         $('logs-load').addEventListener('click', loadLogs);
         $('logs-honeypot').addEventListener('change', loadLogs);
         $('settings-form').addEventListener('submit', saveSettings);
+        $('cleanup-form').addEventListener('submit', saveCleanup);
+        $('cleanup-form').addEventListener('input', () => { cleanupEdited = true; });
+        $('cleanup-run').addEventListener('click', cleanUpNow);
         $('industrial-choose').addEventListener('click', () => openSettings('conpot'));
         $('industrial-enable').addEventListener('click', () => toggleHoneypot('conpot', $('industrial-enable').dataset.enable !== 'false', $('industrial-enable')));
         $('refrigeration-choose').addEventListener('click', () => openSettings('refrigeration'));

@@ -2,6 +2,7 @@ package instance
 
 import (
 	"os"
+	"path"
 	"path/filepath"
 	"slices"
 	"sort"
@@ -152,5 +153,41 @@ func TestNoMountInsideAWritableMount(t *testing.T) {
 	}
 	if compared < 50 {
 		t.Fatalf("compared only %d volume pairs", compared)
+	}
+}
+
+// Storage cleanup deletes old files in a honeypot's capture folders, so each
+// must be what attackers left, inside a volume the container writes: never a
+// host-written config, a read-only mount or the logs folder as a whole.
+func TestCaptureDirsAreInsideWritableVolumes(t *testing.T) {
+	cfg := config.Default("captures")
+	withCaptures := 0
+	for name := range cfg.Honeypots {
+		d := deployProfile(cfg, name)
+		if len(d.Captures) > 0 {
+			withCaptures++
+		}
+		for _, c := range d.Captures {
+			vol, _, _ := strings.Cut(c, "/")
+			writable := slices.ContainsFunc(d.Volumes, func(v deployVolume) bool {
+				return v.HostSubdir == vol && !v.ReadOnly && !v.File
+			})
+			if !writable || c == "logs" || path.Clean(c) != c || strings.HasPrefix(c, "/") {
+				t.Errorf("%s: capture folder %q is not a folder inside a writable volume", name, c)
+			}
+			if !slices.Equal(CaptureDirs(name), d.Captures) {
+				t.Errorf("%s: CaptureDirs differs from the profile", name)
+			}
+		}
+	}
+	// cowrie, adbhoney, dionaea, tanner, h0neytr4p, log4pot, miniprint.
+	if withCaptures < 7 {
+		t.Errorf("only %d honeypots declare capture folders", withCaptures)
+	}
+	// Negative control: a config file is not a capture.
+	for _, v := range deployProfile(cfg, "adbhoney").Volumes {
+		if v.File && slices.Contains(CaptureDirs("adbhoney"), v.HostSubdir) {
+			t.Errorf("adbhoney's %s is a capture folder", v.HostSubdir)
+		}
 	}
 }

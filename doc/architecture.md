@@ -114,6 +114,10 @@ inside `qpot up`. It is not a container: it runs on the host as your user.
   with MITRE ATT&CK techniques, extracts indicators of compromise and groups
   related activity into campaigns. It checkpoints its work, so a crash never
   counts an observation twice. See [intelligence.md](intelligence.md).
+- **Disk cleanup.** Two minutes after start and every hour, it removes old
+  captured files, rotated logs and backup days, empties collected logs above
+  their limit and keeps each honeypot's folder under its storage limit. See
+  [disk-cleanup.md](disk-cleanup.md).
 - **Canary matcher.** It watches captured events for the values of your
   canaries, including the bait planted inside the honeypots, and raises a
   critical alert when one is used. See [canary.md](canary.md).

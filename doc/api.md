@@ -291,6 +291,44 @@ unknown honeypot.
 The instance overview (host load, 24-hour activity per honeypot, latest
 events, cluster), the same data as `qpot overview`.
 
+### GET /api/cleanup
+
+The disk cleanup settings, the storage limits and the last run since the
+control plane started (see [disk-cleanup.md](disk-cleanup.md)):
+
+```json
+{"settings": {"enabled": true, "max_age_days": 30, "max_log_mb": 256, "max_backup_mb": 2048},
+ "honeypot_limit_gb": 10, "honeypot_limits_gb": {}, "running": false,
+ "next_run": "2026-11-09T09:02:00Z",
+ "last": {"started": "...", "duration_ms": 41, "dry_run": false, "collector_running": true,
+          "removed": 12, "emptied": 1, "freed_bytes": 73400320,
+          "areas": [{"name": "cowrie", "bytes": 52428800, "limit_bytes": 10737418240,
+                     "freed_bytes": 73400320, "removed": 12, "emptied": 1, "over_limit": false}],
+          "notes": [], "errors": []}}
+```
+
+`next_run` is null while the hourly run is off; `last` is null until a run.
+
+### PUT /api/cleanup
+
+Body (at most 4 KiB), any of `{"enabled": true, "max_age_days": 30,
+"max_log_mb": 256, "max_backup_mb": 2048}`. Saves them to the config file and
+answers as `GET`. They apply from the next run.
+
+| Status | When |
+|---|---|
+| 400 `QP-WEB-004` | malformed or oversized JSON object, invalid field types, or unknown fields |
+| 400 `QP-INPUT-012` | no setting given, days outside 1 to 3650, or a size limit below 1 MB |
+| 409 `QP-INST-009` | another change to the instance is still running |
+| 500 `QP-INST-002` | the config file could not be read or saved |
+
+### POST /api/cleanup/run
+
+Runs cleanup now and answers with the run's report (`last` above), also while
+the hourly run is off. `?dry_run=1` changes nothing and only reports what it
+would do; a dry run is not kept as the last run. A run waits for one already
+going. `400 QP-INPUT-012` for any other `dry_run`.
+
 ## Events and statistics
 
 ### GET /api/events

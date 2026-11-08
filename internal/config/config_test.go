@@ -581,3 +581,37 @@ func TestConcurrentSaveAndHoneypotChangesProduceCompleteFiles(t *testing.T) {
 		t.Fatal("concurrent save lost a honeypot update")
 	}
 }
+
+// TestCleanupDefaults: a config without a cleanup section (written before
+// cleanup existed) gets it on with the defaults; an explicit "off" and set
+// limits are kept; values out of range fall back to the defaults.
+func TestCleanupDefaults(t *testing.T) {
+	parse := func(extra string) CleanupConfig {
+		t.Helper()
+		cfg, err := Parse([]byte("instance_name: x\n"+extra), filepath.Join(t.TempDir(), "config.yaml"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		return cfg.Cleanup
+	}
+	def := CleanupConfig{MaxAgeDays: DefaultCleanupMaxAgeDays, MaxLogMB: DefaultCleanupMaxLogMB, MaxBackupMB: DefaultCleanupMaxBackupMB}
+	if c := parse(""); !c.On() || c.MaxAgeDays != def.MaxAgeDays || c.MaxLogMB != def.MaxLogMB || c.MaxBackupMB != def.MaxBackupMB {
+		t.Errorf("no section: %+v", c)
+	}
+	if c := parse("cleanup:\n  enabled: false\n  max_age_days: 7\n  max_log_mb: 64\n  max_backup_mb: 100\n"); c.On() || c.MaxAgeDays != 7 || c.MaxLogMB != 64 || c.MaxBackupMB != 100 {
+		t.Errorf("set values: %+v", c)
+	}
+	if c := parse("cleanup:\n  enabled: true\n  max_age_days: -1\n  max_log_mb: 0\n  max_backup_mb: 99999999999\n"); !c.On() || c.MaxAgeDays != def.MaxAgeDays || c.MaxLogMB != def.MaxLogMB || c.MaxBackupMB != def.MaxBackupMB {
+		t.Errorf("out of range: %+v", c)
+	}
+	// Saved and read again, "off" stays off.
+	cfg, _ := Parse([]byte("instance_name: x\ncleanup:\n  enabled: false\n"), filepath.Join(t.TempDir(), "config.yaml"))
+	out, err := yaml.Marshal(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	again, err := Parse(out, cfg.ConfigPath)
+	if err != nil || again.Cleanup.On() {
+		t.Errorf("off did not survive a save: %v %+v", err, again.Cleanup)
+	}
+}

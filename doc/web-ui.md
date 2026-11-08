@@ -40,7 +40,7 @@ Log in with the instance's **QPot ID**, which `qpot id` prints.
 | Events | Browse captured events with filters and text search, and open any event's details |
 | Threat Intel | ATT&CK techniques, IOCs and campaigns |
 | Canaries | Create web, file and AWS canaries; download a file canary's document; review trips; delete your own canaries |
-| Overview | Host CPU, memory, disk and process load, 24-hour activity per honeypot and the latest events with a severity |
+| Overview | Host CPU, memory, disk and process load, 24-hour activity per honeypot and the latest events with a severity; disk cleanup settings, the last cleanup run and **Clean up now** (it shows what it would free before it runs) |
 | Doctor | `qpot doctor`'s checks, with each problem's code, cause and fix (read-only) |
 | Pairing / Networking | Cluster members and pending join requests. Approving or denying a node stays on the host: the tab shows the exact `qpot cluster approve` or `deny` command to run. |
 | Security | The instance's security posture |

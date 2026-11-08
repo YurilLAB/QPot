@@ -35,6 +35,7 @@ this document stays in lock-step with the code.
 - [Cluster / pairing — `qpot cluster`](#cluster--pairing--qpot-cluster)
 - [Canaries — `qpot canary`](#canaries--qpot-canary)
 - [Overview — `qpot overview`](#overview--qpot-overview)
+- [Disk cleanup — `qpot cleanup`](#disk-cleanup--qpot-cleanup)
 - [GeoIP — `qpot geoip`](#geoip--qpot-geoip)
 - [Configuration — `qpot config`](#configuration--qpot-config)
 - [Utilities](#utilities)
@@ -92,6 +93,7 @@ qpot --version
 | `qpot cluster` | Pair multiple nodes into a managed group (aliases: `group`, `pair`, `networking`). |
 | `qpot canary` | Mint and manage canaries (honeytokens) — decoy artifacts that alert on monitored interactions. |
 | `qpot overview` | Host resources, 24h honeypot activity and recent events, for one or all local instances. |
+| `qpot cleanup` | Remove old captured files, logs and backup days to keep the instance within its disk limits. |
 | `qpot geoip` | Install or refresh the GeoIP database used for countries and the attack map. |
 | `qpot config` | Open or print the instance config file. |
 | `qpot id` | Show the QPot ID for an instance. |
@@ -801,6 +803,27 @@ qpot overview -i sensor1 --json
 
 When the instance's control plane is running the data comes from its API;
 otherwise `qpot overview` reads the instance database directly.
+
+---
+
+## Disk cleanup — `qpot cleanup`
+
+```text
+qpot cleanup [-i instance] [--dry-run]
+```
+
+Runs the cleanup `qpot serve` runs every hour: captured files, rotated logs and
+collector backup days older than `cleanup.max_age_days` go; a collected log
+larger than `cleanup.max_log_mb` is emptied while the collector runs; a
+honeypot folder above its storage limit loses its oldest captured files first.
+It prints each folder's size, limit and what was freed, and exits non-zero when
+something could not be removed. `--dry-run` only says what it would do. See
+[disk-cleanup.md](disk-cleanup.md).
+
+```bash
+qpot cleanup --dry-run
+qpot cleanup -i sensor1
+```
 
 ---
 

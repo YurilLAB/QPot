@@ -104,6 +104,7 @@ type Config struct {
 	Collector    CollectorConfig           `yaml:"collector"`
 	AttackMap    AttackMapConfig           `yaml:"attack_map"`
 	Canary       CanaryConfig              `yaml:"canary"`
+	Cleanup      CleanupConfig             `yaml:"cleanup"`
 
 	// hpMu guards concurrent access to the Honeypots map. The web server mutates
 	// it (EnableHoneypot/DisableHoneypot on the POST /api/honeypots path) from one
@@ -174,6 +175,52 @@ type CollectorConfig struct {
 	// JA3/HASSH fingerprints in metadata. Default true; harmless when fatt is
 	// not deployed.
 	IngestFatt bool `yaml:"ingest_fatt"`
+}
+
+// CleanupConfig bounds what the instance keeps on disk outside its database:
+// the honeypots' logs and captured files (downloads, session recordings,
+// uploads) and the collector's backup copy of every event. Each honeypot's
+// folder is also held under its storage limit (security.resource_limits
+// .max_storage_gb, or the honeypot's own). See internal/cleanup.
+type CleanupConfig struct {
+	// Enabled turns automatic cleanup on (hourly, and soon after start).
+	// Unset means on: configs written before cleanup existed get it too.
+	Enabled *bool `yaml:"enabled,omitempty"`
+	// MaxAgeDays: captured files, rotated logs and backup days older than
+	// this are deleted. Default 30.
+	MaxAgeDays int `yaml:"max_age_days"`
+	// MaxLogMB: a honeypot log the collector reads is emptied once it is
+	// larger than this, while the collector runs (its events are already in
+	// the database and the backup). Default 256.
+	MaxLogMB int64 `yaml:"max_log_mb"`
+	// MaxBackupMB bounds the collector's backup folder; its oldest days go
+	// first. Default 2048.
+	MaxBackupMB int64 `yaml:"max_backup_mb"`
+}
+
+// Cleanup defaults and the bounds the web UI and config accept.
+const (
+	DefaultCleanupMaxAgeDays  = 30
+	DefaultCleanupMaxLogMB    = 256
+	DefaultCleanupMaxBackupMB = 2048
+	MaxCleanupAgeDays         = 3650
+	MaxCleanupMB              = 1 << 24 // 16 TiB in MB
+)
+
+// On reports whether automatic cleanup runs.
+func (c CleanupConfig) On() bool { return c.Enabled == nil || *c.Enabled }
+
+// clamp fills unset or out-of-range values with the defaults.
+func (c *CleanupConfig) clamp() {
+	if c.MaxAgeDays <= 0 || c.MaxAgeDays > MaxCleanupAgeDays {
+		c.MaxAgeDays = DefaultCleanupMaxAgeDays
+	}
+	if c.MaxLogMB <= 0 || c.MaxLogMB > MaxCleanupMB {
+		c.MaxLogMB = DefaultCleanupMaxLogMB
+	}
+	if c.MaxBackupMB <= 0 || c.MaxBackupMB > MaxCleanupMB {
+		c.MaxBackupMB = DefaultCleanupMaxBackupMB
+	}
 }
 
 // CanaryConfig controls the canary (honeytoken) subsystem: decoy artifacts
@@ -292,7 +339,7 @@ type RuntimeSecurity struct {
 type ResourceLimits struct {
 	MaxCPUPercent   float64 `yaml:"max_cpu_percent"`
 	MaxMemoryMB     int64   `yaml:"max_memory_mb"`
-	MaxStorageGB    int64   `yaml:"max_storage_gb"`
+	MaxStorageGB    int64   `yaml:"max_storage_gb"` // each honeypot folder's limit (storage cleanup)
 	MaxPids         int64   `yaml:"max_pids"`
 	RestartAttempts int     `yaml:"restart_attempts"`
 }
@@ -332,7 +379,7 @@ type HoneypotResources struct {
 	UseCustomLimits    bool    `yaml:"use_custom_limits"`
 	MaxCPUPercent      float64 `yaml:"max_cpu_percent"`
 	MaxMemoryMB        int64   `yaml:"max_memory_mb"`
-	MaxStorageGB       int64   `yaml:"max_storage_gb"`
+	MaxStorageGB       int64   `yaml:"max_storage_gb"` // 0: the global limit (storage cleanup)
 	MaxPids            int64   `yaml:"max_pids"`
 	MaxFileDescriptors int64   `yaml:"max_file_descriptors"`
 }
@@ -678,6 +725,11 @@ func Default(instanceName string) *Config {
 			Decoy:    "notfound",
 			MaxTrips: 500,
 		},
+		Cleanup: CleanupConfig{
+			MaxAgeDays:  DefaultCleanupMaxAgeDays,
+			MaxLogMB:    DefaultCleanupMaxLogMB,
+			MaxBackupMB: DefaultCleanupMaxBackupMB,
+		},
 	}
 }
 
@@ -811,6 +863,7 @@ func Parse(data []byte, configPath string) (*Config, error) {
 	if cfg.Intelligence.InactivityWindow <= 0 {
 		cfg.Intelligence.InactivityWindow = 30 * time.Minute
 	}
+	cfg.Cleanup.clamp()
 
 	// Clamp the global resource limits the same way. yaml.Unmarshal leaves any
 	// omitted field at its zero value, so a hand-written or older config that

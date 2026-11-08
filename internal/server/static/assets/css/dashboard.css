@@ -1261,3 +1261,17 @@ a.navbar-brand:hover {
 .modal:not(.active) {
     pointer-events: none;
 }
+
+/* the disk cleanup card: its switch sits level with the inputs beside it,
+   and its explanation clears the form */
+.cleanup-switch {
+    justify-content: space-between;
+}
+
+.cleanup-switch .switch {
+    margin: 7px 0;
+}
+
+#cleanup-limits {
+    margin: var(--spacing-sm) 0 var(--spacing-md);
+}

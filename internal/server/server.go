@@ -243,6 +243,8 @@ func (s *Server) setupRoutes() {
 	// Local overview: host resources, per-honeypot 24h activity and recent
 	// events. Replaces the former ypanel phone-home agent; nothing leaves the host.
 	s.mux.HandleFunc("/api/overview", s.withQPotAuth(s.handleOverview))
+	s.mux.HandleFunc("/api/cleanup", s.withQPotAuth(s.handleCleanup))
+	s.mux.HandleFunc("/api/cleanup/run", s.withQPotAuth(s.handleCleanupRun))
 
 	// Attack map feed (T-Pot's map frontend at /map/, fed from QPot's events).
 	s.mux.HandleFunc("/api/map/stream", s.withQPotAuth(s.handleMapStream))
@@ -404,6 +406,10 @@ func (s *Server) Start(ctx context.Context) error {
 	// This node's uptime and event counts for its cluster, if it joins one.
 	s.startedAt = time.Now()
 	go s.nodeStatsLoop(ctx)
+
+	// Keep the honeypots' logs, captured files and the collector's backup
+	// within their limits (internal/cleanup).
+	go s.cleanupLoop(ctx)
 
 	// Canary values used inside a honeypot trip within seconds. The
 	// intelligence worker scans every event it classifies as well, so it

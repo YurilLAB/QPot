@@ -34,6 +34,12 @@ honeypots:
 intelligence:
   worker_interval: 5m            # default 5m; at least 1m
 
+cleanup:                         # see disk-cleanup.md
+  enabled: true
+  max_age_days: 30               # captured files, rotated logs and backup days
+  max_log_mb: 256                # empty a collected log above this
+  max_backup_mb: 2048            # the collector's backup folder
+
 security:
   network_isolation:
     block_outbound: false        # true: honeypots open no outbound connections at all
@@ -79,6 +85,7 @@ change the in-memory profile or partially overwrite the earlier settings.
 |---|---|---|
 | `alerts`, `response` | Webhook alerts and response hooks | [alerts.md](alerts.md) |
 | `canary` | Canaries, including the address their beacon links use | [canary.md](canary.md) |
+| `cleanup` | How long captured files, logs and backups are kept, and their size limits | [disk-cleanup.md](disk-cleanup.md) |
 | `collector` | Extra sensor ingest and the GeoIP database | [intelligence.md](intelligence.md) |
 | `web_ui` | Address, port and login | [web-ui.md](web-ui.md) |
 

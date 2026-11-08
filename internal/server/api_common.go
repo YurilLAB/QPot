@@ -55,6 +55,9 @@ type apiState struct {
 	cfgMu  sync.Mutex
 	cfgSum [sha256.Size]byte
 	cfg    *config.Config
+
+	// cleanup is the storage cleanup runs' state (api_cleanup.go).
+	cleanup cleanupState
 }
 
 // apiError is the JSON body of an error answer.

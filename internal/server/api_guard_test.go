@@ -60,6 +60,9 @@ var apiRoutes = []apiRoute{
 	{method: http.MethodGet, path: "/api/doctor/codes"},
 	{method: http.MethodGet, path: "/api/cluster/requests"},
 	{method: http.MethodGet, path: "/api/pulse?range=1h"},
+	{method: http.MethodGet, path: "/api/cleanup"},
+	{method: http.MethodPut, path: "/api/cleanup", body: `{"max_age_days":0}`},
+	{method: http.MethodPost, path: "/api/cleanup/run?dry_run=1", body: `{}`},
 }
 
 func routePath(p string) string {

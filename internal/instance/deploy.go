@@ -338,6 +338,12 @@ type honeypotDeploy struct {
 	// to a non-root process).
 	RunAsUID     string
 	OwnedSubdirs []string
+	// Captures are the folders, inside the honeypot's writable volumes, that
+	// hold what attackers left: downloads, session recordings, uploads and
+	// payloads. Storage cleanup deletes their files once older than
+	// cleanup.max_age_days, oldest first when the honeypot is over its
+	// storage limit; state and config folders are never touched.
+	Captures []string
 	// LLMEnv maps honeypot custom_config keys to the container environment
 	// variables of an LLM-backed honeypot; LLMRequired are the keys that must
 	// be set (the image refuses to start without a provider).
@@ -550,6 +556,12 @@ func dionaeaPatchVolumes(cfg *config.Config) []deployVolume {
 // for a honeypot by name; use deployProfile for what an instance runs.
 // Unknown honeypots get a generic profile (legacy behavior) so they are not
 // broken further, but the verified images (cowrie, endlessh) get correct specs.
+// CaptureDirs returns the honeypot's capture folders (see
+// honeypotDeploy.Captures), relative to its folder, slash-separated.
+func CaptureDirs(name string) []string {
+	return slices.Clone(deployProfileFor(name).Captures)
+}
+
 func deployProfileFor(name string) honeypotDeploy {
 	switch name {
 	case "refrigeration":
@@ -574,6 +586,7 @@ func deployProfileFor(name string) honeypotDeploy {
 		// listens on 22 (SSH) and 23 (telnet). Verified by running
 		// ghcr.io/telekom-security/cowrie:24.04.2 this way and logging in.
 		return honeypotDeploy{
+			Captures: []string{"dl", "logs/tty"},
 			Tmpfs: []string{
 				"/tmp/cowrie:uid=2000,gid=2000",
 				"/tmp/cowrie/data:uid=2000,gid=2000",
@@ -635,6 +648,7 @@ func deployProfileFor(name string) honeypotDeploy {
 		// Verified by running ghcr.io/telekom-security/adbhoney:24.04.2 this
 		// way and pushing a file to it.
 		return honeypotDeploy{
+			Captures: []string{"dl"},
 			Volumes: []deployVolume{
 				{HostSubdir: "logs", ContainerPath: "/opt/adbhoney/log"},
 				{HostSubdir: "dl", ContainerPath: "/opt/adbhoney/dl"},
@@ -658,6 +672,9 @@ func deployProfileFor(name string) honeypotDeploy {
 		// and its folders are made inside it, where T-Pot mounts each one on
 		// its own (see ContainerDirs).
 		return honeypotDeploy{
+			// Captured malware, bistreams, RTP recordings and what is
+			// uploaded over FTP and TFTP; the web and UPnP roots are served.
+			Captures: []string{"data/binaries", "data/bistreams", "data/rtp", "data/roots/ftp", "data/roots/tftp"},
 			Volumes: append([]deployVolume{
 				{HostSubdir: "logs", ContainerPath: "/opt/dionaea/var/log"},
 				{HostSubdir: "data", ContainerPath: "/opt/dionaea/var/dionaea"},
@@ -789,6 +806,8 @@ func deployProfileFor(name string) honeypotDeploy {
 				{HostSubdir: "logs", ContainerPath: "/var/log/tanner"},
 				{HostSubdir: "files", ContainerPath: "/opt/tanner/files"},
 			},
+			// The files remote-file-inclusion attempts point at, fetched.
+			Captures:    []string{"files"},
 			Ports:       []int{80}, // allocated for tanner, published by snare
 			Internal:    true,
 			HealthPorts: []int{8090},
@@ -854,6 +873,7 @@ func deployProfileFor(name string) honeypotDeploy {
 				{HostSubdir: "logs", ContainerPath: "/opt/h0neytr4p/log"},
 				{HostSubdir: "payloads", ContainerPath: "/data/h0neytr4p/payloads"},
 			},
+			Captures:     []string{"payloads"},
 			Ports:        []int{80, 443},
 			NoShell:      true,
 			RunAsUID:     "2000:2000",
@@ -876,7 +896,8 @@ func deployProfileFor(name string) honeypotDeploy {
 				{HostSubdir: "logs", ContainerPath: "/var/log/log4pot/log"},
 				{HostSubdir: "payloads", ContainerPath: "/var/log/log4pot/payloads"},
 			},
-			Ports: []int{8080},
+			Captures: []string{"payloads"},
+			Ports:    []int{8080},
 			// The image's /usr/bin/python3 carries cap_net_bind_service=ep; under
 			// cap_drop=ALL the kernel won't exec it ("operation not permitted")
 			// unless the cap is in the bounding set, even though log4pot binds 8080.
@@ -892,7 +913,9 @@ func deployProfileFor(name string) honeypotDeploy {
 				{HostSubdir: "uploads", ContainerPath: "/opt/miniprint/uploads"},
 				{HostSubdir: "data", ContainerPath: "/opt/miniprint/data"},
 			},
-			Ports: []int{9100},
+			// The print jobs; data/ is the printer's own files.
+			Captures: []string{"uploads"},
+			Ports:    []int{9100},
 		}
 	case "sentrypeer":
 		return honeypotDeploy{
