@@ -4,6 +4,9 @@
 set -euo pipefail
 
 repo_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
+# The version the Makefile names its release archives with.
+ver=$(sed -n 's/^VERSION ?= \([^[:space:]]*\)[[:space:]]*$/\1/p' "$repo_dir/Makefile")
+[ -n "$ver" ] || { echo "no VERSION in the Makefile"; exit 2; }
 make_bin=$(command -v make)
 tmp_dir=$(mktemp -d)
 trap 'rm -rf "$tmp_dir"' EXIT
@@ -94,8 +97,8 @@ repeat_release() {
   run_make release 'PLATFORMS=linux/amd64 windows/amd64' || return 1
   local files=("$case_dir"/dist/*)
   [ "${#files[@]}" -eq 4 ] || return 1
-  [ "$(tar tzf "$case_dir/dist/qpot_0.1.0_linux_amd64.tar.gz")" = qpot_0.1.0_linux_amd64 ] || return 1
-  [ "$(unzip -Z1 "$case_dir/dist/qpot_0.1.0_windows_amd64.zip")" = qpot_0.1.0_windows_amd64.exe ]
+  [ "$(tar tzf "$case_dir/dist/qpot_${ver}_linux_amd64.tar.gz")" = "qpot_${ver}_linux_amd64" ] || return 1
+  [ "$(unzip -Z1 "$case_dir/dist/qpot_${ver}_windows_amd64.zip")" = "qpot_${ver}_windows_amd64.exe" ]
 }
 
 packaging_failure() {
