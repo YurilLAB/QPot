@@ -1,6 +1,8 @@
 # Clusters
 
-Pair several QPot nodes into a cluster that shares health and attacker data.
+Pair several QPot nodes into a cluster that shares each node's health:
+uptime, event counts and active attackers. Each node keeps its own events and
+dashboard.
 
 - [Quick start](#quick-start)
 - [How joining works](#how-joining-works)

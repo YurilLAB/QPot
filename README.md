@@ -57,8 +57,8 @@ brings T-Pot's web interface with a dashboard for all of it.
 - **Guided setup.** `qpot setup` installs Docker from Docker's signed
   repositories, starts everything and checks it is healthy. Every problem comes
   with a plain-English explanation and a code such as `QP-PKG-001`.
-- **Clusters.** Several nodes can share health and attacker data over TLS, each
-  with its own certificate.
+- **Clusters.** Several nodes pair over TLS, each with its own certificate,
+  and share their health: uptime, event counts and active attackers.
 
 ## Screenshots
 

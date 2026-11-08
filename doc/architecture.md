@@ -136,7 +136,7 @@ inside `qpot up`. It is not a container: it runs on the host as your user.
 
 ## Clusters
 
-Several QPot nodes can form a cluster to share health and attacker data. The
+Several QPot nodes can form a cluster to share each node's health. The
 node that created the cluster acts as its certificate authority and is the
 only one that can admit new members. Each node holds its own private key and
 certificate, and every connection between nodes is TLS, checked against the
