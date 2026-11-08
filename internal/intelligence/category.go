@@ -214,7 +214,12 @@ func Categorize(ev *database.Event) []string {
 	if ev == nil {
 		return nil
 	}
-	in := newCatInput(ev)
+	return categorizeInput(newCatInput(ev))
+}
+
+// categorizeInput is Categorize over an event's prepared input, which the
+// classifier's rules read too.
+func categorizeInput(in *catInput) []string {
 	var s catSet
 	catByEvent(in, &s)
 	if in.shell != "" {
@@ -423,9 +428,9 @@ func catHexValue(h string) (int, bool) {
 }
 
 // catMatchAny reports whether any of the patterns matches s.
-func catMatchAny(s string, res ...*regexp.Regexp) bool {
+func catMatchAny(s, lower string, res ...*regexp.Regexp) bool {
 	for _, re := range res {
-		if re.MatchString(s) {
+		if catMatch(re, s, lower) {
 			return true
 		}
 	}

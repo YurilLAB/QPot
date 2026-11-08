@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 )
@@ -24,7 +25,11 @@ type auditCorpusSample struct {
 	Metadata  map[string]string `json:"metadata"`
 	Expect    []string          `json:"expect"`
 	ExpectNot []string          `json:"expect_not"`
+	Technique *string           `json:"technique"`
 }
+
+// auditTechniqueID is an ATT&CK technique ID, with its sub-technique.
+var auditTechniqueID = regexp.MustCompile(`^T\d{4}(?:\.\d{3})?$`)
 
 // auditCorpusDir is the attack corpus directory.
 const auditCorpusDir = "testdata/attack_corpus"
@@ -96,6 +101,11 @@ func TestCorpusAuditFormat(t *testing.T) {
 		}
 		if s.Honeypot == "" || s.EventType == "" {
 			t.Errorf("%s: honeypot and event_type are required", s.ID)
+		}
+		if s.Technique == nil {
+			t.Errorf("%s: no technique (\"\" for none)", s.ID)
+		} else if *s.Technique != "" && !auditTechniqueID.MatchString(*s.Technique) {
+			t.Errorf("%s: technique %q is not an ATT&CK ID", s.ID, *s.Technique)
 		}
 		for _, c := range s.Expect {
 			if !IsCategory(c) {

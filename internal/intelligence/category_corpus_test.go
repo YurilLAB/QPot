@@ -2,6 +2,7 @@ package intelligence
 
 import (
 	"bufio"
+	"context"
 	"encoding/json"
 	"errors"
 	"io/fs"
@@ -32,6 +33,9 @@ type catCorpusSample struct {
 	Metadata  map[string]string `json:"metadata"`
 	Expect    []string          `json:"expect"`
 	ExpectNot []string          `json:"expect_not"`
+	// Technique is the ATT&CK technique the classifier must assign with
+	// its built-in rules ("" for none). Every sample states one.
+	Technique *string `json:"technique"`
 }
 
 func (s catCorpusSample) event() *database.Event {
@@ -100,6 +104,73 @@ func TestCategoryCorpus(t *testing.T) {
 		}
 	}
 	t.Logf("category corpus: %d samples across %d file(s)", total, len(files))
+}
+
+// TestTechniqueCorpus classifies every corpus sample with the built-in rules
+// (the worker's offline state) and requires the technique the sample states:
+// the technique a category's evidence names, the same one online, where the
+// rules generated from ATT&CK only add to commands no category names.
+func TestTechniqueCorpus(t *testing.T) {
+	files, err := filepath.Glob(filepath.Join(catCorpusDir, "*.jsonl"))
+	if err != nil || len(files) == 0 {
+		t.Fatalf("no corpus: %v", err)
+	}
+	c := newTestClassifierT(t)
+	total, right := 0, 0
+	for _, file := range files {
+		samples, err := catReadCorpus(file)
+		if err != nil {
+			t.Fatalf("%s: %v", filepath.Base(file), err)
+		}
+		for _, s := range samples {
+			total++
+			if s.Technique == nil {
+				t.Errorf("%s [%s]: states no technique", filepath.Base(file), s.ID)
+				continue
+			}
+			ev := s.event()
+			c.Classify(context.Background(), ev)
+			if ev.TechniqueID != *s.Technique {
+				t.Errorf("%s [%s]: technique %q (%s), want %q; categories %v", filepath.Base(file), s.ID, ev.TechniqueID, ev.TechniqueName, *s.Technique, ev.Categories)
+				continue
+			}
+			if ev.TechniqueID != "" && (ev.TacticID == "" || ev.TacticName == "" || ev.KillChainStage == "" || ev.Confidence <= 0 || ev.Confidence > 1) {
+				t.Errorf("%s [%s]: incomplete classification %+v", filepath.Base(file), s.ID, ev)
+			}
+			right++
+		}
+	}
+	if total < 200 {
+		t.Fatalf("only %d samples", total)
+	}
+	t.Logf("technique corpus: %d/%d samples", right, total)
+}
+
+// The rules assign only current ATT&CK IDs: these were revoked in Enterprise
+// v18 (Defense Evasion split into stealth and defense-impairment) and the
+// current ICS matrix. Each rule's tactic ID is the one of its tactic.
+func TestDefaultRulesUseCurrentATTCKIDs(t *testing.T) {
+	revoked := map[string]string{
+		"T0855": "T1692.001", "T0856": "T1692.002", "T0803": "T1691.001", "T0804": "T1691.002",
+		"T0812": "T1694.001", "T0891": "T1694.002", "T0839": "T1693.002", "T0857": "T1693.001", "T0805": "T1695.001",
+		"T1562": "T1685", "T1562.001": "T1685", "T1562.003": "T1690", "T1562.004": "T1686",
+		"T1562.006": "T1685", "T1562.012": "T1685.004", "T1070.002": "T1685.006",
+	}
+	for _, r := range DefaultRules() {
+		if by, ok := revoked[r.TechniqueID]; ok {
+			t.Errorf("%s %q is revoked (by %s)", r.TechniqueID, r.Name, by)
+		}
+		want := enterpriseTactics[r.TacticName]
+		if strings.HasPrefix(r.TechniqueID, "T0") || r.TechniqueID == "T1692.001" {
+			want = icsTactics[r.TacticName]
+		}
+		if want == "" || r.TacticID != want {
+			t.Errorf("%s %q: tactic %q has ID %q, want %q", r.TechniqueID, r.Name, r.TacticName, r.TacticID, want)
+		}
+		if r.KillChain == "" {
+			t.Errorf("%s %q: no kill-chain stage", r.TechniqueID, r.Name)
+		}
+	}
 }
 
 // catReadCorpus reads one JSONL file, rejecting unknown contract fields so a

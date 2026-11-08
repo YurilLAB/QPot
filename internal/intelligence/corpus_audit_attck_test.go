@@ -148,10 +148,14 @@ func TestAuditDynamicRulesNoFalsePositives(t *testing.T) {
 		{"adbhoney", "adbhoney.command", "useradder --help"},
 		{"adbhoney", "adbhoney.command", "echo MYHISTFILE"},
 	}
+	// The curated rules label what a category shows (iptables -F covers
+	// tracks); the generated ones must add nothing to these.
+	static := newTestClassifierT(t)
 	for _, tc := range cases {
 		ev := auditClassify(c, tc.honeypot, tc.eventType, tc.command)
-		if ev.TechniqueID != "" {
-			t.Errorf("%s %s %q labelled %s %s", tc.honeypot, tc.eventType, tc.command, ev.TechniqueID, ev.TechniqueName)
+		want := auditClassify(static, tc.honeypot, tc.eventType, tc.command)
+		if ev.TechniqueID != want.TechniqueID {
+			t.Errorf("%s %s %q labelled %s %s by a generated rule (curated: %q)", tc.honeypot, tc.eventType, tc.command, ev.TechniqueID, ev.TechniqueName, want.TechniqueID)
 		}
 	}
 }

@@ -17,11 +17,18 @@ func TestRefrigerationEventsPreserveEvidenceLimits(t *testing.T) {
 			t.Errorf("ordinary observation %s treated as certain attack: %+v", suffix, ev)
 		}
 	}
+	// What a write does names its technique: a setpoint is a parameter, defrost
+	// and the main switch are commands, acknowledging alarms silences them.
+	// An emulated write proves no physical effect, so none is certain.
 	for _, suffix := range []string{"write.attempt", "write.success", "write.denied"} {
-		ev := &database.Event{Honeypot: "refrigeration", EventType: "refrigeration." + suffix, Protocol: "http"}
-		c.Classify(context.Background(), ev)
-		if ev.TechniqueID != "T0855" || ev.Confidence >= 1 || !slices.Contains(ev.Categories, CatICSAttack) {
-			t.Errorf("emulated control attempt lost qualified classification: %+v", ev)
+		for action, want := range map[string]string{"write_val": "T0836", "": "T0836", "set_defrost": "T1692.001",
+			"set_main_switch": "T1692.001", "write_alarm_ack": "T0878"} {
+			ev := &database.Event{Honeypot: "refrigeration", EventType: "refrigeration." + suffix, Protocol: "http",
+				Metadata: map[string]string{"action": action}}
+			c.Classify(context.Background(), ev)
+			if ev.TechniqueID != want || ev.Confidence >= 1 || !slices.Contains(ev.Categories, CatICSAttack) || ev.TacticID == "" {
+				t.Errorf("%s %q: emulated control attempt lost qualified classification: %+v", suffix, action, ev)
+			}
 		}
 	}
 	ev := &database.Event{Honeypot: "refrigeration", EventType: "refrigeration.auth.failed", Protocol: "http", Username: "admin"}

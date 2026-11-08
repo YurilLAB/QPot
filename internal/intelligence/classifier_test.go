@@ -92,8 +92,13 @@ func TestClassifyPrivilegeEscalation(t *testing.T) {
 	c := newTestClassifierT(t)
 	ev := makeEvent("cowrie", "command", "sudo su root", "attacker")
 	c.Classify(context.Background(), ev)
+	if ev.TechniqueID != "T1548.003" || ev.TacticID != "TA0004" {
+		t.Errorf("sudo: expected T1548.003 (TA0004), got %q %q", ev.TechniqueID, ev.TacticID)
+	}
+	ev = makeEvent("cowrie", "command", "su -", "attacker")
+	c.Classify(context.Background(), ev)
 	if ev.TechniqueID != "T1548" {
-		t.Errorf("expected T1548, got %q", ev.TechniqueID)
+		t.Errorf("su: expected T1548, got %q", ev.TechniqueID)
 	}
 }
 
@@ -101,8 +106,8 @@ func TestClassifyPersistence(t *testing.T) {
 	c := newTestClassifierT(t)
 	ev := makeEvent("cowrie", "command", "crontab -e && echo '* * * * * /tmp/backdoor'", "root")
 	c.Classify(context.Background(), ev)
-	if ev.TechniqueID != "T1053" {
-		t.Errorf("expected T1053, got %q", ev.TechniqueID)
+	if ev.TechniqueID != "T1053.003" || ev.TacticID != "TA0003" {
+		t.Errorf("expected T1053.003 (TA0003), got %q %q", ev.TechniqueID, ev.TacticID)
 	}
 }
 
@@ -119,36 +124,51 @@ func TestClassifyICSCommand(t *testing.T) {
 	c := newTestClassifierT(t)
 	ev := makeEvent("conpot", "command", "WRITE_COIL 1 1", "")
 	c.Classify(context.Background(), ev)
-	if ev.TechniqueID != "T0855" {
-		t.Errorf("expected T0855 (ICS Unauthorized Command), got %q", ev.TechniqueID)
+	// T0855 Unauthorized Command Message was revoked for T1692.001.
+	if ev.TechniqueID != "T1692.001" || ev.TacticID != "TA0106" {
+		t.Errorf("expected T1692.001 (Command Message, TA0106), got %q %q", ev.TechniqueID, ev.TacticID)
 	}
 }
 
 // Connection establishment and normal protocol reads do not establish network
-// connection enumeration (T0840), a scan, or point/tag identification (T0861).
-func TestClassifyICSDoesNotInferDiscoveryFromConnectionOrRead(t *testing.T) {
+// connection enumeration (T0840) or point/tag identification (T0861). A read
+// of coils or registers reads the process state (T0801, collection); a bare
+// connection is one knock, its category's scanning on thin evidence; only a
+// request that asks what the device is names discovery (T0888). None of them
+// is certain.
+func TestClassifyICSEvidenceLimits(t *testing.T) {
 	c := newTestClassifierT(t)
-	for _, tc := range []struct{ eventType, protocol, function, profile string }{
-		{"connection", "modbus", "", "plc_modbus"},
-		{"conpot.modbus.new_connection", "modbus", "", "plc_modbus"},
-		{"conpot.http.new_connection", "http", "", ""},
-		{"conpot.modbus.read", "modbus", "3", "plc_modbus"},
-		{"conpot.modbus.read", "modbus", "43", "plc_modbus"},
-		{"conpot.modbus.request", "modbus", "8", "plc_modbus"},
-		{"conpot.modbus.request", "modbus", "", ""},
-		{"conpot.opcua.read", "opcua", "", "beckhoff_cx"},
-		{"conpot.modbus.connection_closed", "modbus", "", "plc_modbus"},
-		{"conpot.modbus.probe.invalid", "modbus", "", "plc_modbus"},
+	for _, tc := range []struct {
+		eventType, protocol, function, profile string
+		technique, tactic                      string
+		maxConf                                float64
+	}{
+		{"connection", "modbus", "", "plc_modbus", "T1595", "TA0043", 0.5},
+		{"conpot.modbus.new_connection", "modbus", "", "plc_modbus", "T1595", "TA0043", 0.5},
+		{"conpot.http.new_connection", "http", "", "", "T1595", "TA0043", 0.5},
+		{"conpot.modbus.read", "modbus", "3", "plc_modbus", "T0801", "TA0100", 0.6},
+		{"conpot.opcua.read", "opcua", "", "beckhoff_cx", "T0801", "TA0100", 0.6},
+		{"conpot.modbus.read", "modbus", "43", "plc_modbus", "T0888", "TA0102", 0.7},
+		{"conpot.modbus.read", "modbus", "17", "plc_modbus", "T0888", "TA0102", 0.7},
+		{"conpot.modbus.request", "modbus", "8", "plc_modbus", "T0888", "TA0102", 0.6},
+		{"conpot.modbus.request", "modbus", "", "", "T0888", "TA0102", 0.6},
+		{"conpot.modbus.connection_closed", "modbus", "", "plc_modbus", "", "", 0},
+		// Not one of conpot's named probes, but its category is scanning.
+		{"conpot.modbus.probe.invalid", "modbus", "", "plc_modbus", "T1595", "TA0043", 0.5},
 	} {
 		t.Run(tc.eventType+"/"+tc.function, func(t *testing.T) {
 			ev := makeEvent("conpot", tc.eventType, "", "")
 			ev.Protocol = tc.protocol
-			// The current image's FC43/14 identification read remains a read,
-			// even when its function and selected profile are available.
 			ev.Metadata = map[string]string{"function_code": tc.function, "device_profile": tc.profile}
 			c.Classify(context.Background(), ev)
-			if ev.TechniqueID != "" || ev.Classified || ev.Confidence != 0 {
-				t.Errorf("insufficient discovery evidence classified: technique=%q classified=%v confidence=%v", ev.TechniqueID, ev.Classified, ev.Confidence)
+			if ev.TechniqueID != tc.technique || ev.TacticID != tc.tactic {
+				t.Errorf("technique %q tactic %q, want %q %q", ev.TechniqueID, ev.TacticID, tc.technique, tc.tactic)
+			}
+			if ev.Confidence > tc.maxConf {
+				t.Errorf("confidence %v above %v for single-event evidence", ev.Confidence, tc.maxConf)
+			}
+			if tc.technique != "" && ev.TacticName == "" {
+				t.Errorf("no tactic name: %+v", ev)
 			}
 		})
 	}
@@ -170,15 +190,17 @@ func TestClassifyICSExplicitProbeIsDiscoveryCandidate(t *testing.T) {
 	}
 }
 
-func TestClassifyICSWriteAttemptPreservesLegacyMapping(t *testing.T) {
+// A write is an attempted command message whatever the device answered
+// (T1692.001, which replaced the revoked T0855).
+func TestClassifyICSWriteAttemptIsCommandMessage(t *testing.T) {
 	c := newTestClassifierT(t)
 	for _, response := range []string{"accepted", "illegal_data_address", "unknown"} {
 		t.Run(response, func(t *testing.T) {
 			ev := makeEvent("conpot", "conpot.modbus.command", "", "")
 			ev.Metadata = map[string]string{"function_code": "6", "response": response}
 			c.Classify(context.Background(), ev)
-			if ev.TechniqueID != "T0855" {
-				t.Errorf("write attempt mapping = %q, want legacy T0855", ev.TechniqueID)
+			if ev.TechniqueID != "T1692.001" || ev.Confidence >= 1 {
+				t.Errorf("write attempt mapping = %q (confidence %v), want T1692.001 below certainty", ev.TechniqueID, ev.Confidence)
 			}
 		})
 	}
@@ -206,21 +228,29 @@ func TestICSFallbackTechniqueMetadata(t *testing.T) {
 
 func TestClassifyDoesNotMatchWrongHoneypot(t *testing.T) {
 	c := newTestClassifierT(t)
-	// T0855 only applies to conpot; a cowrie command event should not match it.
+	// The ICS command rule only applies to conpot; a cowrie command event
+	// is a shell command.
 	ev := makeEvent("cowrie", "command", "WRITE_COIL 1 1", "")
 	c.Classify(context.Background(), ev)
-	if ev.TechniqueID == "T0855" {
-		t.Error("T0855 should not match cowrie honeypot")
+	if ev.TechniqueID != "T1059.004" {
+		t.Errorf("cowrie command: %q, want T1059.004", ev.TechniqueID)
 	}
 }
 
-func TestClassifyNetworkServiceDiscovery(t *testing.T) {
+// A connection from the internet is active scanning (reconnaissance), not
+// T1046, which is service discovery from inside a network; that is what a
+// scanner run in a honeypot shell gets.
+func TestClassifyConnectionIsActiveScanning(t *testing.T) {
 	c := newTestClassifierT(t)
-	// connection event with no username → T1046
 	ev := makeEvent("cowrie", "connection", "", "")
 	c.Classify(context.Background(), ev)
+	if ev.TechniqueID != "T1595" || ev.TacticID != "TA0043" || ev.KillChainStage != "reconnaissance" {
+		t.Errorf("connection: %q %q %q, want T1595 TA0043 reconnaissance", ev.TechniqueID, ev.TacticID, ev.KillChainStage)
+	}
+	ev = makeEvent("cowrie", "command", "masscan 10.0.0.0/8 -p22 --rate 10000", "root")
+	c.Classify(context.Background(), ev)
 	if ev.TechniqueID != "T1046" {
-		t.Errorf("expected T1046, got %q", ev.TechniqueID)
+		t.Errorf("scan from the honeypot: %q, want T1046", ev.TechniqueID)
 	}
 }
 

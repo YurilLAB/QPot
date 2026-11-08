@@ -57,7 +57,7 @@ var (
 	catConnectEvent = regexp.MustCompile(`(?:^|[._-])(?:connection|connect|probe)(?:$|[._-])|new_connection|session\.connect`)
 	// catDisconnectEvent is the end of a connection (conpot connection_lost,
 	// connection_terminated, connection_closed): not a new probe.
-	catDisconnectEvent = regexp.MustCompile(`(?:^|[._-])(?:connection[._-]?(?:lost|terminated|closed)|disconnect(?:ed)?)(?:$|[._-])`)
+	catDisconnectEvent = regexp.MustCompile(`(?:^|[._-])(?:connection[._-]?(?:lost|terminated|closed?)|disconnect(?:ed)?)(?:$|[._-])`)
 	catUploadEvent     = regexp.MustCompile(`(?:^|[._-])(?:file[._-]?)?upload(?:$|[._-])`)
 	catDownloadEvent   = regexp.MustCompile(`(?:^|[._-])file[._-]?download(?:$|[._-])`)
 	// catICSCommand is a conpot operation in an industrial protocol: a read,
@@ -240,6 +240,12 @@ var (
 	// Persistence, one pattern per kind so the ATT&CK rules can tell them
 	// apart (see rules.go).
 	catPersistKeys = regexp.MustCompile(catWrite + `[^\s;&|]*authorized_keys2?\b`)
+	// Editing sshd_config (PermitRootLogin yes, another AuthorizedKeysFile);
+	// reading it is not.
+	catPersistSSHD = catRe(
+		catWrite+`/etc/ssh/sshd_config\b`,
+		`\bsed\b[^;&|\n]*\s-[a-zA-Z]*i[^;&|\n]*/etc/ssh/sshd_config\b`,
+	)
 	catPersistCron = catRe(
 		`\|\s*crontab\b`,
 		`\bcrontab\s+(?:-u\s+\S+\s+)?(?:-e\b|-\s*(?:$|[;&|)])|[^-\s;&|])`,
@@ -340,14 +346,19 @@ var (
 
 // catDownloads runs a downloader pattern over text. It reports a download
 // of a remote file, a "what is my IP" lookup, and the downloads' arguments.
-func catDownloads(re *regexp.Regexp, text string) (download, ipLookup bool, targets []string) {
+func catDownloads(re *regexp.Regexp, text, lower string) (download, ipLookup bool, targets []string) {
+	if !literalsOf(re).may(text, lower) {
+		return false, false, nil
+	}
 	for _, m := range re.FindAllStringSubmatch(text, 32) {
 		args := m[1]
-		if !catDownloadTarget.MatchString(args) {
-			continue
-		}
+		// A public-IP service is known by its name: "curl ifconfig.me"
+		// names no scheme or path.
 		if catIPLookup.MatchString(args) {
 			ipLookup = true
+			continue
+		}
+		if !catDownloadTarget.MatchString(args) {
 			continue
 		}
 		download = true
@@ -359,10 +370,11 @@ func catDownloads(re *regexp.Regexp, text string) (download, ipLookup bool, targ
 // catPayloadSigns adds what a fetched-and-run payload reveals, wherever the
 // commands came from (a shell, an injected web parameter, a Redis value).
 func catPayloadSigns(text, raw string, targets []string, s *catSet) {
-	if catBotnet.MatchString(text) || catBusyboxProbe.MatchString(raw) {
+	lt, lr := catLower(text), catLower(raw)
+	if catMatch(catBotnet, text, lt) || catMatch(catBusyboxProbe, raw, lr) {
 		s.add(CatBotnet)
 	}
-	if catMinerSigns.MatchString(text) || catWallet.MatchString(raw) {
+	if catMatch(catMinerSigns, text, lt) || catMatch(catWallet, raw, lr) {
 		s.add(CatCryptomining)
 	}
 	for _, t := range targets {
@@ -374,49 +386,54 @@ func catPayloadSigns(text, raw string, targets []string, s *catSet) {
 
 func catShell(in *catInput, s *catSet) {
 	t := in.shell
+	// lt is t lower-cased, for the patterns' case-insensitive literals (see
+	// catMatch).
+	lt := catLower(t)
 
-	dl, lookup, targets := catDownloads(catLooseDownload, t)
-	if dl || catDropper.MatchString(t) || (catDevTCPGet.MatchString(t) && catHTTPGet.MatchString(strings.ToLower(t))) {
+	dl, lookup, targets := catDownloads(catLooseDownload, t, lt)
+	if dl || catMatch(catDropper, t, lt) || (catMatch(catDevTCPGet, t, lt) && catHTTPGet.MatchString(strings.ToLower(t))) {
 		s.add(CatMalwareDownload)
 	}
 	if lookup {
 		s.add(CatRecon)
 	}
 	catPayloadSigns(t, t, targets, s)
-	if catMinerExec.MatchString(t) {
+	if catMatch(catMinerExec, t, lt) {
 		s.add(CatCryptomining)
 	}
-	if catRecon.MatchString(t) {
+	if catMatch(catRecon, t, lt) {
 		s.add(CatRecon)
 	}
-	if catPrivEsc.MatchString(t) {
+	if catMatch(catPrivEsc, t, lt) {
 		s.add(CatPrivilegeEscalation)
 	}
-	if catMatchAny(t, catPersistKeys, catPersistCron, catPersistService, catPersistAccount, catPersistPassword, catPersistProfile) {
+	if catMatchAny(t, lt, catPersistKeys, catPersistSSHD, catPersistCron, catPersistService, catPersistAccount, catPersistPassword, catPersistProfile) {
 		s.add(CatPersistence)
 	}
-	if catMatchAny(t, catEvadeHistory, catEvadeLogs, catEvadeDefenses) {
+	if catMatchAny(t, lt, catEvadeHistory, catEvadeLogs, catEvadeDefenses) {
 		s.add(CatDefenseEvasion)
 	}
-	if catMatchAny(t, catCredShadow, catCredOther) {
+	if catMatchAny(t, lt, catCredShadow, catCredOther) {
 		s.add(CatCredentialAccess)
 	}
-	if catMatchAny(t, catImpact, catImpactDoS, catRansom) {
+	if catMatchAny(t, lt, catImpact, catImpactDoS, catRansom) {
 		s.add(CatImpact)
 	}
-	if catLateralTools.MatchString(t) {
+	if catMatch(catLateralTools, t, lt) {
 		s.add(CatLateralMovement)
 	}
-	for _, m := range catRemoteLogin.FindAllStringSubmatch(t, 16) {
-		if catRemoteHost.MatchString(m[1]) {
-			s.add(CatLateralMovement)
-			break
+	if literalsOf(catRemoteLogin).may(t, lt) {
+		for _, m := range catRemoteLogin.FindAllStringSubmatch(t, 16) {
+			if catRemoteHost.MatchString(m[1]) {
+				s.add(CatLateralMovement)
+				break
+			}
 		}
 	}
-	if catSSHForward.MatchString(t) || catProxyTools.MatchString(t) {
+	if catMatch(catSSHForward, t, lt) || catMatch(catProxyTools, t, lt) {
 		s.add(CatProxyAbuse)
 	}
-	if catSCPUpload.MatchString(t) {
+	if catMatch(catSCPUpload, t, lt) {
 		s.add(CatFileUpload)
 	}
 }
@@ -604,10 +621,13 @@ func catDeobfuscateJNDI(s string) string {
 
 func catWeb(in *catInput, s *catSet) {
 	w := in.web
+	// lw is w folded for the patterns' literals (see catMatch); w is
+	// already lower-case, so this rarely copies.
+	lw := catLower(w)
 
-	if catExploitAny.MatchString(w) {
+	if catMatch(catExploitAny, w, lw) {
 		for _, e := range catExploits {
-			if e.re.MatchString(w) {
+			if catMatch(e.re, w, lw) {
 				s.exploit(e.cve)
 			}
 		}
@@ -616,7 +636,7 @@ func catWeb(in *catInput, s *catSet) {
 		s.exploit("CVE-2021-44228")
 		s.add(CatCodeInjection)
 	}
-	if catPHPCGI.MatchString(w) {
+	if catMatch(catPHPCGI, w, lw) {
 		cve := "CVE-2012-1823"
 		if strings.Contains(in.webRaw, "%ad") {
 			cve = "CVE-2024-4577"
@@ -668,7 +688,7 @@ func catWeb(in *catInput, s *catSet) {
 		{CatProxyAbuse, catWebProxy},
 		{CatBruteForce, catWebLogin},
 	} {
-		if c.re.MatchString(w) {
+		if catMatch(c.re, w, lw) {
 			s.add(c.id)
 		}
 	}
@@ -680,22 +700,24 @@ func catWeb(in *catInput, s *catSet) {
 	}
 
 	// Commands smuggled into the request.
-	dl, _, targets := catDownloads(catWebDownload, w)
-	if dl || catDropper.MatchString(w) {
+	dl, _, targets := catDownloads(catWebDownload, w, lw)
+	if dl || catMatch(catDropper, w, lw) {
 		s.add(CatMalwareDownload)
 	}
 	// A remote file inclusion whose parameter is an http(s) URL pulls that
 	// remote payload in: it is both file-inclusion and a download.
-	for _, m := range catRFIRemote.FindAllStringSubmatch(w, 8) {
-		s.add(CatMalwareDownload)
-		targets = append(targets, m[1])
+	if literalsOf(catRFIRemote).may(w, lw) {
+		for _, m := range catRFIRemote.FindAllStringSubmatch(w, 8) {
+			s.add(CatMalwareDownload)
+			targets = append(targets, m[1])
+		}
 	}
 	catPayloadSigns(w, w, targets, s)
-	if catMinerWebExec.MatchString(w) {
+	if catMatch(catMinerWebExec, w, lw) {
 		s.add(CatCryptomining)
 	}
 
-	if catScannerFingerprint.MatchString(w) {
+	if catMatch(catScannerFingerprint, w, lw) {
 		s.add(CatScanning)
 	}
 	if len(s.ids) == 0 && catWebProbe.MatchString(strings.TrimSpace(w)) {
@@ -755,7 +777,7 @@ func catRedis(in *catInput, s *catSet) {
 	if catRedisAuth.MatchString(t) {
 		s.add(CatBruteForce)
 	}
-	dl, _, targets := catDownloads(catLooseDownload, t)
+	dl, _, targets := catDownloads(catLooseDownload, t, catLower(t))
 	if dl {
 		s.add(CatMalwareDownload)
 	}
