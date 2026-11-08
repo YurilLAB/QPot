@@ -168,6 +168,7 @@ func (es *Elasticsearch) InitializeSchema(ctx context.Context) error {
 					"kill_chain_stage":      map[string]string{"type": "keyword"},
 					"confidence":            map[string]string{"type": "float"},
 					"classified":            map[string]string{"type": "boolean"},
+					"categories":            map[string]string{"type": "keyword"},
 				},
 			},
 		},
@@ -183,9 +184,10 @@ func (es *Elasticsearch) InitializeSchema(ctx context.Context) error {
 	}
 
 	// Existing daily indices do not inherit later template changes. Add the
-	// version marker explicitly, including for strict mappings; old event
-	// documents remain untouched and are decoded with their original format.
-	markerMapping := []byte(`{"properties":{"qpot_payload_encoding":{"type":"keyword"}}}`)
+	// version marker and the categories field explicitly, including for
+	// strict mappings; old event documents remain untouched and are decoded
+	// with their original format (and no categories).
+	markerMapping := []byte(`{"properties":{"qpot_payload_encoding":{"type":"keyword"},"categories":{"type":"keyword"}}}`)
 	data, status, err = es.esRequest(ctx, http.MethodPut, "/qpot-events-*/_mapping?allow_no_indices=true&ignore_unavailable=true", markerMapping)
 	if err != nil {
 		return fmt.Errorf("update event payload encoding mapping: %w", err)
@@ -373,6 +375,7 @@ type esEvent struct {
 	KillChainStage  string            `json:"kill_chain_stage,omitempty"`
 	Confidence      float64           `json:"confidence,omitempty"`
 	Classified      bool              `json:"classified"`
+	Categories      []string          `json:"categories,omitempty"`
 }
 
 func eventToES(event *Event) esEvent {
@@ -410,6 +413,7 @@ func eventToES(event *Event) esEvent {
 		KillChainStage:  event.KillChainStage,
 		Confidence:      event.Confidence,
 		Classified:      event.Classified,
+		Categories:      event.Categories,
 	}
 }
 
@@ -452,6 +456,9 @@ func esDocToEvent(source json.RawMessage) (*Event, error) {
 	default:
 		return nil, fmt.Errorf("decode event payload: unsupported encoding")
 	}
+	if len(doc.Categories) == 0 {
+		doc.Categories = nil // tagged with none ([]) or never tagged
+	}
 	ts, err := time.Parse(time.RFC3339Nano, doc.Timestamp)
 	if err != nil {
 		// Try parsing without nanos
@@ -483,6 +490,7 @@ func esDocToEvent(source json.RawMessage) (*Event, error) {
 		KillChainStage: doc.KillChainStage,
 		Confidence:     doc.Confidence,
 		Classified:     doc.Classified,
+		Categories:     doc.Categories,
 	}, nil
 }
 
@@ -683,6 +691,11 @@ func buildEventQuery(filter EventFilter) map[string]interface{} {
 	if len(filter.EventTypes) > 0 {
 		must = append(must, map[string]interface{}{
 			"terms": map[string]interface{}{"event_type": filter.EventTypes},
+		})
+	}
+	if len(filter.Categories) > 0 {
+		must = append(must, map[string]interface{}{
+			"terms": map[string]interface{}{"categories": filter.Categories},
 		})
 	}
 
@@ -1233,6 +1246,15 @@ func (es *Elasticsearch) ImportData(ctx context.Context, r io.Reader) error {
 	return nil
 }
 
+// esCategories is an event's categories as a JSON array ([] when none, so
+// tagging clears rather than leaves a stale value).
+func esCategories(c []string) []string {
+	if c == nil {
+		return []string{}
+	}
+	return c
+}
+
 // TagEvent updates the ATT&CK classification fields on matching events.
 func (es *Elasticsearch) TagEvent(ctx context.Context, event *Event) error {
 	// Prefer the document id read back by GetUnclassifiedEvents;
@@ -1264,6 +1286,7 @@ ctx._source.tactic_id = params.tactic_id;
 ctx._source.tactic_name = params.tactic_name;
 ctx._source.kill_chain_stage = params.kill_chain_stage;
 ctx._source.confidence = params.confidence;
+ctx._source.categories = params.categories;
 ctx._source.classified = true;`,
 			"lang": "painless",
 			"params": map[string]interface{}{
@@ -1273,6 +1296,7 @@ ctx._source.classified = true;`,
 				"tactic_name":      event.TacticName,
 				"kill_chain_stage": event.KillChainStage,
 				"confidence":       event.Confidence,
+				"categories":       esCategories(event.Categories),
 			},
 		},
 	}

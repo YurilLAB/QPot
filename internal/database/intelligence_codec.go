@@ -105,5 +105,10 @@ func validateElasticsearchEventText(event *Event) error {
 			return err
 		}
 	}
+	for _, c := range event.Categories {
+		if err := validateIntelligenceText("elasticsearch", "event.categories", c, false); err != nil {
+			return err
+		}
+	}
 	return nil
 }

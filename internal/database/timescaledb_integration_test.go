@@ -66,6 +66,11 @@ func connectPG(t *testing.T) *TimescaleDB {
 	if err := ts.createIOCTable(ctx); err != nil {
 		t.Fatalf("createIOCTable: %v", err)
 	}
+	// The events table above is the schema before categories; the
+	// production upgrade adds the column.
+	if err := ts.ensureEventColumns(ctx); err != nil {
+		t.Fatalf("ensureEventColumns: %v", err)
+	}
 	return ts
 }
 

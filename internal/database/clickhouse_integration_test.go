@@ -327,6 +327,38 @@ func TestClickHouseEventIDUpgrade(t *testing.T) {
 	}
 }
 
+// An events table created before categories existed gains the column on
+// InitializeSchema: its rows read back with none and can then be tagged.
+func TestClickHouseCategoriesUpgrade(t *testing.T) {
+	db := connectCH(t)
+	ch := db.(*ClickHouse)
+	ctx := context.Background()
+	if err := ch.conn.Exec(ctx, `ALTER TABLE events DROP COLUMN IF EXISTS categories`); err != nil {
+		t.Fatal(err)
+	}
+	if err := ch.conn.Exec(ctx, `TRUNCATE TABLE events`); err != nil {
+		t.Fatal(err)
+	}
+	if err := ch.conn.Exec(ctx, `INSERT INTO events (timestamp, honeypot, source_ip, event_type) VALUES (now64(3), 'cowrie', '198.51.100.79', 'cowrie.login.failed')`); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.InitializeSchema(ctx); err != nil {
+		t.Fatal(err)
+	}
+	un, err := db.GetUnclassifiedEvents(ctx, 10)
+	if err != nil || len(un) != 1 || un[0].Categories != nil {
+		t.Fatalf("GetUnclassifiedEvents after upgrade = %+v, %v", un, err)
+	}
+	un[0].TechniqueID, un[0].Categories, un[0].Classified = "T1110", []string{"brute-force"}, true
+	if err := db.(BatchTagger).TagEvents(ctx, un); err != nil {
+		t.Fatal(err)
+	}
+	got, err := db.GetEvents(ctx, EventFilter{SourceIPs: []string{"198.51.100.79"}, Categories: []string{"brute-force"}, Limit: 10})
+	if err != nil || len(got) != 1 || len(got[0].Categories) != 1 || got[0].Categories[0] != "brute-force" {
+		t.Fatalf("GetEvents after tagging = %+v, %v", got, err)
+	}
+}
+
 func TestClickHouseIOCSightingsAccumulate(t *testing.T) {
 	db := connectCH(t)
 	if err := db.(*ClickHouse).conn.Exec(context.Background(), `TRUNCATE TABLE iocs`); err != nil {

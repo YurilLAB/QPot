@@ -14,6 +14,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/qpot/qpot/internal/database"
+	"github.com/qpot/qpot/internal/intelligence"
 )
 
 // GET /api/events: the captured events, newest first, with the event
@@ -121,6 +122,14 @@ func parseEventFilter(q url.Values) (database.EventFilter, error) {
 			return f, &eventFilterError{"country", "must be two-letter country codes"}
 		}
 		f.Countries[i] = strings.ToUpper(c)
+	}
+	if f.Categories, err = listParam(q, "category"); err != nil {
+		return f, err
+	}
+	for _, c := range f.Categories {
+		if !intelligence.IsCategory(c) {
+			return f, &eventFilterError{"category", "must be attack category IDs (GET /api/categories lists them)"}
+		}
 	}
 	if f.StartTime, err = parseEventTime("since", q.Get("since")); err != nil {
 		return f, err

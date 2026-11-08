@@ -273,6 +273,7 @@ comma-separated, at most 20 values each.
 | `honeypot` | `[a-z0-9][a-z0-9-]{0,63}` (e.g. `cowrie`, `canary`) |
 | `source_ip` | IPv4 or IPv6 without a zone; matched in canonical form (`2001:DB8::1` finds `2001:db8::1`) |
 | `event_type` | `[A-Za-z0-9_.:-]{1,64}` |
+| `category` | an attack category ID (see `GET /api/categories`); keeps events with any of them |
 | `country` | two letters |
 | `since`, `until` | RFC 3339 or unix seconds; `until` not before `since` |
 | `q` | text found (any case) in the user name, password, command or payload (Elasticsearch: not the payload); at most 200 bytes, no control characters |
@@ -342,6 +343,7 @@ counted by the database.
 | `GET /api/iocs?type=&honeypot=&limit=` | IOCs (`limit` 1 to 1000) |
 | `GET /api/iocs/export?format=misp&type=&honeypot=&limit=` | the IOCs as a MISP event (a download) |
 | `GET /api/techniques` | `[{"technique_id", "technique_name", "tactic_name", "count"}]`, most first |
+| `GET /api/categories` | `[{"id", "label", "description", "count"}]`, in catalogue order; the plain-language attack categories and how many recent events carry each |
 | `GET /api/ttps?limit=` | campaign sessions (`limit` 1 to 500) |
 | `GET /api/intelligence` | `{"techniques_observed", "iocs_total", "active_sessions", "worker_enabled", "attck_loaded"}` |
 

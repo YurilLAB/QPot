@@ -3,6 +3,7 @@
 - [How events are collected](#how-events-are-collected)
 - [Databases](#databases)
 - [The intelligence worker](#the-intelligence-worker)
+- [Attack categories](#attack-categories)
 - [Worker recovery and health](#worker-recovery-and-health)
 - [API](#api)
 - [Optional extras](#optional-extras)
@@ -46,6 +47,71 @@ changes that. It does three things:
 - **Groups campaigns**, also called TTP sessions, by shared credentials,
   tooling, commands and targeted services rather than by IP alone.
 
+## Attack categories
+
+Beside the ATT&CK technique, each event is also given plain-language **attack
+categories**, so a dashboard or log shows "Path traversal" or "Cryptomining"
+rather than only a technique ID. An event can have several, most specific
+first; an event that matches nothing has none. A known-vulnerability exploit
+is followed by its CVE when one is known, for example
+`exploit-attempt, CVE-2021-44228`.
+
+The categories are read from what the honeypot actually recorded — a shell
+command, a web request, a Redis command, a connection — and only where that
+field means what the category assumes, so accuracy is preferred over coverage:
+a near-miss gets no category rather than a wrong one.
+
+The categories are:
+
+- **Scanning and probing** — port scans, banner grabs, crawlers and
+  vulnerability scanners looking around.
+- **Login guessing** — password guessing, spraying and credential stuffing on
+  any service.
+- **Known-vulnerability exploit** — an exploit for a named vulnerability
+  (Log4Shell, Citrix, Cisco ASA, EternalBlue, router and IoT RCEs), with its
+  CVE when known.
+- **Path traversal / file read** — `../` and encoded variants, `/etc/passwd`,
+  local file inclusion.
+- **Remote file inclusion** — pulling in a remote file, or a `php://` or
+  `data://` wrapper.
+- **SQL injection**, **Cross-site scripting**, **Command injection** (OS
+  commands through a web or service parameter) and **Code / template
+  injection** (SSTI, OGNL, JNDI, PHP eval, deserialization).
+- **Server-side request forgery** — including cloud metadata probing.
+- **Secret and config hunting** — `.env`, `.git`, wp-config backups,
+  `phpinfo`, actuator, credentials files.
+- **File upload** — web-shell uploads, HTTP PUT, SCP/SFTP/FTP/ADB pushes.
+- **Web shell use** — requests to a known web shell or a `cmd=` style shell.
+- **Host reconnaissance** — looking around after login (`uname`, `whoami`,
+  CPU, memory, network, directory listings).
+- **Malware / tool download** — `wget`/`curl`/`tftp`/`busybox` fetches and
+  `echo` droppers.
+- **Privilege escalation attempt** — `sudo`/`su` abuse, SUID hunting, kernel
+  and polkit exploits, compiling exploits.
+- **Persistence** — SSH keys, cron, services, new users, password changes,
+  shell profiles.
+- **Credential theft** — reading `/etc/shadow`, SSH keys, cloud credentials,
+  history files.
+- **Covering tracks** — clearing history and logs, disabling firewalls and
+  security tools, killing rival malware.
+- **Cryptomining** — miner downloads and configs, mining-pool connections.
+- **Botnet loader** — Mirai/Gafgyt-style IoT loaders and busybox probes.
+- **Spreading** — scanning or logging in to other machines from the honeypot.
+- **Proxy and relay abuse** — SSH port forwarding, open-proxy checks, SMTP
+  relaying.
+- **Destructive actions** — wiping, `rm -rf /`, fork bombs, ransom notes, DoS
+  tools.
+- **Industrial control attack** — Modbus/S7/BACnet reads, writes and commands.
+- **DDoS amplification** — UDP reflection probes.
+- **Database abuse** — Redis `CONFIG SET`/`SLAVEOF`/`MODULE LOAD`,
+  Elasticsearch script queries, MSSQL `xp_cmdshell`.
+- **VoIP abuse** — SIP scanning, registration guessing, toll fraud.
+
+Events classified before categories existed stay without them; only events
+the worker classifies from now on carry categories. The web UI shows the
+category label wherever the technique is shown, and the Events view has an
+"Attack type" filter.
+
 ## Worker recovery and health
 
 Before it marks source events as classified, the worker saves a database
@@ -83,6 +149,7 @@ plane restarted once its cause is fixed.
 | Endpoint | Description |
 |---|---|
 | `GET /api/techniques` | Observed ATT&CK techniques with counts |
+| `GET /api/categories` | Attack categories with their labels and recent counts |
 | `GET /api/iocs` | IOCs, filterable by type and honeypot |
 | `GET /api/iocs/export?format=misp` | IOCs as a MISP event |
 | `GET /api/ioc` | Attacker IP blocklist |

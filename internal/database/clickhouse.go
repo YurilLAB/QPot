@@ -115,6 +115,8 @@ func (ch *ClickHouse) InitializeSchema(ctx context.Context) error {
 			kill_chain_stage String DEFAULT '',
 			confidence Float64 DEFAULT 0,
 			classified UInt8 DEFAULT 0,
+			-- Plain-language attack categories, most specific first.
+			categories Array(String) DEFAULT [],
 			-- Row identity for TagEvent; generated server-side for every
 			-- insert path (the collector never sends it).
 			event_id UUID DEFAULT generateUUIDv4()
@@ -129,6 +131,9 @@ func (ch *ClickHouse) InitializeSchema(ctx context.Context) error {
 		return fmt.Errorf("failed to create events table: %w", err)
 	}
 	if err := ch.ensureEventID(ctx); err != nil {
+		return err
+	}
+	if err := ch.ensureEventCategories(ctx); err != nil {
 		return err
 	}
 
@@ -233,7 +238,7 @@ func (ch *ClickHouse) InsertEvents(ctx context.Context, events []*Event) error {
 	// Explicit column list: event_id is left to its server-side default.
 	batch, err := ch.conn.PrepareBatch(ctx, `INSERT INTO events (timestamp, honeypot, source_ip, source_port,
 		dest_port, protocol, event_type, username, password, command, payload, metadata, country, city, asn,
-		technique_id, technique_name, tactic_id, tactic_name, kill_chain_stage, confidence, classified)`)
+		technique_id, technique_name, tactic_id, tactic_name, kill_chain_stage, confidence, classified, categories)`)
 	if err != nil {
 		return fmt.Errorf("failed to prepare batch: %w", err)
 	}
@@ -266,6 +271,7 @@ func (ch *ClickHouse) InsertEvents(ctx context.Context, events []*Event) error {
 			event.KillChainStage,
 			event.Confidence,
 			classified,
+			chCategories(event.Categories),
 		)
 		if err != nil {
 			return fmt.Errorf("failed to append event: %w", err)
@@ -289,7 +295,7 @@ func (ch *ClickHouse) GetEvents(ctx context.Context, filter EventFilter) ([]*Eve
 		protocol, event_type, username, password, command,
 		payload, metadata, country, city, asn,
 		technique_id, technique_name, tactic_id, tactic_name,
-		kill_chain_stage, confidence, classified
+		kill_chain_stage, confidence, classified, categories
 	FROM events WHERE 1=1`
 	var args []interface{}
 
@@ -324,6 +330,10 @@ func (ch *ClickHouse) GetEvents(ctx context.Context, filter EventFilter) ([]*Eve
 		query += " AND (positionCaseInsensitiveUTF8(username, ?) > 0 OR positionCaseInsensitiveUTF8(password, ?) > 0" +
 			" OR positionCaseInsensitiveUTF8(command, ?) > 0 OR positionCaseInsensitiveUTF8(payload, ?) > 0)"
 		args = append(args, filter.Text, filter.Text, filter.Text, filter.Text)
+	}
+	if len(filter.Categories) > 0 {
+		query += " AND hasAny(categories, CAST(?, 'Array(String)'))"
+		args = append(args, filter.Categories)
 	}
 
 	query += " ORDER BY timestamp DESC"
@@ -372,9 +382,13 @@ func (ch *ClickHouse) GetEvents(ctx context.Context, filter EventFilter) ([]*Eve
 			&event.KillChainStage,
 			&event.Confidence,
 			&classified,
+			&event.Categories,
 		)
 		if err != nil {
 			return nil, fmt.Errorf("failed to scan event: %w", err)
+		}
+		if len(event.Categories) == 0 {
+			event.Categories = nil
 		}
 		event.SourcePort = int(sourcePort)
 		event.DestPort = int(destPort)
@@ -963,6 +977,34 @@ func (ch *ClickHouse) ensureEventID(ctx context.Context) error {
 	return nil
 }
 
+// ensureEventCategories adds the categories column to an events table
+// created before it existed. Its default is a constant empty array, so
+// existing rows need no materialization: events classified earlier keep no
+// categories.
+func (ch *ClickHouse) ensureEventCategories(ctx context.Context) error {
+	var n uint64
+	if err := ch.conn.QueryRow(ctx,
+		"SELECT count() FROM system.columns WHERE database = currentDatabase() AND table = 'events' AND name = 'categories'",
+	).Scan(&n); err != nil {
+		return fmt.Errorf("check events.categories: %w", err)
+	}
+	if n > 0 {
+		return nil
+	}
+	if err := ch.conn.Exec(ctx, "ALTER TABLE events ADD COLUMN IF NOT EXISTS categories Array(String) DEFAULT []"); err != nil {
+		return fmt.Errorf("add events.categories: %w", err)
+	}
+	return nil
+}
+
+// chCategories is an event's categories as a ClickHouse array value.
+func chCategories(c []string) []string {
+	if c == nil {
+		return []string{}
+	}
+	return c
+}
+
 // TagEvent updates an event's ATT&CK classification fields in ClickHouse.
 func (ch *ClickHouse) TagEvent(ctx context.Context, event *Event) error {
 	if ch.conn == nil {
@@ -979,6 +1021,7 @@ func (ch *ClickHouse) TagEvent(ctx context.Context, event *Event) error {
 			tactic_name     = ?,
 			kill_chain_stage = ?,
 			confidence      = ?,
+			categories      = CAST(?, 'Array(String)'),
 			classified      = 1
 		WHERE source_ip = ? AND timestamp = fromUnixTimestamp64Milli(?)
 	`
@@ -992,16 +1035,33 @@ func (ch *ClickHouse) TagEvent(ctx context.Context, event *Event) error {
 		event.TacticName,
 		event.KillChainStage,
 		event.Confidence,
+		chCategories(event.Categories),
 		event.SourceIP,
 		event.Timestamp.UnixMilli(),
 	)
 }
 
-// tagChunk bounds the size of one tagging mutation's statement. clickhouse-go
-// inlines the bound lists, each event id appears seven times, and an event
-// costs about 400 bytes; ClickHouse refuses statements over max_query_size
-// (256 KiB by default), which 1000 events per chunk exceeded.
-const tagChunk = 250
+// tagChunk and tagChunkBytes bound the size of one tagging mutation's
+// statement. clickhouse-go inlines the bound lists, each event id appears
+// eight times, and an event costs about 450 bytes plus its categories;
+// ClickHouse refuses statements over max_query_size (256 KiB by default),
+// which 1000 events per chunk exceeded.
+const (
+	tagChunk      = 250
+	tagChunkBytes = 160 << 10
+)
+
+// tagEventSize estimates the bytes one event adds to a TagEvents statement
+// as clickhouse-go renders it (quoted, escaped, comma-separated).
+func tagEventSize(e *Event) int {
+	str := func(s string) int { return len(s) + 4 + strings.Count(s, `\`) + strings.Count(s, `'`) }
+	n := 8*str(e.ID) + str(e.TechniqueID) + str(e.TechniqueName) + str(e.TacticID) +
+		str(e.TacticName) + str(e.KillChainStage) + 24 + 4
+	for _, c := range e.Categories {
+		n += str(c)
+	}
+	return n
+}
 
 // TagEvents tags events by their event_id in one mutation per chunk, and waits
 // for it to apply (mutations_sync): ClickHouse mutations are otherwise
@@ -1023,16 +1083,27 @@ func (ch *ClickHouse) TagEvents(ctx context.Context, events []*Event) error {
 		withID = append(withID, e)
 	}
 	sctx := clickhouse.Context(ctx, clickhouse.WithSettings(clickhouse.Settings{"mutations_sync": 1}))
-	for start := 0; start < len(withID); start += tagChunk {
-		chunk := withID[start:min(start+tagChunk, len(withID))]
+	for start := 0; start < len(withID); {
+		end, size := start, 0
+		for end < len(withID) && end-start < tagChunk {
+			n := tagEventSize(withID[end])
+			if end > start && size+n > tagChunkBytes {
+				break
+			}
+			size += n
+			end++
+		}
+		chunk := withID[start:end]
+		start = end
 		ids := make([]string, len(chunk))
 		tid, tname, aid, aname, kc := make([]string, len(chunk)), make([]string, len(chunk)),
 			make([]string, len(chunk)), make([]string, len(chunk)), make([]string, len(chunk))
 		conf := make([]float64, len(chunk))
+		cats := make([][]string, len(chunk))
 		lo, hi := chunk[0].Timestamp, chunk[0].Timestamp
 		for i, e := range chunk {
-			ids[i], tid[i], tname[i], aid[i], aname[i], kc[i], conf[i] =
-				e.ID, e.TechniqueID, e.TechniqueName, e.TacticID, e.TacticName, e.KillChainStage, e.Confidence
+			ids[i], tid[i], tname[i], aid[i], aname[i], kc[i], conf[i], cats[i] =
+				e.ID, e.TechniqueID, e.TechniqueName, e.TacticID, e.TacticName, e.KillChainStage, e.Confidence, chCategories(e.Categories)
 			if e.Timestamp.Before(lo) {
 				lo = e.Timestamp
 			}
@@ -1040,8 +1111,10 @@ func (ch *ClickHouse) TagEvents(ctx context.Context, events []*Event) error {
 				hi = e.Timestamp
 			}
 		}
-		// transform() maps each row's id to its own values; the timestamp
-		// bounds let ClickHouse skip partitions that cannot contain them.
+		// transform() maps each row's id to its own values (and indexOf
+		// picks its categories array, as transform() takes no array
+		// values); the timestamp bounds let ClickHouse skip partitions that
+		// cannot contain them.
 		query := `
 			ALTER TABLE events UPDATE
 				technique_id     = transform(toString(event_id), ?, ?, technique_id),
@@ -1050,13 +1123,14 @@ func (ch *ClickHouse) TagEvents(ctx context.Context, events []*Event) error {
 				tactic_name      = transform(toString(event_id), ?, ?, tactic_name),
 				kill_chain_stage = transform(toString(event_id), ?, ?, kill_chain_stage),
 				confidence       = transform(toString(event_id), ?, ?, confidence),
+				categories       = CAST(arrayElement(?, indexOf(?, toString(event_id))), 'Array(String)'),
 				classified       = 1
 			WHERE toString(event_id) IN ?
 			  AND timestamp >= fromUnixTimestamp64Milli(?) AND timestamp <= fromUnixTimestamp64Milli(?)
 		`
 		if err := ch.conn.Exec(sctx, query,
 			ids, tid, ids, tname, ids, aid, ids, aname, ids, kc, ids, conf,
-			ids, lo.UnixMilli(), hi.UnixMilli(),
+			cats, ids, ids, lo.UnixMilli(), hi.UnixMilli(),
 		); err != nil {
 			return fmt.Errorf("tag events: %w", err)
 		}
@@ -1347,7 +1421,7 @@ func (ch *ClickHouse) GetUnclassifiedEvents(ctx context.Context, limit int) ([]*
 		       protocol, event_type, username, password, command,
 		       payload, metadata, country, city, asn,
 		       technique_id, technique_name, tactic_id, tactic_name,
-		       kill_chain_stage, confidence, classified, toString(event_id)
+		       kill_chain_stage, confidence, classified, toString(event_id), categories
 		FROM events
 		WHERE classified = 0
 		ORDER BY timestamp ASC
@@ -1378,9 +1452,12 @@ func (ch *ClickHouse) GetUnclassifiedEvents(ctx context.Context, limit int) ([]*
 			&event.Country, &event.City, &event.ASN,
 			&event.TechniqueID, &event.TechniqueName,
 			&event.TacticID, &event.TacticName,
-			&event.KillChainStage, &event.Confidence, &classified, &event.ID,
+			&event.KillChainStage, &event.Confidence, &classified, &event.ID, &event.Categories,
 		); err != nil {
 			return nil, fmt.Errorf("failed to scan event: %w", err)
+		}
+		if len(event.Categories) == 0 {
+			event.Categories = nil
 		}
 		event.SourcePort = int(sourcePort)
 		event.DestPort = int(destPort)

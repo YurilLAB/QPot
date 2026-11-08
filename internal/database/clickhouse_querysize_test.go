@@ -39,6 +39,13 @@ func renderedSize(query string, args ...any) int {
 			}
 		case []float64:
 			n += 24 * len(v)
+		case [][]string:
+			for _, inner := range v {
+				n += 4
+				for _, s := range inner {
+					n += len(s) + 4 + strings.Count(s, `\`) + strings.Count(s, `'`)
+				}
+			}
 		default:
 			n += 24
 		}
@@ -186,15 +193,19 @@ func TestClickHouseInsertIOCsStaysUnderMaxQuerySize(t *testing.T) {
 }
 
 // TagEvents tagged up to 1000 events per mutation. Every event id appears
-// seven times in that statement (six transform() maps and the IN list), about
-// 400 bytes per event, so a worker batch over ~650 events (worker_batch_size
-// is configurable) exceeded max_query_size. Tagging then failed on every
-// cycle: the same events came back each time, were never marked classified,
-// and had their IOCs counted again.
+// eight times in that statement (six transform() maps, the categories lookup
+// and the IN list), about 450 bytes per event before its categories, so a
+// worker batch over ~600 events (worker_batch_size is configurable) exceeded
+// max_query_size. Tagging then failed on every cycle: the same events came
+// back each time, were never marked classified, and had their IOCs counted
+// again. Each event here carries as many categories as one can store.
 func TestClickHouseTagEventsStaysUnderMaxQuerySize(t *testing.T) {
 	conn := &sizeLimitedConn{}
 	ch := &ClickHouse{conn: conn}
 	now := time.Now().UTC()
+	cats := []string{"privilege-escalation", "credential-access", "defense-evasion", "command-injection",
+		"malware-download", "lateral-movement", "path-traversal", "file-inclusion", "config-exposure",
+		"exploit-attempt", "CVE-2021-44228", "CVE-2019-19781"}
 	events := make([]*Event, 1000)
 	for i := range events {
 		events[i] = &Event{
@@ -202,11 +213,14 @@ func TestClickHouseTagEventsStaysUnderMaxQuerySize(t *testing.T) {
 			Timestamp:   now.Add(time.Duration(i) * time.Millisecond),
 			TechniqueID: "T1110.001", TechniqueName: "Brute Force: Password Guessing",
 			TacticID: "TA0006", TacticName: "Credential Access", KillChainStage: "initial-access",
-			Confidence: 0.85,
+			Confidence: 0.85, Categories: cats,
 		}
 	}
 	if err := ch.TagEvents(context.Background(), events); err != nil {
 		t.Fatalf("TagEvents: %v", err)
+	}
+	if len(conn.sizes) == 0 {
+		t.Fatal("no mutation was sent")
 	}
 	for _, n := range conn.sizes {
 		if n > chMaxQuerySize {

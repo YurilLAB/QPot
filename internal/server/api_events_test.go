@@ -54,12 +54,16 @@ func TestParseEventFilter(t *testing.T) {
 		"since":      {"2026-11-01T00:00:00Z"},
 		"until":      {"1794096000"},
 		"q":          {`wget 'http://x/%_\`},
+		"category":   {"path-traversal,brute-force", "scanning"},
 		"limit":      {"50"},
 		"offset":     {"100"},
 	}
 	f, err := parseEventFilter(q)
 	if err != nil {
 		t.Fatal(err)
+	}
+	if strings.Join(f.Categories, ",") != "path-traversal,brute-force,scanning" {
+		t.Fatalf("categories: %q", f.Categories)
 	}
 	if strings.Join(f.Honeypots, ",") != "cowrie,dionaea,canary" || strings.Join(f.SourceIPs, ",") != "203.0.113.5,2001:db8::1" || len(f.EventTypes) != 2 ||
 		strings.Join(f.Countries, ",") != "DE,US" || f.Text != `wget 'http://x/%_\` || f.Limit != 50 || f.Offset != 100 ||
@@ -81,6 +85,9 @@ func TestParseEventFilter(t *testing.T) {
 		{"since": {"yesterday"}}, {"until": {"-5"}}, {"since": {"2026-11-02T00:00:00Z"}, "until": {"2026-11-01T00:00:00Z"}},
 		{"q": {strings.Repeat("a", database.MaxEventText+1)}}, {"q": {"a\x00b"}}, {"q": {"a\nb"}}, {"q": {"\xff"}},
 		{"limit": {"0"}}, {"limit": {"1001"}}, {"limit": {"ten"}}, {"offset": {"-1"}}, {"offset": {"100001"}},
+		// Only catalogue IDs: not a label, a CVE, another case or SQL.
+		{"category": {"Path traversal"}}, {"category": {"CVE-2021-44228"}}, {"category": {"SCANNING"}},
+		{"category": {"scanning' OR 1=1"}}, {"category": {strings.Repeat("scanning,", maxEventFilterValues+1)}},
 	} {
 		if _, err := parseEventFilter(bad); err == nil {
 			t.Errorf("%v accepted", bad)

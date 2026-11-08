@@ -1626,6 +1626,7 @@ transforms:
       del(.kill_chain_stage)
       del(.confidence)
       del(.classified)
+      del(.categories)
       del(.country)
       del(.city)
       del(.asn)

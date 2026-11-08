@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"sort"
+	"strings"
 
 	"github.com/qpot/qpot/internal/database"
 )
@@ -32,10 +33,16 @@ func NewClassifier(loader *ATTCKLoader, ttpBuilder *TTPBuilder) *Classifier {
 	}
 }
 
-// Classify enriches a single event in-place with ATT&CK technique, IOCs,
-// and TTP session update. Returns extracted IOCs; caller persists them.
-// Never returns an error — on any failure it leaves the event unmodified.
+// Classify enriches a single event in-place with its attack categories, ATT&CK
+// technique, IOCs, and TTP session update. Returns extracted IOCs; caller
+// persists them. Never returns an error — on any failure it leaves the event
+// unmodified.
 func (c *Classifier) Classify(ctx context.Context, event *database.Event) []*database.IOC {
+	// Categories first: the curated rules can key on them (the "categories"
+	// condition field), so a technique and the plain-language category it
+	// is shown beside never disagree.
+	event.Categories = Categorize(event)
+
 	// Sort applicable rules by priority descending (stable for determinism).
 	applicable := c.applicableRules(event)
 	sort.SliceStable(applicable, func(i, j int) bool {
@@ -159,6 +166,9 @@ func resolveField(field string, event *database.Event) string {
 		return event.Honeypot
 	case "source_port":
 		return fmt.Sprint(event.SourcePort)
+	case "categories":
+		// Comma-joined, so a rule matches one with (^|,)id(,|$).
+		return strings.Join(event.Categories, ",")
 	default:
 		// metadata_<key> convention
 		if len(field) > 9 && field[:9] == "metadata_" {

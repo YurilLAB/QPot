@@ -56,6 +56,23 @@ func TestVectorClickHouseDataPathCorrectness(t *testing.T) {
 	}
 }
 
+// A honeypot log line is attacker-controlled and merged into the event, and
+// the ClickHouse sink stores any key that names a column. Every column the
+// intelligence worker owns must be deleted after that merge, or a line could
+// plant its own classification (or, with a wrongly typed categories value,
+// fail the whole insert batch).
+func TestVectorDropsWorkerOwnedFields(t *testing.T) {
+	out := genVector(t, "clickhouse")
+	merge := strings.Index(out, "merge(")
+	for _, f := range []string{"event_id", "technique_id", "technique_name", "tactic_id", "tactic_name",
+		"kill_chain_stage", "confidence", "classified", "categories"} {
+		at := strings.Index(out, "del(."+f+")")
+		if at < 0 || at < merge {
+			t.Errorf("the honeypot remap does not delete .%s after merging the log line", f)
+		}
+	}
+}
+
 // TestVectorTimescaleSink pins the postgres sink shape that actually inserts:
 // Vector's postgres sink has no `encoding` option (an encoding block makes the
 // whole collector config invalid), and it writes NULL for every column it is

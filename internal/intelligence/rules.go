@@ -3,6 +3,7 @@ package intelligence
 import (
 	"regexp"
 	"sort"
+	"strings"
 )
 
 // Rule maps event patterns to an ATT&CK technique.
@@ -50,9 +51,25 @@ func MergeRules(static []Rule, dynamic []Rule) []Rule {
 
 // Condition is a single match condition on an event field.
 type Condition struct {
-	Field   string // event_type|command|username|protocol|honeypot|source_port
+	Field   string // event_type|command|username|protocol|honeypot|source_port|categories
 	Pattern string // regex
 	Negate  bool
+}
+
+// catCond is a condition that the event has at least one of the given
+// attack categories (see Categorize).
+func catCond(ids ...string) Condition {
+	return Condition{Field: "categories", Pattern: `(?:^|,)(?:` + strings.Join(ids, "|") + `)(?:,|$)`}
+}
+
+// cmdCond is a command condition made of category patterns, so a rule
+// picks its technique with the same pattern the category was found by.
+func cmdCond(res ...*regexp.Regexp) Condition {
+	parts := make([]string, len(res))
+	for i, re := range res {
+		parts[i] = `(?:` + re.String() + `)`
+	}
+	return Condition{Field: "command", Pattern: strings.Join(parts, "|")}
 }
 
 // compiledRule is a Rule with pre-compiled regexps for efficient matching.
@@ -161,6 +178,23 @@ func DefaultRules() []Rule {
 		},
 
 		// -----------------------------------------------------------------------
+		// T1190 Exploit Public-Facing Application, on any honeypot, for an
+		// event whose category is an attack on the service — priority 179
+		// -----------------------------------------------------------------------
+		{
+			TechniqueID: "T1190",
+			TacticID:    "TA0001",
+			TacticName:  "initial-access",
+			Name:        "Exploit Public-Facing Application",
+			KillChain:   "initial-access",
+			Honeypots:   []string{},
+			Priority:    179,
+			Confidence:  1.0,
+			Conditions: []Condition{catCond(CatExploitAttempt, CatSQLInjection, CatXSS, CatCommandInjection,
+				CatCodeInjection, CatPathTraversal, CatFileInclusion, CatSSRF, CatWebShell)},
+		},
+
+		// -----------------------------------------------------------------------
 		// T1110.004 Credential Stuffing (heralding) — priority 170
 		// -----------------------------------------------------------------------
 		{
@@ -233,7 +267,8 @@ func DefaultRules() []Rule {
 		},
 
 		// -----------------------------------------------------------------------
-		// T1548 Privilege Escalation — priority 130
+		// T1548 Abuse Elevation Control Mechanism: sudo, su, pkexec, SUID —
+		// priority 130. A plain chmod 777 or chmod +x is not escalation.
 		// -----------------------------------------------------------------------
 		{
 			TechniqueID: "T1548",
@@ -245,12 +280,15 @@ func DefaultRules() []Rule {
 			Priority:    130,
 			Confidence:  1.0,
 			Conditions: []Condition{
-				{Field: "command", Pattern: `sudo\s|su\s+root|\bchmod\s+[0-7]*7[0-7][0-7]|chown\s+root|pkexec`},
+				catCond(CatPrivilegeEscalation),
+				{Field: "command", Pattern: `\b(?:sudo|su|pkexec|doas|chmod)\b|-perm\b`},
 			},
 		},
 
 		// -----------------------------------------------------------------------
-		// T1053 Scheduled Task / Persistence — priority 120
+		// T1053 Scheduled Task/Job: writing a cron job, in a shell or through
+		// Redis — priority 120. Listing one (crontab -l) is discovery, and
+		// systemctl enable or an init script is not a scheduled task.
 		// -----------------------------------------------------------------------
 		{
 			TechniqueID: "T1053",
@@ -261,13 +299,13 @@ func DefaultRules() []Rule {
 			Honeypots:   []string{},
 			Priority:    120,
 			Confidence:  1.0,
-			Conditions: []Condition{
-				{Field: "command", Pattern: `crontab|/etc/cron|systemctl\s+enable|rc\.local|/etc/init\.d`},
-			},
+			Conditions:  []Condition{catCond(CatPersistence), cmdCond(catPersistCron, catRedisCron)},
 		},
 
 		// -----------------------------------------------------------------------
-		// T1105 Ingress Tool Transfer — priority 110
+		// T1105 Ingress Tool Transfer: a download or an upload, as the
+		// categories found it (an IDS signature naming wget is not one) —
+		// priority 110
 		// -----------------------------------------------------------------------
 		{
 			TechniqueID: "T1105",
@@ -278,9 +316,7 @@ func DefaultRules() []Rule {
 			Honeypots:   []string{},
 			Priority:    110,
 			Confidence:  1.0,
-			Conditions: []Condition{
-				{Field: "command", Pattern: `wget|curl|fetch|tftp|ftp\s|scp\s|nc\s.*<`},
-			},
+			Conditions:  []Condition{catCond(CatMalwareDownload, CatFileUpload, CatBotnet)},
 		},
 
 		// -----------------------------------------------------------------------
@@ -296,6 +332,7 @@ func DefaultRules() []Rule {
 			Priority:    100,
 			Confidence:  1.0,
 			Conditions: []Condition{
+				catCond(CatRecon),
 				{Field: "command", Pattern: `netstat|ss\s+-|/proc/net`},
 			},
 		},
@@ -313,6 +350,7 @@ func DefaultRules() []Rule {
 			Priority:    90,
 			Confidence:  1.0,
 			Conditions: []Condition{
+				catCond(CatRecon),
 				{Field: "command", Pattern: `ifconfig|ip\s+(addr|route|link)|netstat\s+-i|route\s+-n`},
 			},
 		},
@@ -330,6 +368,7 @@ func DefaultRules() []Rule {
 			Priority:    80,
 			Confidence:  1.0,
 			Conditions: []Condition{
+				catCond(CatRecon),
 				{Field: "command", Pattern: `\bwhoami\b|\bid\b|\bw\b|\bwho\b|\blast\b`},
 			},
 		},
@@ -347,6 +386,7 @@ func DefaultRules() []Rule {
 			Priority:    70,
 			Confidence:  1.0,
 			Conditions: []Condition{
+				catCond(CatRecon),
 				{Field: "command", Pattern: `uname|/proc/version|/etc/os-release|lsb_release|hostnamectl`},
 			},
 		},

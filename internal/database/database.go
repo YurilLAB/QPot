@@ -43,6 +43,13 @@ type Event struct {
 	KillChainStage string  `json:"kill_chain_stage,omitempty"`
 	Confidence     float64 `json:"confidence,omitempty"`
 	Classified     bool    `json:"classified"`
+
+	// Categories are the plain-language attack categories the intelligence
+	// worker found (intelligence.Categories lists them), most specific first.
+	// An exploit attempt for a known vulnerability is followed by its CVE
+	// ID. Empty for an event that matched none, and for events classified
+	// before categories existed.
+	Categories []string `json:"categories,omitempty"`
 }
 
 // IOC represents an extracted indicator of compromise
@@ -213,6 +220,9 @@ type EventFilter struct {
 	// stores as binary). Always passed to the database as a parameter, never
 	// as query syntax; callers bound it to MaxEventText bytes.
 	Text string `json:"text,omitempty"`
+	// Categories keeps the events with at least one of these attack
+	// categories.
+	Categories []string `json:"categories,omitempty"`
 }
 
 // MaxEventText is the longest EventFilter.Text the web API accepts.

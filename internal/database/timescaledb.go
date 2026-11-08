@@ -120,11 +120,15 @@ func (ts *TimescaleDB) InitializeSchema(ctx context.Context) error {
 			tactic_name TEXT DEFAULT '',
 			kill_chain_stage TEXT DEFAULT '',
 			confidence DOUBLE PRECISION DEFAULT 0,
-			classified BOOLEAN DEFAULT FALSE
+			classified BOOLEAN DEFAULT FALSE,
+			categories TEXT[] DEFAULT '{}'
 		)
 	`
 	if _, err := ts.pool.Exec(ctx, eventsTable); err != nil {
 		return fmt.Errorf("failed to create events table: %w", err)
+	}
+	if err := ts.ensureEventColumns(ctx); err != nil {
+		return err
 	}
 
 	// Convert to hypertable
@@ -227,6 +231,27 @@ func (ts *TimescaleDB) InsertEvents(ctx context.Context, events []*Event) error 
 
 	// Fall back to batch insert
 	return ts.insertBatchFallback(ctx, events)
+}
+
+// ensureEventColumns adds the columns later versions added to an events table
+// created before them. The categories default is a constant, so PostgreSQL
+// adds it without rewriting the table; events classified earlier keep no
+// categories.
+func (ts *TimescaleDB) ensureEventColumns(ctx context.Context) error {
+	if _, err := ts.pool.Exec(ctx, `ALTER TABLE events ADD COLUMN IF NOT EXISTS categories TEXT[] DEFAULT '{}'`); err != nil {
+		return fmt.Errorf("add events.categories: %w", err)
+	}
+	return nil
+}
+
+// pgCategories is an event's categories as a TEXT[] value ('{}', not NULL,
+// when there are none).
+func pgCategories(c []string) []string {
+	out := make([]string, 0, len(c))
+	for _, v := range c {
+		out = append(out, pgText(v))
+	}
+	return out
 }
 
 // pgText makes s storable in a PostgreSQL TEXT/JSONB value: NUL bytes are
@@ -341,9 +366,13 @@ func (ts *TimescaleDB) GetEvents(ctx context.Context, filter EventFilter) ([]*Ev
 			&event.KillChainStage,
 			&event.Confidence,
 			&event.Classified,
+			&event.Categories,
 		)
 		if err != nil {
 			return nil, fmt.Errorf("failed to scan event: %w", err)
+		}
+		if len(event.Categories) == 0 {
+			event.Categories = nil
 		}
 		events = append(events, &event)
 	}
@@ -361,7 +390,7 @@ func pgEventsQuery(filter EventFilter) (string, []interface{}) {
 			COALESCE(protocol, ''), COALESCE(event_type, ''), COALESCE(username, ''), COALESCE(password, ''), COALESCE(command, ''),
 			payload, metadata, COALESCE(country, ''), COALESCE(city, ''), COALESCE(asn, ''),
 			technique_id, technique_name, tactic_id, tactic_name,
-			kill_chain_stage, confidence, classified
+			kill_chain_stage, confidence, classified, COALESCE(categories, '{}')
 		FROM events
 		WHERE 1=1`
 
@@ -406,6 +435,11 @@ func pgEventsQuery(filter EventFilter) (string, []interface{}) {
 			" OR strpos(lower(COALESCE(command, '')), lower($%[1]d)) > 0"+
 			" OR strpos(lower(encode(COALESCE(payload, ''::bytea), 'escape')), lower($%[1]d)) > 0)", argIdx)
 		args = append(args, filter.Text)
+		argIdx++
+	}
+	if len(filter.Categories) > 0 {
+		query += fmt.Sprintf(" AND categories && $%d::text[]", argIdx)
+		args = append(args, filter.Categories)
 		argIdx++
 	}
 
@@ -911,6 +945,7 @@ func (ts *TimescaleDB) TagEvent(ctx context.Context, event *Event) error {
 			tactic_name      = $4,
 			kill_chain_stage = $5,
 			confidence       = $6,
+			categories       = $9::text[],
 			classified       = TRUE
 		WHERE `+where,
 		event.TechniqueID,
@@ -921,6 +956,7 @@ func (ts *TimescaleDB) TagEvent(ctx context.Context, event *Event) error {
 		event.Confidence,
 		key1,
 		key2,
+		pgCategories(event.Categories),
 	)
 	return err
 }
@@ -1208,7 +1244,7 @@ func (ts *TimescaleDB) GetUnclassifiedEvents(ctx context.Context, limit int) ([]
 		       COALESCE(protocol, ''), COALESCE(event_type, ''), COALESCE(username, ''), COALESCE(password, ''), COALESCE(command, ''),
 		       payload, metadata, COALESCE(country, ''), COALESCE(city, ''), COALESCE(asn, ''),
 		       technique_id, technique_name, tactic_id, tactic_name,
-		       kill_chain_stage, confidence, classified, id::text
+		       kill_chain_stage, confidence, classified, id::text, COALESCE(categories, '{}')
 		FROM events
 		WHERE classified = FALSE
 		ORDER BY timestamp ASC
@@ -1234,9 +1270,12 @@ func (ts *TimescaleDB) GetUnclassifiedEvents(ctx context.Context, limit int) ([]
 			&event.Country, &event.City, &event.ASN,
 			&event.TechniqueID, &event.TechniqueName,
 			&event.TacticID, &event.TacticName,
-			&event.KillChainStage, &event.Confidence, &event.Classified, &event.ID,
+			&event.KillChainStage, &event.Confidence, &event.Classified, &event.ID, &event.Categories,
 		); err != nil {
 			return nil, fmt.Errorf("failed to scan event: %w", err)
+		}
+		if len(event.Categories) == 0 {
+			event.Categories = nil
 		}
 		events = append(events, &event)
 	}

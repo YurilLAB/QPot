@@ -170,7 +170,7 @@
                     </div>
                     <div class="table-wrapper">
                         <table class="data-table">
-                            <thead><tr><th>Time</th><th>Honeypot</th><th>Source IP</th><th class="optional">Country</th><th>Event</th><th class="optional">Detail</th></tr></thead>
+                            <thead><tr><th>Time</th><th>Honeypot</th><th>Source IP</th><th class="optional">Country</th><th>Event</th><th class="optional">Attack type</th><th class="optional">Detail</th></tr></thead>
                             <tbody id="logs"></tbody>
                         </table>
                     </div>
@@ -189,6 +189,7 @@
                             <label class="field"><span>Honeypot</span><select class="setting-select" id="ev-honeypot"><option value="">All honeypots</option></select></label>
                             <label class="field"><span>Source IP</span><input class="search-input" id="ev-ip" placeholder="203.0.113.7" maxlength="45" spellcheck="false"></label>
                             <label class="field"><span>Event type</span><input class="search-input" id="ev-type" placeholder="login.failed" maxlength="64" spellcheck="false"></label>
+                            <label class="field"><span>Attack type</span><select class="setting-select" id="ev-category"><option value="">All attack types</option></select></label>
                             <label class="field"><span>Country</span><input class="search-input" id="ev-country" placeholder="CN" maxlength="2" spellcheck="false"></label>
                             <label class="field"><span>Time</span><select class="setting-select" id="ev-range">
                                 <option value="1h">Last hour</option>
@@ -206,7 +207,7 @@
                     </div>
                     <div class="table-wrapper">
                         <table class="data-table" id="events-table">
-                            <thead><tr><th>Time</th><th>Honeypot</th><th>Source IP</th><th class="optional">Country</th><th>Event</th><th class="optional">User / password</th><th>Command</th></tr></thead>
+                            <thead><tr><th>Time</th><th>Honeypot</th><th>Source IP</th><th class="optional">Country</th><th>Event</th><th class="optional">Attack type</th><th class="optional">User / password</th><th>Command</th></tr></thead>
                             <tbody id="events-body"></tbody>
                         </table>
                     </div>
@@ -227,6 +228,18 @@
                     <div class="dash-card stat-card"><div class="stat-label"><i class="fas fa-fingerprint"></i> IOCs</div><span class="stat-value" id="ti-iocs">-</span><div class="stat-sub">indicators extracted</div></div>
                     <div class="dash-card stat-card"><div class="stat-label"><i class="fas fa-people-group"></i> Campaigns</div><span class="stat-value" id="ti-campaigns">-</span><div class="stat-sub">active attack sessions</div></div>
                     <div class="dash-card stat-card"><div class="stat-label"><i class="fas fa-microchip"></i> Classifier</div><span class="stat-value" id="ti-worker">-</span><div class="stat-sub" id="ti-worker-sub"></div></div>
+                </div>
+
+                <div class="dash-card">
+                    <div class="card-header flex-between">
+                        <h4 class="flex-center"><i class="fas fa-tags"></i> Attack types</h4>
+                    </div>
+                    <div class="table-wrapper">
+                        <table class="data-table">
+                            <thead><tr><th>Attack type</th><th class="optional">What it means</th><th>Events</th></tr></thead>
+                            <tbody id="ti-cat-body"></tbody>
+                        </table>
+                    </div>
                 </div>
 
                 <div class="dash-card">
@@ -1078,20 +1091,60 @@
             }
         }
 
+        // ---------- Attack categories ----------
+
+        // GET /api/categories: the plain-language attack categories with their labels and
+        // recent counts. Loaded once for the labels; the Threat Intel tab reloads it for counts.
+        let categories = [];
+        const categoryLabels = {};
+        let categoriesLoading = null;
+        function loadCategories(again) {
+            if (categoriesLoading && !again) return categoriesLoading;
+            categoriesLoading = api(`${API_BASE}/categories`).then((list) => {
+                categories = Array.isArray(list) ? list.filter((c) => c && typeof c.id === 'string') : [];
+                for (const c of categories) categoryLabels[c.id] = String(c.label || c.id);
+                fillCategorySelect();
+                return categories;
+            }).catch(() => { categoriesLoading = null; return categories; });
+            return categoriesLoading;
+        }
+
+        // "Known-vulnerability exploit (CVE-2021-44228), Code / template injection": the labels,
+        // most specific first, with an exploit's CVE beside it
+        const CVE_ID = /^CVE-\d{4}-\d{4,7}$/;
+        function categoryText(e) {
+            const out = [];
+            for (const c of Array.isArray(e && e.categories) ? e.categories.map(String) : []) {
+                const last = out.length - 1;
+                if (CVE_ID.test(c) && last >= 0) out[last] = out[last].endsWith(')') ? out[last].slice(0, -1) + ', ' + c + ')' : out[last] + ' (' + c + ')';
+                else out.push(categoryLabels[c] || c);
+            }
+            return out.join(', ');
+        }
+
+        function fillCategorySelect() {
+            const sel = $('ev-category');
+            const keep = sel.value;
+            sel.replaceChildren(h('option', { value: '' }, 'All attack types'),
+                ...categories.map((c) => h('option', { value: c.id }, String(c.label || c.id))));
+            sel.value = categories.some((c) => c.id === keep) ? keep : '';
+        }
+
         async function loadActivity() {
+            await loadCategories();
             const data = await api(`${API_BASE}/events?limit=50`);
             const events = data && Array.isArray(data.events) ? data.events : [];
             const tbody = $('logs');
             if (unchanged(tbody, events)) return;
-            if (!events.length) { emptyRow(tbody, 6, 'No recent activity.', 'fa-moon'); return; }
+            if (!events.length) { emptyRow(tbody, 7, 'No recent activity.', 'fa-moon'); return; }
             tbody.replaceChildren(...events.map((e) => eventRow(e, false)));
         }
 
-        // what an event did, in one line: the command, or user:password
+        // what an event did, in one line: the command, or user:password, or what kind of attack
         function detailOf(e) {
             if (e.command) return String(e.command);
             if (e.username || e.password) return `${e.username || ''}:${e.password || ''}`;
-            return e.technique_name ? String(e.technique_name) : '';
+            return categoryText(e) || (e.technique_name ? String(e.technique_name) : '');
         }
 
         // a cell cut to one line, with the whole text in its tooltip (attacker text can be long)
@@ -1107,6 +1160,7 @@
                 clipCell(e.source_ip, 'ip-cell mono-accent'),
                 h('td', { class: 'optional' }, flag(e.country), ' ', String(e.country || '')),
                 clipCell(e.event_type),
+                h('td', { class: 'optional wrap' }, categoryText(e)),
                 full ? h('td', { class: 'optional wrap' }, e.username || e.password ? `${e.username || ''}:${e.password || ''}` : '') : null,
                 h('td', { class: (full ? '' : 'optional ') + 'wrap' }, full ? String(e.command || '') : detailOf(e)));
             const open = () => showEvent(e);
@@ -1129,6 +1183,7 @@
                 ['Source', e.source_ip ? `${e.source_ip}:${e.source_port || ''}` : ''], ['Destination port', e.dest_port],
                 ['Protocol', e.protocol], ['Country', e.country], ['City', e.city], ['ASN', e.asn],
                 ['Username', e.username], ['Password', e.password], ['Command', e.command],
+                ['Attack type', categoryText(e)],
                 ['Technique', e.technique_id ? `${e.technique_id} ${e.technique_name || ''}` : ''],
                 ['Tactic', e.tactic_name || e.tactic_id], ['Kill chain', e.kill_chain_stage],
                 ['Payload (text)', e.payload ? decodePayload(e.payload) : ''], ['Payload (base64)', e.payload]
@@ -1375,7 +1430,7 @@
         // browser's filters answers without paging fields; then only the honeypot filter is offered,
         // so the page never shows unfiltered events as if they were filtered.
         let evFilters = null;
-        const EV_EXTRA = ['ev-ip', 'ev-type', 'ev-country', 'ev-q', 'ev-range'];
+        const EV_EXTRA = ['ev-ip', 'ev-type', 'ev-category', 'ev-country', 'ev-q', 'ev-range'];
         const RANGES = { '1h': 3600, '24h': 86400, '7d': 604800 };
 
         function eventQuery() {
@@ -1388,6 +1443,7 @@
             const country = $('ev-country').value.trim().toUpperCase(), text = $('ev-q').value.trim(), range = $('ev-range').value;
             if (ip) q.set('source_ip', ip);
             if (type) q.set('event_type', type);
+            if ($('ev-category').value) q.set('category', $('ev-category').value);
             if (country) q.set('country', country);
             if (text) q.set('q', text);
             if (RANGES[range]) q.set('since', String(Math.floor(Date.now() / 1000) - RANGES[range]));
@@ -1407,14 +1463,14 @@
 
         async function loadEvents() {
             const tbody = $('events-body');
-            emptyRow(tbody, 7, 'Loading…', 'fa-spinner fa-spin');
+            emptyRow(tbody, 8, 'Loading…', 'fa-spinner fa-spin');
             try {
-                await probeEventFilters();
+                await Promise.all([probeEventFilters(), loadCategories()]);
                 if (evFilters) callout($('events-error'), '', '');
                 const data = await api(`${API_BASE}/events?${eventQuery()}`);
                 const events = data && Array.isArray(data.events) ? data.events : [];
                 evHasMore = !!(evFilters && data && data.has_more);
-                if (!events.length) emptyRow(tbody, 7, evOffset ? 'No older events.' : 'No events match.', 'fa-filter');
+                if (!events.length) emptyRow(tbody, 8, evOffset ? 'No older events.' : 'No events match.', 'fa-filter');
                 else tbody.replaceChildren(...events.map((e) => eventRow(e, true)));
                 $('events-page').textContent = !events.length ? '' : evFilters
                     ? `Events ${fmt(evOffset + 1)}–${fmt(evOffset + events.length)}${evHasMore ? '' : ' (the oldest)'}`
@@ -1435,6 +1491,7 @@
             if (!evFilters) return parts.length ? parts.join(' · ') : 'all honeypots';
             if ($('ev-ip').value.trim()) parts.push($('ev-ip').value.trim());
             if ($('ev-type').value.trim()) parts.push($('ev-type').value.trim());
+            if ($('ev-category').value) parts.push(categoryLabels[$('ev-category').value] || $('ev-category').value);
             if ($('ev-country').value.trim()) parts.push($('ev-country').value.trim().toUpperCase());
             if ($('ev-q').value.trim()) parts.push('"' + $('ev-q').value.trim() + '"');
             const range = $('ev-range');
@@ -1448,6 +1505,13 @@
             if (params.get('honeypot')) $('ev-honeypot').value = params.get('honeypot');
             if (params.get('source_ip')) $('ev-ip').value = params.get('source_ip');
             if (params.get('event_type')) $('ev-type').value = params.get('event_type');
+            const cat = params.get('category');
+            if (cat && /^[a-z-]{1,40}$/.test(cat)) {
+                // the list may not have loaded yet; fillCategorySelect keeps a known value
+                const sel = $('ev-category');
+                if (![...sel.options].some((o) => o.value === cat)) sel.append(h('option', { value: cat }, categoryLabels[cat] || cat));
+                sel.value = cat;
+            }
             if (params.get('country')) $('ev-country').value = params.get('country');
             if (params.get('q')) $('ev-q').value = params.get('q');
             const r = params.get('range');
@@ -1465,6 +1529,19 @@
                 $('ti-worker').textContent = summary.worker_enabled ? 'On' : 'Off';
                 $('ti-worker-sub').textContent = summary.attck_loaded ? 'ATT&CK data loaded' : 'ATT&CK data not loaded';
             }
+            // attack types seen, most first (equal counts keep the catalogue's order)
+            const cats = (await loadCategories(true)).filter((c) => Number(c.count) > 0)
+                .map((c, i) => [c, i]).sort((a, b) => Number(b[0].count) - Number(a[0].count) || a[1] - b[1]).map(([c]) => c);
+            const cb = $('ti-cat-body');
+            if (!cats.length) emptyRow(cb, 3, 'No attack types seen yet.', 'fa-tags');
+            else cb.replaceChildren(...cats.map((c) => {
+                const tr = h('tr', { class: 'clickable', tabindex: 0, title: 'Show these events' },
+                    h('td', {}, String(c.label || c.id)), h('td', { class: 'optional wrap' }, String(c.description || '')), h('td', {}, fmt(c.count)));
+                const open = () => { location.hash = 'events?category=' + encodeURIComponent(c.id) + '&range=all'; };
+                tr.addEventListener('click', open);
+                tr.addEventListener('keydown', (ev) => { if (ev.key === 'Enter') open(); });
+                return tr;
+            }));
             const tb = $('ti-tech-body');
             const tl = Array.isArray(techs) ? techs : [];
             if (!tl.length) emptyRow(tb, 4, 'No techniques observed yet.', 'fa-crosshairs');

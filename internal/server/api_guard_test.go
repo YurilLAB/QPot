@@ -37,6 +37,7 @@ var apiRoutes = []apiRoute{
 	{method: http.MethodGet, path: "/api/logs?honeypot=cowrie&tail=5"},
 	{method: http.MethodGet, path: "/api/ioc"},
 	{method: http.MethodGet, path: "/api/techniques"},
+	{method: http.MethodGet, path: "/api/categories"},
 	{method: http.MethodGet, path: "/api/iocs"},
 	{method: http.MethodGet, path: "/api/iocs/export?format=misp"},
 	{method: http.MethodGet, path: "/api/ttps"},

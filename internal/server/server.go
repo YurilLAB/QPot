@@ -212,6 +212,7 @@ func (s *Server) setupRoutes() {
 
 	// Intelligence API routes
 	s.mux.HandleFunc("/api/techniques", s.withQPotAuth(s.handleTechniques))
+	s.mux.HandleFunc("/api/categories", s.withQPotAuth(s.handleCategories))
 	s.mux.HandleFunc("/api/iocs", s.withQPotAuth(s.handleIOCs))
 	s.mux.HandleFunc("/api/iocs/export", s.withQPotAuth(s.handleIOCExport))
 	s.mux.HandleFunc("/api/ttps", s.withQPotAuth(s.handleTTPs))
@@ -1092,6 +1093,42 @@ func (s *Server) handleTechniques(w http.ResponseWriter, r *http.Request) {
 		return result[i].TechniqueID < result[j].TechniqueID
 	})
 
+	s.sendJSON(w, result)
+}
+
+// handleCategories returns every attack category with its label and how many
+// recent classified events carry it, in the catalogue's order. The dashboard
+// reads its labels from here, so they live in one place.
+func (s *Server) handleCategories(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if s.database == nil {
+		s.sendError(w, http.StatusServiceUnavailable, "database not available")
+		return
+	}
+	// The same recent sample /api/techniques counts.
+	events, err := s.database.GetEvents(r.Context(), database.EventFilter{Limit: 10000})
+	if err != nil {
+		s.sendInternalError(w, "get events failed", err)
+		return
+	}
+	counts := map[string]int{}
+	for _, ev := range events {
+		for _, c := range ev.Categories {
+			counts[c]++
+		}
+	}
+	type categoryEntry struct {
+		intelligence.Category
+		Count int `json:"count"`
+	}
+	cats := intelligence.Categories()
+	result := make([]categoryEntry, 0, len(cats))
+	for _, c := range cats {
+		result = append(result, categoryEntry{Category: c, Count: counts[c.ID]})
+	}
 	s.sendJSON(w, result)
 }
 

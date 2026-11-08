@@ -209,8 +209,15 @@ func TestElasticsearchPayloadMarkerMappingMigratesExistingIndices(t *testing.T) 
 					if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 						t.Error(err)
 					}
-					if len(body.Properties) != 1 || body.Properties["qpot_payload_encoding"].Type != "keyword" {
+					// Only fields later versions added, never an existing one.
+					added := map[string]bool{"qpot_payload_encoding": true, "categories": true}
+					if len(body.Properties) != len(added) {
 						t.Error("mapping migration changed existing fields")
+					}
+					for name, p := range body.Properties {
+						if !added[name] || p.Type != "keyword" {
+							t.Errorf("mapping migration changed field %q (%q)", name, p.Type)
+						}
 					}
 					if fail {
 						w.WriteHeader(http.StatusForbidden)
