@@ -20,6 +20,11 @@ package cluster
 // node left or was removed, and each saves them; a revoked node is never
 // taken back from another member's gossip. Revocations are kept for longer
 // than any certificate the node holds is valid.
+//
+// Membership itself comes only from the enrollment host: a member adds a
+// node it does not know from gossip only with that node's certificate from
+// the cluster CA (see mergeDigestLocked), so no member can add nodes the host
+// never admitted.
 
 import (
 	"context"
@@ -73,8 +78,9 @@ const (
 	revocationsPerMessage = 32
 	// revocationClockSkew is how far in the future a revocation may be dated.
 	revocationClockSkew = 24 * time.Hour
-	// maxRevocationCert bounds a leave's certificate (base64).
-	maxRevocationCert = 4096
+	// maxNodeCertificate bounds a node certificate (base64) in a leave or a
+	// gossiped node record.
+	maxNodeCertificate = 4096
 )
 
 // peerNodeKey is the request context key for the authenticated node ID.
@@ -186,15 +192,8 @@ func verifyRevocation(clusterID string, ca *x509.Certificate, rv Revocation) boo
 		pub, ok := ca.PublicKey.(ed25519.PublicKey)
 		return ok && ed25519.Verify(pub, msg, sig)
 	}
-	if len(rv.Certificate) > maxRevocationCert {
-		return false
-	}
-	der, err := base64.StdEncoding.DecodeString(rv.Certificate)
-	if err != nil {
-		return false
-	}
-	leaf, err := x509.ParseCertificate(der)
-	if err != nil {
+	leaf, ok := nodeLeaf(rv.Certificate)
+	if !ok {
 		return false
 	}
 	id, err := verifyClusterClient(clusterID, []*x509.Certificate{leaf, ca}, rv.RevokedAt)
@@ -204,6 +203,56 @@ func verifyRevocation(clusterID string, ca *x509.Certificate, rv Revocation) boo
 	pub, ok := leaf.PublicKey.(*ecdsa.PublicKey)
 	digest := sha256.Sum256(msg)
 	return ok && ecdsa.VerifyASN1(pub, digest[:], sig)
+}
+
+// nodeLeaf parses a node certificate as a leave or a node record carries
+// it: base64 DER.
+func nodeLeaf(cert string) (*x509.Certificate, bool) {
+	if cert == "" || len(cert) > maxNodeCertificate {
+		return nil, false
+	}
+	der, err := base64.StdEncoding.DecodeString(cert)
+	if err != nil {
+		return nil, false
+	}
+	leaf, err := x509.ParseCertificate(der)
+	return leaf, err == nil
+}
+
+// enrolledAs reports whether cert (a Node.Certificate) is a certificate the
+// CA of clusterID, ca, issued for node id and valid at now: the enrollment
+// host's word that it admitted the node.
+func enrolledAs(clusterID string, ca *x509.Certificate, id, cert string, now time.Time) bool {
+	leaf, ok := nodeLeaf(cert)
+	if !ok {
+		return false
+	}
+	got, err := verifyClusterClient(clusterID, []*x509.Certificate{leaf, ca}, now)
+	return err == nil && got == id
+}
+
+// leafCertificate returns the leaf of a node certificate chain (PEM) as a
+// node record carries it, "" when the chain has none.
+func leafCertificate(chain string) string {
+	block, _ := pem.Decode([]byte(chain))
+	if block == nil || block.Type != "CERTIFICATE" {
+		return ""
+	}
+	return base64.StdEncoding.EncodeToString(block.Bytes)
+}
+
+// presentedCertificate returns the certificate the client of r presented,
+// as a node record carries it, when it names node id ("" otherwise). The
+// chain was verified when the request was authenticated (authenticatePeer).
+func presentedCertificate(r *http.Request, id string) string {
+	if r.TLS == nil || len(r.TLS.PeerCertificates) == 0 {
+		return ""
+	}
+	leaf := r.TLS.PeerCertificates[0]
+	if got, ok := leafNodeID(leaf); !ok || got != id {
+		return ""
+	}
+	return base64.StdEncoding.EncodeToString(leaf.Raw)
 }
 
 // leaveRevocationLocked is this node's own leave, signed with its node key.

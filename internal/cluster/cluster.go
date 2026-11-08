@@ -136,6 +136,15 @@ const (
 	// maxClusterNodes bounds the member map so a peer can't grow it without
 	// limit by gossiping fabricated node records (memory DoS).
 	maxClusterNodes = 4096
+	// maxRosterBodyBytes caps a message that carries the member list (a
+	// gossip message, the join answer): a record of every node, each member's
+	// with its certificate.
+	maxRosterBodyBytes = 8 << 20
+	// newNodesPerMessage bounds the certificates of nodes new to this node
+	// that one gossip message has checked (see mergeDigestLocked), as the
+	// check runs under the manager lock. More new nodes are learnt in the
+	// next rounds.
+	newNodesPerMessage = 32
 )
 
 // sanitizeClusterConfig clamps all numeric/duration fields to sane bounds and
@@ -183,6 +192,11 @@ type Node struct {
 	JoinedAt     time.Time         `json:"joined_at" yaml:"joined_at"`
 	Metadata     map[string]string `json:"metadata,omitempty" yaml:"metadata,omitempty"`
 	Capabilities []string          `json:"capabilities,omitempty" yaml:"capabilities,omitempty"`
+	// Certificate is the node's certificate from the cluster CA (base64
+	// DER): what the enrollment host gave it when it admitted it. A member
+	// adds a node it does not know from gossip only with it (see
+	// mergeDigestLocked).
+	Certificate string `json:"certificate,omitempty" yaml:"certificate,omitempty"`
 
 	// Stats
 	Stats NodeStats `json:"stats" yaml:"stats"`
@@ -206,7 +220,12 @@ func (n *Node) clone() *Node {
 func (m *Manager) snapshotNodesLocked() []*Node {
 	nodes := make([]*Node, 0, len(m.cluster.Nodes))
 	for _, n := range m.cluster.Nodes {
-		nodes = append(nodes, n.clone())
+		c := n.clone()
+		if c.Status == NodeStatusLeft {
+			// Kept only to refuse the node: no member adds it from gossip.
+			c.Certificate = ""
+		}
+		nodes = append(nodes, c)
 	}
 	return nodes
 }
@@ -760,7 +779,7 @@ func (m *Manager) attemptJoin(seedAddr, clusterID, password string, localNode *N
 	}
 	defer resp.Body.Close()
 
-	body, err := io.ReadAll(io.LimitReader(resp.Body, maxClusterBodyBytes))
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxRosterBodyBytes))
 	if err != nil {
 		return nil, fmt.Errorf("failed to read response: %w", err)
 	}
@@ -879,7 +898,7 @@ func (m *Manager) pollJoinApproval(client *http.Client, scheme, host, password, 
 		if err != nil {
 			continue // transient; keep polling until the deadline
 		}
-		body, _ := io.ReadAll(io.LimitReader(resp.Body, maxClusterBodyBytes))
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, maxRosterBodyBytes))
 		resp.Body.Close()
 		if resp.StatusCode != http.StatusOK {
 			continue
@@ -926,6 +945,9 @@ func (m *Manager) Start() error {
 	if _, err := nodeCertificate(m.cluster.ID, m.cluster.LocalNode.ID, m.cluster.NodeCertificate, m.cluster.NodeKey); err != nil {
 		return err
 	}
+	// This node's own record carries its certificate, for the members that
+	// learn of it from another's gossip (see mergeDigestLocked).
+	m.cluster.LocalNode.Certificate = leafCertificate(m.cluster.NodeCertificate)
 	if m.cluster.CAKey != "" {
 		if err := checkClusterCA(m.cluster.ID, m.cluster.CAKey); err != nil {
 			return identityFailure(err)
@@ -1292,6 +1314,8 @@ func (m *Manager) admitNodeLocked(req *JoinRequest) (*JoinResponse, error) {
 		JoinedAt:     now,
 		Metadata:     req.Metadata,
 		Capabilities: req.Capabilities,
+		// Gossip carries it to the members, which add the node only with it.
+		Certificate: leafCertificate(certificate),
 	}
 
 	previousUpdated := m.cluster.UpdatedAt
@@ -1941,7 +1965,7 @@ func (m *Manager) gossip() {
 		}
 
 		var peerMsg GossipMessage
-		if err := json.NewDecoder(io.LimitReader(resp.Body, maxClusterBodyBytes)).Decode(&peerMsg); err != nil {
+		if err := json.NewDecoder(io.LimitReader(resp.Body, maxRosterBodyBytes)).Decode(&peerMsg); err != nil {
 			resp.Body.Close()
 			continue
 		}
@@ -2036,10 +2060,23 @@ const (
 
 // mergeDigestLocked merges a peer's gossip digest into the member map and
 // reports whether the map gained or changed a record to save. from is the
-// node the digest came from when that is known: the peer this node dialled
-// for a gossip round (a pushed digest's sender ID is only its own claim, so
-// a push passes ""). Records that cannot yield a usable peer URL (nil,
-// empty ID, bad address or port) are skipped, as is this node's own.
+// node the digest came from: the sender of a pushed digest, or the peer this
+// node dialled for a gossip round, both as their certificates showed. Records
+// that cannot yield a usable peer URL (nil, empty ID, bad address or port)
+// are skipped, as is this node's own.
+//
+// A node this node does not know is added only with a certificate from the
+// cluster CA for exactly that node ID, valid now, of a node not removed: what
+// the enrollment host gave the node when it admitted it. Members pass it on
+// (each keeps it from the node's own requests and records), but none can
+// make one, so no member can add nodes the host never admitted. At most
+// newNodesPerMessage certificates are checked per digest.
+//
+// A node's name, address and stats are its own to say: they are taken from
+// its own record, from the node itself. Another member's record of it says
+// only whether it is up, taken when newer than this node's last word of it
+// and never dated ahead of this node's clock. A node first heard of from
+// another member starts with no stats.
 //
 // A node that left stays left: its record is kept, so a member that missed
 // the leave, or the node itself still running, cannot gossip it back in. Only
@@ -2052,6 +2089,20 @@ const (
 func (m *Manager) mergeDigestLocked(digest []*Node, localID, from string, now time.Time) bool {
 	members := m.memberCountLocked()
 	changed := false
+	checked := 0
+	var ca *x509.Certificate
+	enrolled := func(n *Node) bool {
+		if n.Certificate == "" || checked >= newNodesPerMessage {
+			return false
+		}
+		checked++
+		if ca == nil {
+			if ca = m.caCertLocked(); ca == nil {
+				return false
+			}
+		}
+		return enrolledAs(m.cluster.ID, ca, n.ID, n.Certificate, now)
+	}
 	for _, n := range digest {
 		if !validPeerNode(n) || n.ID == localID {
 			continue
@@ -2059,8 +2110,15 @@ func (m *Manager) mergeDigestLocked(digest []*Node, localID, from string, now ti
 		existing, ok := m.cluster.Nodes[n.ID]
 		switch {
 		case !ok:
-			if n.Status == NodeStatusLeft || members >= maxClusterNodes || m.revokedLocked(n.ID) {
+			if n.Status == NodeStatusLeft || members >= maxClusterNodes || m.revokedLocked(n.ID) || !enrolled(n) {
 				continue
+			}
+			n.Stats = NodeStats{}
+			if !gossipedStatus(n.Status) {
+				n.Status = NodeStatusUnknown
+			}
+			if n.LastSeen.After(now) {
+				n.LastSeen = now
 			}
 			m.cluster.Nodes[n.ID] = n
 			members++
@@ -2075,16 +2133,56 @@ func (m *Manager) mergeDigestLocked(digest []*Node, localID, from string, now ti
 				changed = true
 			}
 		case n.ID == from:
-			// The node's own numbers, from the node itself: taken whatever
-			// its clock says, which may run behind this node's.
-			existing.Stats = n.Stats
-		case n.LastSeen.After(existing.LastSeen):
-			existing.Status = n.Status
-			existing.LastSeen = n.LastSeen
-			existing.Stats = n.Stats
+			if takeOwnRecord(existing, n, enrolled) {
+				changed = true
+			}
+		default:
+			// Another member's word: only whether the node is up.
+			seen := n.LastSeen
+			if seen.After(now) {
+				seen = now
+			}
+			if gossipedStatus(n.Status) && seen.After(existing.LastSeen) {
+				existing.Status = n.Status
+				existing.LastSeen = seen
+			}
 		}
 	}
 	return changed
+}
+
+// takeOwnRecord takes what node n says of itself into this node's record of
+// it: its stats, whatever its clock says (it may run behind this node's),
+// its name and address, and its certificate when enrolled confirms it. It
+// reports whether a saved field changed.
+func takeOwnRecord(existing, n *Node, enrolled func(*Node) bool) bool {
+	existing.Stats = n.Stats
+	changed := false
+	if existing.Address != n.Address || existing.Port != n.Port {
+		slog.Info("Gossip: a node gave its address", "node_id", n.ID,
+			"address", net.JoinHostPort(n.Address, strconv.Itoa(n.Port)),
+			"was", net.JoinHostPort(existing.Address, strconv.Itoa(existing.Port)))
+		existing.Address, existing.Port = n.Address, n.Port
+		changed = true
+	}
+	if existing.Name != n.Name || existing.InstanceName != n.InstanceName {
+		existing.Name, existing.InstanceName = n.Name, n.InstanceName
+		changed = true
+	}
+	if n.Certificate != "" && n.Certificate != existing.Certificate && enrolled(n) {
+		existing.Certificate = n.Certificate
+		changed = true
+	}
+	return changed
+}
+
+// gossipedStatus reports whether gossip may give a member node status s.
+func gossipedStatus(s NodeStatus) bool {
+	switch s {
+	case NodeStatusHealthy, NodeStatusSuspect, NodeStatusFailed, NodeStatusMaintenance:
+		return true
+	}
+	return false
 }
 
 // memberCountLocked counts the nodes that have not left. Records of nodes
@@ -2306,7 +2404,7 @@ func (m *Manager) handleGossipHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	r.Body = http.MaxBytesReader(w, r.Body, maxClusterBodyBytes)
+	r.Body = http.MaxBytesReader(w, r.Body, maxRosterBodyBytes)
 	body, err := io.ReadAll(r.Body)
 	if err != nil {
 		http.Error(w, "Failed to read body", http.StatusBadRequest)
@@ -2340,6 +2438,12 @@ func (m *Manager) handleGossipHTTP(w http.ResponseWriter, r *http.Request) {
 		if existing, ok := m.cluster.Nodes[sender]; ok && existing.Status != NodeStatusLeft {
 			existing.Status = NodeStatusHealthy
 			existing.LastSeen = now
+			// The certificate it presented, for the members that do not
+			// know it yet; also of a node whose own record has none.
+			if cert := presentedCertificate(r, sender); cert != "" && cert != existing.Certificate {
+				existing.Certificate = cert
+				discovered = true
+			}
 		}
 		if discovered { // once per message (see gossip)
 			if err := m.saveClusterLocked(); err != nil {

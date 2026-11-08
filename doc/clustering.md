@@ -64,6 +64,10 @@ so a node knows which member is asking:
   dialled.
 - A node speaks only for itself: no member can remove another, or send gossip
   or intel in another's name.
+- Only the enrollment host adds members. A member learns of a node from
+  another's gossip only with that node's certificate from the cluster CA, so
+  no member can add nodes the host never admitted. A node's name, address and
+  statistics are taken only from the node itself.
 - Removing a node is the enrollment host's decision: `qpot cluster remove
   <node-id>`, signed with the cluster CA so members can check it.
 
@@ -80,6 +84,14 @@ and the cluster ID stays. Until a node is updated, the updated nodes refuse its
 requests, so update them all together. A cluster whose `cluster.json` has
 `"enable_encryption": false` must turn it on, on every node
 ([QP-CLUSTER-010](setup-errors.md#qp-cluster-010)).
+
+Update the enrollment host first, or with the others: updated nodes learn of a
+newly admitted node only from the certificate the host hands out, which older
+versions do not pass on. Members already in `cluster.json` are kept, and each
+record takes its node's certificate the next time that node gossips. Older
+versions added whatever a member gossiped, so check `qpot cluster nodes` on the
+enrollment host and remove any node you never approved with
+`qpot cluster remove <node-id>`.
 
 **Clusters made before per-node certificates** need an explicit upgrade:
 

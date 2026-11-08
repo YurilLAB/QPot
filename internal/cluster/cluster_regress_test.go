@@ -66,29 +66,30 @@ func TestGossipHandlerEnforcesNodeCap(t *testing.T) {
 	m := NewManager(t.TempDir())
 	cfg := DefaultClusterConfig()
 	cfg.EnableEncryption = false
-	m.InitCluster("c", "password123", cfg)
-	// Hand-written minimal JSON so each POST stays under the 1 MiB body cap.
-	for batch := 0; batch < 3; batch++ {
-		var buf bytes.Buffer
-		buf.WriteString(`{"sender_id":"x","node_digest":[`)
-		for i := 0; i < 2000; i++ {
-			if i > 0 {
-				buf.WriteByte(',')
-			}
-			fmt.Fprintf(&buf, `{"id":"n%d_%d","address":"a","port":1}`, batch, i)
-		}
-		buf.WriteString(`]}`)
-		req := fromPeer(httptest.NewRequest(http.MethodPost, "/api/v1/cluster/gossip", &buf), "x")
-		rec := httptest.NewRecorder()
-		m.handleGossipHTTP(rec, req)
-		if rec.Code != 200 {
-			t.Fatalf("status %d", rec.Code)
-		}
+	if _, err := m.InitCluster("c", "password123", cfg); err != nil {
+		t.Fatal(err)
 	}
-	n := len(m.GetNodes())
-	t.Logf("nodes after gossip POSTs: %d (cap %d)", n, maxClusterNodes)
-	if n > maxClusterNodes {
-		t.Errorf("member map exceeded maxClusterNodes")
+	m.mu.Lock()
+	for i := len(m.cluster.Nodes); i < maxClusterNodes-1; i++ {
+		id := fmt.Sprintf("n%d", i)
+		m.cluster.Nodes[id] = &Node{ID: id, Address: "a", Port: 1, Status: NodeStatusHealthy}
+	}
+	m.mu.Unlock()
+	// Two nodes the host admitted, one place left.
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(GossipMessage{SenderID: "x", NodeDigest: []*Node{
+		enrolled(t, m, &Node{ID: testNodeID(t), Address: "a", Port: 1, Status: NodeStatusHealthy}),
+		enrolled(t, m, &Node{ID: testNodeID(t), Address: "a", Port: 1, Status: NodeStatusHealthy}),
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	rec := httptest.NewRecorder()
+	m.handleGossipHTTP(rec, fromPeer(httptest.NewRequest(http.MethodPost, "/api/v1/cluster/gossip", &buf), "x"))
+	if rec.Code != 200 {
+		t.Fatalf("status %d", rec.Code)
+	}
+	if n := len(m.GetNodes()); n != maxClusterNodes {
+		t.Errorf("%d members after gossip with one place left, want %d", n, maxClusterNodes)
 	}
 }
 

@@ -117,15 +117,18 @@ func TestOldClusterFileLosesQPotIDs(t *testing.T) {
 	// A peer that records what it is sent and answers like an older node.
 	var mu sync.Mutex
 	var got [][]byte
+	// A node the peer passes on, with its certificate from the cluster CA.
+	var gossiped *Node
 	peer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		b, _ := io.ReadAll(r.Body)
 		mu.Lock()
 		got = append(got, b)
+		rec := *gossiped
 		mu.Unlock()
 		_ = json.NewEncoder(w).Encode(map[string]any{
 			"sender_id": "node_oldpeer", "timestamp": time.Now(),
 			"node_digest": []map[string]any{{
-				"id": "node_gossiped", "name": "older", "address": "127.0.0.1", "port": 7949,
+				"id": rec.ID, "name": "older", "address": "127.0.0.1", "port": 7949, "certificate": rec.Certificate,
 				"qpot_id": gossipPeerID, "status": "healthy", "last_seen": time.Now(),
 			}},
 		})
@@ -136,9 +139,15 @@ func TestOldClusterFileLosesQPotIDs(t *testing.T) {
 	dir := t.TempDir()
 	cfg := DefaultClusterConfig()
 	cfg.EnableEncryption = false
-	if _, err := NewManager(dir).InitCluster("prod", "correct-horse-battery", cfg); err != nil {
+	authority := NewManager(dir)
+	if _, err := authority.InitCluster("prod", "correct-horse-battery", cfg); err != nil {
 		t.Fatal(err)
 	}
+	g := enrolled(t, authority, &Node{ID: testNodeID(t)})
+	pushed := enrolled(t, authority, &Node{ID: testNodeID(t)})
+	mu.Lock()
+	gossiped = g
+	mu.Unlock()
 	// Rewrite it as an older node wrote it: QPot IDs on the nodes.
 	path := filepath.Join(dir, "cluster.json")
 	raw, err := os.ReadFile(path)
@@ -197,7 +206,7 @@ func TestOldClusterFileLosesQPotIDs(t *testing.T) {
 	}
 	mu.Unlock()
 	data, _ = os.ReadFile(path)
-	if !bytes.Contains(data, []byte("node_gossiped")) {
+	if !bytes.Contains(data, []byte(g.ID)) {
 		t.Fatalf("the older peer's digest was not merged: %s", data)
 	}
 	noQPotID(t, "cluster.json after an older peer's digest", data)
@@ -206,7 +215,7 @@ func TestOldClusterFileLosesQPotIDs(t *testing.T) {
 	in := mustJSON(t, map[string]any{
 		"sender_id": "node_oldpeer", "timestamp": time.Now(),
 		"node_digest": []map[string]any{{
-			"id": "node_pushed", "name": "older2", "address": "127.0.0.1", "port": 7950,
+			"id": pushed.ID, "name": "older2", "address": "127.0.0.1", "port": 7950, "certificate": pushed.Certificate,
 			"qpot_id": gossipPeerID, "status": "healthy", "last_seen": time.Now(),
 		}},
 	})
@@ -217,7 +226,7 @@ func TestOldClusterFileLosesQPotIDs(t *testing.T) {
 	}
 	noQPotID(t, "the gossip answer", rec.Body.Bytes())
 	data, _ = os.ReadFile(path)
-	if !bytes.Contains(data, []byte("node_pushed")) {
+	if !bytes.Contains(data, []byte(pushed.ID)) {
 		t.Fatalf("the older peer's pushed digest was not merged: %s", data)
 	}
 	noQPotID(t, "cluster.json after an older peer's push", data)

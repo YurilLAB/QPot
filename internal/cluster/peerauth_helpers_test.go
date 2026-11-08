@@ -65,6 +65,15 @@ func issueFor(t *testing.T, host *Manager, nodeID string) (chain, key string) {
 	return chain, key
 }
 
+// enrolled returns n carrying a certificate from host's CA for n.ID, as
+// gossip carries it: a node the enrollment host admitted.
+func enrolled(t *testing.T, host *Manager, n *Node) *Node {
+	t.Helper()
+	chain, _ := issueFor(t, host, n.ID)
+	n.Certificate = leafCertificate(chain)
+	return n
+}
+
 // nodeTLS is the TLS state of a request whose client presented a certificate
 // for nodeID from host's CA.
 func nodeTLS(t *testing.T, host *Manager, nodeID string) *tls.ConnectionState {

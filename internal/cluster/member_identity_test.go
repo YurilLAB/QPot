@@ -570,9 +570,11 @@ func TestGossipAnswerOnlyFromTheNodeDialled(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	newNode := enrolled(t, m2, &Node{ID: "qn_0123456789abcdef", Name: "new", Address: "127.0.0.1", Port: 7998, Status: NodeStatusHealthy})
 	srv := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		_ = json.NewEncoder(w).Encode(GossipMessage{SenderID: real.ID, Timestamp: time.Now(), NodeDigest: []*Node{
-			{ID: "qn_0123456789abcdef", Name: "new", Address: "127.0.0.1", Port: 7998, Status: NodeStatusHealthy, LastSeen: time.Now()}}})
+		n := *newNode
+		n.LastSeen = time.Now()
+		_ = json.NewEncoder(w).Encode(GossipMessage{SenderID: real.ID, Timestamp: time.Now(), NodeDigest: []*Node{&n}})
 	}))
 	srv.TLS = &tls.Config{MinVersion: tls.VersionTLS12, Certificates: []tls.Certificate{cert}}
 	srv.StartTLS()
@@ -635,7 +637,8 @@ func TestSignedLeaveOnlyFromTheNodeItself(t *testing.T) {
 	// gossip does not add it afterwards.
 	pushGossip(t, m, GossipMessage{SenderID: y.ID, Timestamp: now, Revocations: []Revocation{selfLeave(t, clusterID, xID, xChain, xKey, now)}})
 	pushGossip(t, m, GossipMessage{SenderID: y.ID, Timestamp: now, NodeDigest: []*Node{
-		{ID: xID, Name: "x", Address: "10.0.0.5", Port: 7946, Status: NodeStatusHealthy, LastSeen: now.Add(time.Hour)}}})
+		{ID: xID, Name: "x", Address: "10.0.0.5", Port: 7946, Status: NodeStatusHealthy, LastSeen: now.Add(time.Hour),
+			Certificate: leafCertificate(xChain)}}})
 	if isMember(m, xID) {
 		t.Fatal("gossip added a node whose signed leave this node holds")
 	}

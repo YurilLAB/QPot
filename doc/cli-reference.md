@@ -699,8 +699,12 @@ its address is not believed. A request speaks only for its sender:
 gossip and intel must carry the sender's own node ID, and a leave must name
 the node that sends it, so no member can remove another or post intel in its
 name. Removing another node is the enrollment host's decision
-(`qpot cluster remove`). Members still pass on what they know of the others
-through gossip, so approve only nodes you control. Clusters created before the
+(`qpot cluster remove`). Members pass on what they know of the others through
+gossip, but a member adds a node it has not heard of only with that node's
+certificate from the cluster CA, so only nodes the enrollment host admitted
+become members, and a node's name, address and statistics come only from the
+node itself. Approve only nodes you control: an admitted node still reports its
+own statistics and attackers. Clusters created before the
 member key existed do not start until upgraded (`qpot cluster upgrade`), and a
 cluster with encryption off does not start (`QP-CLUSTER-010`): without TLS no
 request could show which member sent it.

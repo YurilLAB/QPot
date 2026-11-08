@@ -59,9 +59,10 @@ func TestGossipedAddressCannotRewriteRequests(t *testing.T) {
 
 	m := plainCluster(t)
 	x := addMember(m, testNodeID(t), "10.0.0.9", 7946)
+	// Enrolled nodes: only their addresses keep them out.
 	digest, _ := json.Marshal(GossipMessage{SenderID: x.ID, NodeDigest: []*Node{
-		{ID: "qn_evil", Address: hostPort + "/admin/reset?", Port: 7946, Status: NodeStatusHealthy},
-		{ID: "qn_evil2", Address: "user@" + hostPort + "#", Port: 7946, Status: NodeStatusHealthy},
+		enrolled(t, m, &Node{ID: testNodeID(t), Address: hostPort + "/admin/reset?", Port: 7946, Status: NodeStatusHealthy}),
+		enrolled(t, m, &Node{ID: testNodeID(t), Address: "user@" + hostPort + "#", Port: 7946, Status: NodeStatusHealthy}),
 	}})
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/cluster/gossip", bytes.NewReader(digest))
 	setPeerAuth(req, "password123", m.memberKey())

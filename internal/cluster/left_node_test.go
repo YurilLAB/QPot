@@ -90,18 +90,19 @@ func TestLeftNodeIsNotGossipedBackIn(t *testing.T) {
 
 	// y, which missed the leave, pushes its digest: x with a fresh time.
 	later := time.Now().Add(time.Second)
+	zID := testNodeID(t)
 	pushGossip(t, m, GossipMessage{SenderID: "qn_y", Timestamp: later, NodeDigest: []*Node{x(later),
-		{ID: "qn_z", Name: "z", Address: "127.0.0.1", Port: 7952, Status: NodeStatusHealthy, LastSeen: later}}})
+		enrolled(t, m, &Node{ID: zID, Name: "z", Address: "127.0.0.1", Port: 7952, Status: NodeStatusHealthy, LastSeen: later})}})
 	if isMember(m, "qn_x") {
 		t.Error("a member that missed the leave gossiped x back in")
 	}
-	if !isMember(m, "qn_z") {
+	if !isMember(m, zID) {
 		t.Error("a node new to the cluster was not discovered by gossip any more")
 	}
 	// y says z left: only z's own word counts (TestLeftRecordOnlyFromTheNodeItself).
 	pushGossip(t, m, GossipMessage{SenderID: "qn_y", Timestamp: later, NodeDigest: []*Node{
-		{ID: "qn_z", Name: "z", Address: "127.0.0.1", Port: 7952, Status: NodeStatusLeft, LastSeen: later}}})
-	if !isMember(m, "qn_z") {
+		{ID: zID, Name: "z", Address: "127.0.0.1", Port: 7952, Status: NodeStatusLeft, LastSeen: later}}})
+	if !isMember(m, zID) {
 		t.Error("another member's record marked z as left")
 	}
 	// No member marks this node as left.
@@ -224,8 +225,12 @@ func TestRunningManagerDoesNotRewriteRemovedClusterFile(t *testing.T) {
 	if err := os.Remove(path); err != nil {
 		t.Fatal(err)
 	}
+	newID := testNodeID(t)
 	pushGossip(t, m, GossipMessage{SenderID: "qn_y", Timestamp: time.Now(), NodeDigest: []*Node{
-		{ID: "qn_new", Name: "new", Address: "127.0.0.1", Port: 7953, Status: NodeStatusHealthy, LastSeen: time.Now()}}})
+		enrolled(t, m, &Node{ID: newID, Name: "new", Address: "127.0.0.1", Port: 7953, Status: NodeStatusHealthy, LastSeen: time.Now()})}})
+	if !isMember(m, newID) {
+		t.Fatal("the node was not discovered, so nothing was saved")
+	}
 	if _, err := os.Stat(path); err == nil {
 		t.Fatal("a discovered node wrote the removed cluster.json again")
 	}
@@ -387,9 +392,10 @@ func TestNodesThatLeftDoNotFillTheCluster(t *testing.T) {
 	m.cluster.Nodes["qn_x"] = &Node{ID: "qn_x", Name: "x", Address: "127.0.0.1", Port: 7962, Status: NodeStatusHealthy, LastSeen: now}
 	m.mu.Unlock()
 
+	newID := testNodeID(t)
 	pushGossip(t, m, GossipMessage{SenderID: "qn_x", Timestamp: now, NodeDigest: []*Node{
-		{ID: "qn_new", Name: "new", Address: "127.0.0.1", Port: 7963, Status: NodeStatusHealthy, LastSeen: now}}})
-	if !isMember(m, "qn_new") {
+		enrolled(t, m, &Node{ID: newID, Name: "new", Address: "127.0.0.1", Port: 7963, Status: NodeStatusHealthy, LastSeen: now})}})
+	if !isMember(m, newID) {
 		t.Error("a new node was not discovered: the records of nodes that left filled the cluster")
 	}
 	if r := m.HandleJoinRequest(&JoinRequest{Version: ProtocolVersion, NodeCSR: testNodeCSR(t), ClusterID: m.cluster.ID, Password: "password123", PollSecret: testPollSecret,
