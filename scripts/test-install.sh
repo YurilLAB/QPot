@@ -12,6 +12,9 @@
 set -euo pipefail
 
 repo_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
+# The version install.sh downloads; the fake release carries the same.
+ver=$(sed -n 's/^QPOT_VERSION="\([^"]*\)"$/\1/p' "$repo_dir/scripts/install.sh")
+[ -n "$ver" ] || { echo "no QPOT_VERSION in scripts/install.sh"; exit 2; }
 bash_bin=$(command -v bash)
 setsid_bin=$(command -v setsid || true)
 timeout_bin=$(command -v timeout || true)
@@ -38,14 +41,14 @@ done
 # to fail), anything else is logged as a hand-over.
 cat > "$tmp_dir/fake-qpot" <<'EOF'
 #!/bin/sh
-[ "$1" = --version ] && { [ -n "${FAKE_BROKEN_QPOT:-}" ] && exit 1; echo qpot 0.1.0; exit 0; }
+[ "$1" = --version ] && { [ -n "${FAKE_BROKEN_QPOT:-}" ] && exit 1; echo qpot test build; exit 0; }
 echo "qpot $*" >> "$QPOT_TEST_DIR/qpot.log"
 exit ${FAKE_SETUP_RC:-0}
 EOF
 chmod +x "$tmp_dir/fake-qpot"
 
 (cd "$repo_dir" && go build -o "$tmp_dir/qpot-release" ./cmd/qpot-release)
-"$tmp_dir/qpot-release" test-server -version 0.1.0 -unix-qpot "$tmp_dir/fake-qpot" \
+"$tmp_dir/qpot-release" test-server -version "$ver" -unix-qpot "$tmp_dir/fake-qpot" \
   -ready "$tmp_dir/ready" -log "$tmp_dir/requests.log" -lifetime 15m &
 server_pid=$!
 for _ in $(seq 1 600); do [ -s "$tmp_dir/ready" ] && break; sleep 0.1; done
@@ -67,7 +70,7 @@ import (
 
 func main() {
 	if len(os.Args) > 1 && os.Args[1] == "--version" {
-		fmt.Println("qpot 0.1.0 (built from source)")
+		fmt.Println("qpot test build (built from source)")
 		return
 	}
 	f, err := os.OpenFile(os.Getenv("QPOT_TEST_DIR")+"/qpot.log", os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600)
@@ -156,19 +159,19 @@ good_release() {
   installed || return 1
   grep -q 'Checksum matches SHA256SUMS' "$case_dir/output.log" || return 1
   grep -q 'Build provenance not checked' "$case_dir/output.log" || return 1
-  grep -q "^A /good/v0.1.0/qpot_0.1.0_linux_amd64.tar.gz$" "$tmp_dir/requests.log" || return 1
+  grep -q "^A /good/v${ver}/qpot_${ver}_linux_amd64.tar.gz$" "$tmp_dir/requests.log" || return 1
   ! grep -q '^B ' "$tmp_dir/requests.log"
 }
 
 good_release_arm64() {
   run_install good QPOT_NO_SETUP=1 FAKE_ARCH=aarch64
-  installed && grep -q "^A /good/v0.1.0/qpot_0.1.0_linux_arm64.tar.gz$" "$tmp_dir/requests.log"
+  installed && grep -q "^A /good/v${ver}/qpot_${ver}_linux_arm64.tar.gz$" "$tmp_dir/requests.log"
 }
 
 # GitHub answers a release download with a redirect to its asset server.
 same_origin_redirect() {
   run_install redirect-same QPOT_NO_SETUP=1
-  installed && grep -q '^A /good/v0.1.0/qpot_0.1.0_linux_amd64.tar.gz$' "$tmp_dir/requests.log"
+  installed && grep -q "^A /good/v${ver}/qpot_${ver}_linux_amd64.tar.gz$" "$tmp_dir/requests.log"
 }
 
 tampered_archive() { run_install tampered-archive; expect_code QP-NET-009 13 && nothing_installed; }
@@ -183,7 +186,7 @@ big_sums() {
 }
 no_entry() {
   run_install no-entry
-  expect_code QP-NET-010 13 && nothing_installed && grep -q 'no entry for qpot_0.1.0_linux_amd64.tar.gz' "$case_dir/output.log"
+  expect_code QP-NET-010 13 && nothing_installed && grep -q "no entry for qpot_${ver}_linux_amd64.tar.gz" "$case_dir/output.log"
 }
 
 # The server promises the whole file and sends half: curl notices.
@@ -249,10 +252,10 @@ provenance_verified() {
   installed && grep -q 'Build provenance verified' "$case_dir/output.log" || return 1
   local want
   for want in attestation verify --bundle --repo YurilLAB/QPot --signer-workflow \
-    YurilLAB/QPot/.github/workflows/release.yml --source-ref refs/tags/v0.1.0 --deny-self-hosted-runners; do
+    YurilLAB/QPot/.github/workflows/release.yml --source-ref "refs/tags/v${ver}" --deny-self-hosted-runners; do
     grep -qx -- "$want" "$case_dir/gh-args" || { echo "gh was not given $want"; return 1; }
   done
-  grep -q '/qpot_0.1.0_provenance.sigstore.json$' "$case_dir/gh-args"
+  grep -q "/qpot_${ver}_provenance.sigstore.json$" "$case_dir/gh-args"
 }
 
 provenance_rejected() { fake_gh; run_install good FAKE_GH_RC=1; expect_code QP-NET-012 13 && nothing_installed; }

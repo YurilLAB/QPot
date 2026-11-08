@@ -10,6 +10,9 @@
 # Needs Go and git.
 $ErrorActionPreference = "Stop"
 $repo = Split-Path -Parent $PSScriptRoot
+# The version install.ps1 downloads; the fake release carries the same.
+$ver = (Select-String -Path "$repo\scripts\install.ps1" -Pattern '^\$QPOT_VERSION = "([^"]+)"' | Select-Object -First 1).Matches.Groups[1].Value
+if (-not $ver) { throw "no QPOT_VERSION in scripts\install.ps1" }
 $work = Join-Path ([System.IO.Path]::GetTempPath()) ("qpot-test-install-" + [Guid]::NewGuid().ToString("N"))
 New-Item -ItemType Directory -Path $work | Out-Null
 $server = $null
@@ -43,7 +46,7 @@ try {
     Invoke-Native $goExe @("build", "-o", "$work\qpot-release.exe", "./cmd/qpot-release") $repo
     Invoke-Native $goExe @("build", "-o", "$work\qpot.exe", "./cmd/qpot") $repo
     $server = Start-Process -FilePath "$work\qpot-release.exe" -PassThru -WindowStyle Hidden -ArgumentList @(
-        "test-server", "-version", "0.1.0", "-unix-qpot", "$work\qpot.exe", "-win-qpot", "$work\qpot.exe",
+        "test-server", "-version", $ver, "-unix-qpot", "$work\qpot.exe", "-win-qpot", "$work\qpot.exe",
         "-ready", "$work\ready", "-log", "$work\requests.log", "-lifetime", "15m")
     for ($i = 0; $i -lt 600 -and -not (Test-Path "$work\ready"); $i++) { Start-Sleep -Milliseconds 100 }
     if (-not (Test-Path "$work\ready")) { throw "the release server did not start" }
@@ -55,7 +58,7 @@ try {
     $srcRepo = Join-Path $work "src-repo"
     New-Item -ItemType Directory -Path "$srcRepo\cmd\qpot" | Out-Null
     [IO.File]::WriteAllText("$srcRepo\go.mod", "module example.com/fakeqpot`n`ngo 1.21`n")
-    [IO.File]::WriteAllText("$srcRepo\cmd\qpot\main.go", "package main`n`nimport `"fmt`"`n`nfunc main() { fmt.Println(`"qpot 0.1.0 (built from source)`") }`n")
+    [IO.File]::WriteAllText("$srcRepo\cmd\qpot\main.go", "package main`n`nimport `"fmt`"`n`nfunc main() { fmt.Println(`"qpot test build (built from source)`") }`n")
     Invoke-Native $gitExe @("init", "-q") $srcRepo
     Invoke-Native $gitExe @("-c", "user.name=test", "-c", "user.email=test@example.invalid", "add", "-A") $srcRepo
     Invoke-Native $gitExe @("-c", "user.name=test", "-c", "user.email=test@example.invalid", "-c", "core.autocrlf=false", "commit", "-q", "-m", "fake qpot") $srcRepo
@@ -188,7 +191,7 @@ try {
         $why = @((Test-Installed $r $c), (Test-NoOriginB))
         if ($r.Output -notmatch "Checksum matches SHA256SUMS") { $why += "no checksum message" }
         if ($r.Output -notmatch "Build provenance not checked") { $why += "no provenance note" }
-        if (-not (Select-String -Quiet -Path "$work\requests.log" -Pattern "^A /good/v0.1.0/qpot_0.1.0_windows_amd64.zip$")) { $why += "the zip was not downloaded" }
+        if (-not (Select-String -Quiet -Path "$work\requests.log" -Pattern "^A /good/v$ver/qpot_$($ver)_windows_amd64.zip$")) { $why += "the zip was not downloaded" }
         Join-Why $why
     }
     Check "a redirect within the release origin is followed" {
@@ -243,8 +246,8 @@ try {
         $why = @((Test-Installed $r $c))
         if ($r.Output -notmatch "Build provenance verified") { $why += "no verified message" }
         $ghArgs = if (Test-Path "$c\gh-args") { Get-Content -Raw "$c\gh-args" } else { "" }
-        foreach ($want in @("attestation verify", "--bundle", "qpot_0.1.0_provenance.sigstore.json", "--repo YurilLAB/QPot",
-                "--signer-workflow YurilLAB/QPot/.github/workflows/release.yml", "--source-ref refs/tags/v0.1.0", "--deny-self-hosted-runners")) {
+        foreach ($want in @("attestation verify", "--bundle", "qpot_$($ver)_provenance.sigstore.json", "--repo YurilLAB/QPot",
+                "--signer-workflow YurilLAB/QPot/.github/workflows/release.yml", "--source-ref refs/tags/v$ver", "--deny-self-hosted-runners")) {
             if (-not $ghArgs.Contains($want)) { $why += "gh was not given $want" }
         }
         Join-Why $why

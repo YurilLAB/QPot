@@ -33,7 +33,7 @@
 # -E: the ERR trap also fires inside functions, so nothing fails silently.
 set -Eeuo pipefail
 
-QPOT_VERSION="0.1.0"
+QPOT_VERSION="1.0.0"
 QPOT_REPO="https://github.com/YurilLAB/QPot"
 QPOT_GH_REPO="YurilLAB/QPot"
 # The one commit the installer builds when no release is published: a main
