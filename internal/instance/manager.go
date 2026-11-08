@@ -772,6 +772,18 @@ func (m *Manager) generateServiceConfigs() error {
 		if err := os.MkdirAll(hpDir, 0750); err != nil {
 			return fmt.Errorf("failed to create data dir for honeypot %q: %w", name, err)
 		}
+		// Folders the image needs inside a writable volume (dionaea's
+		// roots/ftp), writable by the container's user. The container can
+		// leave anything there; see ensureContainerDirIn.
+		for _, d := range prof.ContainerDirs {
+			vol, rel, ok := strings.Cut(d, "/")
+			if !ok {
+				return fmt.Errorf("honeypot %q: folder %q is not inside a volume", name, d)
+			}
+			if err := ensureContainerDirIn(filepath.Join(hpDir, vol), rel, 0777); err != nil {
+				return fmt.Errorf("failed to prepare %s for honeypot %q: %w", d, name, err)
+			}
+		}
 
 		if name == "cowrie" {
 			// Cowrie writes a per-session ttylog to log/tty/ but does NOT create

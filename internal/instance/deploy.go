@@ -289,6 +289,12 @@ type honeypotDeploy struct {
 	// ({DataPath}/honeypots/<name>/logs), so each honeypot's log path must mount
 	// from that subdir.
 	Volumes []deployVolume
+	// ContainerDirs are folders inside a writable volume that the image needs
+	// but does not create ("data/roots/ftp": volume "data"). They are made
+	// before every start through os.Root and never mounted on their own: the
+	// container can swap a folder inside its volume for a symlink, and Docker
+	// follows a symlinked mount source on the next start.
+	ContainerDirs []string
 	// Ports are the TCP container ports to publish. Each is given a
 	// deterministic host port via Config.AllocatePortFor. Empty means "use the
 	// honeypot's configured HP.Port" (generic fallback).
@@ -644,9 +650,20 @@ func deployProfileFor(name string) honeypotDeploy {
 		// SMB, DCE/RPC and MSSQL name the machine; the files that hold its name
 		// are mounted with the instance's own (dionaeaPatchVolumes, content from
 		// deployProfile).
+		// Its config keeps everything else under /opt/dionaea/var/dionaea, which
+		// the image does not ship (T-Pot always mounts it): captured malware in
+		// binaries/, the FTP, TFTP, web and UPnP roots, RTP recordings, the
+		// capped bistreams/ and its error log. On the read-only root none of it
+		// could be created, so no sample was ever saved. Only data/ is mounted
+		// and its folders are made inside it, where T-Pot mounts each one on
+		// its own (see ContainerDirs).
 		return honeypotDeploy{
-			Volumes: append([]deployVolume{{HostSubdir: "logs", ContainerPath: "/opt/dionaea/var/log"}},
-				dionaeaPatchVolumes(nil)...),
+			Volumes: append([]deployVolume{
+				{HostSubdir: "logs", ContainerPath: "/opt/dionaea/var/log"},
+				{HostSubdir: "data", ContainerPath: "/opt/dionaea/var/dionaea"},
+			}, dionaeaPatchVolumes(nil)...),
+			ContainerDirs: []string{"data/binaries", "data/roots/ftp", "data/roots/tftp", "data/roots/www",
+				"data/roots/upnp", "data/rtp"},
 			Ports:    []int{20, 21, 42, 81, 135, 443, 445, 1433, 1723, 1883, 3306, 5060, 5061, 27017},
 			UDPPorts: []int{69, 5060},
 		}
@@ -800,10 +817,14 @@ func deployProfileFor(name string) honeypotDeploy {
 		// LLM-backed dynamic web honeypot; exits without a provider, so
 		// custom_config must set llm_provider (and llm_server_url + llm_model
 		// for Ollama, or llm_api_key for a hosted model).
+		// Its entrypoint writes a self-signed certificate to config/cert on the
+		// first start, kept there for later ones; without the folder 443 and
+		// 8443 never start ("open config/cert/cert.pem").
 		return honeypotDeploy{
 			Volumes: []deployVolume{
 				{HostSubdir: "logs", ContainerPath: "/opt/galah/log"},
 				{HostSubdir: "cache", ContainerPath: "/opt/galah/config/cache"},
+				{HostSubdir: "cert", ContainerPath: "/opt/galah/config/cert"},
 			},
 			Ports: []int{80, 443, 8080, 8443},
 			LLMEnv: map[string]string{
@@ -862,9 +883,16 @@ func deployProfileFor(name string) honeypotDeploy {
 			ExtraCaps: []string{"NET_BIND_SERVICE"},
 		}
 	case "miniprint":
+		// The image saves each print job (at most 1 MiB) to uploads/ and the
+		// printer's virtual files and settings to data/ (size-capped); on the
+		// read-only root every job ended the session with an OSError.
 		return honeypotDeploy{
-			Volumes: []deployVolume{{HostSubdir: "logs", ContainerPath: "/opt/miniprint/log"}},
-			Ports:   []int{9100},
+			Volumes: []deployVolume{
+				{HostSubdir: "logs", ContainerPath: "/opt/miniprint/log"},
+				{HostSubdir: "uploads", ContainerPath: "/opt/miniprint/uploads"},
+				{HostSubdir: "data", ContainerPath: "/opt/miniprint/data"},
+			},
+			Ports: []int{9100},
 		}
 	case "sentrypeer":
 		return honeypotDeploy{
