@@ -147,6 +147,8 @@ type stixObject struct {
 	ExternalReferences []stixExtRef         `json:"external_references"`
 	KillChainPhases    []stixKillChainPhase `json:"kill_chain_phases"`
 	Revoked            bool                 `json:"revoked"`
+	Deprecated         bool                 `json:"x_mitre_deprecated"`
+	ShortName          string               `json:"x_mitre_shortname"` // x-mitre-tactic: "persistence"
 	Detection          string               `json:"x_mitre_detection"`
 	DataSources        []string             `json:"x_mitre_data_sources"`
 	Platforms          []string             `json:"x_mitre_platforms"`
@@ -164,80 +166,119 @@ type stixKillChainPhase struct {
 	PhaseName     string `json:"phase_name"`
 }
 
-// reBacktick matches terms inside backticks.
-var reBacktick = regexp.MustCompile("`([^`]+)`")
+// reBacktick matches the code spans of an ATT&CK description, the only part
+// of its prose that names a concrete command or setting.
+var reBacktick = regexp.MustCompile("`([^`\n]+)`")
 
-// reQuoted matches quoted terms 2-30 chars long.
-var reQuoted = regexp.MustCompile(`"([^"]{2,30})"`)
+// Code terms a generated rule can match. A command term is a lower-case
+// command name, optionally with fixed arguments ("useradd", "crontab -l",
+// "export HISTFILESIZE=0"); it matches only where a shell runs it, so
+// "man useradd" is not account creation. An identifier term is a setting or
+// symbol name with a capital letter or an underscore ("HISTFILE",
+// "ExecStart", "PermitRootLogin"); it matches as a whole word, case and all.
+//
+// Nothing else in a code span becomes a matcher: not the technique's name
+// (English words: "Windows 7 or 8" is not Application Window Discovery), not
+// paths, file names or extensions (they say what a technique touches, not
+// what it does: reading /var/log/kern.log is not clearing it), and not
+// Windows syntax or placeholders such as /proc/<PID>/maps.
+var (
+	reCommandTerm    = regexp.MustCompile(`^[a-z][a-z0-9_+-]*(?: [A-Za-z0-9_./=+:-]+)*$`)
+	reIdentifierTerm = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
+)
 
-// stopwords is a set of common English words to exclude from keywords.
-var stopwords = map[string]bool{
-	"the": true, "and": true, "for": true, "with": true, "that": true,
-	"this": true, "are": true, "from": true, "may": true, "can": true,
-	"use": true, "used": true, "such": true, "also": true, "has": true,
-	"have": true, "been": true, "when": true, "their": true, "they": true,
-	"using": true, "will": true, "which": true, "more": true, "than": true,
-	"these": true, "into": true, "other": true, "system": true, "not": true,
-	"its": true, "all": true, "any": true, "via": true, "often": true,
-	"both": true, "well": true, "each": true, "through": true, "about": true,
-	"data": true, "log": true, "logs": true, "file": true, "files": true,
-	"user": true, "users": true, "access": true, "attack": true,
-	"monitor": true, "activity": true, "malicious": true, "content": true,
+// contextCommands are everyday commands ATT&CK cites as context ("ps and top
+// show the process", "a hook in sshd", "delay with sleep or ping") rather
+// than as the technique itself. A command term starting with one names no
+// technique on its own.
+var contextCommands = map[string]bool{
+	"cat": true, "ls": true, "ps": true, "top": true, "rm": true, "cp": true, "mv": true,
+	"cd": true, "echo": true, "printf": true, "grep": true, "find": true, "touch": true,
+	"mkdir": true, "chmod": true, "chown": true, "sleep": true, "ping": true, "kill": true,
+	"init": true, "hash": true, "mount": true, "ssh": true, "sshd": true, "iptables": true,
+	"dmesg": true, "ldd": true, "curl": true, "wget": true, "bash": true, "sh": true,
+	"python": true, "perl": true, "sudo": true, "su": true, "env": true, "uname": true,
+	"id": true, "whoami": true, "hostname": true, "ifconfig": true, "ip": true,
+	"netstat": true, "df": true, "du": true, "tar": true, "base64": true, "source": true,
+	"which": true, "type": true, "open": true, "copy": true, "dir": true, "import": true,
 }
 
-// ExtractKeywords extracts meaningful technical keywords from text.
-// It lowercases input, pulls out backtick/quoted terms, and filters stopwords.
-func ExtractKeywords(text string) []string {
-	text = strings.ToLower(text)
+// Term kinds returned by codeTerm.
+const (
+	termNone = iota
+	termCommand
+	termIdentifier
+)
+
+// maxDynamicTerms bounds the alternation of one generated rule.
+const maxDynamicTerms = 10
+
+// codeTerm reports whether a code span can identify a technique in a captured
+// shell command, and how: the span with its spacing normalised and its kind.
+func codeTerm(span string) (string, int) {
+	term := strings.Join(strings.Fields(span), " ")
+	if len(term) < 4 {
+		return "", termNone
+	}
+	if reIdentifierTerm.MatchString(term) && strings.ContainsAny(term, "ABCDEFGHIJKLMNOPQRSTUVWXYZ_") {
+		return term, termIdentifier
+	}
+	if reCommandTerm.MatchString(term) {
+		if first, _, _ := strings.Cut(term, " "); !contextCommands[first] {
+			return term, termCommand
+		}
+	}
+	return "", termNone
+}
+
+// codeSpans returns the distinct code spans of text, normalised.
+func codeSpans(text string) []string {
+	var spans []string
 	seen := make(map[string]bool)
-	var keywords []string
-
-	addKW := func(w string) {
-		w = strings.TrimSpace(w)
-		if len(w) < 3 {
-			return
-		}
-		if stopwords[w] {
-			return
-		}
-		if !seen[w] {
-			seen[w] = true
-			keywords = append(keywords, w)
-		}
-	}
-
-	// Extract backtick-quoted terms first (highest specificity).
 	for _, m := range reBacktick.FindAllStringSubmatch(text, -1) {
-		addKW(m[1])
-	}
-
-	// Extract double-quoted terms.
-	for _, m := range reQuoted.FindAllStringSubmatch(text, -1) {
-		addKW(m[1])
-	}
-
-	// Extract individual words (alpha + digits + hyphens, no pure numbers).
-	for _, word := range strings.FieldsFunc(text, func(r rune) bool {
-		return !(r >= 'a' && r <= 'z') && !(r >= '0' && r <= '9') && r != '-' && r != '_' && r != '.'
-	}) {
-		// Skip pure numbers and overly long words.
-		if len(word) > 50 {
-			continue
+		s := strings.Join(strings.Fields(m[1]), " ")
+		if s != "" && !seen[s] {
+			seen[s] = true
+			spans = append(spans, s)
 		}
-		allDigit := true
-		for _, ch := range word {
-			if ch < '0' || ch > '9' {
-				allDigit = false
-				break
+	}
+	return spans
+}
+
+const (
+	// cmdStart is where a shell runs a command: the start of the input or of
+	// a list or pipeline element, behind optional wrappers (with their
+	// flags) and an optional directory, as in "busybox nohup ./x" or
+	// "/usr/sbin/useradd".
+	cmdStart = `(?:^|[\n;&|(\x60]|\$\()\s*(?:(?:sudo|busybox|nohup|exec|command|nice|setsid)(?:\s+-\S+)*\s+)*(?:[\w.~-]*/)*`
+	// cmdEnd ends the command word or its fixed arguments.
+	cmdEnd = `(?:$|[\s;&|)\x60<>])`
+)
+
+// dynamicPattern builds the command-field pattern matching terms, or "".
+func dynamicPattern(terms []string) string {
+	var cmds, ids []string
+	for _, term := range terms {
+		t, kind := codeTerm(term)
+		switch kind {
+		case termCommand:
+			words := strings.Fields(t)
+			for i, w := range words {
+				words[i] = regexp.QuoteMeta(w)
 			}
+			cmds = append(cmds, strings.Join(words, `\s+`))
+		case termIdentifier:
+			ids = append(ids, regexp.QuoteMeta(t))
 		}
-		if allDigit {
-			continue
-		}
-		addKW(word)
 	}
-
-	return keywords
+	var alts []string
+	if len(cmds) > 0 {
+		alts = append(alts, cmdStart+"(?:"+strings.Join(cmds, "|")+")"+cmdEnd)
+	}
+	if len(ids) > 0 {
+		alts = append(alts, `(?:^|\W)(?:`+strings.Join(ids, "|")+`)(?:$|\W)`)
+	}
+	return strings.Join(alts, "|")
 }
 
 // parseSTIX parses a STIX 2.x bundle and populates the techniques map.
@@ -247,9 +288,27 @@ func (a *ATTCKLoader) parseSTIX(data []byte) error {
 		return fmt.Errorf("json unmarshal: %w", err)
 	}
 
+	// Tactic IDs by short name ("persistence" -> "TA0003").
+	tacticIDs := make(map[string]string)
+	for _, obj := range bundle.Objects {
+		if obj.Type != "x-mitre-tactic" || obj.ShortName == "" {
+			continue
+		}
+		for _, ref := range obj.ExternalReferences {
+			if ref.SourceName == "mitre-attack" {
+				tacticIDs[obj.ShortName] = ref.ExternalID
+				break
+			}
+		}
+	}
+
+	spans := make(map[*Technique][]string)
+	citedBy := make(map[string]int) // lower-cased code span -> techniques citing it
 	count := 0
 	for _, obj := range bundle.Objects {
-		if obj.Type != "attack-pattern" || obj.Revoked {
+		// A deprecated technique is no longer part of ATT&CK (v18 still
+		// ships T1153 "Source"); a revoked one was replaced.
+		if obj.Type != "attack-pattern" || obj.Revoked || obj.Deprecated {
 			continue
 		}
 
@@ -266,27 +325,20 @@ func (a *ATTCKLoader) parseSTIX(data []byte) error {
 			continue
 		}
 
-		// Collect tactic names from kill chain phases.
-		var tacticNames []string
+		// Collect tactic names and IDs from kill chain phases.
+		var tacticNames, tacticIDList []string
 		for _, kcp := range obj.KillChainPhases {
 			if kcp.KillChainName == "mitre-attack" || kcp.KillChainName == "mitre-ics-attack" {
 				tacticNames = append(tacticNames, kcp.PhaseName)
+				tacticIDList = append(tacticIDList, tacticIDs[kcp.PhaseName])
 			}
 		}
-
-		// Extract keywords from name + detection text + data sources.
-		kwText := obj.Name + " " + obj.Detection
-		for _, ds := range obj.DataSources {
-			// e.g. "Command: Windows Command Shell" → extract "command"
-			parts := strings.SplitN(ds, ":", 2)
-			kwText += " " + strings.TrimSpace(parts[0])
-		}
-		keywords := ExtractKeywords(kwText)
 
 		tech := &Technique{
 			ID:             techID,
 			SubID:          techID,
 			Name:           obj.Name,
+			TacticIDs:      tacticIDList,
 			TacticNames:    tacticNames,
 			Description:    truncate(obj.Description, 512),
 			URL:            techURL,
@@ -294,11 +346,35 @@ func (a *ATTCKLoader) parseSTIX(data []byte) error {
 			DataSources:    obj.DataSources,
 			Platforms:      obj.Platforms,
 			IsSubTechnique: obj.IsSubTechnique,
-			Keywords:       keywords,
 		}
 
+		// Code spans of the full description and detection text (ATT&CK v18
+		// dropped x_mitre_detection; older bundles still carry it).
+		ss := codeSpans(obj.Description + "\n" + obj.Detection)
+		seen := make(map[string]bool)
+		for _, s := range ss {
+			if k := strings.ToLower(s); !seen[k] {
+				seen[k] = true
+				citedBy[k]++
+			}
+		}
+		spans[tech] = ss
 		a.techniques[techID] = tech
 		count++
+	}
+
+	// Keywords are the code terms only this technique cites: a command
+	// several techniques mention (curl, systemctl, LD_PRELOAD) cannot say
+	// which one an attacker performed.
+	for tech, ss := range spans {
+		for _, s := range ss {
+			if citedBy[strings.ToLower(s)] != 1 {
+				continue
+			}
+			if term, kind := codeTerm(s); kind != termNone && len(tech.Keywords) < maxDynamicTerms {
+				tech.Keywords = append(tech.Keywords, term)
+			}
+		}
 	}
 
 	if count == 0 {
@@ -308,6 +384,7 @@ func (a *ATTCKLoader) parseSTIX(data []byte) error {
 }
 
 // tacticToKillChain maps ATT&CK tactic phase names to QPot kill chain stages.
+// ATT&CK v18 split defense-evasion into stealth and defense-impairment.
 var tacticToKillChain = map[string]string{
 	"credential-access":      "initial-access",
 	"execution":              "execution",
@@ -320,6 +397,8 @@ var tacticToKillChain = map[string]string{
 	"command-and-control":    "c2",
 	"initial-access":         "initial-access",
 	"defense-evasion":        "execution",
+	"stealth":                "execution",
+	"defense-impairment":     "execution",
 	"impact":                 "exfiltration",
 	"reconnaissance":         "reconnaissance",
 	"resource-development":   "reconnaissance",
@@ -329,6 +408,8 @@ var tacticToKillChain = map[string]string{
 // GenerateDynamicRules generates classification rules for all loaded techniques
 // that are not embedded-only. Returns nil when only the embedded fallback is
 // loaded (those techniques lack detection metadata for meaningful rules).
+// The rules are sorted by technique ID: they share one priority, so their
+// order decides which one labels a command two of them match.
 func (a *ATTCKLoader) GenerateDynamicRules() []Rule {
 	if !a.loaded {
 		// Embedded fallback has no detection metadata — skip dynamic generation.
@@ -342,11 +423,15 @@ func (a *ATTCKLoader) GenerateDynamicRules() []Rule {
 			rules = append(rules, *rule)
 		}
 	}
+	sort.Slice(rules, func(i, j int) bool { return rules[i].TechniqueID < rules[j].TechniqueID })
 	return rules
 }
 
 // buildDynamicRule constructs a single Rule from a Technique's metadata.
-// Returns nil when the technique should be skipped (wrong platform, no keywords).
+// Returns nil when the technique should be skipped (wrong platform, no
+// usable code term). The rule applies to shell input only: sensor text in
+// the command field (a Suricata signature, a p0f OS name, a JA3 hash) and
+// SMTP dialogue are not commands.
 func buildDynamicRule(t *Technique) *Rule {
 	// Platform filter: skip techniques that only target Windows with no
 	// cross-platform applicability. Techniques with empty platforms are also
@@ -357,7 +442,7 @@ func buildDynamicRule(t *Technique) *Rule {
 	onlyWindows := true
 	for _, p := range t.Platforms {
 		switch strings.ToLower(p) {
-		case "linux", "macos", "network", "containers":
+		case "linux", "macos", "network", "network devices", "containers", "esxi":
 			onlyWindows = false
 		}
 	}
@@ -365,35 +450,10 @@ func buildDynamicRule(t *Technique) *Rule {
 		return nil
 	}
 
-	// Gather keywords: prefer shorter, more specific terms.
-	kws := t.Keywords
-	if len(kws) == 0 {
+	pattern := dynamicPattern(t.Keywords)
+	if pattern == "" {
 		return nil
 	}
-
-	// Sort by length ascending (shorter = more specific command names).
-	sorted := make([]string, len(kws))
-	copy(sorted, kws)
-	sort.SliceStable(sorted, func(i, j int) bool {
-		return len(sorted[i]) < len(sorted[j])
-	})
-
-	// Take up to 5 keywords, skipping those shorter than 3 chars.
-	var selected []string
-	for _, kw := range sorted {
-		if len(kw) < 3 {
-			continue
-		}
-		selected = append(selected, regexp.QuoteMeta(kw))
-		if len(selected) == 5 {
-			break
-		}
-	}
-	if len(selected) == 0 {
-		return nil
-	}
-
-	pattern := "(?i)(" + strings.Join(selected, "|") + ")"
 
 	// Tactic info from first tactic.
 	tacticName := ""
@@ -418,6 +478,7 @@ func buildDynamicRule(t *Technique) *Rule {
 		Honeypots:   []string{},
 		Priority:    10,
 		Conditions: []Condition{
+			{Field: "event_type", Pattern: `command`},
 			{Field: "command", Pattern: pattern},
 		},
 		Confidence: 0.6,
