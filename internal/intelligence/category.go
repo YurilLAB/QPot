@@ -160,8 +160,6 @@ func (s *catSet) add(ids ...string) {
 	}
 }
 
-func (s *catSet) has(id string) bool { return s.ids[id] }
-
 // exploit records an exploit attempt, naming its CVE when known.
 func (s *catSet) exploit(cve string) {
 	s.add(CatExploitAttempt)
