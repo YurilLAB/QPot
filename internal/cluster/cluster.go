@@ -3,7 +3,6 @@ package cluster
 
 import (
 	"bytes"
-	"context"
 	"crypto/rand"
 	"crypto/subtle"
 	"crypto/tls"
@@ -23,6 +22,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/qpot/qpot/internal/hostsetup"
@@ -65,6 +65,9 @@ type Cluster struct {
 	// Node management
 	LocalNode *Node            `json:"local_node" yaml:"local_node"`
 	Nodes     map[string]*Node `json:"nodes" yaml:"nodes"`
+	// Revocations are the enrollment host's signed removals of nodes (see
+	// peerauth.go), kept so the removed nodes stay refused after a restart.
+	Revocations []Revocation `json:"revocations,omitempty" yaml:"revocations,omitempty"`
 
 	// Configuration
 	Config *ClusterConfig `json:"config" yaml:"config"`
@@ -322,6 +325,9 @@ type GossipMessage struct {
 	Timestamp time.Time `json:"timestamp"`
 	// NodeDigest contains the current status of all nodes the sender knows about.
 	NodeDigest []*Node `json:"node_digest"`
+	// Revocations are the node removals the sender holds, each signed by the
+	// cluster CA (see peerauth.go).
+	Revocations []Revocation `json:"revocations,omitempty"`
 }
 
 // Manager handles cluster lifecycle
@@ -360,8 +366,10 @@ type Manager struct {
 	// probedFailed is when gossip last tried each failed peer (see gossip).
 	probeMu      sync.Mutex
 	probedFailed map[string]time.Time
-	// refusedLeaves are the nodes a leave was refused for (logged once each).
-	refusedLeaves map[string]bool
+	// certWarned is when peerHTTPClient last warned that this node's
+	// certificate is unusable (Unix seconds), so a round every 200 ms does
+	// not repeat it.
+	certWarned atomic.Int64
 }
 
 // NewManager creates a new cluster manager
@@ -432,7 +440,18 @@ func (m *Manager) peerHTTPClient(timeout time.Duration) *http.Client {
 	}
 	operatorCerts := m.cluster.Config.TLSCertPath != "" || m.cluster.Config.CACertPath != "" ||
 		m.cluster.Config.TrustOperatorCerts
-	return clusterHTTPClient(timeout, m.cluster.ID, pool, operatorCerts)
+	// The node certificate goes with every request: it is how peers know
+	// which member is asking (see peerauth.go).
+	var node *tls.Certificate
+	if m.cluster.LocalNode != nil {
+		if cert, err := nodeCertificate(m.cluster.ID, m.cluster.LocalNode.ID, m.cluster.NodeCertificate, m.cluster.NodeKey); err == nil {
+			node = &cert
+		} else if now := time.Now().Unix(); now-m.certWarned.Load() >= 600 {
+			m.certWarned.Store(now)
+			slog.Warn("Cluster TLS: this node's certificate is unusable; peers will refuse its requests", "error", err)
+		}
+	}
+	return clusterPeerClient(timeout, m.cluster.ID, pool, operatorCerts, node)
 }
 
 // HTTPClient returns a client for talking to this cluster's API (e.g. the
@@ -884,6 +903,11 @@ func (m *Manager) Start() error {
 			return identityFailure(err)
 		}
 	}
+	// Members prove which node they are with their certificate in the TLS
+	// handshake; without TLS no request could say which member sent it.
+	if !m.cluster.Config.EnableEncryption {
+		return hostsetup.E("QP-CLUSTER-010")
+	}
 
 	// Only the bcrypt hash is persisted, so a manager restored by LoadCluster
 	// has no plaintext password. Gossiping without it sends an empty
@@ -1293,9 +1317,12 @@ func (m *Manager) withClusterAuth(next http.HandlerFunc) http.HandlerFunc {
 	}
 }
 
-// withMemberAuth guards the peer endpoints: the password (withClusterAuth)
-// and the member key only admitted nodes hold. Missing credentials fail closed;
-// legacy clusters must upgrade their trust rather than use password-only peers.
+// withMemberAuth guards the peer endpoints: the password (withClusterAuth),
+// the member key only admitted nodes hold, and the sender's own node
+// certificate, which names the member asking; that node must still be a
+// member (see peerauth.go). The handler gets its ID from peerNode. Missing
+// credentials fail closed; legacy clusters must upgrade their trust rather
+// than use password-only peers.
 func (m *Manager) withMemberAuth(next http.HandlerFunc) http.HandlerFunc {
 	return m.withClusterAuth(func(w http.ResponseWriter, r *http.Request) {
 		if key := m.memberKey(); key == "" ||
@@ -1311,7 +1338,20 @@ func (m *Manager) withMemberAuth(next http.HandlerFunc) http.HandlerFunc {
 			json.NewEncoder(w).Encode(joinFailure(hostsetup.E("QP-CLUSTER-002")))
 			return
 		}
-		next(w, r)
+		// Not counted as a password failure: the password and member key
+		// were right, and a node refused here (one that left, or one a peer
+		// has not heard of yet) must not get its address blocked for the
+		// members that share it.
+		id, err := m.authenticatePeer(r)
+		switch {
+		case errors.Is(err, errNotAMember):
+			http.Error(w, err.Error(), http.StatusForbidden)
+			return
+		case err != nil:
+			http.Error(w, "Unauthorized: "+err.Error(), http.StatusUnauthorized)
+			return
+		}
+		next(w, withPeerNode(r, id))
 	})
 }
 
@@ -1356,6 +1396,36 @@ func withHostOnly(next http.HandlerFunc) http.HandlerFunc {
 		}
 		next(w, r)
 	}
+}
+
+// withHostIdentity guards the host operations (join approval, removal): the
+// request must come from this host (withHostOnly), carry the password, and
+// present this node's own certificate, which only a process that can read
+// this node's private cluster state holds - the CLI of its operator. A member
+// or a pending joiner on the same machine knows the password too, but not
+// this node's key.
+func (m *Manager) withHostIdentity(next http.HandlerFunc) http.HandlerFunc {
+	return withHostOnly(m.withClusterAuth(func(w http.ResponseWriter, r *http.Request) {
+		if !m.fromLocalNode(r) {
+			http.Error(w, "Forbidden: a host operation must present this node's certificate", http.StatusForbidden)
+			return
+		}
+		next(w, r)
+	}))
+}
+
+// fromLocalNode reports whether r presented this node's own certificate.
+func (m *Manager) fromLocalNode(r *http.Request) bool {
+	if r.TLS == nil || len(r.TLS.PeerCertificates) == 0 {
+		return false
+	}
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	if m.cluster == nil || m.cluster.LocalNode == nil {
+		return false
+	}
+	id, err := verifyClusterClient(m.cluster.ID, r.TLS.PeerCertificates, time.Now())
+	return err == nil && id == m.cluster.LocalNode.ID
 }
 
 // isMemberAddress reports whether addr (an address the request came from, the
@@ -1435,9 +1505,11 @@ func (m *Manager) apiHandler() http.Handler {
 	// proved the password on /join - poll its request; it is also password-gated
 	// so an unauthenticated scanner cannot enumerate request IDs/outcomes, and
 	// answers only the joiner's poll secret.
-	mux.HandleFunc("/api/v1/cluster/pending", withHostOnly(m.withClusterAuth(m.handlePendingHTTP)))
-	mux.HandleFunc("/api/v1/cluster/approve", withHostOnly(m.withClusterAuth(m.handleApproveHTTP)))
-	mux.HandleFunc("/api/v1/cluster/deny", withHostOnly(m.withClusterAuth(m.handleDenyHTTP)))
+	mux.HandleFunc("/api/v1/cluster/pending", m.withHostIdentity(m.handlePendingHTTP))
+	mux.HandleFunc("/api/v1/cluster/approve", m.withHostIdentity(m.handleApproveHTTP))
+	mux.HandleFunc("/api/v1/cluster/deny", m.withHostIdentity(m.handleDenyHTTP))
+	// Removing a node is the host operator's decision too (see RemoveNode).
+	mux.HandleFunc("/api/v1/cluster/remove", m.withHostIdentity(m.handleRemoveHTTP))
 	mux.HandleFunc("/api/v1/cluster/join/status", m.withClusterAuth(m.handleJoinStatusHTTP))
 	return mux
 }
@@ -1478,6 +1550,13 @@ func (m *Manager) startAPIServer() error {
 			return fmt.Errorf("cluster TLS: %w", err)
 		}
 		srv.TLSConfig = &tls.Config{MinVersion: tls.VersionTLS12, Certificates: []tls.Certificate{cert}}
+	}
+	if srv.TLSConfig != nil {
+		// Ask every client for its node certificate. A joiner has none yet,
+		// so the handshake does not require one; withMemberAuth checks it
+		// for the peer endpoints. The handshake still makes a client that
+		// sends one prove it holds the certificate's key.
+		srv.TLSConfig.ClientAuth = tls.RequestClientCert
 	}
 
 	ln, err := net.Listen("tcp", addr)
@@ -1639,6 +1718,10 @@ func (m *Manager) handleLeaveHTTP(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
+	sender, ok := requirePeer(w, r)
+	if !ok {
+		return
+	}
 
 	r.Body = http.MaxBytesReader(w, r.Body, maxClusterBodyBytes)
 	body, err := io.ReadAll(r.Body)
@@ -1655,32 +1738,11 @@ func (m *Manager) handleLeaveHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// A node leaves by itself: this one is never marked left on another's
-	// word, and another is only when the request comes from its registered
-	// address (leaveFromTheNode). Every member holds the member key, so any
-	// of them could otherwise evict any node. A node leaving from behind NAT
-	// is refused here; it has stopped anyway, and failed probes mark it
-	// failed, so nothing is lost.
-	m.mu.RLock()
-	var addr string
-	known := false
-	if m.cluster != nil && (m.cluster.LocalNode == nil || req.NodeID != m.cluster.LocalNode.ID) {
-		if node, ok := m.cluster.Nodes[req.NodeID]; ok && node.Status != NodeStatusLeft {
-			addr, known = node.Address, true
-		}
-	}
-	m.mu.RUnlock()
-	if known && !leaveFromTheNode(r, addr) {
-		m.mu.Lock()
-		if !m.refusedLeaves[req.NodeID] {
-			if m.refusedLeaves == nil {
-				m.refusedLeaves = make(map[string]bool)
-			}
-			m.refusedLeaves[req.NodeID] = true
-			slog.Warn("Refused a leave not sent from the node that leaves", "node_id", req.NodeID,
-				"node_address", addr, "source", r.RemoteAddr)
-		}
-		m.mu.Unlock()
+	// A node leaves by itself: the leave must name the node whose
+	// certificate sent it. Removing another node is the enrollment host's
+	// decision (RemoveNode).
+	if req.NodeID != sender {
+		slog.Warn("Refused a leave naming another node", "node_id", req.NodeID, "sender", sender, "source", r.RemoteAddr)
 		http.Error(w, "a node's leave is taken only from the node itself", http.StatusForbidden)
 		return
 	}
@@ -1689,9 +1751,10 @@ func (m *Manager) handleLeaveHTTP(w http.ResponseWriter, r *http.Request) {
 	// came back from cluster.json at the next start, and a member that missed
 	// the leave gossiped it straight back in.
 	m.mu.Lock()
-	if known && m.cluster != nil {
+	if m.cluster != nil {
 		if node, ok := m.cluster.Nodes[req.NodeID]; ok && node.Status != NodeStatusLeft {
 			m.markLeftLocked(node, time.Now())
+			delete(m.peerIntel, req.NodeID)
 			if err := m.saveClusterLocked(); err != nil {
 				slog.Warn("Failed to persist cluster membership", "error", err)
 			}
@@ -1703,51 +1766,6 @@ func (m *Manager) handleLeaveHTTP(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
 	json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
-}
-
-// leaveFromTheNode reports whether r, a leave request, came from the node
-// registered at addr: its source IP is that address (a host name is looked
-// up), or the node is on this host and the request came over loopback.
-func leaveFromTheNode(r *http.Request, addr string) bool {
-	host, _, err := net.SplitHostPort(r.RemoteAddr)
-	src := net.ParseIP(host)
-	if err != nil || src == nil {
-		return false
-	}
-	var ips []net.IP
-	if ip := net.ParseIP(addr); ip != nil {
-		ips = []net.IP{ip}
-	} else {
-		ctx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
-		defer cancel()
-		found, _ := net.DefaultResolver.LookupIPAddr(ctx, addr)
-		for _, a := range found {
-			ips = append(ips, a.IP)
-		}
-	}
-	for _, ip := range ips {
-		if ip.Equal(src) || (src.IsLoopback() && isThisHost(ip)) {
-			return true
-		}
-	}
-	return false
-}
-
-// isThisHost reports whether ip is a loopback address or one of this host's.
-func isThisHost(ip net.IP) bool {
-	if ip.IsLoopback() {
-		return true
-	}
-	addrs, err := net.InterfaceAddrs()
-	if err != nil {
-		return false
-	}
-	for _, a := range addrs {
-		if n, ok := a.(*net.IPNet); ok && n.IP.Equal(ip) {
-			return true
-		}
-	}
-	return false
 }
 
 // gossipLoop periodically gossips with other nodes. It is handed the stop
@@ -1791,6 +1809,7 @@ func (m *Manager) gossip() {
 	localID := m.cluster.LocalNode.ID
 	// Build a snapshot of current node states to share.
 	digest := m.snapshotNodesLocked()
+	revocations := m.revocationsLocked()
 
 	// Collect peer addresses to contact (all nodes except ourselves).
 	type peerInfo struct {
@@ -1830,9 +1849,10 @@ func (m *Manager) gossip() {
 	m.mu.RUnlock()
 
 	msg := GossipMessage{
-		SenderID:   localID,
-		Timestamp:  time.Now(),
-		NodeDigest: digest,
+		SenderID:    localID,
+		Timestamp:   time.Now(),
+		NodeDigest:  digest,
+		Revocations: revocations,
 	}
 
 	body, err := json.Marshal(msg)
@@ -1893,6 +1913,9 @@ func (m *Manager) gossip() {
 			return
 		}
 		discovered := m.mergeDigestLocked(peerMsg.NodeDigest, localID, peer.id, now)
+		if m.applyRevocationsLocked(peerMsg.Revocations, now) {
+			discovered = true
+		}
 		// Mark the responding peer as healthy and update its last-seen time.
 		if node, ok := m.cluster.Nodes[peer.id]; ok && node.Status != NodeStatusLeft {
 			node.Status = NodeStatusHealthy
@@ -1958,9 +1981,12 @@ func validPeerNode(n *Node) bool {
 
 // leftRetention is how long a node that left is remembered as left (see
 // mergeDigestLocked) before its record is dropped; at most maxLeftNodes such
-// records are kept, the oldest dropped first.
+// records are kept, the oldest dropped first. It is longer than a node
+// certificate is valid: while the record lasts the node is refused, and once
+// it is dropped any certificate the node kept has expired, so a member that
+// missed the leave cannot bring it back with gossip.
 const (
-	leftRetention = 30 * 24 * time.Hour
+	leftRetention = nodeCertLifetime + 24*time.Hour
 	maxLeftNodes  = maxClusterNodes
 )
 
@@ -1973,11 +1999,12 @@ const (
 //
 // A node that left stays left: its record is kept, so a member that missed
 // the leave, or the node itself still running, cannot gossip it back in. Only
-// the node itself marks itself left (its leave request from its address, or
-// its own record when it answers this node's gossip round): every member
-// holds the member key, so any of them could otherwise evict any node for
-// leftRetention with one record, and a left record of a node never seen
-// creates nothing. Caller holds m.mu.
+// the node itself marks itself left (its leave request, its own record in
+// gossip it sends, or its own record when it answers this node's gossip
+// round): a record from any other member would let it evict any node for
+// leftRetention, and a left record of a node never seen creates nothing. A
+// node the enrollment host removed is never discovered again. Caller holds
+// m.mu.
 func (m *Manager) mergeDigestLocked(digest []*Node, localID, from string, now time.Time) bool {
 	members := m.memberCountLocked()
 	changed := false
@@ -1988,7 +2015,7 @@ func (m *Manager) mergeDigestLocked(digest []*Node, localID, from string, now ti
 		existing, ok := m.cluster.Nodes[n.ID]
 		switch {
 		case !ok:
-			if n.Status == NodeStatusLeft || members >= maxClusterNodes {
+			if n.Status == NodeStatusLeft || members >= maxClusterNodes || m.revokedLocked(n.ID) {
 				continue
 			}
 			m.cluster.Nodes[n.ID] = n
@@ -2222,10 +2249,15 @@ func (m *Manager) sync() {
 }
 
 // handleGossipHTTP accepts a gossip ping from another node and responds with
-// the local node's own state digest.
+// the local node's own state digest. The message must come from the node it
+// names as its sender (see peerauth.go).
 func (m *Manager) handleGossipHTTP(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	sender, ok := requirePeer(w, r)
+	if !ok {
 		return
 	}
 
@@ -2241,29 +2273,26 @@ func (m *Manager) handleGossipHTTP(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Invalid JSON", http.StatusBadRequest)
 		return
 	}
+	if incoming.SenderID != sender {
+		http.Error(w, "gossip must name its own sender", http.StatusForbidden)
+		return
+	}
 
 	now := time.Now()
 	m.mu.Lock()
-	// A node that left and still gossips (its control plane kept running)
-	// is told so, and nothing it sends is taken.
 	if m.cluster != nil {
-		if sender, ok := m.cluster.Nodes[incoming.SenderID]; ok && sender.Status == NodeStatusLeft {
-			m.mu.Unlock()
-			http.Error(w, "this node left the cluster", http.StatusGone)
-			return
-		}
-	}
-	if m.cluster != nil {
-		// Merge the sender's node digest (see mergeDigestLocked).
+		// Merge the sender's node digest (see mergeDigestLocked): the sender
+		// is authenticated, so its own record speaks for it.
 		var localID string
 		if m.cluster.LocalNode != nil {
 			localID = m.cluster.LocalNode.ID
 		}
-		// The sender ID is the pusher's own claim: a pushed digest never
-		// marks a node left (from "").
-		discovered := m.mergeDigestLocked(incoming.NodeDigest, localID, "", now)
-		// Update the sender's own record (one that left was refused above).
-		if existing, ok := m.cluster.Nodes[incoming.SenderID]; ok {
+		discovered := m.mergeDigestLocked(incoming.NodeDigest, localID, sender, now)
+		if m.applyRevocationsLocked(incoming.Revocations, now) {
+			discovered = true
+		}
+		// Update the sender's own record, unless it just said it left.
+		if existing, ok := m.cluster.Nodes[sender]; ok && existing.Status != NodeStatusLeft {
 			existing.Status = NodeStatusHealthy
 			existing.LastSeen = now
 		}
@@ -2276,19 +2305,22 @@ func (m *Manager) handleGossipHTTP(w http.ResponseWriter, r *http.Request) {
 
 	// Build response with our own digest.
 	digest := make([]*Node, 0)
+	var revocations []Revocation
+	var localID string
 	if m.cluster != nil {
 		digest = m.snapshotNodesLocked()
-	}
-	var localID string
-	if m.cluster != nil && m.cluster.LocalNode != nil {
-		localID = m.cluster.LocalNode.ID
+		revocations = m.revocationsLocked()
+		if m.cluster.LocalNode != nil {
+			localID = m.cluster.LocalNode.ID
+		}
 	}
 	m.mu.Unlock()
 
 	response := GossipMessage{
-		SenderID:   localID,
-		Timestamp:  now,
-		NodeDigest: digest,
+		SenderID:    localID,
+		Timestamp:   now,
+		NodeDigest:  digest,
+		Revocations: revocations,
 	}
 
 	w.Header().Set("Content-Type", "application/json")
@@ -2296,10 +2328,14 @@ func (m *Manager) handleGossipHTTP(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleIntelHTTP accepts threat intel from a peer node and responds with
-// the local node's own intel.
+// the local node's own intel. The intel must be the sending node's own.
 func (m *Manager) handleIntelHTTP(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	sender, ok := requirePeer(w, r)
+	if !ok {
 		return
 	}
 
@@ -2313,6 +2349,10 @@ func (m *Manager) handleIntelHTTP(w http.ResponseWriter, r *http.Request) {
 	var incoming ThreatIntel
 	if err := json.Unmarshal(body, &incoming); err != nil {
 		http.Error(w, "Invalid JSON", http.StatusBadRequest)
+		return
+	}
+	if incoming.NodeID != sender {
+		http.Error(w, "intel must be the sender's own", http.StatusForbidden)
 		return
 	}
 

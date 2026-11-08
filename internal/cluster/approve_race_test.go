@@ -2,9 +2,11 @@ package cluster
 
 import (
 	"bytes"
+	"crypto/tls"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"testing"
 )
 
@@ -29,6 +31,11 @@ func TestApproveResponseDoesNotShareTheLiveNode(t *testing.T) {
 	}
 	h := m.apiHandler()
 	key := m.memberKey()
+	// The new member's certificate, for a node ID only known once approved.
+	_, memberCSR, err := newNodeRequest()
+	if err != nil {
+		t.Fatal(err)
+	}
 	done := make(chan struct{})
 	// Started before the approval, so nothing orders its write after the
 	// handler's encode: the new member's first gossip ping.
@@ -42,6 +49,12 @@ func TestApproveResponseDoesNotShareTheLiveNode(t *testing.T) {
 					req.RemoteAddr = "10.0.0.7:40000"
 					req.Header.Set("X-Cluster-Password", pw)
 					req.Header.Set(memberKeyHeader, key)
+					req.Header.Set(clusterVersionHeader, strconv.Itoa(ProtocolVersion))
+					if chain, err := issueNodeCertificate(cl.CAKey, n.ID, memberCSR); err == nil {
+						if certs, err := parseChainPEM(chain); err == nil {
+							req.TLS = &tls.ConnectionState{PeerCertificates: certs}
+						}
+					}
 					h.ServeHTTP(httptest.NewRecorder(), req)
 					return
 				}
@@ -52,6 +65,7 @@ func TestApproveResponseDoesNotShareTheLiveNode(t *testing.T) {
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/cluster/approve", bytes.NewReader(b))
 	req.RemoteAddr = "127.0.0.1:40000"
 	req.Header.Set("X-Cluster-Password", pw)
+	req.TLS = hostTLS(t, m)
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
 	<-done

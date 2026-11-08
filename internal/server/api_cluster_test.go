@@ -124,7 +124,7 @@ func startedTestCluster(t *testing.T) (cm *cluster.Manager, c *cluster.Cluster, 
 	port := ln.Addr().(*net.TCPAddr).Port
 	_ = ln.Close()
 	cfg := cluster.DefaultClusterConfig()
-	cfg.BindAddr, cfg.BindPort, cfg.EnableEncryption, cfg.RequireApproval = "127.0.0.1", port, false, true
+	cfg.BindAddr, cfg.BindPort, cfg.RequireApproval = "127.0.0.1", port, true
 	pw = "pw-" + strings.Repeat("c", 12)
 	cm = cluster.NewManager(t.TempDir())
 	if c, err = cm.InitCluster("lab", pw, cfg); err != nil {

@@ -120,7 +120,7 @@ func TestTwoNodeJoinOverAutoTLS(t *testing.T) {
 	host := NewManager(t.TempDir())
 	cfg := DefaultClusterConfig()
 	cfg.RequireApproval = false
-	cfg.BindAddr = "127.0.0.1"
+	cfg.BindAddr, cfg.AdvertiseAddr = "127.0.0.1", "127.0.0.1"
 	cfg.BindPort = hostPort
 	cl, err := host.InitCluster("prod", password, cfg)
 	if err != nil {

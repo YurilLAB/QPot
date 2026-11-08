@@ -44,6 +44,11 @@ var errOldClusterFormat = hostsetup.E("QP-CLUSTER-001").WithWhy("this cluster us
 
 const maxNodeCSRBytes = 4096
 
+// nodeCertLifetime is how long a node certificate is valid. A node that left
+// or was removed is remembered for longer (leftRetention), so no certificate
+// it kept outlives the record that refuses it.
+const nodeCertLifetime = 365 * 24 * time.Hour
+
 func checkClusterVersion(version int) error {
 	if version < ProtocolVersion {
 		return errOldClusterFormat
@@ -200,7 +205,7 @@ func issueNodeCertificate(caKey, nodeID, csrPEM string) (string, error) {
 		DNSNames:              []string{"qpot-cluster-node"},
 		IPAddresses:           []net.IP{net.IPv4(127, 0, 0, 1)},
 		NotBefore:             time.Now().Add(-time.Hour),
-		NotAfter:              time.Now().Add(365 * 24 * time.Hour),
+		NotAfter:              time.Now().Add(nodeCertLifetime),
 		KeyUsage:              x509.KeyUsageDigitalSignature,
 		ExtKeyUsage:           []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth, x509.ExtKeyUsageClientAuth},
 		BasicConstraintsValid: true,
@@ -302,6 +307,12 @@ func verifyClusterPeer(clusterID string, certs []*x509.Certificate) error {
 }
 
 func verifyClusterPeerAt(clusterID string, certs []*x509.Certificate, now time.Time) error {
+	return verifyClusterChain(clusterID, certs, now, x509.ExtKeyUsageServerAuth)
+}
+
+// verifyClusterChain checks that certs[0] is signed by the CA whose public key
+// gives clusterID (one of certs[1:]) and may be used for usage.
+func verifyClusterChain(clusterID string, certs []*x509.Certificate, now time.Time, usage x509.ExtKeyUsage) error {
 	if len(certs) == 0 {
 		return errors.New("cluster TLS: peer sent no certificate")
 	}
@@ -313,11 +324,40 @@ func verifyClusterPeerAt(clusterID string, certs []*x509.Certificate, now time.T
 		roots := x509.NewCertPool()
 		roots.AddCert(c)
 		if _, err := certs[0].Verify(x509.VerifyOptions{Roots: roots, CurrentTime: now,
-			KeyUsages: []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth}}); err == nil {
+			KeyUsages: []x509.ExtKeyUsage{usage}}); err == nil {
 			return nil
 		}
 	}
 	return fmt.Errorf("cluster TLS: the peer's certificate is not from the CA of cluster %s", clusterID)
+}
+
+// verifyClusterClient returns the node ID a client certificate chain proves:
+// a leaf from the CA of clusterID, for client use, naming one node. The TLS
+// handshake has already checked that the client holds the leaf's key.
+func verifyClusterClient(clusterID string, certs []*x509.Certificate, now time.Time) (string, error) {
+	if err := verifyClusterChain(clusterID, certs, now, x509.ExtKeyUsageClientAuth); err != nil {
+		return "", err
+	}
+	leaf := certs[0]
+	id, ok := strings.CutPrefix(leaf.Subject.CommonName, "qpot-node ")
+	if !ok || leaf.IsCA || !validNodeID(id) {
+		return "", errors.New("cluster TLS: the peer's certificate names no node")
+	}
+	return id, nil
+}
+
+// validNodeID reports whether id has the form generateNodeID gives.
+func validNodeID(id string) bool {
+	rest, ok := strings.CutPrefix(id, NodeIDPrefix)
+	if !ok || len(rest) != NodeIDLength {
+		return false
+	}
+	for i := 0; i < len(rest); i++ {
+		if c := rest[i]; !(c >= '0' && c <= '9' || c >= 'a' && c <= 'f') {
+			return false
+		}
+	}
+	return true
 }
 
 // systemRoots is the trust store an operator certificate is checked against
@@ -380,8 +420,16 @@ func clusterTLSClientConfig(clusterID string, caPool *x509.CertPool, dialHost st
 }
 
 // clusterHTTPClient returns an HTTP client that trusts cluster peers as
-// described for clusterTLSClientConfig.
+// described for clusterTLSClientConfig and presents no certificate of its own
+// (a joiner, which has none yet).
 func clusterHTTPClient(timeout time.Duration, clusterID string, caPool *x509.CertPool, operatorCerts bool) *http.Client {
+	return clusterPeerClient(timeout, clusterID, caPool, operatorCerts, nil)
+}
+
+// clusterPeerClient is clusterHTTPClient presenting node, this node's
+// certificate, when a peer asks for one: peers serve a member's request only
+// when it comes with the member's own certificate (see peerauth.go).
+func clusterPeerClient(timeout time.Duration, clusterID string, caPool *x509.CertPool, operatorCerts bool, node *tls.Certificate) *http.Client {
 	transport := http.DefaultTransport.(*http.Transport).Clone()
 	// Dial TLS ourselves so each connection verifies against the host it was
 	// actually opened to (see clusterTLSClientConfig).
@@ -390,8 +438,11 @@ func clusterHTTPClient(timeout time.Duration, clusterID string, caPool *x509.Cer
 		if err != nil {
 			return nil, err
 		}
-		d := &tls.Dialer{NetDialer: &net.Dialer{Timeout: 10 * time.Second},
-			Config: clusterTLSClientConfig(clusterID, caPool, host, operatorCerts)}
+		cfg := clusterTLSClientConfig(clusterID, caPool, host, operatorCerts)
+		if node != nil {
+			cfg.Certificates = []tls.Certificate{*node}
+		}
+		d := &tls.Dialer{NetDialer: &net.Dialer{Timeout: 10 * time.Second}, Config: cfg}
 		return d.DialContext(ctx, network, addr)
 	}
 	return &http.Client{Timeout: timeout, Transport: transport}

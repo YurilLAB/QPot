@@ -24,23 +24,29 @@ func isMember(m *Manager, id string) bool {
 	return false
 }
 
-// leaveFrom sends m a leave request naming id from source (host:port).
-func leaveFrom(m *Manager, id, source string) *httptest.ResponseRecorder {
+// leaveFrom sends m a leave request naming id, authenticated as sender.
+func leaveFrom(m *Manager, id, sender string) *httptest.ResponseRecorder {
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/cluster/leave", strings.NewReader(`{"node_id":"`+id+`"}`))
-	req.RemoteAddr = source
 	rec := httptest.NewRecorder()
-	m.handleLeaveHTTP(rec, req)
+	m.handleLeaveHTTP(rec, fromPeer(req, sender))
 	return rec
 }
 
+// pushGossip sends m msg, authenticated as its sender.
 func pushGossip(t *testing.T, m *Manager, msg GossipMessage) *httptest.ResponseRecorder {
+	t.Helper()
+	return pushGossipAs(t, m, msg.SenderID, msg)
+}
+
+// pushGossipAs sends m msg, authenticated as sender.
+func pushGossipAs(t *testing.T, m *Manager, sender string, msg GossipMessage) *httptest.ResponseRecorder {
 	t.Helper()
 	b, err := json.Marshal(msg)
 	if err != nil {
 		t.Fatal(err)
 	}
 	rec := httptest.NewRecorder()
-	m.handleGossipHTTP(rec, httptest.NewRequest(http.MethodPost, "/api/v1/cluster/gossip", bytes.NewReader(b)))
+	m.handleGossipHTTP(rec, fromPeer(httptest.NewRequest(http.MethodPost, "/api/v1/cluster/gossip", bytes.NewReader(b)), sender))
 	return rec
 }
 
@@ -71,7 +77,7 @@ func TestLeftNodeIsNotGossipedBackIn(t *testing.T) {
 	}
 	m.mu.Unlock()
 
-	rec := leaveFrom(m, "qn_x", "127.0.0.1:40000")
+	rec := leaveFrom(m, "qn_x", "qn_x")
 	if rec.Code != http.StatusOK || isMember(m, "qn_x") {
 		t.Fatalf("x is still a member right after leaving: %d", rec.Code)
 	}
@@ -99,7 +105,7 @@ func TestLeftNodeIsNotGossipedBackIn(t *testing.T) {
 		t.Error("another member's record marked z as left")
 	}
 	// No member marks this node as left.
-	leaveFrom(m, m.LocalNodeID(), "127.0.0.1:40000")
+	leaveFrom(m, m.LocalNodeID(), "qn_y")
 	if !isMember(m, m.LocalNodeID()) {
 		t.Error("another member's /leave marked this node as left")
 	}
@@ -138,7 +144,6 @@ func TestLeaveWhileServeRuns(t *testing.T) {
 	host := NewManager(t.TempDir())
 	cfg := DefaultClusterConfig()
 	cfg.RequireApproval = false
-	cfg.EnableEncryption = false
 	cfg.BindAddr, cfg.BindPort, cfg.AdvertiseAddr = "127.0.0.1", hostPort, "127.0.0.1"
 	cfg.GossipInterval = 50 * time.Millisecond
 	cl, err := host.InitCluster("prod", password, cfg)
@@ -155,7 +160,7 @@ func TestLeaveWhileServeRuns(t *testing.T) {
 	nodeDir := t.TempDir()
 	serve := NewManager(nodeDir)
 	joined, err := serve.JoinCluster(cl.ID, password, &Node{Name: "sensor", Address: "127.0.0.1", Port: nodePort},
-		[]string{"http://127.0.0.1:" + itoa(hostPort)})
+		[]string{"127.0.0.1:" + itoa(hostPort)})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -206,7 +211,6 @@ func TestRunningManagerDoesNotRewriteRemovedClusterFile(t *testing.T) {
 	ln.Close()
 	m := NewManager(t.TempDir())
 	cfg := DefaultClusterConfig()
-	cfg.EnableEncryption = false
 	cfg.BindAddr, cfg.BindPort = "127.0.0.1", port
 	cfg.GossipInterval = time.Hour // no gossip round in this test
 	if _, err := m.InitCluster("prod", "correct-horse-battery", cfg); err != nil {
@@ -241,7 +245,7 @@ func TestLeftRecordsArePruned(t *testing.T) {
 	m.cluster.Nodes["qn_recent"] = &Node{ID: "qn_recent", Address: "127.0.0.1", Port: 7955, Status: NodeStatusLeft, LastSeen: now.Add(-leftRetention + time.Hour)}
 	m.cluster.Nodes["qn_x"] = &Node{ID: "qn_x", Address: "127.0.0.1", Port: 7956, Status: NodeStatusHealthy, LastSeen: now}
 	m.mu.Unlock()
-	if rec := leaveFrom(m, "qn_x", "127.0.0.1:40000"); rec.Code != http.StatusOK {
+	if rec := leaveFrom(m, "qn_x", "qn_x"); rec.Code != http.StatusOK {
 		t.Fatalf("x's leave: %d", rec.Code)
 	}
 	m.mu.RLock()
@@ -321,71 +325,50 @@ func TestLeftRecordOnlyFromTheNodeItself(t *testing.T) {
 	if isMember(m, "qn_z") {
 		t.Error("z's own answer that it left was not taken")
 	}
-	// A digest pushed as from x, saying x left: the sender ID is only the
-	// pusher's claim, so it is not taken either.
-	pushGossip(t, m, GossipMessage{SenderID: "qn_x", Timestamp: later, NodeDigest: []*Node{leftNode("qn_x", 7960, later)}})
+	// y pushes a digest naming x as its sender, saying x left: a push is
+	// taken only as from the node that sent it.
+	if rec := pushGossipAs(t, m, "qn_y", GossipMessage{SenderID: "qn_x", Timestamp: later, NodeDigest: []*Node{leftNode("qn_x", 7960, later)}}); rec.Code != http.StatusForbidden {
+		t.Errorf("a push from y as x: %d, want 403", rec.Code)
+	}
 	if !isMember(m, "qn_x") {
 		t.Error("a pushed digest claiming to come from x marked x as left")
+	}
+	// x itself pushes that it left: taken.
+	pushGossip(t, m, GossipMessage{SenderID: "qn_x", Timestamp: later, NodeDigest: []*Node{leftNode("qn_x", 7960, later)}})
+	if isMember(m, "qn_x") {
+		t.Error("x's own pushed record that it left was not taken")
 	}
 }
 
 // TestLeaveTakenOnlyFromTheNode: any member could send a leave naming any
-// node. A leave is now taken only from the node's registered address.
+// node, and then one sharing the node's address. A leave is now taken only
+// from the node it names, as its certificate shows.
 func TestLeaveTakenOnlyFromTheNode(t *testing.T) {
 	m := plainCluster(t)
 	now := time.Now()
 	m.mu.Lock()
 	for _, n := range []*Node{
 		{ID: "qn_x", Name: "x", Address: "10.1.1.1", Port: 7970, Status: NodeStatusHealthy, LastSeen: now},
-		{ID: "qn_y", Name: "y", Address: "10.1.1.2", Port: 7971, Status: NodeStatusHealthy, LastSeen: now},
-		{ID: "qn_h", Name: "h", Address: "localhost", Port: 7972, Status: NodeStatusHealthy, LastSeen: now},
+		{ID: "qn_y", Name: "y", Address: "10.1.1.1", Port: 7971, Status: NodeStatusHealthy, LastSeen: now},
 	} {
 		m.cluster.Nodes[n.ID] = n
 	}
 	m.mu.Unlock()
 
-	if rec := leaveFrom(m, "qn_x", "10.1.1.2:40000"); rec.Code != http.StatusForbidden || !isMember(m, "qn_x") {
-		t.Errorf("y's leave naming x: %d, x a member %v; want 403 and x kept", rec.Code, isMember(m, "qn_x"))
+	if rec := leaveFrom(m, "qn_x", "qn_y"); rec.Code != http.StatusForbidden || !isMember(m, "qn_x") {
+		t.Errorf("y's leave naming x (same address): %d, x a member %v; want 403 and x kept", rec.Code, isMember(m, "qn_x"))
 	}
-	// Loopback is this host, and x is not on it.
-	if rec := leaveFrom(m, "qn_x", "127.0.0.1:40000"); rec.Code != http.StatusForbidden || !isMember(m, "qn_x") {
-		t.Errorf("a leave naming x from this host: %d, x a member %v; want 403 and x kept", rec.Code, isMember(m, "qn_x"))
+	if rec := leaveFrom(m, m.LocalNodeID(), "qn_y"); rec.Code != http.StatusForbidden || !isMember(m, m.LocalNodeID()) {
+		t.Errorf("y's leave naming this node: %d; want 403 and this node kept", rec.Code)
 	}
-	if rec := leaveFrom(m, "qn_x", "10.1.1.1:40000"); rec.Code != http.StatusOK || isMember(m, "qn_x") {
+	if rec := leaveFrom(m, "qn_x", "qn_x"); rec.Code != http.StatusOK || isMember(m, "qn_x") {
 		t.Errorf("x's own leave: %d, x a member %v; want 200 and x gone", rec.Code, isMember(m, "qn_x"))
 	}
-	// A node registered by host name leaves from that name's address.
-	if rec := leaveFrom(m, "qn_h", "10.1.1.2:40000"); rec.Code != http.StatusForbidden || !isMember(m, "qn_h") {
-		t.Errorf("y's leave naming h: %d; want 403", rec.Code)
-	}
-	if rec := leaveFrom(m, "qn_h", "127.0.0.1:40000"); rec.Code != http.StatusOK || isMember(m, "qn_h") {
-		t.Errorf("h's own leave from localhost: %d, h a member %v", rec.Code, isMember(m, "qn_h"))
-	}
-	// A node on this host (registered at loopback or at one of this host's
-	// addresses) leaves over loopback.
-	local := "127.0.0.1"
-	if addrs, err := net.InterfaceAddrs(); err == nil {
-		for _, a := range addrs {
-			if n, ok := a.(*net.IPNet); ok && n.IP.To4() != nil && !n.IP.IsLoopback() {
-				local = n.IP.String()
-				break
-			}
-		}
-	}
-	m.mu.Lock()
-	m.cluster.Nodes["qn_lo"] = &Node{ID: "qn_lo", Name: "lo", Address: "127.0.0.1", Port: 7973, Status: NodeStatusHealthy, LastSeen: now}
-	m.cluster.Nodes["qn_here"] = &Node{ID: "qn_here", Name: "here", Address: local, Port: 7974, Status: NodeStatusHealthy, LastSeen: now}
-	m.mu.Unlock()
-	if rec := leaveFrom(m, "qn_lo", "[::1]:40000"); rec.Code != http.StatusOK || isMember(m, "qn_lo") {
-		t.Errorf("a leave naming a node at 127.0.0.1 over ::1: %d", rec.Code)
-	}
-	if rec := leaveFrom(m, "qn_here", "127.0.0.1:40000"); rec.Code != http.StatusOK || isMember(m, "qn_here") {
-		t.Errorf("a leave naming a node at this host's %s over loopback: %d", local, rec.Code)
-	}
-
-	// Unknown nodes and this node: nothing to refuse, nothing changes.
-	if rec := leaveFrom(m, "qn_unknown", "10.1.1.2:40000"); rec.Code != http.StatusOK {
-		t.Errorf("a leave naming an unknown node: %d", rec.Code)
+	// Without an authenticated sender nothing is taken.
+	rec := httptest.NewRecorder()
+	m.handleLeaveHTTP(rec, httptest.NewRequest(http.MethodPost, "/api/v1/cluster/leave", strings.NewReader(`{"node_id":"qn_y"}`)))
+	if rec.Code != http.StatusUnauthorized || !isMember(m, "qn_y") {
+		t.Errorf("a leave without an authenticated sender: %d, y a member %v", rec.Code, isMember(m, "qn_y"))
 	}
 }
 
@@ -414,7 +397,7 @@ func TestNodesThatLeftDoNotFillTheCluster(t *testing.T) {
 		t.Errorf("a join was refused: the records of nodes that left filled the cluster: %+v", r)
 	}
 
-	if rec := leaveFrom(m, "qn_x", "127.0.0.1:40000"); rec.Code != http.StatusOK {
+	if rec := leaveFrom(m, "qn_x", "qn_x"); rec.Code != http.StatusOK {
 		t.Fatalf("x's leave: %d", rec.Code)
 	}
 	m.mu.RLock()
@@ -454,7 +437,6 @@ func TestLeaveWithAMemberOffline(t *testing.T) {
 	hostPort := free()
 	host := NewManager(t.TempDir())
 	cfg := DefaultClusterConfig()
-	cfg.EnableEncryption = false
 	cfg.BindAddr, cfg.BindPort, cfg.AdvertiseAddr = "127.0.0.1", hostPort, "127.0.0.1"
 	cfg.GossipInterval = 50 * time.Millisecond
 	cl, err := host.InitCluster("prod", password, cfg) // joins need approval
@@ -466,7 +448,7 @@ func TestLeaveWithAMemberOffline(t *testing.T) {
 	}
 	defer host.Stop()
 	waitListening(t, hostPort)
-	seed := []string{"http://127.0.0.1:" + itoa(hostPort)}
+	seed := []string{"127.0.0.1:" + itoa(hostPort)}
 
 	// join admits a new node through the host's approval and starts it.
 	join := func(name string) (*Manager, string) {

@@ -211,7 +211,7 @@ func TestOldClusterFileLosesQPotIDs(t *testing.T) {
 		}},
 	})
 	rec := httptest.NewRecorder()
-	m.handleGossipHTTP(rec, httptest.NewRequest(http.MethodPost, "/api/v1/cluster/gossip", bytes.NewReader(in)))
+	m.handleGossipHTTP(rec, fromPeer(httptest.NewRequest(http.MethodPost, "/api/v1/cluster/gossip", bytes.NewReader(in)), "node_oldpeer"))
 	if rec.Code != http.StatusOK {
 		t.Fatalf("an older peer's gossip was refused: %d %s", rec.Code, rec.Body)
 	}

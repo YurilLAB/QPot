@@ -843,6 +843,13 @@ Exit status 0 means success; 1 is a usage error (an unknown flag).
 - Why: The new cluster state was atomically activated, but syncing its directory failed.
 - Fix: Do not rerun the upgrade or restore the old CA. Inspect qpot cluster status and the private backup, correct the filesystem issue, and keep the new trust state.
 
+### QP-CLUSTER-010
+
+**Cluster encryption is off.**
+
+- Why: Members prove which node they are with their node certificate in the TLS handshake, so a cluster without TLS cannot tell its members apart.
+- Fix: Set "enable_encryption": true in ~/.qpot/cluster/cluster.json on every node, then restart their control planes.
+
 ## Interrupted (`INT`, exit 130)
 
 ### QP-INT-001

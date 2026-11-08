@@ -929,7 +929,8 @@ Typical flow:
   qpot cluster join   --id <group-id>   # pair another node into the group
   qpot cluster status                   # show the group summary
   qpot cluster nodes                    # list paired honeypots
-  qpot cluster leave                    # unpair this node`,
+  qpot cluster leave                    # unpair this node
+  qpot cluster remove <node-id>         # on the enrollment host: remove another node`,
 	}
 
 	cmd.AddCommand(newClusterInitCommand())
@@ -941,6 +942,7 @@ Typical flow:
 	cmd.AddCommand(newClusterRequestsCommand())
 	cmd.AddCommand(newClusterApproveCommand())
 	cmd.AddCommand(newClusterDenyCommand())
+	cmd.AddCommand(newClusterRemoveCommand())
 
 	return cmd
 }
@@ -1564,6 +1566,36 @@ func newClusterApproveCommand() *cobra.Command {
 				return fmt.Errorf("authentication failed: wrong cluster password")
 			default:
 				return fmt.Errorf("approve failed (%d): %s", code, string(out))
+			}
+		},
+	}
+	cmd.Flags().StringVarP(&password, "password", "p", "", "cluster password (default: QPOT_CLUSTER_PASSWORD or the stored cluster secret)")
+	return cmd
+}
+
+func newClusterRemoveCommand() *cobra.Command {
+	var password string
+	cmd := &cobra.Command{
+		Use:   "remove <node-id>",
+		Short: "Remove a node from the cluster (enrollment host only)",
+		Long: "Remove a member, for example one that is compromised or gone for good. Run it on the enrollment host: " +
+			"it signs the removal with the cluster CA, and every member refuses the node from then on, whatever credentials " +
+			"it kept. The node IDs are listed by 'qpot cluster nodes'. A removed node can only come back by joining again.",
+		Args: cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			reqBody, _ := json.Marshal(map[string]string{"node_id": args[0]})
+			out, code, err := clusterAPIRequest(http.MethodPost, "/remove", password, reqBody)
+			if err != nil {
+				return err
+			}
+			switch code {
+			case http.StatusOK:
+				fmt.Printf("[OK] Removed node %s; the other members refuse it once gossip reaches them\n", termSafe(args[0]))
+				return nil
+			case http.StatusUnauthorized:
+				return fmt.Errorf("authentication failed: wrong cluster password")
+			default:
+				return fmt.Errorf("remove failed (%d): %s", code, termSafe(strings.TrimSpace(string(out))))
 			}
 		},
 	}

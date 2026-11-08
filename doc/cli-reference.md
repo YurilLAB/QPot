@@ -506,6 +506,7 @@ qpot cluster [command]
 | `requests` | List pending join requests awaiting approval. |
 | `approve <request-id>` | Approve a pending join request. |
 | `deny <request-id>` | Deny a pending join request. |
+| `remove <node-id>` | Remove another node from the cluster (enrollment host only). |
 | `nodes` | List paired nodes. |
 | `status` | Show the cluster summary. |
 | `leave` | Unpair this node from the cluster. |
@@ -584,10 +585,14 @@ qpot cluster deny    <request-id> [-p <password>]
 
 The request list shows the requester's **real source IP** (taken from the
 connection, not the request body) alongside its claimed hostname and instance.
+These commands connect over loopback and present the host's own node
+certificate, so a member or a pending joiner on the same machine, which knows
+the password too, cannot approve anything.
 
-On approval the joiner receives the cluster's **member key**, which the peer
-endpoints (gossip, intel, nodes, status, leave) require besides the password,
-and a signed **node certificate** for a private key generated on the joiner.
+On approval the joiner receives the cluster's **member key** and a signed
+**node certificate** for a private key generated on the joiner. The peer
+endpoints (gossip, intel, nodes, status, leave) require the password, the
+member key and, in the TLS handshake, the sender's own node certificate.
 The private node key never leaves the node; the CA key stays only on the host
 that ran `cluster init`. Use that enrollment host as `--seed`; ordinary members
 cannot enroll others. The cluster ID is the authority's fingerprint, so the
@@ -637,7 +642,7 @@ the new version on restart. Keep independent storage backups for power-loss or
 filesystem recovery. Configuration backups contain old secrets and must remain
 private; do not restore their old CA into the upgraded cluster's trust.
 
-Upgrade/enrollment failures use `QP-CLUSTER-001` through `QP-CLUSTER-009` with
+Upgrade/enrollment failures use `QP-CLUSTER-001` through `QP-CLUSTER-010` with
 actionable guidance; join API failures also expose `error_code`. Code `009`
 means activation completed but filesystem durability is uncertain: inspect
 the active new state and backup, and never automatically restore the old CA.
@@ -655,26 +660,44 @@ qpot cluster leave [flags]
 The node tells every member it can reach that it left, then removes its
 `cluster.json`; a `qpot serve` still running for it stops its cluster
 membership at its next gossip round instead of carrying on. Members that got
-the leave keep the node as *left* for 30 days, so no other member's gossip can
-bring it back. A member that was offline still lists it, as failed once it
-cannot reach it.
+the leave keep the node as *left* for a year and a day, longer than its
+certificate is valid, and refuse it: no other member's gossip can bring it
+back, and copies of its credentials no longer work. A member that was offline
+still lists it, as failed once it cannot reach it.
 To come back, the node joins again and is approved like a new one; it gets a
 new node ID.
+
+### `qpot cluster remove`
+
+```text
+qpot cluster remove <node-id> [-p <password>]
+```
+
+Run on the **enrollment host** to remove another node, for example one that
+is compromised or gone for good (`qpot cluster nodes` lists the IDs). The host
+signs the removal with the cluster CA key and saves it; gossip carries it to
+every member, which checks the signature against the CA the cluster ID names
+and saves it too. From then on every member refuses the node, whatever
+credentials it kept, also after restarts, and gossip never adds it back. The
+command presents the host's own node certificate over loopback, so only that
+host's operator can run it. A removed node can come back only by joining again
+under a new node ID.
 
 ### Who is trusted with membership
 
 Every admitted member holds the cluster password, the member key and a node
-certificate of its own (never the CA key), so the cluster trusts every member
-with its membership: any member can add nodes through gossip, and nothing in a
-request proves which member sent it, as members present no client certificate
-to each other. Approve only nodes you control. A node's departure is the
-exception, taken only from the node itself as far as its address shows: a
-leave request counts only when it comes from the address the node is
-registered with, gossip pushed to a member never marks a node as left, and the
-only gossip that does is a node's own answer when a member contacts it. A node
-that leaves from behind NAT is refused; it has stopped, so the members mark it
-failed when they cannot reach it. Clusters created before the member key
-existed do not start until upgraded (`qpot cluster upgrade`).
+certificate of its own (never the CA key). Each peer request presents the
+sender's node certificate in the TLS handshake, and is served only while that
+node is a member: a node that left, or that the enrollment host removed, is
+refused whatever credentials it kept. A request speaks only for its sender:
+gossip and intel must carry the sender's own node ID, and a leave must name
+the node that sends it, so no member can remove another or post intel in its
+name. Removing another node is the enrollment host's decision
+(`qpot cluster remove`). Members still pass on what they know of the others
+through gossip, so approve only nodes you control. Clusters created before the
+member key existed do not start until upgraded (`qpot cluster upgrade`), and a
+cluster with encryption off does not start (`QP-CLUSTER-010`): without TLS no
+request could show which member sent it.
 
 ### `qpot cluster nodes` / `qpot cluster status`
 

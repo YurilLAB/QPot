@@ -34,7 +34,7 @@ func TestGossipHandlerRejectsMalformedNodes(t *testing.T) {
 		`{"sender_id":"x","node_digest":[{"id":"n3","address":"1.2.3.4","port":99999}]}`,
 	}
 	for _, b := range bodies {
-		req := httptest.NewRequest(http.MethodPost, "/api/v1/cluster/gossip", bytes.NewBufferString(b))
+		req := fromPeer(httptest.NewRequest(http.MethodPost, "/api/v1/cluster/gossip", bytes.NewBufferString(b)), "x")
 		req.Header.Set("X-Cluster-Password", pw)
 		rec := httptest.NewRecorder()
 		m.withClusterAuth(m.handleGossipHTTP)(rec, req) // must not panic
@@ -110,6 +110,10 @@ func FuzzClusterHandlers(f *testing.F) {
 		`{"cluster_id":"x","password":"y"}`,
 		`{"top_ips":[{"ip":"1.1.1.1","count":-5}]}`,
 		`[]`, `null`, `not json`, `{"node_digest":123}`,
+		// The handlers act only for the sending node (here "x").
+		`{"sender_id":"x","node_digest":[null,{"id":"n1","address":"1.2.3.4","port":7946}]}`,
+		`{"sender_id":"x","revocations":[{"node_id":"qn_0123456789abcdef","revoked_at":"2026-01-01T00:00:00Z","signature":"AA=="}]}`,
+		`{"node_id":"x","top_source_ips":[{"ip":"1.1.1.1","count":-5}]}`,
 	}
 	for _, s := range seeds {
 		f.Add(s)
@@ -137,7 +141,7 @@ func FuzzClusterHandlers(f *testing.F) {
 			{"/api/v1/cluster/gossip", m.handleGossipHTTP},
 			{"/api/v1/cluster/intel", m.handleIntelHTTP},
 		} {
-			req := httptest.NewRequest(http.MethodPost, h.path, bytes.NewBufferString(body))
+			req := fromPeer(httptest.NewRequest(http.MethodPost, h.path, bytes.NewBufferString(body)), "x")
 			req.Header.Set("X-Cluster-Password", pw)
 			rec := httptest.NewRecorder()
 			h.handler(rec, req) // must not panic

@@ -53,12 +53,27 @@ func TestClusterApprovalIsHostOnly(t *testing.T) {
 	if n := len(seed.GetNodes()); n != 1 {
 		t.Fatalf("joiner admitted itself: %d nodes", n)
 	}
+	// A joiner on the host's own machine (loopback) has the password too, but
+	// not the host's node certificate.
+	for _, presented := range []*tls.ConnectionState{nil, nodeTLS(t, seed, testNodeID(t))} {
+		ab, _ := json.Marshal(map[string]string{"request_id": jr.RequestID})
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/cluster/approve", bytes.NewReader(ab))
+		req.RemoteAddr = "127.0.0.1:50000"
+		req.Header.Set("X-Cluster-Password", pw)
+		req.TLS = presented
+		rec = httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		if rec.Code != http.StatusForbidden || len(seed.GetNodes()) != 1 {
+			t.Fatalf("approve over loopback without the host's certificate: %d, %d nodes", rec.Code, len(seed.GetNodes()))
+		}
+	}
 
-	// The host (loopback) can still approve.
+	// The host's operator (loopback, the host's certificate) can still approve.
 	ab, _ := json.Marshal(map[string]string{"request_id": jr.RequestID})
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/cluster/approve", bytes.NewReader(ab))
 	req.RemoteAddr = "127.0.0.1:50000"
 	req.Header.Set("X-Cluster-Password", pw)
+	req.TLS = hostTLS(t, seed)
 	rec = httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
 	if rec.Code != http.StatusOK || len(seed.GetNodes()) != 2 {

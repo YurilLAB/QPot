@@ -3,6 +3,7 @@ package cluster
 import (
 	"bytes"
 	"context"
+	"crypto/tls"
 	"encoding/json"
 	"net"
 	"net/http"
@@ -57,12 +58,14 @@ func TestGossipedAddressCannotRewriteRequests(t *testing.T) {
 	hostPort := strings.TrimPrefix(srv.URL, "http://")
 
 	m := plainCluster(t)
-	digest, _ := json.Marshal(GossipMessage{SenderID: "qn_x", NodeDigest: []*Node{
+	x := addMember(m, testNodeID(t), "10.0.0.9", 7946)
+	digest, _ := json.Marshal(GossipMessage{SenderID: x.ID, NodeDigest: []*Node{
 		{ID: "qn_evil", Address: hostPort + "/admin/reset?", Port: 7946, Status: NodeStatusHealthy},
 		{ID: "qn_evil2", Address: "user@" + hostPort + "#", Port: 7946, Status: NodeStatusHealthy},
 	}})
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/cluster/gossip", bytes.NewReader(digest))
 	setPeerAuth(req, "password123", m.memberKey())
+	req.TLS = nodeTLS(t, m, x.ID)
 	rec := httptest.NewRecorder()
 	m.apiHandler().ServeHTTP(rec, req)
 	if rec.Code != http.StatusOK {
@@ -183,15 +186,30 @@ func TestJoinFloodFromOneSourceLeavesRoom(t *testing.T) {
 
 // TestPeerIntelOnlyFromMembers: intel was stored under whatever node_id the
 // body named, so one password holder could fill the map with any number of
-// 1 MiB entries.
+// 1 MiB entries. A member's intel is now taken only as its own.
 func TestPeerIntelOnlyFromMembers(t *testing.T) {
 	m := plainCluster(t)
 	h := m.apiHandler()
-	for i := 0; i < 500; i++ {
-		body, _ := json.Marshal(ThreatIntel{NodeID: "qn_fake" + strconv.Itoa(i), TopSourceIPs: []IPCount{{IP: "203.0.113.1", Count: 1}}})
+	member := addMember(m, testNodeID(t), "10.0.0.2", 7946)
+	memberTLS := nodeTLS(t, m, member.ID)
+	send := func(state *tls.ConnectionState, nodeID string) int {
+		body, _ := json.Marshal(ThreatIntel{NodeID: nodeID, TopSourceIPs: []IPCount{{IP: "203.0.113.1", Count: 1}}})
 		req := httptest.NewRequest(http.MethodPost, "/api/v1/cluster/intel", bytes.NewReader(body))
 		setPeerAuth(req, "password123", m.memberKey())
-		h.ServeHTTP(httptest.NewRecorder(), req)
+		req.TLS = state
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		return rec.Code
+	}
+	// No node certificate, or a member's naming other nodes.
+	for i := 0; i < 500; i++ {
+		state := memberTLS
+		if i%2 == 0 {
+			state = nil
+		}
+		if code := send(state, "qn_fake"+strconv.Itoa(i)); code == http.StatusOK {
+			t.Fatalf("intel naming another node was taken: %d", code)
+		}
 	}
 	m.mu.RLock()
 	got := len(m.peerIntel)
@@ -200,16 +218,9 @@ func TestPeerIntelOnlyFromMembers(t *testing.T) {
 		t.Fatalf("stored intel for %d nodes that are not members", got)
 	}
 
-	// A member's intel is still kept.
-	m.mu.Lock()
-	m.cluster.Nodes["qn_member"] = &Node{ID: "qn_member", Address: "10.0.0.2", Port: 7946, Status: NodeStatusHealthy}
-	m.mu.Unlock()
-	body, _ := json.Marshal(ThreatIntel{NodeID: "qn_member"})
-	req := httptest.NewRequest(http.MethodPost, "/api/v1/cluster/intel", bytes.NewReader(body))
-	setPeerAuth(req, "password123", m.memberKey())
-	h.ServeHTTP(httptest.NewRecorder(), req)
-	if len(m.GetThreatIntel()) != 1 {
-		t.Fatal("member intel was not stored")
+	// A member's own intel is still kept.
+	if code := send(memberTLS, member.ID); code != http.StatusOK || len(m.GetThreatIntel()) != 1 {
+		t.Fatalf("member intel was not stored: %d", code)
 	}
 }
 
@@ -232,23 +243,20 @@ func loopGoroutines(fn string) int {
 // the new channel and ticker and kept running next to the loop the new Start
 // launched, so each restart added another gossip and sync loop.
 func TestRestartDoesNotShareLoopState(t *testing.T) {
-	slow := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		time.Sleep(150 * time.Millisecond)
-		_ = json.NewEncoder(w).Encode(GossipMessage{SenderID: "qn_peer"})
-	})
-	srv := httptest.NewServer(slow)
-	defer srv.Close()
-	host, port := peerAddr(t, srv.URL)
-
 	m := NewManager(t.TempDir())
 	cfg := DefaultClusterConfig()
-	cfg.EnableEncryption = false
 	cfg.BindAddr, cfg.BindPort = "127.0.0.1", 0
 	cfg.GossipInterval = 10 * time.Millisecond
 	cfg.SyncInterval = 10 * time.Millisecond
 	if _, err := m.InitCluster("c", "password123", cfg); err != nil {
 		t.Fatal(err)
 	}
+	slow := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		time.Sleep(150 * time.Millisecond)
+		_ = json.NewEncoder(w).Encode(GossipMessage{SenderID: "qn_peer"})
+	})
+	srv := servePeerTLS(t, m, slow)
+	host, port := urlHostPort(t, srv.URL)
 	m.UpdateThreatIntel([]IPCount{{IP: "203.0.113.5", Count: 1}})
 	m.mu.Lock()
 	m.cluster.Nodes["qn_peer"] = &Node{ID: "qn_peer", Address: host, Port: port, Status: NodeStatusHealthy}
@@ -318,10 +326,14 @@ func TestPasswordGuessingIsThrottled(t *testing.T) {
 		t.Fatal(err)
 	}
 	h := m.apiHandler()
+	// Every request presents a member's certificate (this node's): what is
+	// under test is the password check before it.
+	own := hostTLS(t, m)
 	status := func(remote, password string) int {
 		req := httptest.NewRequest(http.MethodGet, "/api/v1/cluster/status", nil)
 		req.RemoteAddr = remote
 		setPeerAuth(req, password, m.memberKey())
+		req.TLS = own
 		rec := httptest.NewRecorder()
 		h.ServeHTTP(rec, req)
 		return rec.Code
@@ -375,10 +387,14 @@ func TestThrottleTableFullKeepsBlocks(t *testing.T) {
 	m.cluster.Nodes["peer6"] = &Node{ID: "peer6", Address: "2001:db8:ffff::10", Port: 7946}
 	m.mu.Unlock()
 	h := m.apiHandler()
+	// Every request presents a member's certificate (this node's): what is
+	// under test is the password check before it.
+	own := hostTLS(t, m)
 	status := func(remote, password string) int {
 		req := httptest.NewRequest(http.MethodGet, "/api/v1/cluster/status", nil)
 		req.RemoteAddr = remote
 		setPeerAuth(req, password, m.memberKey())
+		req.TLS = own
 		rec := httptest.NewRecorder()
 		h.ServeHTTP(rec, req)
 		return rec.Code
@@ -504,15 +520,13 @@ func TestApprovedMemberStillGossips(t *testing.T) {
 	const pw = "correct-horse-battery"
 	host := NewManager(t.TempDir())
 	cfg := DefaultClusterConfig()
-	cfg.EnableEncryption = false
 	cfg.RequireApproval = false
 	cl, err := host.InitCluster("prod", pw, cfg)
 	if err != nil {
 		t.Fatal(err)
 	}
-	srv := httptest.NewServer(host.apiHandler())
-	defer srv.Close()
-	hostIP, hostPort := peerAddr(t, srv.URL)
+	srv := serveTLS(t, host)
+	hostIP, hostPort := urlHostPort(t, srv.URL)
 	host.mu.Lock()
 	host.cluster.LocalNode.Address, host.cluster.LocalNode.Port = hostIP, hostPort
 	host.mu.Unlock()

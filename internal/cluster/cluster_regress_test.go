@@ -78,7 +78,7 @@ func TestGossipHandlerEnforcesNodeCap(t *testing.T) {
 			fmt.Fprintf(&buf, `{"id":"n%d_%d","address":"a","port":1}`, batch, i)
 		}
 		buf.WriteString(`]}`)
-		req := httptest.NewRequest(http.MethodPost, "/api/v1/cluster/gossip", &buf)
+		req := fromPeer(httptest.NewRequest(http.MethodPost, "/api/v1/cluster/gossip", &buf), "x")
 		rec := httptest.NewRecorder()
 		m.handleGossipHTTP(rec, req)
 		if rec.Code != 200 {

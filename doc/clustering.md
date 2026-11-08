@@ -17,6 +17,7 @@ qpot cluster init --name production                                   # on the e
 qpot cluster join --id qc_... --password '...' --seed 10.0.0.10:7946  # on each sensor
 qpot cluster requests --password '...'                                # on the host: pending joiners
 qpot cluster approve <request-id> --password '...'                    # or deny
+qpot cluster remove <node-id>                                         # on the host: remove a node
 qpot cluster status
 ```
 
@@ -52,14 +53,31 @@ a certificate from your own or a public CA (`tls_cert_path` in
 `cluster.json`), add `--operator-cert`, or `--ca-file <bundle.pem>` to check it
 against a specific CA bundle.
 
-Every approved member is trusted with the membership. A node's departure is
-accepted only from the node itself, as far as its address shows. Nodes never
-send each other their QPot IDs. The full trust model is in the CLI reference:
+Every request between nodes also carries the sender's own node certificate,
+so a node knows which member is asking:
+
+- A node that left, or that the host removed, is refused, whatever credentials
+  it kept.
+- A node speaks only for itself: no member can remove another, or send gossip
+  or intel in another's name.
+- Removing a node is the enrollment host's decision: `qpot cluster remove
+  <node-id>`, signed with the cluster CA so members can check it.
+
+Nodes never send each other their QPot IDs. The full trust model is in the CLI
+reference:
 [who is trusted with membership](cli-reference.md#who-is-trusted-with-membership).
 
 ## Upgrading an older cluster
 
-Clusters made before per-node certificates need an explicit upgrade:
+**From a release before node certificates were checked on every request**
+(QPot 1.0.1 and earlier): update QPot on every node and restart the control
+planes. Existing certificates already work for this, so nothing is re-enrolled
+and the cluster ID stays. Until a node is updated, the updated nodes refuse its
+requests, so update them all together. A cluster whose `cluster.json` has
+`"enable_encryption": false` must turn it on, on every node
+([QP-CLUSTER-010](setup-errors.md#qp-cluster-010)).
+
+**Clusters made before per-node certificates** need an explicit upgrade:
 
 1. Stop the old control planes.
 2. Update QPot on every node.
@@ -81,5 +99,9 @@ signing keys are never trusted by the upgraded cluster.
   days left.
 - **The password** is stored in `~/.qpot/cluster/cluster.secret`, readable
   only by you, or read from the `QPOT_CLUSTER_PASSWORD` environment variable.
-- **Nodes that leave** are remembered as left for 30 days, so gossip from a
-  member that missed the leave cannot bring them back.
+- **Nodes that leave or are removed** are remembered for a year and a day,
+  longer than their certificates are valid, so gossip from a member that
+  missed the leave cannot bring them back.
+- **Remove a node** that is compromised or gone for good with
+  `qpot cluster remove <node-id>` on the enrollment host. Every member refuses
+  it from then on, also after restarts.

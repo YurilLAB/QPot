@@ -88,7 +88,7 @@ func startTLSNode(t *testing.T, name, password string) (*Manager, *Cluster, stri
 // from its cluster's CA: a client that knows the cluster ID trusts it, one
 // pinned to another cluster and plain system roots do not.
 func TestAutoTLSServesAndVerifies(t *testing.T) {
-	_, c, base := startTLSNode(t, "tls-test", "password123")
+	m, c, base := startTLSNode(t, "tls-test", "password123")
 	get := func(client *http.Client) (int, error) {
 		req, _ := http.NewRequest(http.MethodGet, base+"/api/v1/cluster/status", nil)
 		setPeerAuth(req, "password123", c.MemberKey)
@@ -99,8 +99,19 @@ func TestAutoTLSServesAndVerifies(t *testing.T) {
 		resp.Body.Close()
 		return resp.StatusCode, nil
 	}
-	if code, err := get(clusterHTTPClient(3*time.Second, c.ID, nil, true)); err != nil || code != http.StatusOK {
+	// A member presents its own node certificate (the host is the only one).
+	m.mu.RLock()
+	own, err := nodeCertificate(c.ID, c.LocalNode.ID, c.NodeCertificate, c.NodeKey)
+	m.mu.RUnlock()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if code, err := get(clusterPeerClient(3*time.Second, c.ID, nil, true, &own)); err != nil || code != http.StatusOK {
 		t.Fatalf("member client: code=%d err=%v", code, err)
+	}
+	// Without a node certificate the password and member key are not enough.
+	if code, err := get(clusterHTTPClient(3*time.Second, c.ID, nil, true)); err != nil || code != http.StatusUnauthorized {
+		t.Fatalf("client without a node certificate: code=%d err=%v", code, err)
 	}
 	_, other, _ := newClusterCA()
 	if _, err := get(clusterHTTPClient(3*time.Second, other, nil, true)); err == nil {
@@ -813,6 +824,7 @@ func TestMemberEndpointsRejectIncompatibleProtocol(t *testing.T) {
 		req := httptest.NewRequest(http.MethodGet, "/api/v1/cluster/status", nil)
 		setPeerAuth(req, "password123", c.MemberKey)
 		req.Header.Set(clusterVersionHeader, version)
+		req.TLS = hostTLS(t, m)
 		recorder := httptest.NewRecorder()
 		m.apiHandler().ServeHTTP(recorder, req)
 		if version == strconv.Itoa(ProtocolVersion) {
