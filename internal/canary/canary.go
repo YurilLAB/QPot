@@ -409,7 +409,10 @@ func (t *Trip) ToEvent() *database.Event {
 		proto = "credential"
 	}
 	meta := map[string]string{
-		"severity":    "critical",
+		"severity": "critical",
+		// The trip's ID identifies its event: a replay of a trip whose
+		// insert may have reached the database looks it up by this.
+		"trip_id":     t.ID,
 		"canary_id":   t.CanaryID,
 		"canary_name": t.Name,
 		"canary_kind": string(t.Kind),

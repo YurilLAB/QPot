@@ -27,6 +27,14 @@ A canary trip is just an event tagged `honeypot="canary"`, so it flows through
 the *existing* pipeline — the attacker activity feed, IOC extraction and the
 local overview — with no special-casing downstream.
 
+A trip is written to `<data>/canary-outbox/` and synced to disk before it goes
+to the database, and that file is removed once the database holds the trip's
+event and IOCs. When the database is down or restarting, or was not reachable
+when the control plane started, the control plane tries again every 15 seconds
+and at its next start. Each event carries its trip's ID (`metadata.trip_id`),
+so a retry never writes the event twice. At most 10,000 trips wait; beyond
+that a trip is tried once and kept only in the canary history.
+
 ## Canary kinds
 
 | Kind   | What it is | How it trips | Plant it as… |

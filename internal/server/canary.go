@@ -190,31 +190,21 @@ func (s *Server) serveCanaryDecoy(w http.ResponseWriter) {
 
 // onCanaryTrip is invoked once per recorded trip (from either channel). It logs
 // a high-visibility alert and emits the trip as a classified canary event into
-// the events pipeline so it shows up in the feed, IOC store and overview.
+// the events pipeline so it shows up in the feed, IOC store and overview,
+// through the outbox when the database cannot take it yet.
 func (s *Server) onCanaryTrip(ctx context.Context, trip *canary.Trip) {
 	slog.Warn("CANARY TRIPPED",
 		"canary_id", trip.CanaryID, "name", trip.Name, "kind", trip.Kind,
 		"channel", trip.Channel, "source_ip", trip.SourceIP, "memo", trip.Memo)
 
-	if s.database == nil {
-		return
-	}
 	event := trip.ToEvent()
 	var iocs []*database.IOC
 	if s.classifier != nil {
 		iocs = s.classifier.ExtractIOCs(event)
 	}
-	// Bounded context so a slow DB never blocks the calling goroutine.
-	insCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
-	defer cancel()
-	if err := s.database.InsertEvent(insCtx, event); err != nil {
-		slog.Error("canary: failed to insert trip event", "error", err)
-	}
-	if len(iocs) > 0 {
-		if err := s.database.InsertIOCs(insCtx, iocs); err != nil {
-			slog.Warn("canary: failed to insert trip IOCs", "error", err)
-		}
-	}
+	// Through the outbox (canary_outbox.go), so a database that is down or
+	// restarting, or not reached yet, still gets the trip later.
+	s.queueCanaryTrip(ctx, trip, event, iocs)
 }
 
 // canaryView renders a canary for an API response, including the beacon URL for

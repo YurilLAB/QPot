@@ -53,6 +53,9 @@ type Server struct {
 	// canaries is the canary (honeytoken) registry. nil when the subsystem is
 	// disabled, in which case the beacon and management routes are not served.
 	canaries *canary.Store
+	// canaryOutbox holds canary trips the database has not taken yet (see
+	// canary_outbox.go). nil without the canary subsystem.
+	canaryOutbox *canaryOutbox
 	// planted is followPlanted's state: the planted canaries follow the
 	// instance's config file while the server runs.
 	planted plantedFollower
@@ -170,6 +173,9 @@ func New(cfg *config.Config) (*Server, error) {
 			// followPlanted retries the desired plan before subsequent reads.
 			if err := cs.SyncPlanted(instance.PlantedCanaries(cfg)); err != nil {
 				slog.Warn("Canary watches not updated; previous registry retained, newly planned values may be unwatched until storage recovers", "error", err)
+			}
+			if s.canaryOutbox, err = newCanaryOutbox(cfg.DataPath); err != nil {
+				slog.Error("Canary outbox unavailable; a trip the database refuses is only logged", "error", err)
 			}
 		}
 	}
@@ -404,6 +410,11 @@ func (s *Server) Start(ctx context.Context) error {
 	// matches what this misses; without it the honeypot channel is off.
 	if s.canaries != nil && s.database != nil && s.worker != nil {
 		go s.canaryScanLoop(ctx)
+	}
+	// Canary trips the database did not take yet, this run's or an earlier
+	// one's (canary_outbox.go).
+	if s.canaryOutbox != nil && s.database != nil {
+		go s.canaryOutboxLoop(ctx)
 	}
 
 	// Start intelligence worker goroutine when enabled.
