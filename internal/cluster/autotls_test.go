@@ -555,14 +555,24 @@ func TestAuthorityRenewsOnlyItsOwnValidatedIdentity(t *testing.T) {
 
 func testLegacyCluster(t *testing.T) (*Manager, *Cluster, []byte) {
 	t.Helper()
+	m, c, raw, ln := testLegacyClusterListening(t)
+	ln.Close()
+	return m, c, raw
+}
+
+// testLegacyClusterListening is testLegacyCluster with the cluster's port still
+// held open, for a test that needs a live listener on it. Closing the port and
+// binding it again lets a parallel process take it in between.
+func testLegacyClusterListening(t *testing.T) (*Manager, *Cluster, []byte, net.Listener) {
+	t.Helper()
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(func() { ln.Close() })
 	cfg := DefaultClusterConfig()
 	cfg.BindAddr, cfg.AdvertiseAddr = "127.0.0.1", "127.0.0.1"
 	cfg.BindPort = ln.Addr().(*net.TCPAddr).Port
-	ln.Close()
 	cfg.RequireApproval = false // preserve operator settings during upgrade
 	m := NewManager(t.TempDir())
 	c, err := m.InitCluster("preserved-production", "password123", cfg)
@@ -585,7 +595,7 @@ func testLegacyCluster(t *testing.T) (*Manager, *Cluster, []byte) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	return m, c, old
+	return m, c, old, ln
 }
 
 func requireClusterCode(t *testing.T, err error, code string) {
@@ -678,17 +688,16 @@ func TestClusterUpgradePreservesSettingsAndDataWithNewTrust(t *testing.T) {
 func TestClusterUpgradeFailuresLeaveActiveStateUntouched(t *testing.T) {
 	for _, mode := range []string{"locked", "active-listener", "stale-lock", "changed-config", "operator-tls", "backup-write", "stage-write", "backup-sync", "concurrent-change", "activation-failure", "interrupted-staging"} {
 		t.Run(mode, func(t *testing.T) {
-			m, old, raw := testLegacyCluster(t)
+			m, old, raw, held := testLegacyClusterListening(t)
+			if mode != "active-listener" {
+				held.Close()
+			}
 			wantCode := "QP-CLUSTER-006"
 			switch mode {
 			case "locked":
 				m.plainPassword = ""
 			case "active-listener":
-				ln, err := net.Listen("tcp", net.JoinHostPort(old.Config.BindAddr, strconv.Itoa(old.Config.BindPort)))
-				if err != nil {
-					t.Fatal(err)
-				}
-				defer ln.Close()
+				// held, the cluster port's own listener, stays open.
 			case "stale-lock":
 				if err := os.WriteFile(filepath.Join(m.dataPath, "cluster.upgrade.lock"), []byte("interrupted owner"), 0600); err != nil {
 					t.Fatal(err)
