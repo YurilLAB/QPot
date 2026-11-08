@@ -5,10 +5,7 @@
 HTTP, with virtual refrigeration equipment. It is separate from Conpot and is
 disabled by default, including when an existing instance is upgraded.
 
-This service requires a current `main` source build; the v1.0.0 release and
-pinned installers do not include it. Follow the [source installation
-instructions](installation.md#install-the-qpot-program) and use the resulting
-`./qpot` binary for the commands below.
+QPot 1.0.1 and later include this service.
 
 ## Start and configure
 

@@ -39,11 +39,6 @@ irm https://raw.githubusercontent.com/YurilLAB/QPot/main/scripts/install.ps1 | i
 git clone https://github.com/YurilLAB/QPot.git && cd QPot && make build
 ```
 
-The release installers currently install v1.0.0. The new industrial profile
-catalog and refrigeration supervisor are unreleased features on `main`; use
-the source-build option above to try them. It creates `./qpot`; run that binary
-to use the additions.
-
 The installers offer to run `qpot setup` straight away. `QPOT_NO_SETUP=1`
 installs the program only, and `QPOT_SETUP_ARGS="--yes --install-docker"` runs
 setup without questions.

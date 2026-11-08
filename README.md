@@ -21,11 +21,6 @@ attacker, every QPot instance is a believable machine of its own. QPot also
 keeps the honeypots away from your network, analyses what attackers do, and
 brings T-Pot's web interface with a dashboard for all of it.
 
-This README describes `main`. The new industrial profile catalog and refrigeration
-supervisor are unreleased; the installers below still install v1.0.0. To try these
-additions, [build the current source](doc/installation.md#install-the-qpot-program)
-and run the resulting `./qpot` binary.
-
 ## Contents
 
 - [Features](#features)

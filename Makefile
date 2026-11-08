@@ -1,6 +1,6 @@
 # QPot Makefile
 
-VERSION ?= 1.0.0
+VERSION ?= 1.0.1
 BINARY = qpot
 MAIN_PACKAGE = ./cmd/qpot
 
