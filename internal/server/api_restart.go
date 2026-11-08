@@ -36,7 +36,7 @@ func (s *Server) handleHoneypotRestart(w http.ResponseWriter, r *http.Request) {
 		Name string `json:"name"`
 	}
 	if err := decodeJSONBody(w, r, 4096, &req); err != nil {
-		s.sendAPIError(w, http.StatusBadRequest, "", err.Error())
+		s.sendAPIError(w, http.StatusBadRequest, "QP-WEB-004", err.Error())
 		return
 	}
 	if !s.isKnownHoneypot(req.Name) {
@@ -50,16 +50,16 @@ func (s *Server) handleHoneypotRestart(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if hp, ok := cfg.GetHoneypotConfig(req.Name); !ok || !hp.Enabled {
-		s.sendAPIError(w, http.StatusConflict, "", fmt.Sprintf("%s is turned off, so there is nothing to restart. Turn it on first.", req.Name))
+		s.sendAPIError(w, http.StatusConflict, "QP-INST-010", fmt.Sprintf("%s is turned off, so there is nothing to restart. Turn it on first.", req.Name))
 		return
 	}
 	runner := s.liveRunner()
 	if runner == nil {
-		s.sendAPIError(w, http.StatusServiceUnavailable, "", "This server cannot reach the instance's containers.")
+		s.sendAPIError(w, http.StatusServiceUnavailable, "QP-INST-008", "This server cannot reach the instance's containers.")
 		return
 	}
 	if !s.api.change.TryLock() {
-		s.sendAPIError(w, http.StatusConflict, "", "Another honeypot change is still running. Try again when it has finished.")
+		s.sendAPIError(w, http.StatusConflict, "QP-INST-009", "Another honeypot change is still running. Try again when it has finished.")
 		return
 	}
 	defer s.api.change.Unlock()

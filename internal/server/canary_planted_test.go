@@ -2,8 +2,10 @@ package server
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -241,6 +243,27 @@ func TestPlantedCanariesInAPI(t *testing.T) {
 			t.Errorf("POST kind %s: %d", kind, rec.Code)
 		}
 	}
+	if err := s.canaries.SyncPlanted(nil); err != nil {
+		t.Fatal(err)
+	}
+	rec = httptest.NewRecorder()
+	s.mux.ServeHTTP(rec, authReq(http.MethodGet, "/api/canaries", ""))
+	if err := json.Unmarshal(rec.Body.Bytes(), &list); err != nil || len(list.Canaries) != len(planted) {
+		t.Fatalf("historical list: %v, %d entries", err, len(list.Canaries))
+	}
+	for _, c := range list.Canaries {
+		if c["planted"] != true || c["historical"] != true {
+			t.Fatalf("previous watch missing history/provenance flags: %v", c)
+		}
+	}
+	rec = httptest.NewRecorder()
+	s.mux.ServeHTTP(rec, authReq(http.MethodDelete, "/api/canaries?id="+planted[0].ID, ""))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("DELETE historical canary: %d %s", rec.Code, rec.Body.String())
+	}
+	if _, exists := s.canaries.Get(planted[0].ID); exists {
+		t.Fatal("API did not delete historical watch")
+	}
 }
 
 // TestServerSyncsPlantedCanaries: a server started for an instance registers
@@ -267,8 +290,8 @@ func TestServerSyncsPlantedCanaries(t *testing.T) {
 // TestServerFollowsPlantedCanaries: the CLI changes what Cowrie plants while
 // the server runs on (qpot honeypot enable cowrie, set cowrie bait=off or
 // persona=..., a canary.base_url change, each saving the config file and
-// recreating Cowrie): the server watches what is planted now, as a restarted
-// one would, not what was planted when it started.
+// recreating Cowrie): desired values are active, and earlier watches remain
+// historical for copied values or old processes after a failed recreation.
 func TestServerFollowsPlantedCanaries(t *testing.T) {
 	old := plantedRecheck
 	plantedRecheck = 0
@@ -342,16 +365,19 @@ func TestServerFollowsPlantedCanaries(t *testing.T) {
 		t.Error("a broken config file dropped the planted canaries")
 	}
 
-	// qpot honeypot set cowrie bait=off: nothing planted, nothing watched
+	// qpot honeypot set cowrie bait=off: no desired artifacts, earlier values
+	// remain watched until the operator explicitly disables/deletes the history.
 	cli(func(hp *config.HoneypotConfig, _ *config.Config) {
 		hp.Enabled = true
 		hp.CustomConfig["bait"] = "off"
 	})
-	if use("203.0.113.12", "aws configure set aws_secret_access_key "+aws.SecretAccessKey) {
-		t.Error("bait off: the AWS secret still trips")
+	if !use("203.0.113.12", "aws configure set aws_secret_access_key "+aws.SecretAccessKey) {
+		t.Error("bait off silently dropped a previously planted AWS watch")
 	}
-	if n := len(s.canaries.List()); n != 0 {
-		t.Errorf("bait off: %d canaries left", n)
+	for _, c := range s.canaries.List() {
+		if !c.Historical || !c.Planted {
+			t.Errorf("bait off: previous watch not marked historical: %+v", c)
+		}
 	}
 
 	// bait on again with a canary.base_url: the healthcheck's memo follows it
@@ -363,6 +389,11 @@ func TestServerFollowsPlantedCanaries(t *testing.T) {
 	s.handleCanaries(rec, httptest.NewRequest(http.MethodGet, "/api/canaries", nil))
 	if !strings.Contains(rec.Body.String(), "https://cdn.example.net/c/") {
 		t.Errorf("base_url change not followed: %s", rec.Body.String())
+	}
+	for _, c := range s.canaries.List() {
+		if c.Historical {
+			t.Errorf("restored desired bait stayed historical: %+v", c)
+		}
 	}
 }
 
@@ -405,6 +436,75 @@ func TestFollowPlantedLooksAtMostOncePerRecheck(t *testing.T) {
 	s.followPlanted()
 	if n := len(cs.List()); n == 0 {
 		t.Error("the change was not seen after the recheck interval")
+	}
+}
+
+// TestFollowPlantedRetriesFailedPersistence checks that a transient store
+// failure does not cache the desired config hash and suppress later retries.
+func TestFollowPlantedRetriesFailedPersistence(t *testing.T) {
+	old := plantedRecheck
+	plantedRecheck = 0
+	defer func() { plantedRecheck = old }()
+	cfg, previous := plantedCfg(t)
+	cfg.ConfigPath = filepath.Join(cfg.DataPath, "config.yaml")
+	if err := config.Save(cfg); err != nil {
+		t.Fatal(err)
+	}
+	cs, err := canary.NewStore(cfg.DataPath, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := cs.SyncPlanted(previous); err != nil {
+		t.Fatal(err)
+	}
+	s := &Server{config: cfg, canaries: cs}
+	s.followPlanted()
+	previousSum := s.planted.sum
+	hp, _ := cfg.GetHoneypotConfig("cowrie")
+	hp.CustomConfig["bait_profile"] = "industrial"
+	cfg.SetHoneypotCustomConfig("cowrie", hp.CustomConfig)
+	if err := config.Save(cfg); err != nil {
+		t.Fatal(err)
+	}
+	desired := instance.PlantedCanaries(cfg)
+	storePath := filepath.Join(cfg.DataPath, "canaries.json")
+	backupPath := filepath.Join(cfg.DataPath, "prior-canary-store")
+	if err := os.Rename(storePath, backupPath); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(storePath, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	s.followPlanted() // Atomic rename of the store onto a directory must fail.
+	if s.planted.sum != previousSum {
+		t.Fatal("failed sync cached desired hash and would not retry the same config")
+	}
+	for _, oldCanary := range previous {
+		if c, ok := cs.Get(oldCanary.ID); !ok || c.Historical {
+			t.Fatal("failed follower save changed prior active watches")
+		}
+	}
+	for _, newCanary := range desired {
+		if _, ok := cs.Get(newCanary.ID); ok {
+			t.Fatal("failed follower save partially applied desired watches")
+		}
+	}
+	if err := os.Remove(storePath); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(backupPath, storePath); err != nil {
+		t.Fatal(err)
+	}
+	s.followPlanted() // Identical desired bytes must be retried after recovery.
+	for _, newCanary := range desired {
+		if c, ok := cs.Get(newCanary.ID); !ok || c.Historical {
+			t.Fatal("follower did not recover desired watches after persistence returned")
+		}
+	}
+	for _, oldCanary := range previous {
+		if c, ok := cs.Get(oldCanary.ID); !ok || !c.Historical {
+			t.Fatal("successful follower retry lost historical watch")
+		}
 	}
 }
 
@@ -453,5 +553,96 @@ func TestMatcherTripsEveryCanaryOfAnEvent(t *testing.T) {
 	}
 	if len(tripped) != len(planted) {
 		t.Errorf("%d of %d canaries tripped by one event", len(tripped), len(planted))
+	}
+}
+
+// First-load failures must be throttled as well as successful reads. Recovery
+// retries the same desired YAML after the interval, without caching a failed sum.
+func TestFollowPlantedInitialFailuresAreThrottled(t *testing.T) {
+	previousInterval := plantedRecheck
+	plantedRecheck = time.Hour
+	defer func() { plantedRecheck = previousInterval }()
+	for _, scenario := range []string{"parse", "persistence"} {
+		t.Run(scenario, func(t *testing.T) {
+			cfg, desired := plantedCfg(t)
+			cfg.ConfigPath = filepath.Join(cfg.DataPath, "config.yaml")
+			if err := config.Save(cfg); err != nil {
+				t.Fatal(err)
+			}
+			validConfig, err := os.ReadFile(cfg.ConfigPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			store, err := canary.NewStore(cfg.DataPath, 0)
+			if err != nil {
+				t.Fatal(err)
+			}
+			storePath := filepath.Join(cfg.DataPath, "canaries.json")
+			warning := "canary: config file changed but does not parse"
+			if scenario == "parse" {
+				if err := os.WriteFile(cfg.ConfigPath, []byte("["), 0600); err != nil {
+					t.Fatal(err)
+				}
+			} else {
+				// Rename onto a directory fails even when the test process is root.
+				if err := os.Mkdir(storePath, 0700); err != nil {
+					t.Fatal(err)
+				}
+				warning = "Canary watches not updated"
+			}
+			logFile, err := os.CreateTemp(t.TempDir(), "follow-warnings-*.log")
+			if err != nil {
+				t.Fatal(err)
+			}
+			previousLogger := slog.Default()
+			slog.SetDefault(slog.New(slog.NewJSONHandler(logFile, nil)))
+			defer func() { slog.SetDefault(previousLogger); logFile.Close() }()
+			s := &Server{config: cfg, canaries: store}
+			for range 3 {
+				s.followPlanted()
+			}
+			attempted := s.planted.checked
+			if attempted.IsZero() || s.planted.read {
+				t.Fatal("initial failure must record an attempt without a successful config hash")
+			}
+			logs, err := os.ReadFile(logFile.Name())
+			if err != nil {
+				t.Fatal(err)
+			}
+			if count := strings.Count(string(logs), warning); count != 1 {
+				t.Fatalf("%s failure attempted/logged %d times inside one recheck interval, want1", scenario, count)
+			}
+			if scenario == "parse" {
+				if err := os.WriteFile(cfg.ConfigPath, validConfig, 0600); err != nil {
+					t.Fatal(err)
+				}
+			} else {
+				if err := os.Remove(storePath); err != nil {
+					t.Fatal(err)
+				}
+			}
+			s.followPlanted()
+			if s.planted.read || !s.planted.checked.Equal(attempted) || len(store.List()) != 0 {
+				t.Fatal("recovery bypassed the remaining retry interval")
+			}
+			s.planted.checked = time.Now().Add(-2 * plantedRecheck)
+			s.followPlanted()
+			if !s.planted.read || s.planted.sum != sha256.Sum256(validConfig) {
+				t.Fatal("recovery did not retry and cache the desired config after the interval")
+			}
+			persisted, err := canary.NewStore(cfg.DataPath, 0)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(store.List()) != len(desired) || len(persisted.List()) != len(desired) {
+				t.Fatal("recovered watches were not registered and persisted")
+			}
+			for _, c := range desired {
+				active, ok := persisted.Get(c.ID)
+				if !ok || active.Historical || !active.Enabled {
+					t.Fatalf("desired watch not active after retry: %s", c.ID)
+				}
+			}
+		})
 	}
 }

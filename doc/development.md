@@ -26,6 +26,10 @@ Every push runs:
 - **Fuzzing:** a smoke run of every fuzz target.
 - **Security:** govulncheck, gosec and gitleaks.
 - **Database:** integration tests against a real ClickHouse.
+- **Industrial protocols:** actual Conpot PLC/RTU/Beckhoff clients, read/write
+  operations, fragmented/coalesced Modbus frames, errors and persistent identity
+  across restart/recreation, on isolated
+  containers without host ports.
 - **Smoke tests:** the CLI on a matrix of Linux distributions, and the Windows
   installer against a local fake release.
 - **Lint:** the shell scripts and the workflows.
@@ -33,6 +37,36 @@ Every push runs:
 
 Changes to the HiFi broker or the egress guard also rebuild and publish their
 container images.
+
+Run the native refrigeration acceptance checks with Docker. They build from
+the same embedded sources an installed QPot binary emits; no unpublished
+registry image or host compiler is required for deployment:
+
+```bash
+QPOT_TEST_REFRIGERATION=1 go test -race -count=1 -timeout 12m ./internal/instance -run '^TestRefrigerationLive'
+```
+
+The shared Dockerfile is `internal/refrigeration/Dockerfile`; it uses a pinned
+official Go builder, an offline standard-library build and a nonroot scratch
+runtime. Do not duplicate emulator code into a second build context.
+
+Run the industrial protocol checks locally after pulling the versioned image:
+
+```bash
+docker pull ghcr.io/telekom-security/conpot:24.04.2@sha256:be17a238709c78909c7d2e0da55bc3ea66dc3aa46618f0d89b7080f3e7dda3e8
+QPOT_TEST_CONPOT=1 go test -race -count=1 -timeout 8m ./internal/instance -run '^TestConpotLiveProfiles$'
+```
+
+The image reference includes the reviewed multi-architecture index digest;
+mutable tag contents cannot silently replace the modules the patches target.
+Readiness checks poll listeners/bootstrap only. Each full protocol assertion
+script runs once per startup/restart/recreation, so a failed assertion is not
+hidden by repeating the whole script until it passes.
+
+Ordinary unit runs skip this opt-in test. A requested run fails if Docker or the
+image is unavailable. `scripts/ci-local.sh --only conpot-integration` runs the
+same image pull and tests as CI. These checks validate isolated protocol
+endpoints; a full deployment also needs a host that supports the egress guard.
 
 ## Releases
 

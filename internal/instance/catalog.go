@@ -10,8 +10,9 @@ import (
 // the web UI show.
 var honeypotDescriptions = map[string]string{
 	"cowrie": "SSH/Telnet medium-interaction shell", "dionaea": "Malware capture (SMB/FTP/MSSQL/SIP)",
-	"conpot": "ICS/SCADA (Modbus/S7comm/BACnet)", "tanner": "Web application (multi-service)",
-	"adbhoney": "Android Debug Bridge", "endlessh": "SSH tarpit",
+	"conpot": "Industrial devices (PLC/RTU and other profiles)", "tanner": "Web application (multi-service)",
+	"refrigeration": "AK-SM 800A refrigeration supervisor (virtual temperatures, defrost and alarms)",
+	"adbhoney":      "Android Debug Bridge", "endlessh": "SSH tarpit",
 	"heralding": "Credential catcher (12 protocols)", "honeyaml": "YAML-defined API honeypot",
 	"elasticpot": "Elasticsearch", "ciscoasa": "Cisco ASA (CVE-2018-0101)",
 	"citrixhoneypot": "Citrix NetScaler (CVE-2019-19781)", "ddospot": "UDP amplification (NTP/DNS/SSDP)",

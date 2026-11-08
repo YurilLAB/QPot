@@ -12,7 +12,8 @@
 
 | Page | What it covers |
 |---|---|
-| [Honeypots](honeypots.md) | The 27 honeypots, turning them on and off, and the LLM honeypots |
+| [Honeypots](honeypots.md) | The 28 honeypots, turning them on and off, and the LLM honeypots |
+| [Refrigeration supervisor](refrigeration.md) | Retail and plasma scenarios, controller controls, exports and canaries |
 | [Deception](deception.md) | How each instance gets its own believable identity |
 | [Data and threat intelligence](intelligence.md) | Event collection, the databases, ATT&CK tagging, IOCs and campaigns |
 | [Canaries](canary.md) | Decoy credentials, files and links, and the bait planted in the honeypots |

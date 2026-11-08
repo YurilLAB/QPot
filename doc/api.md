@@ -169,9 +169,9 @@ effect when it starts.
 | Status | When |
 |---|---|
 | 400 `QP-INPUT-003` | unknown honeypot |
-| 400 | no `enabled`, or a malformed body |
+| 400 `QP-WEB-004` | no `enabled`, malformed JSON object, invalid field types, unknown fields, or oversized body |
 | 400 `QP-INPUT-012` + `needs` | an LLM honeypot (galah, beelzebub) has no LLM settings yet: set them first with `PUT /api/honeypots/settings` |
-| 409 | another honeypot change is still running |
+| 409 `QP-INST-009` | another honeypot change is still running |
 | 502 `QP-INST-008` + `"saved": true` | saved, but the container did not start or stop; the error points at `GET /api/logs?honeypot=<name>` |
 | 500 `QP-INST-002` | the configuration file could not be read or saved (nothing changed) |
 
@@ -205,6 +205,29 @@ beelzebub, conpot, cowrie, galah and ssh-proxy), sorted by name.
 - `400 QP-INPUT-003` for an unknown name, `500 QP-INST-002` when the
   configuration file cannot be read.
 
+Refrigeration accepts `site_profile=retail|plasma` (empty means retail). It is
+disabled on fresh and upgraded instances until explicitly enabled. Changing the
+scene recreates the service and retains separate scene state. A failed local
+image build returns `saved: true` when configuration was saved; the error directs
+the operator to QPot service output because a honeypot container may not exist.
+The native controller XML interface is separate from this management API; see
+[refrigeration.md](refrigeration.md).
+
+Cowrie accepts `bait_profile=ops|industrial` (empty means ops). Industrial
+archives belong to a Linux support host and reference the selected device;
+`bait_target=conpot|refrigeration` chooses the industrial archive reference
+(empty means conpot); it does not enable the referenced service. `bait=off`
+suppresses either file profile. Changing these settings recreates Cowrie,
+without restarting Conpot.
+
+Conpot's `template` choice also returns an `options` array containing each
+profile's `id`, `label`, `category`, `description`, `model`, `protocols`,
+`tcp_ports`, `udp_ports` and `limitations`. The original `allowed` IDs remain
+available for older clients. The optional `default` field is the saved automatic
+profile used when clearing an explicit pin; `effective` retains its existing
+meaning. Device ports describe container services. Read the honeypot API's
+`host_ports` for configured host mappings, which do not prove live reachability.
+
 ### PUT /api/honeypots/settings
 
 The same as `qpot honeypot set` (the same Go function). Body (at most 16 KiB,
@@ -228,8 +251,8 @@ the instance runs (the request waits up to 5 minutes for Docker).
 | 400 `QP-INPUT-003` | unknown honeypot |
 | 400 `QP-INPUT-012` | a bad key or value; the error names the rule (values are never repeated) |
 | 400 `QP-INPUT-012` + `needs` | a change that decides where a stored secret is sent (galah `llm_server_url` or `llm_provider` while `llm_api_key` is stored) must send `llm_api_key` again |
-| 400 | malformed body |
-| 409 | another honeypot change is still running |
+| 400 `QP-WEB-004` | malformed JSON object, invalid field types, unknown fields, or oversized body |
+| 409 `QP-INST-009` | another honeypot change is still running |
 | 502 `QP-INST-008` + `"saved": true` | saved, but the honeypot did not restart with them |
 | 500 `QP-INST-002` | the configuration could not be saved |
 
@@ -246,8 +269,15 @@ and its companions (ssh-proxy's backends, tanner's).
 {"name": "cowrie", "restarted": true}
 ```
 
-`400 QP-INPUT-003` unknown honeypot; `409` honeypot off, instance not running
-(`QP-INST-007`) or another change running; `502 QP-INST-008` Docker failed.
+| Status | When |
+|---|---|
+| 400 `QP-WEB-004` | malformed or oversized JSON object, invalid field types, or unknown fields |
+| 400 `QP-INPUT-003` | unknown honeypot |
+| 409 `QP-INST-010` | the honeypot is turned off; enable it before restarting |
+| 409 `QP-INST-007` | the instance is not running |
+| 409 `QP-INST-009` | another honeypot change is still running |
+| 503 `QP-INST-008` | this control plane cannot reach its container manager |
+| 502 `QP-INST-008` | Docker could not restart the honeypot |
 
 ### GET /api/logs
 
@@ -356,9 +386,15 @@ address, in every database backend.
 |---|---|
 | `GET /api/canaries` | `{"canaries": [...]}` |
 | `POST /api/canaries` | body (at most 8 KiB) `{"kind": "web" \| "file" \| "aws", "name", "memo"}` makes one |
-| `DELETE /api/canaries?id=` | removes one; `409` for a canary planted in a honeypot |
+| `DELETE /api/canaries?id=` | removes a manual or historical canary; `409` for a currently planted one |
 | `GET /api/canaries/trips?limit=` | `{"trips": [...]}` (`limit` 1 to 1000) |
 | `GET /api/canaries/artifact?id=` | a file canary's HTML (a download); `400` without `id`, `404` for an unknown one |
+
+Canary entries include `planted`, `historical` and `enabled`. Previously planted
+values remain watched after profile changes or failed recreation. Historical
+entries can be deleted explicitly; the current planned entries remain protected.
+Retained trip records are unaffected by deletion.
+
 
 ## Cluster
 

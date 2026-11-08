@@ -148,32 +148,28 @@ func parsePersonaRotation(v string) (int, bool) {
 	return days, true
 }
 
-// tpotConpotTemplate is one device template of the Conpot image and the ports
-// it listens on inside the container.
-type tpotConpotTemplate struct {
-	ID  string
-	TCP []int
-	UDP []int
-}
+// ConpotDeviceProfile describes an existing Conpot device, its protocols and
+// container ports. The catalog lives with configuration so saved selections
+// can be migrated and validated without depending on the instance runtime.
+type ConpotDeviceProfile = config.ConpotDeviceProfile
 
-// tpotConpotTemplates are the templates marked deploy = true in the Conpot
-// image's /opt/tpot/templates.toml at TPotVersion. Each draws its own device
-// identity (addresses, MAC, serials, PINs) on first start and keeps it in
-// /var/lib/conpot. The ports were measured by running each template in the
-// image. Left out on purpose: "default", the multi-protocol S7-200 whose
-// identity is the same on every install, which T-Pot itself does not deploy,
-// and "proxy". Check the list again when TPotVersion changes: a name the image
-// does not know stops the container.
-var tpotConpotTemplates = []tpotConpotTemplate{
-	{ID: "IEC104", TCP: []int{2404, 20000}, UDP: []int{161}},
-	{ID: "guardian_ast", TCP: []int{10001}},
-	{ID: "ipmi", UDP: []int{623}},
-	{ID: "kamstrup_382", TCP: []int{1025, 50100}},
-	{ID: "beckhoff_cx", TCP: []int{4840, 48898}, UDP: []int{48899}},
-	{ID: "building_automation", UDP: []int{3671, 47808}},
-	{ID: "hart_gateway", TCP: []int{5094}},
-	{ID: "iccp", TCP: []int{102}},
-	{ID: "plc_modbus", TCP: []int{502}},
+type tpotConpotTemplate = ConpotDeviceProfile
+
+// tpotConpotTemplates mirror the deployable templates of the pinned upstream
+// image. The static multi-protocol "default" and "proxy" are not offered.
+var tpotConpotTemplates = config.ConpotProfiles()
+
+// ConpotProfiles returns device descriptions for CLI, API and dashboard use.
+// Returned slices can be changed without changing the deployment catalog.
+func ConpotProfiles() []ConpotDeviceProfile { return config.ConpotProfiles() }
+
+// ConpotProfile returns the effective device profile for this instance.
+func ConpotProfile(cfg *config.Config) ConpotDeviceProfile {
+	p := conpotTemplate(cfg)
+	p.Protocols = append([]string(nil), p.Protocols...)
+	p.TCP = append([]int(nil), p.TCP...)
+	p.UDP = append([]int(nil), p.UDP...)
+	return p
 }
 
 // ConpotTemplateIDs returns every Conpot template QPot can run.
@@ -185,10 +181,9 @@ func ConpotTemplateIDs() []string {
 	return ids
 }
 
-// conpotTemplate returns the device this instance's Conpot emulates: the
-// operator's custom_config "template" when the image deploys it, otherwise one
-// picked from the instance seed, so restarts keep the same device and
-// different instances emulate different ones.
+// conpotTemplate honors the operator's pin, otherwise the persisted automatic
+// choice. The fallback uses the frozen legacy catalog, never a modulo of the
+// current catalog size: adding or reordering devices must not change a unit.
 func conpotTemplate(cfg *config.Config) tpotConpotTemplate {
 	if hp, ok := cfg.GetHoneypotConfig("conpot"); ok {
 		want := strings.TrimSpace(hp.CustomConfig["template"])
@@ -198,7 +193,16 @@ func conpotTemplate(cfg *config.Config) tpotConpotTemplate {
 			}
 		}
 	}
-	return tpotConpotTemplates[seededIndex("tpot-conpot:"+deceptionSeed(cfg), len(tpotConpotTemplates))]
+	want := config.ConpotAutomaticProfileID(cfg)
+	for _, t := range tpotConpotTemplates {
+		if t.ID == want {
+			return t
+		}
+	}
+	// Parse and Save reject invalid saved IDs. A direct, unsaved config can
+	// still contain one; returning an empty profile avoids impersonating a
+	// different device. Such configs fail validation before deployment.
+	return tpotConpotTemplate{}
 }
 
 // adbDevice is how adbd names its device in the connection banner.

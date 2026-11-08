@@ -2,6 +2,9 @@ package instance
 
 import (
 	"fmt"
+	"os"
+	"os/exec"
+	"path/filepath"
 	"regexp"
 	"slices"
 	"strconv"
@@ -185,4 +188,107 @@ func FuzzConpotTemplateSetting(f *testing.F) {
 			t.Fatalf("CheckSetting accepts %q but conpot runs %s", template, ids[0])
 		}
 	})
+}
+
+func TestConpotSettingsProfilePreviewAndPinRemoval(t *testing.T) {
+	cfg := conpotConfig("qp_savedautoprofile", "")
+	cfg.DataPath = t.TempDir()
+	cfg.ConfigPath = filepath.Join(cfg.DataPath, "config.yaml")
+	cfg.DisableHoneypot("conpot") // Settings changes should not need Docker.
+	auto := conpotTemplate(cfg).ID
+	pin := "plc_modbus"
+	if auto == pin {
+		pin = "IEC104"
+	}
+	if _, err := ApplySettings(t.Context(), cfg, "conpot", []SettingChange{{Key: "template", Value: pin}}, nil); err != nil {
+		t.Fatal(err)
+	}
+	infos := DescribeSettings(cfg, "conpot")
+	if len(infos) != 1 || infos[0].Default != auto || infos[0].Value != pin || len(infos[0].Options) != len(ConpotTemplateIDs()) {
+		t.Fatalf("missing rich profile preview: %+v", infos)
+	}
+	if got := ConpotProfile(cfg).ID; got != pin {
+		t.Fatalf("explicit pin not effective: %s", got)
+	}
+	for i, option := range infos[0].Options {
+		if infos[0].Allowed[i] != option.ID {
+			t.Fatal("rich choices disagree with accepted IDs")
+		}
+	}
+	infos[0].Options[0].Protocols[0] = "changed"
+	if DescribeSettings(cfg, "conpot")[0].Options[0].Protocols[0] == "changed" {
+		t.Fatal("metadata shares the catalog")
+	}
+	if _, err := ApplySettings(t.Context(), cfg, "conpot", []SettingChange{{Key: "template", Value: ""}}, nil); err != nil {
+		t.Fatal(err)
+	}
+	if got := ConpotProfile(cfg).ID; got != auto {
+		t.Fatalf("clearing pin changed the saved automatic device from %s to %s", auto, got)
+	}
+	if got := DescribeSettings(cfg, "conpot")[0]; got.Set || got.Default != auto || got.Effective != auto {
+		t.Fatalf("automatic settings: %+v", got)
+	}
+}
+
+func TestConpotSavedProfileSurvivesCatalogReordering(t *testing.T) {
+	cfg := conpotConfig("qp_savedcatalogorder", "")
+	cfg.DataPath = t.TempDir()
+	cfg.ConfigPath = filepath.Join(cfg.DataPath, "config.yaml")
+	want := ConpotProfile(cfg).ID
+	if err := config.Save(cfg); err != nil {
+		t.Fatal(err)
+	}
+	original := tpotConpotTemplates
+	t.Cleanup(func() { tpotConpotTemplates = original })
+	tpotConpotTemplates = slices.Clone(original)
+	slices.Reverse(tpotConpotTemplates)
+	tpotConpotTemplates = append(tpotConpotTemplates, tpotConpotTemplate{ID: "future-controller"})
+	if got := ConpotProfile(cfg).ID; got != want {
+		t.Fatalf("catalog update changed device from %s to %s", want, got)
+	}
+	// An unsaved legacy configuration must keep its old choice as well.
+	legacy := conpotConfig("qp_savedcatalogorder", "")
+	if got := ConpotProfile(legacy).ID; got != want {
+		t.Fatalf("legacy migration changed device from %s to %s", want, got)
+	}
+}
+
+// Run the launcher normalization with Docker's duplicate-case proxy defaults.
+// The image uses ConfigParser(os.environ), so duplicate keys would prevent startup.
+func TestConpotProxyEnvironment(t *testing.T) {
+	if _, err := exec.LookPath("sh"); err != nil {
+		t.Skip("POSIX shell not available")
+	}
+	for _, both := range []bool{true, false} {
+		cmd := exec.Command("sh", "-c", conpotProxySetup+"env")
+		for _, entry := range os.Environ() {
+			key, _, _ := strings.Cut(entry, "=")
+			if strings.HasSuffix(strings.ToLower(key), "proxy") {
+				continue
+			}
+			cmd.Env = append(cmd.Env, entry)
+		}
+		for _, key := range []string{"http_proxy", "https_proxy", "ftp_proxy", "no_proxy", "all_proxy"} {
+			cmd.Env = append(cmd.Env, key+"=lower-value")
+			if both {
+				cmd.Env = append(cmd.Env, strings.ToUpper(key)+"=upper-value")
+			}
+		}
+		out, err := cmd.Output()
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, key := range []string{"http_proxy", "https_proxy", "ftp_proxy", "no_proxy", "all_proxy"} {
+			lower := strings.Contains(string(out), key+"=lower-value")
+			upper := strings.Contains(string(out), strings.ToUpper(key)+"=upper-value")
+			if both && (lower || !upper) || !both && (!lower || upper) {
+				t.Fatalf("proxy normalization both=%v key=%s: lowerPresent=%v upperPresent=%v", both, key, lower, upper)
+			}
+		}
+	}
+	cfg := conpotConfig("qp_proxylaunch", "plc_modbus")
+	svc, _, _ := publishedPorts(t, cfg, "conpot")
+	if !strings.Contains(svc, "tpot_templates.py render") || !strings.Contains(svc, "unset") {
+		t.Fatal("Conpot image launcher does not normalize duplicate proxy settings")
+	}
 }

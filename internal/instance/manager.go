@@ -646,7 +646,7 @@ func readLogLine(r *bufio.Reader, max int) (string, error) {
 // pullImages pulls Docker images for the instance
 func (m *Manager) pullImages(ctx context.Context) error {
 	composeFile := m.config.GetDockerComposePath()
-	cmd := exec.CommandContext(ctx, "docker", "compose", "-f", composeFile, "pull")
+	cmd := exec.CommandContext(ctx, "docker", "compose", "-f", composeFile, "pull", "--ignore-buildable")
 	cmd.Dir = m.config.DataPath
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
@@ -719,6 +719,11 @@ func (m *Manager) generateServiceConfigs() error {
 			continue
 		}
 		prof := deployProfile(m.config, name)
+		if prof.LocalBuild {
+			if err := writeRefrigerationBuild(m.config); err != nil {
+				return err
+			}
+		}
 		hpDir := filepath.Join(m.config.DataPath, "honeypots", name)
 		// Ensure all profile volume subdirs (and the config dir) exist so the
 		// bind mounts resolve to real directories. They must be writable by the

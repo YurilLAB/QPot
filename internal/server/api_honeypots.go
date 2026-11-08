@@ -36,11 +36,11 @@ func (s *Server) handleHoneypotToggle(w http.ResponseWriter, r *http.Request) {
 		Enabled *bool  `json:"enabled"`
 	}
 	if err := decodeJSONBody(w, r, maxToggleBody, &req); err != nil {
-		s.sendAPIError(w, http.StatusBadRequest, "", err.Error())
+		s.sendAPIError(w, http.StatusBadRequest, "QP-WEB-004", err.Error())
 		return
 	}
 	if req.Enabled == nil {
-		s.sendAPIError(w, http.StatusBadRequest, "", "Say whether to turn the honeypot on or off: {\"name\": ..., \"enabled\": true}.")
+		s.sendAPIError(w, http.StatusBadRequest, "QP-WEB-004", "Say whether to turn the honeypot on or off: {\"name\": ..., \"enabled\": true}.")
 		return
 	}
 	// Checked against the configured honeypots before the name reaches a
@@ -52,7 +52,7 @@ func (s *Server) handleHoneypotToggle(w http.ResponseWriter, r *http.Request) {
 	on := *req.Enabled
 
 	if !s.api.change.TryLock() {
-		s.sendAPIError(w, http.StatusConflict, "", "Another honeypot change is still running. Try again when it has finished.")
+		s.sendAPIError(w, http.StatusConflict, "QP-INST-009", "Another honeypot change is still running. Try again when it has finished.")
 		return
 	}
 	defer s.api.change.Unlock()
@@ -85,8 +85,12 @@ func (s *Server) handleHoneypotToggle(w http.ResponseWriter, r *http.Request) {
 			if !on {
 				verb = "stop"
 			}
+			message := fmt.Sprintf("Saved, but %s did not %s. Its log (GET /api/logs?honeypot=%s) shows why.", req.Name, verb, req.Name)
+			if req.Name == "refrigeration" && on {
+				message = "Saved, but refrigeration did not start. Check QPot service output for local image-build or startup errors, and refrigeration logs if a container was created. The first build needs Docker access to the builder image."
+			}
 			writeJSON(w, http.StatusBadGateway, apiError{
-				Error: fmt.Sprintf("Saved, but %s did not %s. Its log (GET /api/logs?honeypot=%s) shows why.", req.Name, verb, req.Name),
+				Error: message,
 				Code:  "QP-INST-008", Saved: true})
 		case errors.Is(err, instance.ErrNeedsSettings) && errors.As(err, &se):
 			writeJSON(w, http.StatusBadRequest, apiError{

@@ -39,6 +39,11 @@ irm https://raw.githubusercontent.com/YurilLAB/QPot/main/scripts/install.ps1 | i
 git clone https://github.com/YurilLAB/QPot.git && cd QPot && make build
 ```
 
+The release installers currently install v1.0.0. The new industrial profile
+catalog and refrigeration supervisor are unreleased features on `main`; use
+the source-build option above to try them. It creates `./qpot`; run that binary
+to use the additions.
+
 The installers offer to run `qpot setup` straight away. `QPOT_NO_SETUP=1`
 installs the program only, and `QPOT_SETUP_ARGS="--yes --install-docker"` runs
 setup without questions.
@@ -66,6 +71,8 @@ installs nothing. To check a release download yourself, see
 qpot setup                          # guided: a few questions, each with a safe default
 qpot setup --yes                    # no questions: flags and defaults (minimal: cowrie + endlessh)
 qpot setup --yes --install-docker --docker-group --profile standard
+qpot setup --profile industrial     # one Modbus PLC, no unrelated honeypots
+qpot setup --profile refrigeration  # native cold storage supervisor
 qpot setup --profile hifi --service # real-OpenSSH HiFi mode, as a systemd service
 qpot setup --dry-run                # show what setup would do, change nothing
 qpot doctor                         # re-check health at any time (non-zero on failure)
@@ -74,7 +81,7 @@ qpot doctor                         # re-check health at any time (non-zero on f
 In a terminal, `qpot setup` asks for:
 
 - the instance name;
-- the honeypots: `minimal`, `standard`, `hifi` or a list of names;
+- the honeypots: `minimal`, `standard`, `hifi`, `industrial`, `refrigeration` or a list of names;
 - the web UI address and port;
 - the database;
 - whether honeypots may connect out to the internet;
@@ -91,6 +98,8 @@ flag instead. `qpot setup --help` lists them.
 | `minimal` | cowrie (SSH/Telnet) and endlessh (an SSH tarpit). Low risk, a good start. |
 | `standard` | minimal plus dionaea, heralding, conpot and adbhoney |
 | `hifi` | minimal plus real OpenSSH servers behind a broker ([HiFi mode](ssh-hifi-proxy.md)) |
+| `industrial` | Conpot only, explicitly presenting a Schneider Modicon M340 PLC (Modbus/TCP); change the device in the dashboard or CLI. |
+| `refrigeration` | Native refrigeration supervisor only; simulated retail cold storage, with an optional plasma scenario. First start builds its image locally ([details](refrigeration.md)). |
 
 ## What setup does
 

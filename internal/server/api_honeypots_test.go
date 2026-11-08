@@ -155,12 +155,12 @@ func TestHoneypotToggleRefuses(t *testing.T) {
 	}{
 		{`{"name":"nosuch","enabled":true}`, "QP-INPUT-003"},
 		{`{"name":"-rm","enabled":false}`, "QP-INPUT-003"},
-		{`{"name":"cowrie"}`, ""},
-		{`{"name":"cowrie","enabled":"yes"}`, ""},
-		{`{"name":"cowrie","enabled":true,"force":true}`, ""},
-		{`{"name":"cowrie","enabled":true} {}`, ""},
-		{`{"name":"` + strings.Repeat("a", 5000) + `","enabled":true}`, ""},
-		{`not json`, ""},
+		{`{"name":"cowrie"}`, "QP-WEB-004"},
+		{`{"name":"cowrie","enabled":"yes"}`, "QP-WEB-004"},
+		{`{"name":"cowrie","enabled":true,"force":true}`, "QP-WEB-004"},
+		{`{"name":"cowrie","enabled":true} {}`, "QP-WEB-004"},
+		{`{"name":"` + strings.Repeat("a", 5000) + `","enabled":true}`, "QP-WEB-004"},
+		{`not json`, "QP-WEB-004"},
 	} {
 		rec := a.do(http.MethodPost, "/api/honeypots", c.body)
 		if e := decodeAPIError(t, rec); rec.Code != http.StatusBadRequest || e.Code != c.code {
@@ -179,11 +179,65 @@ func TestHoneypotToggleRefuses(t *testing.T) {
 	a.s.api.change.Lock()
 	rec = a.do(http.MethodPost, "/api/honeypots", `{"name":"cowrie","enabled":false}`)
 	a.s.api.change.Unlock()
-	if rec.Code != http.StatusConflict {
-		t.Fatalf("busy: %d", rec.Code)
+	if e := decodeAPIError(t, rec); rec.Code != http.StatusConflict || e.Code != "QP-INST-009" {
+		t.Fatalf("busy: %d %+v", rec.Code, e)
 	}
 
 	if string(before) != string(a.configFile(t)) || len(a.runner.started)+len(a.runner.stopped) != 0 {
 		t.Fatalf("a refused request changed something: %+v", a.runner)
+	}
+}
+
+// Management errors must remain explainable from both new native and
+// industrial template controls, without applying a refused request.
+func TestIndustrialManagementErrorCodes(t *testing.T) {
+	a := newAPITestServer(t, "api-industrial-codes", func(c *config.Config) { c.EnableHoneypot("refrigeration"); c.EnableHoneypot("conpot") })
+	a.runner.running = true
+	before := a.configFile(t)
+	for _, endpoint := range []struct{ method, path, body string }{
+		{http.MethodPost, "/api/honeypots", `{"name":"refrigeration","enabled":false}`},
+		{http.MethodPut, "/api/honeypots/settings", `{"name":"refrigeration","settings":{"site_profile":"plasma"}}`},
+		{http.MethodPost, "/api/honeypots/restart", `{"name":"conpot"}`},
+	} {
+		for _, body := range []string{`null`, `[]`, `{"name":`, endpoint.body + ` {}`, "\u00a0" + endpoint.body, endpoint.body + "\u00a0"} {
+			rec := a.do(endpoint.method, endpoint.path, body)
+			e := decodeAPIError(t, rec)
+			if rec.Code != http.StatusBadRequest || e.Code != "QP-WEB-004" || e.Saved {
+				t.Errorf("%s malformed %q: %d %+v", endpoint.path, body, rec.Code, e)
+			}
+		}
+		a.s.api.change.Lock()
+		rec := a.do(endpoint.method, endpoint.path, endpoint.body)
+		a.s.api.change.Unlock()
+		if e := decodeAPIError(t, rec); rec.Code != http.StatusConflict || e.Code != "QP-INST-009" || e.Saved {
+			t.Errorf("%s busy: %d %+v", endpoint.path, rec.Code, e)
+		}
+	}
+	if string(before) != string(a.configFile(t)) || len(a.runner.started)+len(a.runner.stopped)+len(a.runner.recreated)+len(a.runner.restarted) != 0 {
+		t.Fatal("refused management request changed configuration or runtime")
+	}
+}
+
+func TestHoneypotRequestBodySizeBoundary(t *testing.T) {
+	a := newAPITestServer(t, "api-body-boundary", nil)
+	for _, endpoint := range []struct {
+		method, path, body string
+		limit              int
+	}{
+		{http.MethodPost, "/api/honeypots", `{"name":"refrigeration","enabled":false}`, maxToggleBody},
+		{http.MethodPut, "/api/honeypots/settings", `{"name":"refrigeration","settings":{"site_profile":"retail"}}`, maxSettingsBody},
+	} {
+		body := endpoint.body + strings.Repeat(" ", endpoint.limit-len(endpoint.body))
+		if rec := a.do(endpoint.method, endpoint.path, body); rec.Code != http.StatusOK {
+			t.Errorf("%s exactlylimit: %d %s", endpoint.path, rec.Code, rec.Body.String())
+		}
+		before := a.configFile(t)
+		rec := a.do(endpoint.method, endpoint.path, body+" ")
+		if e := decodeAPIError(t, rec); rec.Code != http.StatusBadRequest || e.Code != "QP-WEB-004" || e.Saved {
+			t.Errorf("%s overlimit: %d %+v", endpoint.path, rec.Code, e)
+		}
+		if string(before) != string(a.configFile(t)) {
+			t.Fatal("oversized body changed configuration")
+		}
 	}
 }

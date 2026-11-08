@@ -13,6 +13,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/qpot/qpot/internal/canary"
 )
 
 // python returns a Python 3 interpreter, or skips.
@@ -86,6 +88,82 @@ type harnessOut struct {
 	Added int
 	Nodes map[string]harnessNode
 	Host  *string
+}
+
+// TestIndustrialBaitPlantedByPython verifies the rendered archive, rather than
+// just its Go plan: the gzip snapshot must contain the same inventory/CSV
+// bytes, with all runtime dates/hostname resolved, and the shortcut must work.
+func TestIndustrialBaitPlantedByPython(t *testing.T) {
+	py := python(t)
+	cfg := baitCfg("qp_industrialpython00000001", "debian-bookworm")
+	cfg.Honeypots["cowrie"].CustomConfig[baitProfileSetting] = "industrial"
+	hp := cfg.Honeypots["conpot"]
+	hp.CustomConfig = map[string]string{"template": "plc_modbus"}
+	cfg.Honeypots["conpot"] = hp
+	plan, planted := cowrieBait(cfg)
+	const installed, booted = int64(1700000000), int64(1760000000)
+	out := runBait(t, py, cowrieBaitJSON(cfg), installed, booted, "archive01")
+	if out.Host == nil || *out.Host != plan.Hosts[0].IP {
+		t.Fatal("SSH archive host is not recognized")
+	}
+	shortcut := out.Nodes["/home/debian/ot"]
+	if shortcut.Target == nil || *shortcut.Target != industrialRoot {
+		t.Fatal("login user cannot discover the reference directory via ~/ot")
+	}
+	var inventory industrialInventory
+	invBytes := out.Nodes[industrialRoot+"/inventory.json"].bytes(t)
+	if err := json.Unmarshal(invBytes, &inventory); err != nil {
+		t.Fatal(err)
+	}
+	if inventory.SourceHost != "db12-node7" || len(inventory.Assets) != 1 || inventory.Assets[0].Model != "Schneider Modicon M340" {
+		t.Fatalf("unresolved or wrong inventory: %+v", inventory)
+	}
+	if _, err := time.Parse(time.RFC3339, inventory.RecordedAt); err != nil {
+		t.Fatalf("inventory date: %v", err)
+	}
+	var archivePath string
+	for name, node := range out.Nodes {
+		if strings.HasSuffix(name, ".txt.gz") {
+			archivePath = name
+			reader, err := gzip.NewReader(bytes.NewReader(node.bytes(t)))
+			if err != nil {
+				t.Fatal(err)
+			}
+			body, err := io.ReadAll(reader)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := reader.Close(); err != nil {
+				t.Fatal(err)
+			}
+			comms := out.Nodes[industrialRoot+"/exports/plc01/communications.csv"].bytes(t)
+			if !bytes.Contains(body, invBytes) || !bytes.Contains(body, comms) || bytes.Contains(body, []byte("{{")) {
+				t.Fatal("compressed backup differs from archived inventory/communications records")
+			}
+		}
+	}
+	if archivePath == "" || !bytes.Contains(out.Nodes[industrialRoot+"/maintenance/backup.log"].bytes(t), []byte(archivePath)) ||
+		!bytes.Contains(out.Nodes["/root/.bash_history"].bytes(t), []byte(archivePath)) {
+		t.Fatal("backup log/history names a missing dated archive")
+	}
+	if out.Nodes["/root/.netrc"].Mode&0o777 != 0o600 || !bytes.Contains(out.Nodes["/root/.netrc"].bytes(t), []byte(planted[1].Values[0])) {
+		t.Fatal("rendered archive credential lost its mode/value")
+	}
+	store, err := canary.NewStore(t.TempDir(), 20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.SyncPlanted(planted); err != nil {
+		t.Fatal(err)
+	}
+	// Capturing a file path is not capturing its contents. The reused value,
+	// rather than the prior read command, is what the matcher can observe.
+	if _, hit, err := store.Match("cat /root/.netrc", "198.51.100.42", "cowrie"); err != nil || hit {
+		t.Fatalf("file read falsely claimed as credential use: %v, %v", hit, err)
+	}
+	if trip, hit, err := store.Match("password: "+planted[1].Values[0], "198.51.100.42", "cowrie"); err != nil || !hit || trip.CanaryID != planted[1].ID {
+		t.Fatalf("captured archive password failed to trip: %v, %v", hit, err)
+	}
 }
 
 // runBait plants plan into the harness tree and returns the result.

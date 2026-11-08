@@ -51,7 +51,7 @@ Exit status 0 means success; 1 is a usage error (an unknown flag).
 
 **That honeypot profile does not exist.**
 
-- Why: The profile names are minimal, standard and hifi.
+- Why: The profile names are minimal, standard, hifi, industrial and refrigeration.
 - Fix: Use one of them, for example: qpot setup --profile minimal. Or list honeypots yourself with --honeypots cowrie,endlessh
 
 ### QP-INPUT-003
@@ -119,10 +119,10 @@ Exit status 0 means success; 1 is a usage error (an unknown flag).
 
 ### QP-INPUT-012
 
-**An option has a value setup does not understand.**
+**An option has an unsupported value.**
 
-- Why: Each option accepts only the values listed in its help text.
-- Fix: Run qpot setup --help to see the accepted values, then try again.
+- Why: A setup answer or honeypot setting is missing, unknown, or outside the values accepted by that command.
+- Fix: Read the named rule and the command's help. Use qpot setup --help for setup options or qpot honeypot set --help for honeypot settings, then retry.
 
 ### QP-INPUT-013
 
@@ -655,6 +655,13 @@ Exit status 0 means success; 1 is a usage error (an unknown flag).
 - Why: The web UI, threat intelligence and HiFi resets only run while the control plane runs.
 - Fix: Start it with: qpot up -d
 
+### QP-WEB-004
+
+**The API request body is not valid.**
+
+- Why: The request is not the required JSON object, contains unknown fields, exceeds the size limit, or omits a required field.
+- Fix: Send the documented JSON object with Content-Type: application/json. Check the field names, types and body size in doc/api.md, then retry.
+
 ## QPot instance and containers (`INST`, exit 21)
 
 ### QP-INST-001
@@ -712,6 +719,20 @@ Exit status 0 means success; 1 is a usage error (an unknown flag).
 
 - Why: A container stopped, was never created, or reports itself unhealthy.
 - Fix: See why with: qpot logs <the part named above>. Start what stopped with: qpot up -d; if it stays down, run qpot down, then qpot setup (for another instance add -i <instance> to each command).
+
+### QP-INST-009
+
+**Another honeypot change is still running.**
+
+- Why: The control plane is already enabling, disabling, restarting or changing settings for a honeypot.
+- Fix: Wait for that change to finish, refresh the honeypot status and retry. Do not start a second change to bypass the active one.
+
+### QP-INST-010
+
+**This honeypot is turned off.**
+
+- Why: The requested restart needs an enabled honeypot, but its saved configuration has it disabled.
+- Fix: Choose the honeypot in the web UI and turn it on, or run qpot honeypot enable <name> -i <instance>. Then check its status before restarting it.
 
 ## Intelligence recovery and ownership (`INTEL`, exit 22)
 

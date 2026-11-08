@@ -70,12 +70,13 @@ type plantedFollower struct {
 
 // followPlanted keeps the store's planted canaries those the instance plants
 // now. The CLI changes them while the server runs on: qpot honeypot enable
-// cowrie, set cowrie persona=... or bait=on|off and a canary.base_url change
-// each save the config file and recreate Cowrie with the new bait, and this
+// a honeypot, set cowrie persona=... or bait=on|off and a canary.base_url change
+// each save the config file and update the desired bait, and this
 // server read the file once, at its start. So before a store read that
 // matters (an event matched, a beacon hit, the API's list) it looks at the
 // file again, at most once per plantedRecheck, and when the file's contents
-// changed, syncs the planted canaries of what it says now, as a restarted
+// changed, syncs the desired planted canaries while retaining earlier watches
+// as historical (an old honeypot process or copied values may still exist), as a restarted
 // server would (with this server's QPot ID, which a start takes from the ID
 // file). A file that cannot be read or parsed changes nothing.
 func (s *Server) followPlanted() {
@@ -86,7 +87,8 @@ func (s *Server) followPlanted() {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	now := time.Now()
-	if f.read && now.Sub(f.checked) < plantedRecheck {
+	// Rate-limit attempts even before the first successful parse or sync.
+	if !f.checked.IsZero() && now.Sub(f.checked) < plantedRecheck {
 		return
 	}
 	f.checked = now
@@ -100,7 +102,6 @@ func (s *Server) followPlanted() {
 	if f.read && sum == f.sum {
 		return
 	}
-	f.read, f.sum = true, sum
 	cfg, err := config.Parse(data, path)
 	if err != nil {
 		slog.Warn("canary: config file changed but does not parse; planted canaries kept", "path", path, "error", err)
@@ -108,8 +109,10 @@ func (s *Server) followPlanted() {
 	}
 	cfg.QPotID = s.config.QPotID
 	if err := s.canaries.SyncPlanted(instance.PlantedCanaries(cfg)); err != nil {
-		slog.Warn("Canary store: could not save the planted canaries", "error", err)
+		slog.Warn("Canary watches not updated; previous registry retained, newly planned values may be unwatched until storage recovers", "error", err)
+		return // Retry the same desired config after transient persistence failure.
 	}
+	f.read, f.sum = true, sum
 }
 
 // readConfigBounded reads a config file of at most maxPlantedConfig bytes.
@@ -242,6 +245,9 @@ func (s *Server) canaryView(c *canary.Canary) map[string]interface{} {
 	}
 	if c.Planted {
 		m["planted"] = true
+	}
+	if c.Historical {
+		m["historical"] = true
 	}
 	return m
 }

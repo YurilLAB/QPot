@@ -256,3 +256,59 @@ func FuzzSetupAnswers(f *testing.F) {
 		}
 	})
 }
+
+// Industrial is explicit: a raw conpot selection must keep the existing automatic device semantics.
+func TestIndustrialSetupProfile(t *testing.T) {
+	profile, hps, err := parseHoneypotsAnswer(" Industrial ")
+	if err != nil || profile != "industrial" || strings.Join(hps, ",") != "conpot" {
+		t.Fatalf("profile=%q hps=%v err=%v", profile, hps, err)
+	}
+	cfg := config.Default("industrial-test")
+	applyAnswers(cfg, setupAnswers{Profile: profile, Honeypots: hps, Bind: "127.0.0.1", Port: 8080})
+	if got := strings.Join(cfg.GetEnabledHoneypots(), ","); got != "conpot" {
+		t.Fatalf("industrial enables unrelated services: %s", got)
+	}
+	hp, _ := cfg.GetHoneypotConfig("conpot")
+	if hp.CustomConfig["template"] != "plc_modbus" {
+		t.Fatal("industrial did not select the Modbus PLC")
+	}
+	profile, hps, err = parseHoneypotsAnswer("conpot")
+	if err != nil || profile != "custom" {
+		t.Fatalf("raw engine list became industrial preset: %s %v", profile, err)
+	}
+	plain := config.Default("raw-conpot-test")
+	applyAnswers(plain, setupAnswers{Profile: profile, Honeypots: hps, Bind: "127.0.0.1", Port: 8080})
+	hp, _ = plain.GetHoneypotConfig("conpot")
+	if hp.CustomConfig["template"] != "" {
+		t.Fatal("raw engine selection unexpectedly pinned a device")
+	}
+	t.Setenv("HOME", t.TempDir())
+	answers := defaultAnswers()
+	answers.Profile, answers.Honeypots = "industrial", []string{"conpot"}
+	if err := saveSetupState(answers); err != nil {
+		t.Fatal(err)
+	}
+	got, ok := loadSetupState()
+	if !ok || got.Profile != "industrial" {
+		t.Fatalf("saved industrial profile not preserved: %+v %v", got, ok)
+	}
+}
+
+func TestRefrigerationSetupProfile(t *testing.T) {
+	profile, hps, err := parseHoneypotsAnswer(" Refrigeration ")
+	if err != nil || profile != "refrigeration" || strings.Join(hps, ",") != "refrigeration" {
+		t.Fatalf("profile=%q hps=%v err=%v", profile, hps, err)
+	}
+	cfg := config.Default("cold-storage-test")
+	applyAnswers(cfg, setupAnswers{Profile: profile, Honeypots: hps, Bind: "127.0.0.1", Port: 8080})
+	if got := strings.Join(cfg.GetEnabledHoneypots(), ","); got != "refrigeration" {
+		t.Fatalf("refrigeration preset enabled unrelated services: %s", got)
+	}
+	hp, ok := cfg.GetHoneypotConfig("refrigeration")
+	if !ok || hp.CustomConfig["site_profile"] != "" {
+		t.Fatal("new refrigeration instance did not preserve the retail default")
+	}
+	if err := checkSetupFlags(&setupOptions{profileSet: true, profile: "refrigeration"}); err != nil {
+		t.Fatalf("documented refrigeration setup flag rejected: %v", err)
+	}
+}

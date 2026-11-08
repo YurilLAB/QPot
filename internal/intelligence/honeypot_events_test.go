@@ -24,8 +24,8 @@ func TestDefaultRulesMatchHoneypotEventNames(t *testing.T) {
 		{"dionaea", "dionaea.connection.accept", "", "", "T1046"},
 		{"endlessh", "endlessh.connection.accept", "", "", "T1046"},
 		{"cowrie", "cowrie.session.connect", "", "", "T1046"},
-		{"conpot", "conpot.modbus.new_connection", "", "", "T0840"},
-		{"conpot", "conpot.http.probe", "", "", "T0840"},
+		{"conpot", "conpot.modbus.new_connection", "", "", ""},
+		{"conpot", "conpot.http.probe", "", "", "T0846"},
 		{"conpot", "conpot.s7comm.command", "", "", "T0855"},
 		// Legacy bare names keep working.
 		{"cowrie", "login_failed", "", "root", "T1110"},

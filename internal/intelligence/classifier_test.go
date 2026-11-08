@@ -124,6 +124,86 @@ func TestClassifyICSCommand(t *testing.T) {
 	}
 }
 
+// Connection establishment and normal protocol reads do not establish network
+// connection enumeration (T0840), a scan, or point/tag identification (T0861).
+func TestClassifyICSDoesNotInferDiscoveryFromConnectionOrRead(t *testing.T) {
+	c := newTestClassifierT(t)
+	for _, tc := range []struct{ eventType, protocol, function, profile string }{
+		{"connection", "modbus", "", "plc_modbus"},
+		{"conpot.modbus.new_connection", "modbus", "", "plc_modbus"},
+		{"conpot.http.new_connection", "http", "", ""},
+		{"conpot.modbus.read", "modbus", "3", "plc_modbus"},
+		{"conpot.modbus.read", "modbus", "43", "plc_modbus"},
+		{"conpot.modbus.request", "modbus", "8", "plc_modbus"},
+		{"conpot.modbus.request", "modbus", "", ""},
+		{"conpot.opcua.read", "opcua", "", "beckhoff_cx"},
+		{"conpot.modbus.connection_closed", "modbus", "", "plc_modbus"},
+		{"conpot.modbus.probe.invalid", "modbus", "", "plc_modbus"},
+	} {
+		t.Run(tc.eventType+"/"+tc.function, func(t *testing.T) {
+			ev := makeEvent("conpot", tc.eventType, "", "")
+			ev.Protocol = tc.protocol
+			// The current image's FC43/14 identification read remains a read,
+			// even when its function and selected profile are available.
+			ev.Metadata = map[string]string{"function_code": tc.function, "device_profile": tc.profile}
+			c.Classify(context.Background(), ev)
+			if ev.TechniqueID != "" || ev.Classified || ev.Confidence != 0 {
+				t.Errorf("insufficient discovery evidence classified: technique=%q classified=%v confidence=%v", ev.TechniqueID, ev.Classified, ev.Confidence)
+			}
+		})
+	}
+}
+
+func TestClassifyICSExplicitProbeIsDiscoveryCandidate(t *testing.T) {
+	c := newTestClassifierT(t)
+	for _, eventType := range []string{"probe", "conpot.http.probe", "conpot.modbus.probe"} {
+		t.Run(eventType, func(t *testing.T) {
+			ev := makeEvent("conpot", eventType, "", "")
+			c.Classify(context.Background(), ev)
+			if ev.TechniqueID != "T0846" || ev.TechniqueName != "Remote System Discovery" || ev.TacticID != "TA0102" || !ev.Classified {
+				t.Errorf("probe candidate metadata: %+v", ev)
+			}
+			if ev.Confidence != 0.5 {
+				t.Errorf("single probe confidence = %v, want candidate confidence 0.5", ev.Confidence)
+			}
+		})
+	}
+}
+
+func TestClassifyICSWriteAttemptPreservesLegacyMapping(t *testing.T) {
+	c := newTestClassifierT(t)
+	for _, response := range []string{"accepted", "illegal_data_address", "unknown"} {
+		t.Run(response, func(t *testing.T) {
+			ev := makeEvent("conpot", "conpot.modbus.command", "", "")
+			ev.Metadata = map[string]string{"function_code": "6", "response": response}
+			c.Classify(context.Background(), ev)
+			if ev.TechniqueID != "T0855" {
+				t.Errorf("write attempt mapping = %q, want legacy T0855", ev.TechniqueID)
+			}
+		})
+	}
+}
+
+func TestICSFallbackTechniqueMetadata(t *testing.T) {
+	loader := NewATTCKLoader(t.TempDir())
+	loader.loadEmbedded()
+	for id, name := range map[string]string{
+		"T0840": "Network Connection Enumeration",
+		"T0846": "Remote System Discovery",
+	} {
+		tech, ok := loader.Get(id)
+		if !ok {
+			t.Fatalf("missing embedded ICS technique %s", id)
+		}
+		if tech.Name != name || tech.ID != id || tech.SubID != id || tech.URL != "https://attack.mitre.org/techniques/"+id+"/" {
+			t.Errorf("incorrect embedded ICS technique %s: %+v", id, tech)
+		}
+		if len(tech.TacticIDs) != 1 || tech.TacticIDs[0] != "TA0102" || len(tech.TacticNames) != 1 || tech.TacticNames[0] != "discovery" {
+			t.Errorf("incorrect ICS discovery tactic %s: %+v", id, tech)
+		}
+	}
+}
+
 func TestClassifyDoesNotMatchWrongHoneypot(t *testing.T) {
 	c := newTestClassifierT(t)
 	// T0855 only applies to conpot; a cowrie command event should not match it.

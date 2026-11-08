@@ -1,8 +1,8 @@
 # Honeypots
 
-QPot runs 27 honeypots from T-Pot's newest upstream images, `24.04.2`. There
-is no T-Pot 25 release. tanner, snare and phpox stay on `24.04.1`, the newest
-published for them.
+QPot offers 28 honeypots, including the native refrigeration supervisor and
+HiFi SSH broker. The T-Pot services use upstream `24.04.2`; tanner, snare and
+phpox stay on `24.04.1`, the newest published for them. There is no T-Pot 25 release.
 
 | Honeypot | Emulates |
 |---|---|
@@ -10,7 +10,7 @@ published for them.
 | `beelzebub` | SSH and HTTP answered by an LLM (needs Ollama or an LLM API) |
 | `ciscoasa` | Cisco ASA (CVE-2018-0101) |
 | `citrixhoneypot` | Citrix NetScaler (CVE-2019-19781) |
-| `conpot` | ICS/SCADA devices (Modbus, S7comm, BACnet and more), one device per instance |
+| `conpot` | Industrial device profiles (Modbus, IEC 104, OPC UA and more), one device per instance |
 | `cowrie` | SSH and Telnet with a medium-interaction shell |
 | `ddospot` | UDP amplification (NTP, DNS, SSDP) |
 | `dicompot` | DICOM medical imaging |
@@ -29,6 +29,7 @@ published for them.
 | `medpot` | HL7 medical messaging |
 | `miniprint` | Network printer (JetDirect) |
 | `redishoneypot` | Redis |
+| `refrigeration` | Legacy refrigeration supervisor with XML/web management and virtual retail or plasma cold storage ([details](refrigeration.md)) |
 | `sentrypeer` | SIP and VoIP |
 | `ssh-proxy` | High-interaction SSH: real OpenSSH behind the HiFi broker ([HiFi mode](ssh-hifi-proxy.md)) |
 | `tanner` | Web application (multi-service) |
@@ -38,6 +39,51 @@ published for them.
 
 `glutton` and `honeytrap` are left out on purpose: they need host networking
 and `NET_ADMIN`, which would break QPot's per-honeypot isolation.
+
+## Industrial control systems
+
+The dashboard has an **Industrial control systems** card. Choose a device to
+see its model, protocols, device ports and simulation limits before saving.
+The picker uses the same supported profile IDs as the CLI:
+
+```bash
+qpot honeypot profiles conpot              # devices, protocols and limitations
+qpot honeypot set conpot template=plc_modbus
+qpot honeypot enable conpot
+qpot honeypot list                         # configured host ports, not a reachability check
+```
+
+`plc_modbus` is a Schneider Modicon M340 PLC (Modbus/TCP); `IEC104` is a
+substation RTU (IEC 104, DNP3 and SNMP); `beckhoff_cx` is an industrial
+controller with OPC UA and ADS. The catalog also distinguishes related meters,
+tank gauges, building controllers and server management devices. A Siemens
+device name does not imply S7comm support: the stock multi-protocol `default`
+template is not offered.
+
+For a **new** instance, `qpot setup --profile industrial` enables only Conpot
+and explicitly selects the Modbus PLC. Existing instance settings are kept.
+Choose a different device later through the dashboard or `honeypot set`.
+
+Device ports such as Modbus TCP 502 are inside the container. Automatic port
+allocation can publish them on different host ports; inspect the configured
+mappings before connecting. Changing a running device recreates Conpot, so
+existing protocol sessions disconnect. Saving while it is off does not enable
+it. A saved change that fails to start is reported as a failure, not success.
+
+The automatic choice is saved with a profile version and survives catalog
+reordering or expansion. `template=` clears an explicit pin and returns to
+that saved automatic choice. This release selects one emulated device per
+instance; it does not add an HMI or a coordinated PLC/RTU industrial site.
+
+## Refrigeration and cold storage
+
+`qpot setup --profile refrigeration` creates a new supervisor-only instance.
+For an existing instance, enable `refrigeration` and choose `site_profile=retail`
+or `site_profile=plasma` in its settings. The dashboard has a dedicated card and
+a link to the decoy console. The image is built locally from bundled Go sources,
+so first start needs access to the pinned builder image. No vendor firmware or
+real equipment is run. See [refrigeration.md](refrigeration.md) for the XML subset,
+accounts, files, canaries, persistence and simulation limits.
 
 ## Turning honeypots on and off
 

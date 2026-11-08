@@ -37,11 +37,22 @@ func siblingReservations(dataPath string) (map[int]bool, map[string]bool) {
 		if !e.IsDir() || dir == self {
 			continue
 		}
-		data, err := os.ReadFile(filepath.Join(dir, "docker-compose.yml"))
-		if err != nil {
-			continue
+		if data, err := os.ReadFile(filepath.Join(dir, "docker-compose.yml")); err == nil {
+			collectComposeReservations(data, ports, subnets)
 		}
-		collectComposeReservations(data, ports, subnets)
+		// QPot serves management in-process, so its listener has no compose
+		// service. Reserve it separately from a sibling's published decoy ports.
+		if data, err := os.ReadFile(filepath.Join(dir, "config.yaml")); err == nil {
+			var cfg struct {
+				WebUI struct {
+					Enabled bool `yaml:"enabled"`
+					Port    int  `yaml:"port"`
+				} `yaml:"web_ui"`
+			}
+			if yaml.Unmarshal(data, &cfg) == nil && cfg.WebUI.Enabled && cfg.WebUI.Port > 0 && cfg.WebUI.Port <= 65535 {
+				ports[cfg.WebUI.Port] = true
+			}
+		}
 	}
 	return ports, subnets
 }

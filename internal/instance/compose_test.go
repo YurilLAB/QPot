@@ -146,14 +146,20 @@ func TestComposeHoneypotHasNoSecretMount(t *testing.T) {
 }
 
 // TestComposeRuntimeGatedOnAvailability verifies the gVisor/Kata runtime line is
-// only emitted when the sandbox runtime is actually available. In this test
-// environment runsc/kata are absent, so NewSandbox falls back to "none" and the
-// compose must NOT contain a runtime: line (which would make docker refuse to
-// start the stack).
+// only emitted when the sandbox runtime is actually available. Hide the runtime
+// executables so the result does not depend on the developer's installed tools
+// or Docker daemon. NewSandbox must fall back to "none" in both cases.
 func TestComposeRuntimeGatedOnAvailability(t *testing.T) {
-	out := renderCompose(t) // uses config.Default (sandbox_mode gvisor) -> falls back to none here
-	if strings.Contains(out, "runtime: runsc") || strings.Contains(out, "runtime: kata-runtime") {
-		t.Error("compose emitted a sandbox runtime line while the runtime is unavailable; would break docker compose up")
+	t.Setenv("PATH", t.TempDir())
+	for _, mode := range []string{"gvisor", "kata"} {
+		t.Run(mode, func(t *testing.T) {
+			cfg := config.Default("compose-test")
+			cfg.Security.SandboxMode = mode
+			out := renderComposeCfg(t, cfg)
+			if strings.Contains(out, "runtime: runsc") || strings.Contains(out, "runtime: kata-runtime") {
+				t.Error("compose emitted a sandbox runtime line while the runtime is unavailable; would break docker compose up")
+			}
+		})
 	}
 }
 

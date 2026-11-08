@@ -122,14 +122,24 @@ func compileRules(rules []Rule) []compiledRule {
 // dionaea.connection.accept, conpot.modbus.new_connection, endlessh.connection.accept,
 // …), so the rules match those as well as the bare legacy names.
 const (
-	loginFailedPattern = `login[._]failed`
+	loginFailedPattern = `(?:login|auth)[._]failed`
 	connectionPattern  = `^(connection|probe)$|session\.connect$|connection\.accept$|new_connection$|\.probe$`
 )
 
 func DefaultRules() []Rule {
 	return []Rule{
+		// Refrigeration commands are attempts against emulated controls. A
+		// denied command or changed simulated value proves no physical impact.
+		{
+			TechniqueID: "T0855", TacticID: "TA0104", TacticName: "impair-process-control",
+			Name: "Industrial control command attempt", KillChain: "initial-access",
+			Honeypots: []string{"refrigeration"}, Priority: 201, Confidence: 0.6,
+			Conditions: []Condition{{Field: "event_type", Pattern: `^refrigeration\.write\.(?:attempt|success|denied)$`}},
+		},
 		// -----------------------------------------------------------------------
 		// T0855 Unauthorized Command (ICS) — priority 200
+		// This legacy mapping records a command attempt. The event does not
+		// establish that the device accepted it or changed the process.
 		// -----------------------------------------------------------------------
 		{
 			TechniqueID: "T0855",
@@ -146,19 +156,23 @@ func DefaultRules() []Rule {
 		},
 
 		// -----------------------------------------------------------------------
-		// T0840 ICS Network Scanning — priority 190
+		// T0846 Remote System Discovery candidate (ICS) — priority 190
+		// An explicit probe may be reconnaissance, but one event cannot prove
+		// a port scan. Bare connections and ordinary reads stay unmapped.
+		// T0840 concerns enumerating existing network connections, not probes:
+		// https://attack.mitre.org/techniques/T0840/
 		// -----------------------------------------------------------------------
 		{
-			TechniqueID: "T0840",
+			TechniqueID: "T0846",
 			TacticID:    "TA0102",
 			TacticName:  "discovery",
-			Name:        "ICS Network Scanning",
+			Name:        "Remote System Discovery",
 			KillChain:   "reconnaissance",
 			Honeypots:   []string{"conpot"},
 			Priority:    190,
-			Confidence:  1.0,
+			Confidence:  0.5,
 			Conditions: []Condition{
-				{Field: "event_type", Pattern: connectionPattern},
+				{Field: "event_type", Pattern: `^(probe|conpot\.[a-z0-9_]+\.probe)$`},
 			},
 		},
 
@@ -258,7 +272,7 @@ func DefaultRules() []Rule {
 			TacticName:  "credential-access",
 			Name:        "Brute Force",
 			KillChain:   "initial-access",
-			Honeypots:   []string{"cowrie", "heralding"},
+			Honeypots:   []string{"cowrie", "heralding", "refrigeration"},
 			Priority:    140,
 			Confidence:  1.0,
 			Conditions: []Condition{
@@ -423,6 +437,9 @@ func DefaultRules() []Rule {
 			Confidence:  1.0,
 			Conditions: []Condition{
 				{Field: "event_type", Pattern: connectionPattern},
+				// Conpot has the evidence-limited ICS rule above; do not turn
+				// its bare connections into certain enterprise discovery here.
+				{Field: "honeypot", Pattern: `^conpot$`, Negate: true},
 				// username must be absent (no auth attempted)
 				{Field: "username", Pattern: `.+`, Negate: true},
 			},

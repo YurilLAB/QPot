@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -13,6 +14,8 @@ import (
 	"gopkg.in/yaml.v3"
 
 	"github.com/qpot/qpot/internal/config"
+	"github.com/qpot/qpot/internal/database"
+	"github.com/qpot/qpot/internal/intelligence"
 	"github.com/qpot/qpot/internal/security"
 )
 
@@ -46,7 +49,7 @@ func TestVectorRemapLive(t *testing.T) {
 	cfg.QPotID = "qp_vectorvectorvectorvecto"
 	for _, n := range []string{"cowrie", "endlessh", "dionaea", "conpot", "heralding", "adbhoney",
 		"tanner", "dicompot", "ddospot", "hellpot", "log4pot", "citrixhoneypot", "galah", "mailoney",
-		"redishoneypot", "go-pot", "beelzebub", "ciscoasa", "sentrypeer", "wordpot", "medpot"} {
+		"redishoneypot", "go-pot", "beelzebub", "ciscoasa", "sentrypeer", "wordpot", "medpot", "refrigeration"} {
 		hp := cfg.Honeypots[n]
 		hp.Enabled = true
 		cfg.Honeypots[n] = hp
@@ -101,6 +104,12 @@ func TestVectorRemapLive(t *testing.T) {
 	keyID := "AKIA" + strings.Repeat("Z", 16)
 	secret := strings.Repeat("s", 40)
 	typed := "Hunter-" + strings.Repeat("x", 12)
+	longNativeInput := strings.Repeat("x", 5000)
+	nativeArchivePassword := refrigerationArchiveCanary(cfg).Values[0]
+	var escapedNativePassword strings.Builder
+	for _, b := range []byte(nativeArchivePassword) {
+		fmt.Fprintf(&escapedNativePassword, "%%%02X", b)
+	}
 
 	in := strings.Join([]string{
 		"/data/honeypots/cowrie/logs/cowrie.json\t" + `{"eventid":"cowrie.session.connect","src_ip":"203.0.113.9","src_port":55632,"dst_ip":"172.20.0.2","dst_port":22,"session":"s1","protocol":"ssh"}`,
@@ -144,6 +153,33 @@ func TestVectorRemapLive(t *testing.T) {
 		"/data/honeypots/cowrie/logs/cowrie.json\t" + `{"eventid":"cowrie.client.fingerprint","username":"root","fingerprint":"` + fp + `","key":"ssh-ed25519 ` + blob + `","type":"ssh-ed25519","src_ip":"203.0.113.40","session":"s9","protocol":"ssh"}`,
 		"/data/honeypots/cowrie/logs/cowrie.json\t" + `{"eventid":"cowrie.command.input","realm":"ssh","input":"` + typed + `","src_ip":"203.0.113.41","session":"s10","protocol":"ssh"}`,
 		"/data/honeypots/cowrie/logs/cowrie.json\t" + `{"eventid":"cowrie.credentials.use","realm":"aws","username":"` + keyID + `","password":"` + secret + `","service":"sts","input":"aws sts get-caller-identity","src_ip":"203.0.113.42","session":"s11","protocol":"ssh"}`,
+		// Captured pinned-image schema: protocol rather than data_type, and
+		// nested Modbus fields. Preserve source profiles across queued logs.
+		"/data/honeypots/conpot/logs/conpot.json\t" + `{"protocol":"modbus","src_ip":"203.0.113.50","dst_port":502,"event_type":null,"data":{"slave_id":1,"function_code":3},"request":"b'00010000000601039c410001'","response":"b'0302007b'","template":"plc_modbus"}`,
+		"/data/honeypots/conpot/logs/conpot.json\t" + `{"protocol":"modbus","src_ip":"203.0.113.51","dst_port":502,"event_type":null,"data":{"slave_id":1,"function_code":6},"request":"b'00010000000601069c41007b'","response":"b'069c41007b'","template":"plc_modbus"}`,
+		"/data/honeypots/conpot/logs/conpot.json\t" + `{"protocol":"modbus","src_ip":"203.0.113.52","dst_port":502,"event_type":null,"data":{"slave_id":1,"function_code":3},"request":"b'0001000000060103ffff0001'","response":"b'8302'","template":"plc_modbus"}`,
+		"/data/honeypots/conpot/logs/conpot.json\t" + `{"protocol":"modbus","src_ip":"203.0.113.53","dst_port":502,"event_type":null,"data":{"slave_id":1,"function_code":43},"request":"b'000100000005012b0e0100'","template":"plc_modbus"}`,
+		"/data/honeypots/conpot/logs/conpot.json\t" + `{"protocol":"modbus","src_ip":"203.0.113.54","event_type":null,"data":{"slave_id":1,"function_code":8},"template":"plc_modbus"}`,
+		"/data/honeypots/conpot/logs/conpot.json\t" + `{"protocol":"modbus","src_ip":"203.0.113.55","event_type":null,"data":{"slave_id":999,"function_code":999},"template":"untrusted-template"}`,
+		"/data/honeypots/conpot/logs/conpot.json\t" + `{"protocol":"dnp3","src_ip":"203.0.113.56","dst_port":20000,"event_type":"REQUEST","data":{"object_groups":[60]},"request":"READ","template":"IEC104"}`,
+		"/data/honeypots/conpot/logs/conpot.json\t" + `{"protocol":"IEC104","src_ip":"203.0.113.57","dst_port":2404,"event_type":"NEW_CONNECTION","data":{},"template":"IEC104"}`,
+		"/data/honeypots/refrigeration/logs/events.json\t" + `{"event_type":"refrigeration.auth.failed","src_ip":"203.0.113.70","src_port":41001,"dst_port":8080,"protocol":"http","username":"admin","password":"wrong","action":"login","success":false,"metadata":{"profile":"ak-sm800a","model":"AK-SM 800A","firmware":"3.3.0","role":"supervisor"}}`,
+		"/data/honeypots/refrigeration/logs/events.json\t" + `{"event_type":"refrigeration.auth.success","src_ip":"203.0.113.71","src_port":41002,"protocol":"http","username":"operator","password":"captured-input","action":"login","success":true}`,
+		"/data/honeypots/refrigeration/logs/events.json\t" + `{"event_type":"refrigeration.read","src_ip":"203.0.113.72","protocol":"http","action":"readings","method":"GET","path":"/readings","success":true,"request":"GET /readings","metadata":{"key":"must-not-be-watched","profile":"retail"}}`,
+		"/data/honeypots/refrigeration/logs/events.json\t" + `{"event_type":"refrigeration.write.attempt","src_ip":"203.0.113.73","protocol":"http","action":"setpoint","device_id":"case01","success":false,"request":"setpoint=-20","metadata":{"parameter":"setpoint","value":-20,"reason":"pending"}}`,
+		"/data/honeypots/refrigeration/logs/events.json\t" + `{"event_type":"refrigeration.write.success","src_ip":"203.0.113.74","protocol":"http","action":"setpoint","success":true,"metadata":{"outcome":"emulated value changed","previous_value":-18,"value":-20}}`,
+		"/data/honeypots/refrigeration/logs/events.json\t" + `{"event_type":"refrigeration.write.denied","src_ip":"203.0.113.75","protocol":"http","action":"defrost","success":false,"metadata":{"reason":"read-only role"}}`,
+		"/data/honeypots/refrigeration/logs/events.json\t" + `{"event_type":"refrigeration.alarm","src_ip":"203.0.113.76","protocol":"http","action":"alarm-list","device_id":"case01","success":true}`,
+		"/data/honeypots/refrigeration/logs/events.json\t" + `{"event_type":"refrigeration.read","src_ip":"203.0.113.77","protocol":"http","action":"configuration","success":true}`,
+		"/data/honeypots/refrigeration/logs/events.json\t" + `{"event_type":"refrigeration.export","src_ip":"203.0.113.78","protocol":"http","action":"maintenance","success":true,"request":"GET /exports/maintenance.zip","response":"do-not-match-response-secret"}`,
+		"/data/honeypots/refrigeration/logs/events.json\t" + `{"event_type":"refrigeration.exploit.attempt","src_ip":"203.0.113.79","protocol":"http","action":"request","request":"GET /../../etc/passwd","command":"never execute OS input","success":false}`,
+		"/data/honeypots/refrigeration/logs/events.json\t" + `{"event_type":"refrigeration.malformed","src_ip":"203.0.113.80","protocol":"http","action":"xml","request":"<broken","success":false}`,
+		"/data/honeypots/refrigeration/logs/events.json\t" + `{"event_type":"injected.event","eventid":"cowrie.command.input","honeypot":"cowrie","file":"/data/honeypots/cowrie/logs/x.json","src_ip":"203.0.113.81","protocol":"http","metadata":{"source_ip":"198.51.100.99","profile":[],"key":"must-not-be-watched"}}`,
+		"/data/honeypots/refrigeration/logs/events.json\t" + `{"event_type":"refrigeration.read","src_ip":"203.0.113.82","protocol":"http","username":"` + longNativeInput + `","request":"` + longNativeInput + `","metadata":{"reason":"` + longNativeInput + `","request_uri":"` + longNativeInput + `","query":"` + longNativeInput + `","user_agent":"` + longNativeInput + `"}}`,
+		"/data/honeypots/refrigeration/logs/events.json\t" + `{"event_type":"refrigeration.read","src_ip":"203.0.113.83","src_port":42001,"protocol":"http","action":"metadata","method":"GET","path":"/metadata","request":"/metadata?archive=` + escapedNativePassword.String() + `","metadata":{"request_uri":"/metadata?archive=` + escapedNativePassword.String() + `","query":"archive=` + nativeArchivePassword + `","user_agent":"fleet-agent"}}`,
+		"/data/honeypots/refrigeration/logs/events.json\t" + `{"event_type":"refrigeration.read","src_ip":"203.0.113.84","src_port":42002,"protocol":"http","action":"metadata","method":"GET","path":"/metadata","request":"/metadata","metadata":{"request_uri":"/metadata","user_agent":"fleet-agent ` + nativeArchivePassword + `"}}`,
+		"/data/honeypots/refrigeration/logs/events.json\t" + `{"event_type":"refrigeration.malformed","src_ip":"203.0.113.85","src_port":42003,"protocol":"http","action":"http.method","method":"POST","path":"/unknown","success":false,"request":"/unknown?probe=1","metadata":{"request_uri":"/unknown?probe=1","query":"probe=1","user_agent":"method-probe","reason":"method"}}`,
+		"/data/honeypots/refrigeration/logs/events.json\t" + `{"event_type":"refrigeration.read","src_ip":"203.0.113.86","src_port":42004,"protocol":"http","action":"not_found","method":"GET","path":"/unknown","request":"/unknown?archive=` + nativeArchivePassword + `","metadata":{"request_uri":"/unknown?archive=` + nativeArchivePassword + `","query":"archive=` + nativeArchivePassword + `"}}`,
 	}, "\n") + "\n"
 
 	cmd := exec.Command(run[0], append(run[1:], "--quiet", "--config", cfgPath)...)
@@ -186,12 +222,42 @@ func TestVectorRemapLive(t *testing.T) {
 		}
 		rows = append(rows, r)
 	}
-	// 35 input lines: broken JSON, cowrie.log chatter, endlessh's banner line
+	// Broken JSON, cowrie.log chatter, endlessh's banner line
 	// and the lines without an attacker address (dicompot's finished line,
 	// hellpot's/log4pot's startup lines, wordpot's profile state) must be
 	// dropped.
-	if len(rows) != 28 {
-		t.Fatalf("got %d events, want 28: %+v", len(rows), rows)
+	if len(rows) != 53 {
+		t.Fatalf("got %d events, want 53: %+v", len(rows), rows)
+	}
+	if r := rows[48]; len(r.Username) != 256 || len(r.Payload) != 4096 || len(r.Metadata["reason"]) != 256 || len(r.Metadata["request_uri"]) != 2048 || len(r.Metadata["query"]) != 1024 || len(r.Metadata["user_agent"]) != 512 {
+		t.Errorf("native event fields escaped their size bounds: username=%d payload=%d reason=%d URI=%d query=%d user_agent=%d", len(r.Username), len(r.Payload), len(r.Metadata["reason"]), len(r.Metadata["request_uri"]), len(r.Metadata["query"]), len(r.Metadata["user_agent"]))
+	}
+	if r := rows[49]; r.SourceIP != "203.0.113.83" || r.SourcePort != 42001 || r.EventType != "refrigeration.read" || r.Metadata["query"] != "archive="+nativeArchivePassword || r.Metadata["request_uri"] != "/metadata?archive="+escapedNativePassword.String() {
+		t.Error("native raw/decoded request target or source attribution was discarded")
+	}
+	if r := rows[50]; r.Metadata["user_agent"] != "fleet-agent "+nativeArchivePassword || r.SourceIP != "203.0.113.84" {
+		t.Error("credential reuse supplied in User-Agent was discarded")
+	}
+	if r := rows[51]; r.EventType != "refrigeration.malformed" || r.Metadata["method"] != "POST" || r.Metadata["path"] != "/unknown" || r.Metadata["action"] != "http.method" || r.Metadata["reason"] != "method" || r.Payload != "/unknown?probe=1" || r.SourceIP != "203.0.113.85" {
+		t.Errorf("unsupported HTTP method observation was discarded or mislabeled: %+v", r)
+	}
+	if r := rows[52]; r.Payload != "/unknown?archive="+nativeArchivePassword || r.Metadata["request_uri"] != r.Payload || r.Metadata["query"] != "archive="+nativeArchivePassword || r.SourceIP != "203.0.113.86" {
+		t.Error("literal canary credential in an unknown GET target was discarded")
+	}
+	for i, eventType := range []string{"auth.failed", "auth.success", "read", "write.attempt", "write.success", "write.denied", "alarm", "read", "export", "exploit.attempt", "malformed", "request"} {
+		r := rows[36+i]
+		if r.Honeypot != "refrigeration" || r.EventType != "refrigeration."+eventType || r.SourceIP != fmt.Sprintf("203.0.113.%d", 70+i) || r.Protocol != "http" || r.Metadata["state_scope"] != "simulated" {
+			t.Errorf("native refrigeration event %d lost attribution or semantics: %+v", i, r)
+		}
+		if r.Command != "" || r.Metadata["key"] != "" || r.Metadata["source_ip"] != "" || strings.Contains(r.Payload, "do-not-match-response-secret") {
+			t.Errorf("refrigeration copied non-input or unapproved fields: %+v", r)
+		}
+	}
+	if r := rows[36]; r.Username != "admin" || r.Password != "wrong" || r.SourcePort != 41001 || r.DestPort != 8080 || r.Metadata["success"] != "false" || r.Metadata["firmware"] != "3.3.0" {
+		t.Errorf("native authentication lost credentials, socket address or device context: %+v", r)
+	}
+	if r := rows[39]; r.Metadata["parameter"] != "setpoint" || r.Metadata["value"] != "-20" || r.Metadata["device_id"] != "case01" {
+		t.Errorf("setpoint attempt lost control metadata: %+v", r)
 	}
 	if r := rows[25]; r.EventType != "cowrie.client.fingerprint" || r.Username != "root" ||
 		r.Metadata["fingerprint"] != fp || r.Metadata["key"] != "ssh-ed25519 "+blob {
@@ -241,6 +307,35 @@ func TestVectorRemapLive(t *testing.T) {
 	}
 	if r := rows[10]; r.DestPort != 5555 || r.SourcePort != 34434 {
 		t.Errorf("adbhoney: %+v", r)
+	}
+
+	// Test the actual image schema through the real transform and classifier.
+	// Reads and exceptions must not become unauthorized control writes.
+	classifier := intelligence.NewClassifier(intelligence.NewATTCKLoader(t.TempDir()), nil)
+	conpotWant := []struct {
+		event, operation, function, unit, profile, exception string
+	}{
+		{"conpot.modbus.read", "read", "3", "1", "plc_modbus", ""},
+		{"conpot.modbus.command", "write", "6", "1", "plc_modbus", ""},
+		{"conpot.modbus.read", "read", "3", "1", "plc_modbus", "02"},
+		{"conpot.modbus.read", "read", "43", "1", "plc_modbus", ""},
+		{"conpot.modbus.request", "", "8", "1", "plc_modbus", ""},
+		{"conpot.modbus.request", "", "", "", "", ""},
+		{"conpot.dnp3.read", "read", "", "", "IEC104", ""},
+		{"conpot.iec104.new_connection", "", "", "", "IEC104", ""},
+	}
+	for i, want := range conpotWant {
+		r := rows[28+i]
+		if r.EventType != want.event || r.Metadata["operation"] != want.operation ||
+			r.Metadata["function_code"] != want.function || r.Metadata["unit_id"] != want.unit ||
+			r.Metadata["device_profile"] != want.profile || r.Metadata["exception_code"] != want.exception {
+			t.Errorf("current Conpot image fixture %d: got %+v, want %+v", i, r, want)
+		}
+		event := &database.Event{Honeypot: r.Honeypot, EventType: r.EventType, SourceIP: r.SourceIP, Protocol: r.Protocol, Metadata: r.Metadata}
+		classifier.Classify(t.Context(), event)
+		if want.operation == "write" && event.TechniqueID != "T0855" || want.operation != "write" && event.TechniqueID == "T0855" {
+			t.Errorf("Conpot %s operation %q classified as %s", r.EventType, want.operation, event.TechniqueID)
+		}
 	}
 
 	want := []struct {

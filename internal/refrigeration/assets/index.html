@@ -1,0 +1,87 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light">
+  <title>Danfoss StoreView</title>
+  <link rel="stylesheet" href="/assets/app.css">
+  <script src="/assets/app.js" defer></script>
+</head>
+<body>
+  <header class="masthead">
+    <div class="instrument"><span class="instrument-mark" aria-hidden="true">AK</span><div><strong>AK-SM 800A</strong><span>System Manager</span></div></div>
+    <div class="plant-heading"><strong id="plant-name">Refrigeration system</strong><span id="plant-location">Remote management</span></div>
+    <div class="session"><span id="operator-name"></span><button id="logout" type="button" hidden>Log out</button></div>
+  </header>
+  <div class="status-bar"><span><i id="connection-lamp" class="lamp" aria-hidden="true"></i><span id="connection-status">Connecting</span></span><span id="system-clock">—</span><span id="controller-address"></span></div>
+
+  <main id="login-view" class="login-view">
+    <form id="login-form" class="login-panel">
+      <div class="panel-title">System log in</div>
+      <div class="login-content"><h1>Remote access</h1><p>Enter your user name and password to access the system.</p>
+        <label for="username">User name</label><input id="username" name="username" autocomplete="username" maxlength="64" required>
+        <label for="password">Password</label><input id="password" name="password" type="password" autocomplete="current-password" maxlength="128" required>
+        <p id="login-error" class="error-message" role="alert" hidden></p>
+        <div class="form-footer"><span>AK-SM 800A</span><button class="primary" id="login-submit" type="submit">Log in</button></div>
+      </div>
+    </form>
+    <p class="login-version" id="login-version"></p>
+  </main>
+
+  <div id="console" hidden>
+    <nav class="main-nav" aria-label="System navigation">
+      <button type="button" data-view="dashboard" aria-current="page">Dashboard</button>
+      <button type="button" data-view="equipment">Equipment</button>
+      <button type="button" data-view="alarms">Alarms <span id="alarm-count" class="count">0</span></button>
+      <button type="button" data-view="history">History</button>
+      <button type="button" data-view="configuration">Configuration</button>
+      <button type="button" data-view="about">About</button>
+    </nav>
+    <div id="notice" class="notice" role="status" hidden><span id="notice-text"></span><button type="button" id="dismiss-notice" aria-label="Dismiss message">×</button></div>
+    <div class="console-layout">
+      <aside class="equipment-tree"><div class="tree-heading">System overview</div><button class="site-node" id="site-node" type="button">Refrigeration</button><div class="tree-summary" id="tree-summary"></div><div id="unit-tree" aria-label="Refrigeration equipment"></div><div class="tree-footer">Network status <span id="network-status">—</span></div></aside>
+      <main id="workspace" tabindex="-1">
+        <section id="view-dashboard" class="view" aria-labelledby="dashboard-heading">
+          <div class="page-heading"><div><div class="breadcrumb">System / Overview</div><h1 id="dashboard-heading">Dashboard</h1></div><button type="button" class="refresh">Refresh</button></div>
+          <div class="summary-strip"><div><span>Refrigeration units</span><strong id="summary-units">—</strong></div><div><span>Units in alarm</span><strong id="summary-alarm-units">—</strong></div><div><span>Active alarms</span><strong id="summary-alarms">—</strong></div><div><span>Communication</span><strong id="summary-communications">—</strong></div></div>
+          <div class="panel"><div class="panel-title">Refrigeration overview <span class="panel-aside">Live values</span></div><div class="table-scroll"><table><caption class="sr-only">Refrigeration equipment live values</caption><thead><tr><th>Equipment name</th><th>Address</th><th>Temperature</th><th>Setpoint</th><th>Defrost</th><th>Compressor</th><th>Status</th></tr></thead><tbody id="dashboard-units"></tbody></table></div></div>
+          <div class="panel"><div class="panel-title">Active alarms <button type="button" class="small" data-view="alarms">View alarms</button></div><div class="table-scroll"><table><caption class="sr-only">Latest active alarms</caption><thead><tr><th>Occurred</th><th>Equipment</th><th>Description</th><th>Priority</th><th>State</th></tr></thead><tbody id="dashboard-alarms"></tbody></table></div></div>
+        </section>
+
+        <section id="view-equipment" class="view" aria-labelledby="equipment-heading" hidden>
+          <div class="page-heading"><div><div class="breadcrumb">System / Refrigeration / Equipment</div><h1 id="equipment-heading">Equipment</h1></div><button type="button" class="refresh">Refresh</button></div>
+          <div class="device-strip"><span id="device-model">—</span><span>Address <strong id="device-address">—</strong></span><span id="device-status">—</span></div>
+          <nav class="sub-tabs" aria-label="Equipment pages"><button type="button" data-device-tab="status" aria-current="page">Status</button><button type="button" data-device-tab="alarms">Alarms</button><button type="button" data-device-tab="settings">Settings</button><button type="button" data-device-tab="graph">Graph</button></nav>
+          <div id="device-tab-status" class="device-tab"><div class="panel"><div class="panel-title">Current values</div><dl id="device-values" class="property-list"></dl></div><p class="last-update" id="device-updated"></p></div>
+          <div id="device-tab-alarms" class="device-tab" hidden><div class="panel"><div class="panel-title">Equipment alarms</div><div class="table-scroll"><table><caption class="sr-only">Selected equipment alarms</caption><thead><tr><th>Occurred</th><th>Description</th><th>Priority</th><th>State</th><th>Action</th></tr></thead><tbody id="device-alarms"></tbody></table></div></div></div>
+          <div id="device-tab-settings" class="device-tab" hidden><form id="unit-settings-form" class="panel"><div class="panel-title">Control settings</div><div class="settings-fields"><label for="unit-setpoint">Temperature setpoint (°C)</label><div><input id="unit-setpoint" type="number" step="0.1" required><span id="setpoint-range" class="field-help"></span></div><label for="unit-enabled">Main switch</label><select id="unit-enabled"><option value="true">On</option><option value="false">Off</option></select></div><div class="panel-footer"><span id="unit-save-status" role="status"></span><button id="save-unit" class="primary" type="submit">Save settings</button></div></form><div class="panel"><div class="panel-title">Manual operation</div><div class="operation-row"><div><strong>Defrost</strong><p>Start or end a manual defrost for this refrigeration circuit.</p></div><div><button type="button" id="start-defrost">Start Manual Defrost</button><button type="button" id="stop-defrost">Manual Defrost Off</button></div></div></div></div>
+          <div id="device-tab-graph" class="device-tab" hidden><div class="panel"><div class="panel-title">Temperature history</div><div class="graph-toolbar"><label for="device-period">Period</label><select id="device-period"><option value="1">Last hour</option><option value="6" selected>Last 6 hours</option><option value="24">Last 24 hours</option></select><button id="device-draw" type="button">Draw graph</button><button id="device-export" type="button">Export CSV</button></div><div id="device-chart" class="chart"></div><div id="device-chart-stats" class="chart-stats"></div></div></div>
+        </section>
+
+        <section id="view-alarms" class="view" aria-labelledby="alarms-heading" hidden>
+          <div class="page-heading"><div><div class="breadcrumb">System / Alarms</div><h1 id="alarms-heading">Alarm management</h1></div><button type="button" id="export-alarms">Export CSV</button></div>
+          <div class="alarm-tools"><label for="alarm-filter">View</label><select id="alarm-filter"><option value="active">Active alarms</option><option value="acknowledged">Acknowledged alarms</option><option value="cleared">Cleared alarms</option><option value="all">All alarms</option></select><span id="alarm-summary"></span><button class="refresh" type="button">Refresh</button></div>
+          <div class="panel"><div class="table-scroll"><table><caption class="sr-only">System alarms</caption><thead><tr><th>Occurred</th><th>Equipment</th><th>Description</th><th>Priority</th><th>State</th><th>Acknowledged</th><th>Action</th></tr></thead><tbody id="all-alarms"></tbody></table></div></div><p class="field-help">Acknowledgement records that an alarm has been reviewed. The alarm remains active until its condition has cleared.</p>
+        </section>
+
+        <section id="view-history" class="view" aria-labelledby="history-heading" hidden>
+          <div class="page-heading"><div><div class="breadcrumb">System / History</div><h1 id="history-heading">Historical data</h1></div></div>
+          <form id="history-form" class="panel"><div class="panel-title">History selection</div><div class="history-controls"><label>Equipment<select id="history-unit" required></select></label><label>From (UTC)<input id="history-from" type="datetime-local" required></label><label>To (UTC)<input id="history-to" type="datetime-local" required></label><button type="submit" class="primary">Draw graph</button><button id="history-export" type="button">Export CSV</button></div></form>
+          <div class="panel"><div class="panel-title">Temperature and setpoint <span id="history-caption" class="panel-aside"></span></div><div id="history-chart" class="chart"></div><div id="history-stats" class="chart-stats"></div></div>
+          <div class="panel"><div class="panel-title">Recorded values <span id="history-record-count" class="panel-aside"></span></div><div class="table-scroll history-table"><table><caption class="sr-only">Historical temperature readings</caption><thead><tr><th>Time</th><th>Temperature (°C)</th><th>Setpoint (°C)</th><th>Defrost</th><th>Compressor</th></tr></thead><tbody id="history-values"></tbody></table></div></div>
+        </section>
+
+        <section id="view-configuration" class="view" aria-labelledby="configuration-heading" hidden>
+          <div class="page-heading"><div><div class="breadcrumb">System / Configuration</div><h1 id="configuration-heading">System configuration</h1></div></div>
+          <div class="panel"><div class="panel-title">System information</div><dl id="configuration-properties" class="property-list"></dl><div class="panel-footer"><span>Maintenance files</span><div><button type="button" id="config-export">Export configuration</button> <button type="button" id="maintenance-export">Maintenance archive</button></div></div></div>
+          <div class="panel"><div class="panel-title">Network and communication</div><dl id="network-properties" class="property-list"></dl></div>
+        </section>
+
+        <section id="view-about" class="view" aria-labelledby="about-heading" hidden><div class="page-heading"><div><div class="breadcrumb">System / Information</div><h1 id="about-heading">About this system</h1></div></div><div class="panel"><div class="panel-title">AK-SM 800A · System Manager</div><dl id="system-properties" class="property-list"></dl></div><div class="panel"><div class="panel-title">Equipment inventory</div><div class="table-scroll"><table><caption class="sr-only">Equipment identity and address</caption><thead><tr><th>Name</th><th>Type</th><th>Model</th><th>Address</th><th>Product code</th></tr></thead><tbody id="inventory-values"></tbody></table></div></div></section>
+      </main>
+    </div>
+    <footer class="console-footer"><span id="footer-model">AK-SM 800A</span><span id="last-refresh">Waiting for system data</span><span>Remote management</span></footer>
+  </div>
+</body>
+</html>

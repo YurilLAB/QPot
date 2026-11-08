@@ -302,7 +302,7 @@ func describePlatform(env *setupEnv, p hostsetup.Platform) {
 func checkSetupFlags(o *setupOptions) *hostsetup.Error {
 	if o.profileSet && o.honeypotsSet {
 		return hostsetup.E("QP-INPUT-010").WithWhy("--profile and --honeypots both choose the honeypots.").
-			WithFix("Use only one: --profile minimal|standard|hifi, or --honeypots name,name.")
+			WithFix("Use only one: --profile minimal|standard|hifi|industrial|refrigeration, or --honeypots name,name.")
 	}
 	if o.instanceSet {
 		if _, err := parseInstanceAnswer(o.instance); err != nil {
@@ -311,7 +311,7 @@ func checkSetupFlags(o *setupOptions) *hostsetup.Error {
 	}
 	if o.profileSet {
 		if _, ok := setupProfiles[strings.ToLower(o.profile)]; !ok {
-			return hostsetup.E("QP-INPUT-002").WithWhy("%q is not a profile; use minimal, standard or hifi.", truncRunes(o.profile, 30))
+			return hostsetup.E("QP-INPUT-002").WithWhy("%q is not a profile; use minimal, standard, hifi, industrial or refrigeration.", truncRunes(o.profile, 30))
 		}
 		o.profile = strings.ToLower(o.profile)
 	}
@@ -509,6 +509,15 @@ func printAnswers(env *setupEnv, a setupAnswers) {
 	}
 	env.say("  Instance:          %s", termSafe(a.Instance))
 	env.say("  Honeypots:         %s (%s)", termSafe(strings.Join(a.Honeypots, ", ")), termSafe(a.Profile))
+	if a.Profile == "industrial" {
+		env.say("  Industrial device: Schneider Modicon M340 (plc_modbus); Modbus/TCP, container port 502")
+		env.say("  Device ports:      host ports are allocated; qpot honeypot list shows the mappings")
+	}
+	if a.Profile == "refrigeration" {
+		env.say("  Refrigeration:     legacy supervisor with simulated retail cold storage")
+		env.say("  Image:             built locally from bundled Go source; first start needs the build image")
+		env.say("  Device ports:      host ports are allocated; qpot honeypot list shows the mappings")
+	}
 	env.say("  Web UI address:    %s", termSafe(net.JoinHostPort(a.Bind, strconv.Itoa(a.Port))))
 	env.say("  Database:          %s", termSafe(a.Database))
 	env.say("  Honeypot outbound: %s", outbound)
@@ -542,6 +551,8 @@ func askSettings(env *setupEnv, ask *prompter, a *setupAnswers, o setupOptions, 
 			{"minimal", "SSH/Telnet (cowrie) and an SSH tarpit (endlessh): low risk, a good start"},
 			{"standard", "minimal + dionaea, heralding, conpot, adbhoney: more services, more traffic"},
 			{"hifi", "minimal + real OpenSSH servers behind a broker: high interaction, highest risk"},
+			{"industrial", "Industrial control systems: one Schneider Modicon M340 PLC (Modbus/TCP)"},
+			{"refrigeration", "Refrigeration supervisor: virtual cold storage, web management and XML control"},
 			{"custom", "choose honeypots by name"},
 		}, a.Profile)
 		if err != nil {

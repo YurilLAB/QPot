@@ -307,3 +307,14 @@ func FuzzDoctorExplain(f *testing.F) {
 		}
 	})
 }
+
+func TestIndustrialManagementCodesExplain(t *testing.T) {
+	a := newAPITestServer(t, "api-coldcodes", nil)
+	for _, id := range []string{"QP-WEB-004", "QP-INST-009", "QP-INST-010"} {
+		rec := a.do(http.MethodGet, "/api/doctor/explain?code="+id, "")
+		var entry codeEntry
+		if rec.Code != http.StatusOK || json.Unmarshal(rec.Body.Bytes(), &entry) != nil || entry.Code != id || entry.Title == "" || entry.Cause == "" || entry.Fix == "" {
+			t.Fatalf("%s: %d %s", id, rec.Code, rec.Body.String())
+		}
+	}
+}

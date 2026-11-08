@@ -20,7 +20,7 @@ import (
 // terminal, or taken from flags and defaults.
 type setupAnswers struct {
 	Instance  string   `json:"instance"`
-	Profile   string   `json:"profile"` // minimal, standard, hifi or custom
+	Profile   string   `json:"profile"` // minimal, standard, hifi, industrial, refrigeration or custom
 	Honeypots []string `json:"honeypots"`
 	Bind      string   `json:"bind"`
 	Port      int      `json:"port"`
@@ -64,7 +64,7 @@ func parseInstanceAnswer(s string) (string, *hostsetup.Error) {
 	return s, nil
 }
 
-// parseHoneypotsAnswer accepts a profile name (minimal, standard, hifi) or a
+// parseHoneypotsAnswer accepts a profile name (minimal, standard, hifi, industrial, refrigeration) or a
 // list of honeypot names separated by commas or spaces. It returns the
 // profile ("custom" for a list) and the sorted, de-duplicated names.
 func parseHoneypotsAnswer(s string) (string, []string, *hostsetup.Error) {
@@ -85,7 +85,7 @@ func parseHoneypotsAnswer(s string) (string, []string, *hostsetup.Error) {
 	for _, f := range fields {
 		if !known[f] {
 			if len(fields) == 1 {
-				return "", nil, hostsetup.E("QP-INPUT-002").WithWhy("%q is neither a profile (minimal, standard, hifi) nor a honeypot QPot knows.", truncRunes(f, 40))
+				return "", nil, hostsetup.E("QP-INPUT-002").WithWhy("%q is neither a profile (minimal, standard, hifi, industrial, refrigeration) nor a honeypot QPot knows.", truncRunes(f, 40))
 			}
 			return "", nil, hostsetup.E("QP-INPUT-003").WithWhy("%q is not a honeypot QPot knows.", truncRunes(f, 40))
 		}
@@ -256,6 +256,9 @@ func applyAnswers(cfg *config.Config, a setupAnswers) {
 	}
 	for _, h := range a.Honeypots {
 		cfg.EnableHoneypot(h)
+	}
+	if a.Profile == "industrial" {
+		cfg.SetHoneypotCustomConfig("conpot", map[string]string{"template": "plc_modbus"})
 	}
 	cfg.WebUI.BindAddr = a.Bind
 	cfg.WebUI.Port = a.Port

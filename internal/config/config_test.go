@@ -1,9 +1,16 @@
 package config
 
 import (
+	"bytes"
+	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
+	"runtime"
+	"sync"
 	"testing"
+
+	"gopkg.in/yaml.v3"
 )
 
 func TestDefaultConfigValid(t *testing.T) {
@@ -321,5 +328,219 @@ func TestEnableHoneypotAddsMissingEntry(t *testing.T) {
 	cfg.EnableHoneypot("no-such-honeypot")
 	if _, ok := cfg.Honeypots["no-such-honeypot"]; ok {
 		t.Error("unknown honeypot name was added to the config")
+	}
+}
+
+func TestSaveFailureLeavesProfilesAndExistingFilesUnchanged(t *testing.T) {
+	for _, scenario := range []string{"blocked-data-path", "blocked-config-parent", "target-is-directory", "readonly-directory", "invalid-profile"} {
+		t.Run(scenario, func(t *testing.T) {
+			root := t.TempDir()
+			cfg := Default("save-failure-" + scenario)
+			cfg.QPotID = "qp_abcdefghijklmnopqrstuvwx"
+			cfg.DataPath = root
+			cfg.ConfigPath = filepath.Join(root, "config.yaml")
+			previous := []byte("previous complete config\n")
+			preservedPath := cfg.ConfigPath
+			if err := os.WriteFile(preservedPath, previous, 0600); err != nil {
+				t.Fatal(err)
+			}
+			switch scenario {
+			case "blocked-data-path":
+				cfg.DataPath = filepath.Join(root, "blocker")
+				if err := os.WriteFile(cfg.DataPath, []byte("not a directory"), 0600); err != nil {
+					t.Fatal(err)
+				}
+			case "blocked-config-parent":
+				blocker := filepath.Join(root, "blocker")
+				if err := os.WriteFile(blocker, []byte("not a directory"), 0600); err != nil {
+					t.Fatal(err)
+				}
+				cfg.ConfigPath = filepath.Join(blocker, "config.yaml")
+			case "target-is-directory":
+				cfg.ConfigPath = filepath.Join(root, "config-directory")
+				if err := os.Mkdir(cfg.ConfigPath, 0700); err != nil {
+					t.Fatal(err)
+				}
+				preservedPath = filepath.Join(cfg.ConfigPath, "keep.yaml")
+				if err := os.WriteFile(preservedPath, previous, 0600); err != nil {
+					t.Fatal(err)
+				}
+			case "readonly-directory":
+				if err := os.Chmod(root, 0500); err != nil {
+					t.Fatal(err)
+				}
+				t.Cleanup(func() { _ = os.Chmod(root, 0700) })
+				probe, err := os.CreateTemp(root, "permission-probe-*")
+				if err == nil {
+					probe.Close()
+					os.Remove(probe.Name())
+					t.Skip("executor can bypass directory write permissions")
+				}
+			case "invalid-profile":
+				cfg.SetHoneypotCustomConfig("conpot", map[string]string{"template": "unsupported-device"})
+			}
+			before := cfg.SnapshotHoneypots()
+			if before["conpot"].DeviceProfile != (ResolvedDeviceProfile{}) {
+				t.Fatal("test requires an unresolved legacy device")
+			}
+			if err := Save(cfg); err == nil {
+				t.Fatal("Save unexpectedly succeeded")
+			}
+			if after := cfg.SnapshotHoneypots(); !reflect.DeepEqual(before, after) {
+				t.Fatalf("failed save changed honeypots: before %+v after %+v", before["conpot"], after["conpot"])
+			}
+			contents, err := os.ReadFile(preservedPath)
+			if err != nil || !bytes.Equal(contents, previous) {
+				t.Fatalf("failed save damaged previous file: %q, %v", contents, err)
+			}
+			staged, err := filepath.Glob(filepath.Join(root, ".qpot-config-*.tmp"))
+			if err != nil || len(staged) != 0 {
+				t.Fatalf("failed save left staged files: %v, %v", staged, err)
+			}
+		})
+	}
+}
+
+func TestSaveActivatesPrivateResolvedProfileWithoutLoadDefaults(t *testing.T) {
+	root := t.TempDir()
+	cfg := Default("save-atomic-success")
+	cfg.QPotID = "qp_abcdefghijklmnopqrstuvwx"
+	cfg.DataPath = filepath.Join(root, "new-data")
+	cfg.ConfigPath = filepath.Join(root, "separate", "config.yaml")
+	cfg.WebUI.BindAddr = ""
+	cfg.Security.SandboxMode = ""
+	want := ConpotAutomaticProfileID(cfg)
+	if err := Save(cfg); err != nil {
+		t.Fatal(err)
+	}
+	hp, _ := cfg.GetHoneypotConfig("conpot")
+	if hp.DeviceProfile != (ResolvedDeviceProfile{ID: want, Version: 1}) {
+		t.Fatalf("successful save did not adopt resolved profile: %+v", hp.DeviceProfile)
+	}
+	data, err := os.ReadFile(cfg.ConfigPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var persisted Config
+	if err := yaml.Unmarshal(data, &persisted); err != nil {
+		t.Fatal(err)
+	}
+	if persisted.Honeypots["conpot"].DeviceProfile != hp.DeviceProfile {
+		t.Fatal("saved and in-memory profiles disagree")
+	}
+	if persisted.WebUI.BindAddr != "" || persisted.Security.SandboxMode != "" {
+		t.Fatal("Save applied load-time defaults")
+	}
+	// Replacing an existing public-mode file must also make the new file private.
+	if err := os.Chmod(cfg.ConfigPath, 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := Save(cfg); err != nil {
+		t.Fatal(err)
+	}
+	info, err := os.Stat(cfg.ConfigPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if runtime.GOOS != "windows" && info.Mode().Perm() != 0600 {
+		t.Fatalf("saved credentials have mode %04o", info.Mode().Perm())
+	}
+	staged, err := filepath.Glob(filepath.Join(filepath.Dir(cfg.ConfigPath), ".qpot-config-*.tmp"))
+	if err != nil || len(staged) != 0 {
+		t.Fatalf("successful save left staged files: %v, %v", staged, err)
+	}
+}
+
+func TestConcurrentSaveAndHoneypotChangesProduceCompleteFiles(t *testing.T) {
+	cfg := Default("save-concurrent")
+	cfg.DataPath = t.TempDir()
+	cfg.ConfigPath = filepath.Join(cfg.DataPath, "config.yaml")
+	if err := Save(cfg); err != nil {
+		t.Fatal(err)
+	}
+	stop := make(chan struct{})
+	ready := make(chan struct{})
+	errs := make(chan error, 20)
+	var readers sync.WaitGroup
+	readers.Add(1)
+	go func() {
+		defer readers.Done()
+		first := true
+		defer func() {
+			if first {
+				close(ready)
+			}
+		}()
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+			}
+			data, err := os.ReadFile(cfg.ConfigPath)
+			if err != nil {
+				errs <- err
+				return
+			}
+			var current Config
+			if err := yaml.Unmarshal(data, &current); err != nil {
+				errs <- fmt.Errorf("reader saw partial YAML: %w", err)
+				return
+			}
+			if current.Honeypots["conpot"].DeviceProfile.ID == "" {
+				errs <- fmt.Errorf("reader saw incomplete config")
+				return
+			}
+			if first {
+				close(ready)
+				first = false
+			}
+		}
+	}()
+	<-ready
+	var writers sync.WaitGroup
+	for _, name := range []string{"cowrie", "dionaea", "conpot", "heralding", "endlessh", "adbhoney"} {
+		writers.Add(1)
+		go func() {
+			defer writers.Done()
+			for range 3 {
+				cfg.EnableHoneypot(name)
+				if err := Save(cfg); err != nil {
+					errs <- err
+					return
+				}
+				cfg.DisableHoneypot(name)
+				if err := Save(cfg); err != nil {
+					errs <- err
+					return
+				}
+			}
+		}()
+	}
+	writers.Wait()
+	close(stop)
+	readers.Wait()
+	close(errs)
+	for err := range errs {
+		t.Error(err)
+	}
+	data, err := os.ReadFile(cfg.ConfigPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var persisted Config
+	if err := yaml.Unmarshal(data, &persisted); err != nil {
+		t.Fatal(err)
+	}
+	want, err := yaml.Marshal(cfg.SnapshotHoneypots())
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := yaml.Marshal(persisted.SnapshotHoneypots())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(got, want) {
+		t.Fatal("concurrent save lost a honeypot update")
 	}
 }

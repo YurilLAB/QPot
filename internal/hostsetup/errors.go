@@ -134,7 +134,7 @@ var catalog = []Code{
 		"Instance names become folder and container names, so only letters, digits, '-' and '_' work (1 to 32 characters, starting with a letter or digit).",
 		"Pick a name such as 'default' or 'sensor1' and pass it with -i, for example: qpot setup -i sensor1"},
 	{"QP-INPUT-002", "That honeypot profile does not exist.",
-		"The profile names are minimal, standard and hifi.",
+		"The profile names are minimal, standard, hifi, industrial and refrigeration.",
 		"Use one of them, for example: qpot setup --profile minimal. Or list honeypots yourself with --honeypots cowrie,endlessh"},
 	{"QP-INPUT-003", "One of the honeypot names is not known.",
 		"Honeypot names must match the ones QPot ships; a typo is the usual reason.",
@@ -163,9 +163,9 @@ var catalog = []Code{
 	{"QP-INPUT-011", "That error code is not known.",
 		"Codes look like QP-PKG-001; this one is not in QPot's list.",
 		"Check the code for typos, or read the full list in doc/setup-errors.md."},
-	{"QP-INPUT-012", "An option has a value setup does not understand.",
-		"Each option accepts only the values listed in its help text.",
-		"Run qpot setup --help to see the accepted values, then try again."},
+	{"QP-INPUT-012", "An option has an unsupported value.",
+		"A setup answer or honeypot setting is missing, unknown, or outside the values accepted by that command.",
+		"Read the named rule and the command's help. Use qpot setup --help for setup options or qpot honeypot set --help for honeypot settings, then retry."},
 	{"QP-INPUT-013", "Setup was cancelled before it changed anything.",
 		"You answered no when setup asked to go ahead.",
 		"Nothing was changed. Run qpot setup again whenever you are ready."},
@@ -406,6 +406,10 @@ var catalog = []Code{
 		"The web UI, threat intelligence and HiFi resets only run while the control plane runs.",
 		"Start it with: qpot up -d"},
 
+	{"QP-WEB-004", "The API request body is not valid.",
+		"The request is not the required JSON object, contains unknown fields, exceeds the size limit, or omits a required field.",
+		"Send the documented JSON object with Content-Type: application/json. Check the field names, types and body size in doc/api.md, then retry."},
+
 	// INST: QPot instance and containers.
 	{"QP-INST-001", "The QPot instance could not be created.",
 		"Setup could not write the instance's folders or files.",
@@ -431,6 +435,14 @@ var catalog = []Code{
 	{"QP-INST-008", "A part of the instance is not running properly.",
 		"A container stopped, was never created, or reports itself unhealthy.",
 		"See why with: qpot logs <the part named above>. Start what stopped with: qpot up -d; if it stays down, run qpot down, then qpot setup (for another instance add -i <instance> to each command)."},
+
+	{"QP-INST-009", "Another honeypot change is still running.",
+		"The control plane is already enabling, disabling, restarting or changing settings for a honeypot.",
+		"Wait for that change to finish, refresh the honeypot status and retry. Do not start a second change to bypass the active one."},
+
+	{"QP-INST-010", "This honeypot is turned off.",
+		"The requested restart needs an enabled honeypot, but its saved configuration has it disabled.",
+		"Choose the honeypot in the web UI and turn it on, or run qpot honeypot enable <name> -i <instance>. Then check its status before restarting it."},
 
 	// INT: interrupted.
 	{"QP-INT-001", "Setup was stopped before it finished.",

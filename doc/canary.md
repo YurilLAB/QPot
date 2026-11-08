@@ -71,7 +71,7 @@ credential harvesters read `~/.ssh` (keys, `config`, `known_hosts`),
 `~/.aws/credentials`, `.git-credentials`, `.env` files and database dumps, then
 log in to the hosts they found with the keys and passwords they found; people at
 the keyboard look for user files and stay longer where the files look lived in.
-A Cowrie persona from the image has none of that on its server personas, so the
+The default `bait_profile=ops` adds that working state to server personas. Its
 bait is:
 
 | Canary | Where the attacker finds it | It trips when |
@@ -104,10 +104,72 @@ without `canary.base_url` its URL points into the persona's internal network.
 
 The server registers the planted canaries in the store when it starts
 (`planted: true` in the API), and follows the instance's config file while it
-runs: enabling Cowrie, changing its persona or bait, or `canary.base_url` takes
-effect within seconds, without a restart. They cannot be deleted (QPot would
-plant them again); turn the bait off with `qpot honeypot set cowrie bait=off`. Trips need
-`canary.enabled` and, for the honeypot channel, `intelligence.enabled`.
+runs. Enabling Cowrie, changing its persona/bait profile, or changing
+`canary.base_url` updates the watch registry within seconds. Changing bait on a running instance
+also needs a successful Cowrie recreation before its visible files change.
+Current planted canaries cannot be deleted while planned. Turn planting off with
+`qpot honeypot set cowrie bait=off` if desired; that does not stop watching older
+exposed values. Trips need `canary.enabled` and, for the honeypot channel,
+`intelligence.enabled`.
+
+### Industrial support archives
+
+```bash
+qpot honeypot set cowrie persona=debian-bookworm bait_profile=industrial
+```
+
+This opt-in profile replaces the generic ops files with an OT maintenance archive:
+`/srv/ot/inventory.json`, per-asset `communications.csv`, handover/backup records,
+and dated `.txt.gz` snapshots. The login user's `~/ot` link and shell histories
+lead to the archive. Root's SSH configuration and `0600` `.netrc` describe a
+separate private archive host; their synthetic key/password are registered canaries.
+The model, role and protocol ports match the selected device profile. The private
+asset address is a distinct synthetic reference, not Conpot's live host mapping.
+
+The files depict a Linux support host; they do not claim a PLC filesystem, a
+Windows workstation, a running industrial poller, real process tags or a vendor
+project that an engineering IDE can import. A BMC/meter reference retains its own
+role. JSON, CSV, compression, file ownership, timestamps and cross-file references
+are validated. Reapply `bait_profile=industrial` after a device-profile change to
+refresh the archive deliberately. `bait_profile=` returns to ops.
+
+Reading the files alone does not trip. A captured command/login containing the
+password or an SSH attempt exposing the watched key/fingerprint can trip. No real
+plant, cloud service or maintenance account is contacted to validate credentials.
+
+### Refrigeration maintenance credential
+
+The `refrigeration` supervisor exports a genuine maintenance ZIP containing its
+configuration, CSV records and a synthetic `.netrc` credential. The same value
+is registered as a credential canary whenever the supervisor is enabled, with
+Cowrie independent of that choice. Export responses are not matched as captured
+attacker input: downloading or reading files alone does not alert. Captured
+credential reuse can trip, with its actual observed source retained.
+
+For a support-host copy, set
+`cowrie bait_profile=industrial bait_target=refrigeration`. The archive shares
+the exact controller site, unit, serial and watched credential. Copies share one
+watch ID; disabling a service while another copy is still planned does not
+retire that watch. `bait_target=` returns to the Conpot reference. Use the
+dashboard's **Save and refresh archives** after changing the referenced scene.
+See [refrigeration.md](refrigeration.md) for scope and account details.
+
+### Previously planted values
+
+A credential copied before a role change may be used afterwards. Old planted
+canaries therefore stay enabled with `historical: true` when their files are no
+longer planned, including after `bait=off` or a failed recreation. `planted: true`
+retains their origin; `historical: false` identifies the current plan. The UI labels
+historical entries **previously planted** and shows whether they are watched.
+
+Explicitly disabled values stay disabled. If a role is selected again, its canaries
+become current while keeping trip history and enabled state. Historical entries
+can be deleted through the UI/CLI/API to stop watching their values; recorded
+trips remain. Manual canaries are unaffected. A failed registry save preserves
+the previous registry and lookup indexes, so a transient storage error does not
+silently drop earlier watches. The server logs a warning and retries the desired
+plan. Newly planned values may be unwatched until storage recovers; a successful
+file deployment does not establish that the canary registry was saved.
 
 Sources: Sysdig TRT on SSH-Snake (2024) and on TeamTNT's AWS credential
 stealers; AhnLab ASEC on Kinsing's `spre.sh` (report 66695); CISA and FBI on
@@ -178,7 +240,7 @@ accepted in the query string, where it would end up in logs and history.
 |----------|--------|-------------|
 | `/api/canaries` | GET | List canaries (with beacon URL / credential pair; planted ones with their values) |
 | `/api/canaries` | POST | Create `{ "kind": "web\|file\|aws", "name": "...", "memo": "..." }` |
-| `/api/canaries?id=<id>` | DELETE | Remove a canary (409 for a planted one) |
+| `/api/canaries?id=<id>` | DELETE | Remove a manual or historical canary (409 for a currently planted one) |
 | `/api/canaries/trips?limit=N` | GET | Recent trips, newest first |
 | `/api/canaries/artifact?id=<id>` | GET | Download a file canary's document |
 | `/c/<token>` | GET, HEAD | **Public** beacon — records a trip, returns the decoy |

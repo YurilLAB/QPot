@@ -166,3 +166,23 @@ The full API reference is in [api.md](api.md).
   `collector.geoip_db_path`.
 - Kibana on top of ClickHouse, through the bundled connector in
   [docker/clickhouse-kibana](../docker/clickhouse-kibana/README.md).
+
+## Industrial device events
+
+Conpot events retain the logged device profile in `metadata.device_profile` when
+it is a supported template. This describes the device used when the event was
+recorded, including queued logs from before a profile change. Modbus events also
+retain validated function code, unit ID, operation and exception code when
+available. Ordinary reads become `conpot.modbus.read`, attempted control writes
+become `conpot.modbus.command`, and unsupported or ambiguous operations remain
+requests. A read alone is not labeled an unauthorized control command. Both
+current `protocol` logs and older `data_type` logs are accepted.
+
+A bare Conpot connection or ordinary read is retained as telemetry without
+claiming a discovery technique. An explicit probe can yield a low-confidence
+T0846 Remote System Discovery candidate; it is not proof of a port scan.
+T0840 is Network Connection Enumeration, not a catch-all incoming connection
+label. Control-write attempts keep the existing T0855 compatibility mapping;
+that tag does not prove an accepted command or a physical state change. ATT&CK
+v20 reorganizes command-message techniques; existing stored IDs are not silently
+rewritten by this update.

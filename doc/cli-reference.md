@@ -120,7 +120,7 @@ its settings (change them with `qpot config`).
 | Flag | Default | Description |
 |------|---------|-------------|
 | `-i, --instance string` | `default` | Instance name. |
-| `--profile string` | `minimal` | Honeypots for a new instance: `minimal`, `standard` or `hifi`. |
+| `--profile string` | `minimal` | Honeypots for a new instance: `minimal`, `standard`, `hifi`, `industrial` (one Modbus PLC) or `refrigeration` (cold storage supervisor). |
 | `--honeypots string` | | Honeypots for a new instance by name, comma-separated (instead of `--profile`). |
 | `--bind string` | `127.0.0.1` | Web UI address. Anything other than loopback prints an exposure warning. |
 | `--port int` | `8080` | Web UI port (the next free one if the default is taken; a chosen port that is taken is an error). |
@@ -304,7 +304,8 @@ qpot honeypot [command]
 
 | Subcommand | Flags | Description |
 |------------|-------|-------------|
-| `list` | `-i, --instance` | List available honeypots with port, risk, and on/off state. |
+| `list` | `-i, --instance` | List honeypots with configured host ports, risk and on/off state (not a live reachability check). |
+| `profiles [honeypot]` | `-i, --instance` | Explore Conpot industrial devices, models, protocols, container ports and limits; works before creating an instance. |
 | `enable [honeypot]` | `-i, --instance` | Enable a honeypot; starts it (and its companions) if the instance is running. |
 | `disable [honeypot]` | `-i, --instance` | Disable a honeypot; stops it if the instance is running. |
 | `set [honeypot] key=value...` | `-i, --instance` | Set a honeypot's settings (`key=` removes one); an enabled honeypot on a running instance is recreated with them. |
@@ -313,9 +314,10 @@ qpot honeypot [command]
 
 ```bash
 qpot honeypot list
-# Name             Port  Risk     On  Description
-# cowrie            2222 low      [x] SSH/Telnet medium-interaction shell
-# dionaea             21 medium   [ ] Malware capture (SMB/FTP/MSSQL/SIP)
+# Name             Host ports                 Risk     On  Description
+# cowrie           15022/tcp, 15023/tcp        low      [x] SSH/Telnet medium-interaction shell
+# dionaea          —                          medium   [ ] Malware capture (SMB/FTP/MSSQL/SIP)
+# Host port numbers vary by instance.
 # ...
 
 qpot honeypot enable dionaea
@@ -324,7 +326,7 @@ qpot honeypot disable endlessh -i production
 
 `qpot honeypot list` shows every selectable service — **26 classic honeypots**
 (low-interaction tarpits through high-interaction and LLM-backed services) plus
-the **HiFi `ssh-proxy`**, for 27 entries in total.
+the **HiFi `ssh-proxy`** and **native `refrigeration` supervisor**, for 28 entries in total.
 
 `set` accepts only the keys a honeypot uses. The LLM-backed honeypots refuse to
 start without a provider, so `enable` asks for these first:
@@ -333,9 +335,10 @@ start without a provider, so `enable` asks for these first:
 |----------|------|----------|
 | `beelzebub` | `llm_provider` (`ollama` or `openai`), `llm_model`, `llm_host` | `llm_provider`, `llm_model` |
 | `galah` | `llm_provider`, `llm_server_url`, `llm_model`, `llm_temperature`, `llm_api_key`, `llm_cloud_location`, `llm_cloud_project` | `llm_provider`, `llm_model` |
-| `cowrie` | `persona` (one of the image's persona IDs), `persona_rotation` (days, 0-365) | – |
+| `cowrie` | `persona` (one of the image's persona IDs), `persona_rotation` (days, 0-365), `bait` (`on`/`off`), `bait_profile` (`ops`/`industrial`), `bait_target` (`conpot`/`refrigeration`) | – |
 | `conpot` | `template` (one of the image's deployed device templates) | – |
 | `ssh-proxy` | `backends` | – |
+| `refrigeration` | `site_profile` (`retail`/`plasma`; empty restores retail) | – |
 
 ```bash
 qpot honeypot set beelzebub llm_provider=ollama llm_model=llama3.1 llm_host=http://10.0.0.5:11434/api/chat
@@ -355,8 +358,31 @@ restarts:
 qpot honeypot set cowrie persona=centos-7 persona_rotation=365
 ```
 
-Conpot emulates one device template of its image, picked per instance when
-`template` is unset, and publishes only that template's ports:
+For archived OT support-host files, use
+`qpot honeypot set cowrie persona=debian-bookworm bait_profile=industrial`.
+This supplies a separate Linux support archive, not controller services or a
+Windows engineering runtime. Reapply the setting to refresh archives after
+changing the device reference. Empty `bait_profile=` restores ops; `bait=off`
+stops planting, while historical canary values remain watched until removed.
+Set `bait_target=refrigeration` to reference the native cold storage supervisor
+and share its maintenance canary. This does not enable either service. The
+dashboard's **Save and refresh archives** reapplies the support files even when
+the selected file settings have not changed.
+
+For a new supervisor-only instance, use `qpot setup --profile refrigeration`.
+Existing instances can run `qpot honeypot enable refrigeration` and
+`qpot honeypot set refrigeration site_profile=plasma`. First start builds from
+bundled Go sources. See [refrigeration.md](refrigeration.md).
+
+Conpot emulates one device template of its image. Its automatic choice is
+saved with a profile version, so expanding or reordering the catalog preserves
+existing devices. `template` pins a device; `template=` returns to the saved
+automatic choice. Explore the catalog with `qpot honeypot profiles conpot`.
+For a new controller-only instance, `qpot setup --profile industrial` selects
+`plc_modbus` and enables only Conpot. Settings of an existing instance are kept.
+
+Only the selected template's ports are published. The table lists **container**
+ports; automatic allocation may use different host ports (see `honeypot list`):
 
 | Template | Device | TCP | UDP |
 |----------|--------|-----|-----|

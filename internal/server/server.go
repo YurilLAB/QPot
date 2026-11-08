@@ -165,10 +165,11 @@ func New(cfg *config.Config) (*Server, error) {
 		} else {
 			s.canaries = cs
 			// The canaries planted in this instance's honeypots (the bait files
-			// of its Cowrie persona), derived from the instance: watched from
-			// the first event on. A failed write keeps them in memory.
+			// of its Cowrie persona), derived from the instance. Activation is
+			// transactional: a failed write keeps the previous registry, and
+			// followPlanted retries the desired plan before subsequent reads.
 			if err := cs.SyncPlanted(instance.PlantedCanaries(cfg)); err != nil {
-				slog.Warn("Canary store: could not save the planted canaries", "error", err)
+				slog.Warn("Canary watches not updated; previous registry retained, newly planned values may be unwatched until storage recovers", "error", err)
 			}
 		}
 	}

@@ -100,13 +100,21 @@ func (s *Server) allowMethods(w http.ResponseWriter, r *http.Request, methods ..
 // name is an error rather than silently ignored.
 func decodeJSONBody(w http.ResponseWriter, r *http.Request, max int64, v any) error {
 	r.Body = http.MaxBytesReader(w, r.Body, max)
-	dec := json.NewDecoder(r.Body)
-	dec.DisallowUnknownFields()
-	if err := dec.Decode(v); err != nil {
+	data, err := io.ReadAll(r.Body)
+	if err != nil {
 		var mbe *http.MaxBytesError
 		if errors.As(err, &mbe) {
 			return fmt.Errorf("request body is larger than %d bytes", max)
 		}
+		return errors.New("request body is not the expected JSON object")
+	}
+	data = bytes.TrimLeft(data, " \t\r\n")
+	if len(data) == 0 || data[0] != '{' {
+		return errors.New("request body is not the expected JSON object")
+	}
+	dec := json.NewDecoder(bytes.NewReader(data))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(v); err != nil {
 		return errors.New("request body is not the expected JSON object")
 	}
 	if _, err := dec.Token(); !errors.Is(err, io.EOF) {
@@ -190,6 +198,7 @@ func (s *Server) adoptHoneypots(cfg *config.Config) {
 	s.config.ReplaceHoneypots(cfg.SnapshotHoneypots())
 	s.planted.mu.Lock()
 	s.planted.read = false
+	s.planted.checked = time.Time{} // An explicit saved change must be followed immediately.
 	s.planted.mu.Unlock()
 	s.followPlanted()
 }

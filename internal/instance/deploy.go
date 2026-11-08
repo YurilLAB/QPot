@@ -219,6 +219,66 @@ log_file = adbhoney.json
 `)
 }
 
+// Conpot feeds os.environ to case-insensitive ConfigParser. Docker client proxy
+// defaults commonly add both cases, which otherwise prevents the image starting.
+// Keep uppercase when both exist, and preserve lowercase-only proxy settings.
+const conpotProxySetup = `for pair in HTTP_PROXY:http_proxy HTTPS_PROXY:https_proxy FTP_PROXY:ftp_proxy NO_PROXY:no_proxy ALL_PROXY:all_proxy; do
+  upper=${pair%:*}; lower=${pair#*:}
+  if printenv "$upper" >/dev/null; then unset "$lower"; fi
+done
+`
+
+func conpotStartScript() string {
+	return conpotProxySetup + `exec python3 /opt/tpot/tpot_templates.py render "$CONPOT_TEMPLATE"`
+}
+
+// Conpot's protocol patches come from this exact image release and source files.
+// The integration test checks the image's original hash before mounting the
+// patch; a release change requires comparing the upstream source again.
+const (
+	conpotPatchVersion         = "24.04.2"
+	conpotSource               = "/usr/lib/python3.14/site-packages/conpot"
+	conpotModbusOriginalSHA256 = "e189928a7dc3b3970393b70d50c1ee19e0221742ccf92700bffa412a2dab1218"
+	conpotSlaveOriginalSHA256  = "2da36e02c8bf4dd06886f2c5bc224ed53bcac1c380a4f28816a1c779b9c161f0"
+	conpotBACnetOriginalSHA256 = "d56e2b7da061129cddf1b763fda49299cfa92831c6ef52ee3ef96356253ffd98"
+)
+
+// conpotModbusServerPy reads segmented MBAP frames within one timeout budget.
+// TCP fragments must neither invalidate a header nor extend worker lifetimes.
+//
+//go:embed honeypotfiles/conpot/modbus_server.py
+var conpotModbusServerPy []byte
+
+func conpotModbusPatchVolume() deployVolume {
+	return deployVolume{HostSubdir: "patch/modbus_server.py",
+		ContainerPath: conpotSource + "/protocols/modbus/modbus_server.py",
+		File:          true, ReadOnly: true, Content: conpotModbusServerPy}
+}
+
+// conpotModbusSlavePy corrects device identification access and rejects the
+// serial-only Report Server ID function for the Ethernet M340 persona.
+//
+//go:embed honeypotfiles/conpot/slave.py
+var conpotModbusSlavePy []byte
+
+func conpotModbusSlavePatchVolume() deployVolume {
+	return deployVolume{HostSubdir: "patch/slave.py",
+		ContainerPath: conpotSource + "/protocols/modbus/slave.py",
+		File:          true, ReadOnly: true, Content: conpotModbusSlavePy}
+}
+
+// conpotBACnetAppPy confines device discovery replies to the requested range.
+// The mounted module differs from the pinned image only in that range check.
+//
+//go:embed honeypotfiles/conpot/bacnet_app.py
+var conpotBACnetAppPy []byte
+
+func conpotBACnetPatchVolume() deployVolume {
+	return deployVolume{HostSubdir: "patch/bacnet_app.py",
+		ContainerPath: conpotSource + "/protocols/bacnet/bacnet_app.py",
+		File:          true, ReadOnly: true, Content: conpotBACnetAppPy}
+}
+
 // honeypotDeploy is the deployment profile for one honeypot image.
 type honeypotDeploy struct {
 	// Tmpfs are raw docker-compose tmpfs entries the image needs (e.g. cowrie
@@ -248,10 +308,16 @@ type honeypotDeploy struct {
 	// log4pot's /usr/bin/python3 has cap_net_bind_service=ep but binds only 8080,
 	// so without NET_BIND_SERVICE in the bounding set the interpreter cannot start.
 	ExtraCaps []string
+	// NoCapabilities runs a native non-root service without restoring any of
+	// the capabilities required by upstream image launchers.
+	NoCapabilities bool
+	// LocalBuild means QPot emits a source context instead of pulling an
+	// unpublished service image from a registry.
+	LocalBuild bool
 	// NoShell marks images without /bin/sh (static Go binaries on scratch /
 	// distroless). The /proc/net healthcheck runs through a shell, so it can
-	// never succeed there; such honeypots get no in-container healthcheck and
-	// `qpot setup`/`doctor` probe their published TCP ports from the host.
+	// never succeed there; the generic in-container check is omitted (a native
+	// image may supply its own), and setup/doctor also probe from the host.
 	NoShell bool
 	// HealthPorts are the container ports the healthcheck probes when they
 	// differ from the published ones (e.g. tanner's server, whose web front end
@@ -304,12 +370,21 @@ func deployProfile(cfg *config.Config, name string) honeypotDeploy {
 		return d
 	}
 	switch name {
+	case "refrigeration":
+		d.Env = maps.Clone(d.Env)
+		d.Env["DEVICE_SEED"] = refrigerationDeviceSeed(cfg)
+		d.Env["SITE_PROFILE"] = refrigerationSiteProfile(cfg)
 	case "conpot":
 		t := conpotTemplate(cfg)
 		d.Ports = slices.Clone(t.TCP)
 		d.UDPPorts = slices.Clone(t.UDP)
 		d.Env = maps.Clone(d.Env)
 		d.Env["CONPOT_TEMPLATE"] = t.ID
+		if t.ID == "plc_modbus" {
+			d.Volumes = append(slices.Clone(d.Volumes), conpotModbusPatchVolume(), conpotModbusSlavePatchVolume())
+		} else if t.ID == "building_automation" {
+			d.Volumes = append(slices.Clone(d.Volumes), conpotBACnetPatchVolume())
+		}
 	case "adbhoney":
 		d.Volumes = slices.Clone(d.Volumes)
 		for i, v := range d.Volumes {
@@ -471,6 +546,17 @@ func dionaeaPatchVolumes(cfg *config.Config) []deployVolume {
 // broken further, but the verified images (cowrie, endlessh) get correct specs.
 func deployProfileFor(name string) honeypotDeploy {
 	switch name {
+	case "refrigeration":
+		return honeypotDeploy{
+			Ports: []int{8080}, NoShell: true, LocalBuild: true, NoCapabilities: true,
+			Volumes: []deployVolume{
+				{HostSubdir: "logs", ContainerPath: "/var/log/refrigeration"},
+				{HostSubdir: "state", ContainerPath: "/var/lib/refrigeration"},
+			},
+			Env:      map[string]string{"LISTEN_ADDR": ":8080", "EVENT_LOG": "/var/log/refrigeration/events.json", "STATE_DIR": "/var/lib/refrigeration"},
+			RunAsUID: "65532:65532", OwnedSubdirs: []string{"logs", "state"},
+			Settings: []string{"site_profile"}, Values: map[string][]string{"site_profile": {"retail", "plasma"}},
+		}
 	case "cowrie":
 		// The image's own launcher (start-cowrie-persona) renders Cowrie as the
 		// persona in COWRIE_PERSONA (see deception.go and the compose template)
@@ -496,8 +582,8 @@ func deployProfileFor(name string) honeypotDeploy {
 				{HostSubdir: "bait/plan.json", ContainerPath: baitPlanPath, File: true, ReadOnly: true},
 			}, cowriePatchVolumes()...),
 			Ports:    []int{22, 23},
-			Settings: []string{"persona", "persona_rotation", baitSetting},
-			Values:   map[string][]string{"persona": CowriePersonaIDs(), baitSetting: {"on", "off"}},
+			Settings: []string{"persona", "persona_rotation", baitSetting, baitProfileSetting, baitTargetSetting},
+			Values:   map[string][]string{"persona": CowriePersonaIDs(), baitSetting: {"on", "off"}, baitProfileSetting: {"ops", "industrial"}, baitTargetSetting: {"conpot", "refrigeration"}},
 		}
 	case "endlessh":
 		// Verified: endlessh redirects its log to /var/log/endlessh and listens

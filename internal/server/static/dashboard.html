@@ -17,7 +17,7 @@
     <link href="/map/static/fonts/fonts.css" rel="stylesheet" integrity="sha384-WiEXL66/E+frAZqRB5+nO/MLUoXj+VrnKxXgvK33R87imSuzxukyaFlj5lnDHV80">
     <link href="/map/static/fontawesome/css/all.min.css" rel="stylesheet" integrity="sha384-qrALq7+6jBOZIQsNnT6xGkMDru64qD6uTlDra39xrt2SoXl4pO3FX6Roz/RpR/BS">
     <link href="/map/static/index.css?v=8" rel="stylesheet" integrity="sha384-F4gdNU3u74uMqjmFBLqfUI0IMwkZi07wpwIdoGzPWeWF6/qEGw/uaeb0plLpu7pT">
-    <link href="/assets/css/dashboard.css" rel="stylesheet" integrity="sha384-E4jHlr6MGpwMAS+EBA5y4rGetcWJLMgjZTp8Z3Di5UUXvC6TeDYZQhBIRH1gTA5T">
+    <link href="/assets/css/dashboard.css" rel="stylesheet" integrity="sha384-PXqTzj/rPLlqbTava5w8Va91XSWAPtLsd9OgM7YsobQrdnpu888ay4yhUTc21Gbi">
 </head>
 <body class="qpot-dashboard">
 
@@ -128,6 +128,43 @@
                     <button class="btn-base btn-primary hover-lift" id="action-refresh" type="button"><i class="fas fa-rotate"></i> Refresh</button>
                     <button class="btn-base btn-secondary hover-lift" id="action-logs" type="button"><i class="fas fa-file-lines"></i> View Logs</button>
                     <button class="btn-base btn-secondary hover-lift" id="action-export" type="button"><i class="fas fa-file-export"></i> Export IOCs (MISP)</button>
+                </div>
+
+                <div class="dash-card" id="industrial-controls" hidden>
+                    <div class="card-header flex-between">
+                        <h4 class="flex-center"><i class="fas fa-industry"></i> Industrial control systems</h4>
+                        <span class="card-note" id="industrial-state"></span>
+                    </div>
+                    <div class="card-body industrial-entry">
+                        <div>
+                            <p>Choose a PLC, substation RTU or another industrial device profile.</p>
+                            <p class="setting-description" id="industrial-selection"></p>
+                            <p class="device-pending" id="industrial-apply-warning" role="status" hidden></p>
+                        </div>
+                        <div class="actions-row">
+                            <button class="btn-base btn-secondary hover-lift" id="industrial-choose" type="button"><i class="fas fa-sliders"></i> Choose device</button>
+                            <button class="btn-base btn-primary hover-lift" id="industrial-enable" type="button"><i class="fas fa-power-off"></i> Enable device</button>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="dash-card" id="refrigeration-controls" hidden>
+                    <div class="card-header flex-between">
+                        <h4 class="flex-center"><i class="fas fa-snowflake"></i> Refrigeration and cold storage</h4>
+                        <span class="card-note" id="refrigeration-state"></span>
+                    </div>
+                    <div class="card-body industrial-entry">
+                        <div>
+                            <p>A legacy refrigeration supervisor with simulated retail or plasma cold storage.</p>
+                            <p class="setting-description" id="refrigeration-selection"></p>
+                            <p class="device-pending" id="refrigeration-apply-warning" role="status" hidden></p>
+                        </div>
+                        <div class="actions-row">
+                            <button class="btn-base btn-secondary hover-lift" id="refrigeration-choose" type="button"><i class="fas fa-sliders"></i> Choose scenario</button>
+                            <button class="btn-base btn-primary hover-lift" id="refrigeration-enable" type="button"><i class="fas fa-power-off"></i> Enable supervisor</button>
+                            <a class="btn-base btn-secondary hover-lift" id="refrigeration-open" target="_blank" rel="noopener noreferrer" hidden><i class="fas fa-arrow-up-right-from-square"></i> Open decoy console</a>
+                        </div>
+                    </div>
                 </div>
 
                 <div class="dash-card">
@@ -904,11 +941,13 @@
         let honeypots = [];        // GET /api/honeypots
         let statusByName = {};     // GET /api/status, per honeypot
         let settingsByName = {};   // GET /api/honeypots/settings
+        let industrialApplyFailed = false; // a saved change has not completed during this session
+        let refrigerationApplyFailed = false;
         const busy = new Set();    // honeypots with a change in flight
         let showOff = false;       // the list shows the honeypots that are off
 
         const HP_ICONS = {
-            cowrie: 'fa-terminal', dionaea: 'fa-bug', conpot: 'fa-industry', adbhoney: 'fa-mobile-screen',
+            cowrie: 'fa-terminal', dionaea: 'fa-bug', conpot: 'fa-industry', refrigeration: 'fa-snowflake', adbhoney: 'fa-mobile-screen',
             endlessh: 'fa-hourglass-half', heralding: 'fa-key', honeyaml: 'fa-code', tanner: 'fa-globe',
             mailoney: 'fa-envelope', redishoneypot: 'fa-database', elasticpot: 'fa-magnifying-glass',
             citrixhoneypot: 'fa-shield', ciscoasa: 'fa-network-wired', galah: 'fa-robot', beelzebub: 'fa-robot',
@@ -983,6 +1022,88 @@
             }
         }
 
+        function industrialTemplate(view) {
+            return view && Array.isArray(view.settings) ? view.settings.find((s) => s && s.key === 'template') : null;
+        }
+
+        function deviceOptions(setting) {
+            return setting && Array.isArray(setting.options) ? setting.options.filter((o) => o && typeof o.id === 'string' && typeof o.label === 'string') : [];
+        }
+
+        function deviceLabel(device) {
+            return device.model && !device.label.includes(device.model) ? device.label + ' · ' + device.model : device.label;
+        }
+
+        const coldStorageScenarios = {
+            retail: {
+                label: 'Retail refrigeration',
+                description: 'A food-store supervisor managing frozen foods, a dairy display and a produce cold room.',
+                equipment: ['Frozen foods: initial setpoint −20 °C', 'Dairy display: initial setpoint 3 °C', 'Produce cold room: initial setpoint 5 °C']
+            },
+            plasma: {
+                label: 'Plasma cold storage',
+                description: 'A cold-storage supervisor managing a plasma freezer and refrigerated blood storage.',
+                equipment: ['Plasma freezer: initial setpoint −30 °C', 'Blood storage: initial setpoint 4 °C']
+            }
+        };
+
+        function renderIndustrialEntry() {
+            const hp = honeypots.find((x) => x.name === 'conpot');
+            const setting = industrialTemplate(settingsByName.conpot);
+            const options = deviceOptions(setting);
+            $('industrial-controls').hidden = !hp || !options.length;
+            if (!hp || !options.length) return;
+            const id = setting.value || setting.effective || setting.default;
+            const device = options.find((o) => o.id === id);
+            $('industrial-selection').textContent = 'Configured device: ' + (device ? deviceLabel(device) : id || 'automatic selection') + ' · Conpot';
+            const running = !!(hp.running || (statusByName.conpot && statusByName.conpot.running));
+            const needsStop = !hp.enabled && running;
+            $('industrial-state').textContent = hp.enabled ? running ? 'Container running · profile not verified' : 'Enabled · container not running' : needsStop ? 'Configured off · container still running' : 'Off';
+            $('industrial-apply-warning').hidden = !industrialApplyFailed && !needsStop;
+            $('industrial-apply-warning').textContent = needsStop ? 'Conpot is configured off, but its container is still running. Retry stop and check Conpot logs if it cannot be stopped.' : industrialApplyFailed ? 'A saved device change did not complete. Check Conpot logs, then turn it off and on to retry the saved configuration. The configured profile may not be live.' : '';
+            $('industrial-choose').disabled = busy.has('conpot');
+            $('industrial-enable').hidden = !!hp.enabled;
+            $('industrial-enable').disabled = busy.has('conpot');
+            $('industrial-enable').dataset.enable = String(!needsStop);
+            $('industrial-enable').replaceChildren(icon(needsStop ? 'fa-stop' : 'fa-power-off'), needsStop ? ' Retry stop' : ' Enable device');
+        }
+
+        function renderRefrigerationEntry() {
+            const hp = honeypots.find((x) => x.name === 'refrigeration');
+            $('refrigeration-controls').hidden = !hp;
+            if (!hp) return;
+            const view = settingsByName.refrigeration;
+            const setting = view && Array.isArray(view.settings) ? view.settings.find((s) => s && s.key === 'site_profile') : null;
+            const scene = setting && (setting.value || setting.effective) || 'retail';
+            const scenario = coldStorageScenarios[scene];
+            $('refrigeration-selection').textContent = 'Configured scenario: ' + (scenario ? scenario.label + '. ' + scenario.description : scene + ' (details unavailable).') + ' First start builds the isolated service locally. Host mappings describe configuration; console reachability is not verified.';
+            const running = !!(hp.running || (statusByName.refrigeration && statusByName.refrigeration.running));
+            const needsStop = !hp.enabled && running;
+            $('refrigeration-state').textContent = hp.enabled ? running ? 'Container running · scenario not verified' : 'Enabled · container not running' : needsStop ? 'Configured off · container still running' : 'Off';
+            $('refrigeration-apply-warning').hidden = !refrigerationApplyFailed && !needsStop;
+            $('refrigeration-apply-warning').textContent = needsStop ? 'The supervisor is configured off, but its container is still running. Retry stop and check its logs.' : refrigerationApplyFailed ? 'The configuration was saved, but the service change did not complete. Check QPot service output for build or startup errors and refrigeration logs if a container was created, then turn it off and on to retry. The saved scenario may not be live.' : '';
+            $('refrigeration-choose').disabled = busy.has('refrigeration');
+            $('refrigeration-enable').hidden = !!hp.enabled;
+            $('refrigeration-enable').disabled = busy.has('refrigeration');
+            $('refrigeration-enable').dataset.enable = String(!needsStop);
+            $('refrigeration-enable').replaceChildren(icon(needsStop ? 'fa-stop' : 'fa-power-off'), needsStop ? ' Retry stop' : ' Enable supervisor');
+            const port = Array.isArray(hp.host_ports) ? hp.host_ports.find((p) => p && p.protocol === 'tcp' && p.container_port === 8080 && Number.isInteger(p.host_port) && p.host_port > 0 && p.host_port <= 65535) : null;
+            const open = $('refrigeration-open');
+            open.hidden = !running || !port;
+            open.removeAttribute('href');
+            if (running && port) {
+                const url = new URL(window.location.href);
+                url.protocol = 'http:';
+                url.port = String(port.host_port);
+                url.pathname = '/';
+                url.search = '';
+                url.hash = '';
+                url.username = '';
+                url.password = '';
+                open.href = url.href;
+            }
+        }
+
         // A row is rebuilt only between presses: a refresh that lands while a finger or a mouse button
         // is down on the list waits for the release, so the press and the release meet the same
         // button and its click is not lost.
@@ -999,9 +1120,11 @@
         function renderHoneypots() {
             const ul = $('honeypot-list');
             if (pressing) { renderLater = true; return; }
+            renderIndustrialEntry();
+            renderRefrigerationEntry();
             // what the rows show, in a fixed order (GET /api/status lists the honeypots in any order)
             const shownStatus = Object.keys(statusByName).sort().map((k) => [k, !!statusByName[k].running]);
-            if (unchanged(ul, [honeypots, shownStatus, Object.values(settingsByName).map((v) => [v.name, v.missing]), [...busy], showOff])) return;
+            if (unchanged(ul, [honeypots, shownStatus, Object.values(settingsByName).map((v) => [v.name, v.missing, v.name === 'conpot' || v.name === 'refrigeration' ? v.settings : null]), [...busy], showOff])) return;
             if (!honeypots.length) {
                 ul.replaceChildren(h('li', { class: 'empty-state' }, icon('fa-server'), 'No honeypots configured.'));
                 return;
@@ -1021,6 +1144,9 @@
                     hp.enabled ? (running ? pill('running', 'ok') : pill('not running', 'warn')) : pill('off', 'muted'));
                 const settings = settingsByName[name];
                 if (settings && Array.isArray(settings.missing) && settings.missing.length) meta.append(pill('needs ' + settings.missing.join(', '), 'warn'));
+                const deviceSetting = name === 'conpot' ? industrialTemplate(settings) : null;
+                const device = deviceOptions(deviceSetting).find((o) => o.id === (deviceSetting.value || deviceSetting.effective || deviceSetting.default));
+                if (device) meta.append(h('span', {}, deviceLabel(device)));
                 const toggle = h('input', { type: 'checkbox', role: 'switch', 'aria-label': `${name} on or off`, 'data-key': name + ':switch' });
                 toggle.checked = !!hp.enabled;
                 toggle.disabled = busy.has(name);
@@ -1031,7 +1157,7 @@
                     hp.enabled ? h('button', { class: 'btn-base btn-secondary btn-icon hover-lift', type: 'button', title: `Restart ${name}`, 'data-key': name + ':restart', disabled: busy.has(name), onclick: () => restartHoneypot(name) }, icon('fa-rotate-right'), h('span', {}, 'Restart')) : null);
                 return h('li', { class: 'hp-row ' + (hp.enabled ? 'on' : 'off') },
                     h('div', { class: 'hp-icon' }, icon(HP_ICONS[name] || 'fa-server')),
-                    h('div', {}, h('div', { class: 'hp-name' }, capitalize(name)), meta),
+                    h('div', {}, h('div', { class: 'hp-name' }, name === 'conpot' ? 'Conpot · industrial devices' : capitalize(name)), meta),
                     tools,
                     h('label', { class: 'switch', title: hp.enabled ? `Turn ${name} off` : `Turn ${name} on` }, toggle, h('span', { class: 'track' })));
             });
@@ -1055,9 +1181,21 @@
             busy.add(name);
             input.disabled = true;
             try {
-                await api(`${API_BASE}/honeypots`, { method: 'POST', body: { name, enabled } });
+                const result = await api(`${API_BASE}/honeypots`, { method: 'POST', body: { name, enabled } });
+                if (name === 'conpot' && (!enabled || result && result.applied)) industrialApplyFailed = false;
+                if (name === 'refrigeration' && (!enabled || result && result.applied)) refrigerationApplyFailed = false;
                 toast(`${capitalize(name)} ${enabled ? 'turned on' : 'turned off'}.`, 'ok');
             } catch (e) {
+                if (name === 'conpot' && e.body && e.body.saved) {
+                    industrialApplyFailed = true;
+                    renderIndustrialEntry();
+                    loadSettingsIndex().catch(() => {});
+                }
+                if (name === 'refrigeration' && e.body && e.body.saved) {
+                    refrigerationApplyFailed = true;
+                    renderRefrigerationEntry();
+                    loadSettingsIndex().catch(() => {});
+                }
                 input.checked = !enabled;
                 if (e.status !== 401 && e.status !== 403) toast(`${capitalize(name)} was not ${enabled ? 'turned on' : 'turned off'}: ${errorText(e)}`, 'error');
             } finally {
@@ -1297,22 +1435,95 @@
 
         // ---------- Honeypot settings ----------
 
-        let settingsFor = '', settingsView = null;
+        let settingsFor = '', settingsView = null, settingsRequest = 0;
 
         async function openSettings(name) {
+            const requestID = ++settingsRequest;
             settingsFor = name;
-            $('settings-title').replaceChildren(icon('fa-sliders'), ' Settings: ' + capitalize(name));
+            settingsView = null;
+            $('settings-save').disabled = false;
+            $('settings-title').replaceChildren(icon(name === 'conpot' ? 'fa-industry' : 'fa-sliders'), name === 'conpot' ? ' Industrial device settings' : ' Settings: ' + capitalize(name));
             $('settings-fields').replaceChildren(h('div', { class: 'empty-state' }, icon('fa-spinner fa-spin'), 'Loading…'));
             callout($('settings-message'), '', '');
             openModal('settings-modal');
             try {
-                settingsView = await api(`${API_BASE}/honeypots/settings?name=${encodeURIComponent(name)}`);
+                const view = await api(`${API_BASE}/honeypots/settings?name=${encodeURIComponent(name)}`);
+                if (settingsRequest !== requestID) return;
+                settingsView = view;
                 renderSettings();
             } catch (e) {
+                if (settingsRequest !== requestID) return;
                 if (e.status !== 401 && e.status !== 403) {
                     $('settings-fields').replaceChildren();
                     callout($('settings-message'), 'error', 'The settings could not be read: ' + errorText(e));
                 }
+            }
+        }
+
+        // Device ports describe the emulator. Host mappings belong to the saved deployment,
+        // never to an unsaved dropdown selection. In particular, an allocated host port is
+        // not implied by the device's standard protocol port.
+        function renderDevicePreview(target, setting, value) {
+            const automatic = setting.default || setting.effective || '';
+            const selected = value || automatic;
+            const device = deviceOptions(setting).find((o) => o.id === selected);
+            target.replaceChildren();
+            if (!device) {
+                target.append(h('p', { class: 'setting-description' }, 'Device details are unavailable for this selection.'));
+                return;
+            }
+            const pending = value !== (setting.value || '');
+            const ports = [];
+            for (const [key, proto] of [['tcp_ports', 'TCP'], ['udp_ports', 'UDP']]) {
+                const numbers = Array.isArray(device[key]) ? device[key].filter((p) => Number.isInteger(p) && p > 0 && p <= 65535) : [];
+                if (numbers.length) ports.push(proto + ' ' + numbers.join(', '));
+            }
+            const details = h('dl', { class: 'device-details' });
+            const field = (label, text) => { if (text) details.append(h('dt', {}, label), h('dd', {}, text)); };
+            field('Role', device.category);
+            field('Model', device.model);
+            field('Protocols', Array.isArray(device.protocols) ? device.protocols.join(', ') : '');
+            field('Device ports', ports.join('; ') || 'None');
+            target.append(h('h4', {}, device.label),
+                h('p', { class: 'setting-description' }, device.description || ''), details,
+                h('p', { class: 'setting-description' }, value ? (pending ? 'Selected profile: ' : 'Pinned profile: ') + selected : 'Automatic profile: ' + selected + '. This selection is kept across restarts and upgrades.'),
+                h('p', { class: 'setting-description' }, device.limitations || 'Protocol emulation of one device; no physical process or HMI simulation.'));
+            if (pending) target.append(h('p', { class: 'device-pending' }, 'Selection preview. Save settings to configure this device. The mappings below still describe the saved configuration.'));
+            const hp = honeypots.find((x) => x.name === 'conpot');
+            const mappings = hp && Array.isArray(hp.host_ports) ? hp.host_ports.filter((p) => p && Number.isInteger(p.host_port) && Number.isInteger(p.container_port)) : [];
+            target.append(h('h5', {}, 'Configured host mappings'));
+            if (mappings.length) {
+                target.append(h('ul', { class: 'device-mappings' }, ...mappings.map((p) => h('li', {},
+                    'Host ' + p.host_port + ' → device ' + p.container_port + '/' + String(p.protocol || 'tcp')))),
+                    h('p', { class: 'setting-description' }, 'Host ports can differ from device ports. Mappings apply when Conpot starts successfully; check its running state after saving.'));
+            } else {
+                target.append(h('p', { class: 'setting-description' }, hp && !hp.enabled ? 'No host ports are published while Conpot is off. Ports are assigned when it is enabled.' : 'No host mappings are available. Refresh after Conpot starts.'));
+            }
+        }
+
+        function renderRefrigerationPreview(target, setting, value) {
+            const selected = value || 'retail';
+            const scenario = coldStorageScenarios[selected];
+            target.replaceChildren();
+            if (!scenario) {
+                target.append(h('p', { class: 'setting-description' }, 'Scenario details are unavailable for this selection.'));
+                return;
+            }
+            target.append(h('h4', {}, scenario.label),
+                h('p', { class: 'setting-description' }, scenario.description),
+                h('ul', { class: 'device-mappings' }, ...scenario.equipment.map((item) => h('li', {}, item))),
+                h('p', { class: 'setting-description' }, 'Both scenarios present an AK-SM 800A / StoreView 3.3.0 supervisor with a browser console and HTTP/XML controls. Temperatures, defrost, alarms, history and maintenance exports share simulated state.'),
+                h('p', { class: 'setting-description' }, 'These are synthetic equipment examples. Initial setpoints describe a fresh scenario; changing scenarios preserves each scenario’s saved settings and history. This model is not a clinical storage specification.'));
+            const pending = value !== (setting.value || '');
+            target.append(h('p', { class: pending ? 'device-pending' : 'setting-description' }, pending ? 'Selection preview. Save settings to configure this scenario. A running supervisor must restart to apply the change.' : 'Configured scenario: ' + scenario.label + (value ? '.' : ' (default).')));
+            const hp = honeypots.find((x) => x.name === 'refrigeration');
+            const mappings = hp && Array.isArray(hp.host_ports) ? hp.host_ports.filter((p) => p && p.container_port === 8080 && Number.isInteger(p.host_port)) : [];
+            target.append(h('h5', {}, 'Configured host mappings'));
+            if (mappings.length) {
+                target.append(h('ul', { class: 'device-mappings' }, ...mappings.map((p) => h('li', {}, 'Host ' + p.host_port + ' → supervisor ' + p.container_port + '/' + String(p.protocol || 'tcp')))),
+                    h('p', { class: 'setting-description' }, 'Mappings describe the saved deployment. Check running state and any save error before opening the console.'));
+            } else {
+                target.append(h('p', { class: 'setting-description' }, hp && !hp.enabled ? 'No host ports are published while the supervisor is off. Ports are assigned when it is enabled.' : 'No host mappings are available. Refresh after the supervisor starts.'));
             }
         }
 
@@ -1327,11 +1538,31 @@
                 if (!s || typeof s.key !== 'string') continue;
                 const id = 'set-' + s.key.replace(/[^a-z0-9_-]/gi, '_');
                 let control;
-                const def = s.effective !== undefined && s.effective !== '' ? `default (${s.effective})` : 'default';
+                const options = v.name === 'conpot' && s.key === 'template' ? deviceOptions(s) : [];
+                const automatic = options.find((o) => o.id === (s.default || s.effective));
+                const baitProfile = v.name === 'cowrie' && s.key === 'bait_profile';
+                const baitTarget = v.name === 'cowrie' && s.key === 'bait_target';
+                const siteProfile = v.name === 'refrigeration' && s.key === 'site_profile';
+                const labels = baitProfile ? { ops: 'Linux operations files', industrial: 'Industrial support archives' } : baitTarget ? { conpot: 'Conpot device', refrigeration: 'Refrigeration supervisor' } : siteProfile ? Object.fromEntries(Object.entries(coldStorageScenarios).map(([key, scene]) => [key, scene.label])) : {};
+                const choiceLabel = (a) => labels[a] || String(a);
+                const defaultChoice = baitProfile ? 'ops' : baitTarget ? 'conpot' : siteProfile ? 'retail' : '';
+                const def = defaultChoice ? `default (${choiceLabel(defaultChoice)})` : options.length ? 'Automatic' + (automatic ? ' (' + deviceLabel(automatic) + ')' : '') : s.effective !== undefined && s.effective !== '' ? `default (${choiceLabel(s.effective)})` : 'default';
                 if (s.type === 'choice') {
-                    control = h('select', { class: 'setting-select', id, 'data-key': s.key },
-                        h('option', { value: '' }, def),
-                        ...(Array.isArray(s.allowed) ? s.allowed : []).map((a) => h('option', { value: String(a) }, String(a))));
+                    control = h('select', { class: 'setting-select', id, 'data-key': s.key }, h('option', { value: '' }, def));
+                    if (options.length) {
+                        const groups = new Map();
+                        options.forEach((o) => {
+                            const category = o.category || 'Other devices';
+                            if (!groups.has(category)) {
+                                const group = h('optgroup', { label: category });
+                                groups.set(category, group);
+                                control.append(group);
+                            }
+                            groups.get(category).append(h('option', { value: o.id }, deviceLabel(o)));
+                        });
+                    } else {
+                        control.append(...(Array.isArray(s.allowed) ? s.allowed : []).map((a) => h('option', { value: String(a) }, choiceLabel(a))));
+                    }
                     control.value = s.value || '';
                 } else if (s.type === 'secret') {
                     control = h('input', { class: 'search-input', id, 'data-key': s.key, type: 'password', autocomplete: 'new-password',
@@ -1349,9 +1580,38 @@
                 }
                 control.dataset.orig = s.type === 'secret' ? '' : String(s.value || '');
                 const item = h('div', { class: 'setting-item' },
-                    h('label', { class: 'setting-title', for: id }, s.key, s.required ? ' (required)' : ''),
+                    h('label', { class: 'setting-title', for: id }, options.length ? 'Industrial device' : baitProfile ? 'Files and canaries' : baitTarget ? 'Archive reference' : siteProfile ? 'Cold storage scenario' : s.key, s.required ? ' (required)' : ''),
                     s.help ? h('span', { class: 'setting-description' }, String(s.help)) : null,
                     control);
+                if (options.length) {
+                    const preview = h('div', { class: 'device-preview', id: 'industrial-preview', 'aria-live': 'polite' });
+                    const update = () => renderDevicePreview(preview, s, control.value);
+                    control.setAttribute('aria-describedby', 'industrial-preview');
+                    control.addEventListener('change', update);
+                    update();
+                    item.append(preview);
+                }
+                if (siteProfile) {
+                    const preview = h('div', { class: 'device-preview', id: 'refrigeration-preview', 'aria-live': 'polite' });
+                    const update = () => renderRefrigerationPreview(preview, s, control.value);
+                    control.setAttribute('aria-describedby', 'refrigeration-preview');
+                    control.addEventListener('change', update);
+                    update();
+                    item.append(preview);
+                }
+                if (baitProfile) {
+                    const note = h('p', { class: 'setting-description', id: 'industrial-bait-note', 'aria-live': 'polite' });
+                    const refresh = h('button', { class: 'btn-base btn-secondary hover-lift', id: 'refresh-industrial-archives', type: 'button', onclick: (ev) => saveSettings(ev, true) }, icon('fa-rotate'), ' Save and refresh archives');
+                    const updateBaitNote = () => {
+                        note.hidden = (control.value || 'ops') !== 'industrial';
+                        refresh.hidden = note.hidden;
+                        note.textContent = 'Adds maintenance inventories, communication exports and canary credentials to a Linux support host. These archives reference a separate asset. Reapply the Cowrie file settings after changing the referenced device or cold storage scenario to refresh its archives. File reads alone do not trip a canary.';
+                    };
+                    control.addEventListener('change', updateBaitNote);
+                    control.setAttribute('aria-describedby', 'industrial-bait-note');
+                    updateBaitNote();
+                    item.append(note, refresh);
+                }
                 if (s.type === 'secret') {
                     item.append(h('label', { class: 'setting-description' },
                         h('input', { type: 'checkbox', 'data-clear': s.key }), ' Remove the stored value'));
@@ -1384,8 +1644,9 @@
             });
         }
 
-        async function saveSettings(ev) {
+        async function saveSettings(ev, refreshArchives = false) {
             ev.preventDefault();
+            const name = settingsFor, requestID = settingsRequest;
             const msg = $('settings-message');
             const changes = {};
             $('settings-fields').querySelectorAll('[data-key]').forEach((el) => {
@@ -1398,27 +1659,63 @@
                     changes[key] = el.value.trim();
                 }
             });
+            if (refreshArchives && name === 'cowrie') changes.bait_profile = 'industrial';
             if (!Object.keys(changes).length) { callout(msg, 'info', 'Nothing changed.'); return; }
             const save = $('settings-save');
             save.disabled = true;
+            const archiveRefresh = $('refresh-industrial-archives');
+            if (archiveRefresh) archiveRefresh.disabled = true;
             callout(msg, 'info', 'Saving… (a running honeypot is recreated, which can take a minute)');
             try {
-                const r = await api(`${API_BASE}/honeypots/settings`, { method: 'PUT', body: { name: settingsFor, settings: changes } });
+                const r = await api(`${API_BASE}/honeypots/settings`, { method: 'PUT', body: { name, settings: changes } });
+                if (name === 'conpot' && (r.recreated || !r.enabled)) industrialApplyFailed = false;
+                if (name === 'refrigeration' && (r.recreated || !r.enabled)) refrigerationApplyFailed = false;
+                loadSettingsIndex().catch(() => {});
+                if (settingsRequest !== requestID) return;
                 settingsView = r;
+                // Recreating a device may replace every port. Do not keep showing the previous
+                // template's host mappings after a successful save.
+                if (name === 'conpot') await loadHoneypots().catch(() => {});
+                if (settingsRequest !== requestID) return;
                 renderSettings();
                 callout(msg, 'ok', r && typeof r.message === 'string' ? r.message : 'Saved.');
-                toast(`${capitalize(settingsFor)}: settings saved.`, 'ok');
-                loadSettingsIndex().catch(() => {});
+                toast(`${capitalize(name)}: settings saved.`, 'ok');
             } catch (e) {
+                if (name === 'conpot' && e.body && e.body.saved) {
+                    industrialApplyFailed = true;
+                    renderIndustrialEntry();
+                }
+                if (name === 'refrigeration' && e.body && e.body.saved) {
+                    refrigerationApplyFailed = true;
+                    renderRefrigerationEntry();
+                }
+                if (e.body && e.body.saved) loadSettingsIndex().catch(() => {});
+                if (settingsRequest !== requestID) return;
                 if (e.status === 401 || e.status === 403) return;
                 const needs = e.body && Array.isArray(e.body.needs) ? e.body.needs.map(String) : [];
                 if (needs.length) markNeeds(needs);
                 let text = errorText(e);
                 if (needs.length) text += ` Fill in ${needs.join(', ')} too (or tick its Remove box).`;
-                if (e.body && e.body.saved) text = 'Saved, but: ' + text;
+                if (e.body && e.body.saved) {
+                    text = 'Saved, but: ' + text;
+                    // A failed recreation can still have saved the selection. Reflect that
+                    // saved state without resubmitting the same mutation or claiming it is live.
+                    try {
+                        const view = await api(`${API_BASE}/honeypots/settings?name=${encodeURIComponent(name)}`);
+                        if (name === 'conpot') await loadHoneypots().catch(() => {});
+                        if (settingsRequest !== requestID) return;
+                        settingsView = view;
+                        renderSettings();
+                        loadSettingsIndex().catch(() => {});
+                    } catch (_) { /* retain the original actionable save error */ }
+                }
                 callout(msg, e.status === 409 ? 'warn' : 'error', text);
             } finally {
-                save.disabled = false;
+                if (settingsRequest === requestID) {
+                    save.disabled = false;
+                    const refresh = $('refresh-industrial-archives');
+                    if (refresh) refresh.disabled = false;
+                }
             }
         }
 
@@ -1606,8 +1903,9 @@
                 return;
             }
             const canaries = list && Array.isArray(list.canaries) ? list.canaries : [];
-            const planted = canaries.filter((c) => c.planted).length;
-            $('canary-note').textContent = `${plural(canaries.length, 'canary', 'canaries')}${planted ? `, ${fmt(planted)} planted in the honeypots` : ''}`;
+            const planted = canaries.filter((c) => c.planted && !c.historical).length;
+            const historical = canaries.filter((c) => c.historical).length;
+            $('canary-note').textContent = `${plural(canaries.length, 'canary', 'canaries')}${planted ? `, ${fmt(planted)} planned in bait` : ''}${historical ? `, ${fmt(historical)} previously planted` : ''}`;
             if (unchanged(body, canaries)) { /* as shown */ }
             else if (!canaries.length) emptyRow(body, 6, 'No canaries yet. Mint one above.', 'fa-dove');
             else body.replaceChildren(...canaries.map(canaryRow));
@@ -1627,9 +1925,9 @@
             const actions = h('div', { class: 'hp-tools' },
                 h('button', { class: 'btn-base btn-secondary btn-icon hover-lift', type: 'button', title: 'Show the canary', onclick: () => showCanary(c) }, icon('fa-eye'), h('span', {}, 'Show')),
                 c.kind === 'file' ? h('button', { class: 'btn-base btn-secondary btn-icon hover-lift', type: 'button', title: 'Download the document', onclick: () => downloadArtifact(c) }, icon('fa-download'), h('span', {}, 'Document')) : null,
-                h('button', { class: 'btn-base btn-secondary btn-icon hover-lift', type: 'button', title: c.planted ? 'Planted by QPot: turned off with bait=off' : 'Delete the canary', onclick: () => deleteCanary(c) }, icon('fa-trash-can'), h('span', {}, 'Delete')));
+                h('button', { class: 'btn-base btn-secondary btn-icon hover-lift', type: 'button', disabled: !!c.planted && !c.historical, title: c.planted && !c.historical ? 'Currently planned in bait: change the bait settings first' : 'Delete this canary and stop watching its values', onclick: () => deleteCanary(c) }, icon('fa-trash-can'), h('span', {}, 'Delete')));
             return h('tr', {},
-                h('td', { class: 'wrap' }, String(c.name || c.id || ''), c.planted ? h('div', {}, pill('planted', 'accent'), ' ', h('span', { class: 'setting-description' }, 'turn off with bait=off')) : null),
+                h('td', { class: 'wrap' }, String(c.name || c.id || ''), c.historical ? h('div', {}, pill('previously planted', 'muted'), ' ', h('span', { class: 'setting-description' }, c.enabled ? 'still watched' : 'monitoring off')) : c.planted ? h('div', {}, pill('planned in bait', 'accent'), ' ', h('span', { class: 'setting-description' }, c.enabled ? 'currently watched' : 'monitoring off')) : null),
                 h('td', {}, kind),
                 h('td', { class: 'optional wrap' }, String(c.memo || '')),
                 h('td', {}, c.trips ? pill(fmt(c.trips), 'bad') : '0'),
@@ -1644,7 +1942,8 @@
             if (c.access_key_id) rows.push(['AWS access key ID', c.access_key_id], ['AWS secret access key', c.secret_access_key]);
             if (Array.isArray(c.values)) c.values.forEach((v, i) => rows.push([`Watched value ${i + 1}`, v]));
             if (c.public_key) rows.push(['Public key', c.public_key]);
-            if (c.planted) rows.push(['Planted', 'by QPot in its own honeypots (Cowrie bait). Turn it off with qpot honeypot set cowrie bait=off.']);
+            if (c.planted) rows.push(['Origin', c.historical ? 'Previously planned in honeypot bait. Earlier files or copied credentials may still exist.' : 'Currently planned in honeypot bait. Disabling a honeypot or its bait stops planting; earlier values remain watched.']);
+            rows.push(['Monitoring', c.enabled ? 'On' : 'Off']);
             return rows;
         }
 
@@ -1686,13 +1985,14 @@
         }
 
         async function deleteCanary(c) {
-            if (!(await confirmAction(`Delete the canary "${c.name || c.id}"? Its trips stay in the list.`, 'Delete'))) return;
+            const consequence = c.historical ? ' This stops watching earlier exposed or copied values.' : '';
+            if (!(await confirmAction(`Delete the canary "${c.name || c.id}"?${consequence} Its trips stay in the list.`, 'Delete'))) return;
             try {
                 await api(`${API_BASE}/canaries?id=${encodeURIComponent(c.id)}`, { method: 'DELETE' });
                 toast('Canary deleted.', 'ok');
             } catch (e) {
                 if (e.status === 401 || e.status === 403) return;
-                if (e.status === 409) toast(`${e.message} It is planted in the honeypots: turn it off with qpot honeypot set cowrie bait=off.`, 'error');
+                if (e.status === 409) toast(errorText(e), 'error');
                 else toast('The canary was not deleted: ' + errorText(e), 'error');
             }
             loadCanaries();
@@ -2210,6 +2510,10 @@
         $('logs-load').addEventListener('click', loadLogs);
         $('logs-honeypot').addEventListener('change', loadLogs);
         $('settings-form').addEventListener('submit', saveSettings);
+        $('industrial-choose').addEventListener('click', () => openSettings('conpot'));
+        $('industrial-enable').addEventListener('click', () => toggleHoneypot('conpot', $('industrial-enable').dataset.enable !== 'false', $('industrial-enable')));
+        $('refrigeration-choose').addEventListener('click', () => openSettings('refrigeration'));
+        $('refrigeration-enable').addEventListener('click', () => toggleHoneypot('refrigeration', $('refrigeration-enable').dataset.enable !== 'false', $('refrigeration-enable')));
         $('doctor-run').addEventListener('click', () => loadDoctor(true));
         $('explain-form').addEventListener('submit', (ev) => { ev.preventDefault(); explainCode(); });
         $('codes-category').addEventListener('change', renderCodes);

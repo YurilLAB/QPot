@@ -28,6 +28,10 @@ var setupProfiles = map[string][]string{
 	"standard": {"cowrie", "endlessh", "dionaea", "heralding", "conpot", "adbhoney"},
 	// High-interaction SSH (real OpenSSH backends behind the HiFi broker).
 	"hifi": {"cowrie", "endlessh", "ssh-proxy"},
+	// One industrial controller, with no unrelated services on its address.
+	"industrial": {"conpot"},
+	// A separate, locally built refrigeration supervisor with virtual equipment.
+	"refrigeration": {"refrigeration"},
 }
 
 // check is one line of a setup/doctor report (see internal/doctor).
@@ -288,7 +292,7 @@ and the database only on 127.0.0.1 with a random password.`,
 	}
 	f := cmd.Flags()
 	f.StringVarP(&o.instance, "instance", "i", "default", "instance name")
-	f.StringVar(&o.profile, "profile", "minimal", "honeypots for a new instance: minimal, standard or hifi")
+	f.StringVar(&o.profile, "profile", "minimal", "honeypots for a new instance: minimal, standard, hifi, industrial (Modbus PLC) or refrigeration (cold storage supervisor)")
 	f.StringVar(&o.honeypots, "honeypots", "", "honeypots for a new instance by name, comma-separated (instead of --profile)")
 	f.StringVar(&o.bind, "bind", "127.0.0.1", "web UI address for a new instance (127.0.0.1 = this computer only)")
 	f.IntVar(&o.port, "port", 8080, "web UI port for a new instance (the next free one if the default is taken)")

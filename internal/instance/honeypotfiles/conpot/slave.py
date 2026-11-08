@@ -1,0 +1,329 @@
+import logging
+import struct
+
+from pymodbus.constants import ExcCodes
+from pymodbus.pdu import DecodePDU, ExceptionResponse
+from pymodbus.pdu.bit_message import (
+    ReadCoilsRequest,
+    ReadCoilsResponse,
+    ReadDiscreteInputsRequest,
+    ReadDiscreteInputsResponse,
+    WriteMultipleCoilsRequest,
+    WriteMultipleCoilsResponse,
+    WriteSingleCoilRequest,
+    WriteSingleCoilResponse,
+)
+from pymodbus.pdu.register_message import (
+    ReadHoldingRegistersRequest,
+    ReadHoldingRegistersResponse,
+    ReadInputRegistersRequest,
+    ReadInputRegistersResponse,
+    WriteMultipleRegistersRequest,
+    WriteMultipleRegistersResponse,
+    WriteSingleRegisterRequest,
+    WriteSingleRegisterResponse,
+)
+
+from conpot.utils.networking import str_to_bytes
+
+from .modbus_block_databus_mediator import DatabusBlock
+
+logger = logging.getLogger(__name__)
+
+# Template <type> names. Values are the Modbus function codes modbus_tk used
+# as block-type keys, which is also how requests address these tables.
+BLOCK_TYPES = {
+    "COILS": ReadCoilsRequest.function_code,
+    "DISCRETE_INPUTS": ReadDiscreteInputsRequest.function_code,
+    "HOLDING_REGISTERS": ReadHoldingRegistersRequest.function_code,
+    "ANALOG_INPUTS": ReadInputRegistersRequest.function_code,
+}
+
+_READ_BIT_LIMIT = 2000
+_READ_REGISTER_LIMIT = 125
+_WRITE_COIL_LIMIT = 1968
+_WRITE_REGISTER_LIMIT = 123
+
+_BROADCAST_FUNCTIONS = (
+    WriteSingleCoilRequest.function_code,
+    WriteSingleRegisterRequest.function_code,
+    WriteMultipleCoilsRequest.function_code,
+    WriteMultipleRegistersRequest.function_code,
+)
+
+# Importing the message modules registers their PDUs on DecodePDU.
+_DECODER = DecodePDU(True)
+
+# Schneider UMAS rides on Modbus function 90. Start/stop do not need a
+# reservation when no application password is set; other UMAS codes are
+# acknowledged and rejected so the unit still looks like it speaks UMAS.
+_UMAS_FUNCTION = 0x5A
+_UMAS_START = 0x40
+_UMAS_STOP = 0x41
+_UMAS_OK = 0xFE
+_UMAS_ERROR = 0xFD
+
+
+class ModbusInvalidRequestError(Exception):
+    """A PDU that cannot be turned into an exception response."""
+
+
+class MBSlave(object):
+    """One Modbus unit id: template blocks plus pymodbus encode/decode."""
+
+    def __init__(self, slave_id, template):
+        self._id = slave_id
+        self.template = template
+        self.function_code = None
+        self.event_type = None
+        self.running = True
+        self._umas_enabled = bool(template.get("umas_enabled", False))
+        self._blocks = {}
+        self._memory = {block_type: [] for block_type in BLOCK_TYPES.values()}
+        logger.debug("Modbus slave (ID: %d) created", self._id)
+
+    def add_block(self, block_name, block_type, starting_address, size):
+        if size <= 0:
+            raise ValueError("size must be a positive number")
+        if starting_address < 0:
+            raise ValueError("starting address must be zero or positive number")
+        if block_name in self._blocks:
+            raise ValueError("Block %s already exists." % block_name)
+        if block_type not in self._memory:
+            raise ValueError("Invalid block type %s" % block_type)
+
+        index = len(self._memory[block_type])
+        for i, block in enumerate(self._memory[block_type]):
+            if block.is_in(starting_address, size):
+                raise ValueError(
+                    "Overlap block at %d size %d" % (block.starting_address, block.size)
+                )
+            if block.starting_address > starting_address:
+                index = i
+                break
+
+        self._blocks[block_name] = (block_type, starting_address)
+        self._memory[block_type].insert(
+            index, DatabusBlock(block_name, starting_address)
+        )
+
+    def handle_request(self, request_pdu, broadcast=False):
+        """Return a response PDU, or None when a broadcast must stay silent."""
+        logger.debug("Slave (ID: %d) is handling request", self._id)
+        if not request_pdu:
+            raise ModbusInvalidRequestError("Request PDU is empty")
+
+        self.function_code = request_pdu[0]
+        self.event_type = None
+        if broadcast and self.function_code not in _BROADCAST_FUNCTIONS:
+            raise ModbusInvalidRequestError(
+                "Function %d can not be broadcasted" % self.function_code
+            )
+
+        if self.function_code == _UMAS_FUNCTION and self._umas_enabled:
+            response = self._umas(request_pdu)
+        elif self.function_code == 0x11:
+            response = self._report_slave_id()
+        elif self.function_code == 0x2B:
+            response = self._device_info(request_pdu)
+        else:
+            response = self._handle_standard(request_pdu)
+
+        if broadcast:
+            logger.info("Modbus broadcast on slave %s", self._id)
+            return None
+        return response
+
+    def _handle_standard(self, request_pdu):
+        try:
+            pdu = _DECODER.decode(request_pdu)
+        except struct.error:
+            return _exception_pdu(self.function_code, ExcCodes.ILLEGAL_VALUE)
+        if pdu is None:
+            return _exception_pdu(self.function_code, ExcCodes.ILLEGAL_FUNCTION)
+
+        if isinstance(pdu, (ReadCoilsRequest, ReadDiscreteInputsRequest)):
+            return self._read_bits(pdu)
+        if isinstance(pdu, (ReadHoldingRegistersRequest, ReadInputRegistersRequest)):
+            return self._read_registers(pdu)
+        if isinstance(pdu, WriteSingleCoilRequest):
+            return self._write_single_coil(pdu, request_pdu)
+        if isinstance(pdu, WriteSingleRegisterRequest):
+            return self._write_single_register(pdu)
+        if isinstance(pdu, WriteMultipleCoilsRequest):
+            return self._write_multiple_coils(pdu, request_pdu)
+        if isinstance(pdu, WriteMultipleRegistersRequest):
+            return self._write_multiple_registers(pdu)
+        return _exception_pdu(self.function_code, ExcCodes.ILLEGAL_FUNCTION)
+
+    def _read_bits(self, pdu):
+        if pdu.count <= 0 or pdu.count > _READ_BIT_LIMIT:
+            return _exception_pdu(pdu.function_code, ExcCodes.ILLEGAL_VALUE)
+        found = self._block_and_offset(pdu.function_code, pdu.address, pdu.count)
+        if found is None:
+            return _exception_pdu(pdu.function_code, ExcCodes.ILLEGAL_ADDRESS)
+        block, offset = found
+        values = block.get_values(offset, pdu.count)
+        if pdu.function_code == ReadCoilsRequest.function_code:
+            response = ReadCoilsResponse(bits=values)
+        else:
+            response = ReadDiscreteInputsResponse(bits=values)
+        return _success_pdu(response)
+
+    def _read_registers(self, pdu):
+        if pdu.count <= 0 or pdu.count > _READ_REGISTER_LIMIT:
+            return _exception_pdu(pdu.function_code, ExcCodes.ILLEGAL_VALUE)
+        found = self._block_and_offset(pdu.function_code, pdu.address, pdu.count)
+        if found is None:
+            return _exception_pdu(pdu.function_code, ExcCodes.ILLEGAL_ADDRESS)
+        block, offset = found
+        values = [int(value) for value in block.get_values(offset, pdu.count)]
+        if pdu.function_code == ReadHoldingRegistersRequest.function_code:
+            response = ReadHoldingRegistersResponse(registers=values)
+        else:
+            response = ReadInputRegistersResponse(registers=values)
+        return _success_pdu(response)
+
+    def _write_single_coil(self, pdu, request_pdu):
+        try:
+            _address, raw_value = struct.unpack(">HH", request_pdu[1:5])
+        except struct.error:
+            return _exception_pdu(pdu.function_code, ExcCodes.ILLEGAL_VALUE)
+        if raw_value == 0:
+            stored = 0
+        elif raw_value == 0xFF00:
+            stored = 1
+        else:
+            return _exception_pdu(pdu.function_code, ExcCodes.ILLEGAL_VALUE)
+        found = self._block_and_offset(BLOCK_TYPES["COILS"], pdu.address, 1)
+        if found is None:
+            return _exception_pdu(pdu.function_code, ExcCodes.ILLEGAL_ADDRESS)
+        block, offset = found
+        block.set_values(offset, [stored])
+        response = WriteSingleCoilResponse(address=pdu.address, bits=[bool(stored)])
+        return _success_pdu(response)
+
+    def _write_single_register(self, pdu):
+        if not pdu.registers:
+            return _exception_pdu(pdu.function_code, ExcCodes.ILLEGAL_VALUE)
+        found = self._block_and_offset(BLOCK_TYPES["HOLDING_REGISTERS"], pdu.address, 1)
+        if found is None:
+            return _exception_pdu(pdu.function_code, ExcCodes.ILLEGAL_ADDRESS)
+        block, offset = found
+        block.set_values(offset, [int(pdu.registers[0])])
+        response = WriteSingleRegisterResponse(
+            address=pdu.address, registers=[int(pdu.registers[0])]
+        )
+        return _success_pdu(response)
+
+    def _write_multiple_coils(self, pdu, request_pdu):
+        try:
+            _address, count, byte_count = struct.unpack(">HHB", request_pdu[1:6])
+        except struct.error:
+            return _exception_pdu(pdu.function_code, ExcCodes.ILLEGAL_VALUE)
+        expected = count // 8
+        if count % 8:
+            expected += 1
+        if count <= 0 or count > _WRITE_COIL_LIMIT or byte_count != expected:
+            return _exception_pdu(pdu.function_code, ExcCodes.ILLEGAL_VALUE)
+        found = self._block_and_offset(BLOCK_TYPES["COILS"], pdu.address, count)
+        if found is None:
+            return _exception_pdu(pdu.function_code, ExcCodes.ILLEGAL_ADDRESS)
+        block, offset = found
+        block.set_values(offset, list(pdu.bits))
+        response = WriteMultipleCoilsResponse(address=pdu.address, count=count)
+        return _success_pdu(response)
+
+    def _write_multiple_registers(self, pdu):
+        if (
+            pdu.count <= 0
+            or pdu.count > _WRITE_REGISTER_LIMIT
+            or len(pdu.registers) != pdu.count
+        ):
+            return _exception_pdu(pdu.function_code, ExcCodes.ILLEGAL_VALUE)
+        found = self._block_and_offset(
+            BLOCK_TYPES["HOLDING_REGISTERS"], pdu.address, pdu.count
+        )
+        if found is None:
+            return _exception_pdu(pdu.function_code, ExcCodes.ILLEGAL_ADDRESS)
+        block, offset = found
+        block.set_values(offset, [int(value) for value in pdu.registers])
+        response = WriteMultipleRegistersResponse(address=pdu.address, count=pdu.count)
+        return _success_pdu(response)
+
+    def _block_and_offset(self, block_type, address, length):
+        for block in self._memory[block_type]:
+            if address >= block.starting_address:
+                offset = address - block.starting_address
+                if block.size >= offset + length:
+                    return block, offset
+        return None
+
+    def _umas(self, request_pdu):
+        """Answer Schneider UMAS (function 90) start/stop. Do not stop the server."""
+        if len(request_pdu) < 3:
+            return _exception_pdu(self.function_code, ExcCodes.ILLEGAL_VALUE)
+        session_key = request_pdu[1]
+        umas_code = request_pdu[2]
+        if umas_code == _UMAS_START:
+            self.running = True
+            self.event_type = "UMAS_START"
+            status = _UMAS_OK
+        elif umas_code == _UMAS_STOP:
+            self.running = False
+            self.event_type = "UMAS_STOP"
+            status = _UMAS_OK
+        else:
+            status = _UMAS_ERROR
+        return struct.pack(">BBB", _UMAS_FUNCTION, session_key, status)
+
+    def _report_slave_id(self):
+        # QPot: FC17 is serial-line-only (Modbus V1.1b3 section 6.13).
+        # This Ethernet M340 persona has no serial server ID to report.
+        return _exception_pdu(0x11, ExcCodes.ILLEGAL_FUNCTION)
+
+    def _device_info(self, request_pdu):
+        # QPot: Modbus V1.1b3 sections 6.19 and 6.21. Only MEI 14 is
+        # implemented; do not identify this device in response to other MEIs.
+        if len(request_pdu) < 2:
+            return _exception_pdu(0x2B, ExcCodes.ILLEGAL_VALUE)
+        if request_pdu[1] != 0x0E:
+            return _exception_pdu(0x2B, ExcCodes.ILLEGAL_FUNCTION)
+        if len(request_pdu) != 4:
+            return _exception_pdu(0x2B, ExcCodes.ILLEGAL_VALUE)
+        read_code, object_id = request_pdu[2:4]
+        if read_code not in (1, 2, 3, 4):
+            return _exception_pdu(0x2B, ExcCodes.ILLEGAL_VALUE)
+
+        info = self.template["device_info"]
+        objects = {
+            0: str_to_bytes(info["VendorName"]),
+            1: str_to_bytes(info["ProductCode"]),
+            2: str_to_bytes(info["MajorMinorRevision"]),
+        }
+        if read_code == 4:
+            if object_id not in objects:
+                return _exception_pdu(0x2B, ExcCodes.ILLEGAL_ADDRESS)
+            selected = [object_id]
+        else:
+            # Unknown stream starting objects restart at zero. Requests for
+            # a higher level return the actual basic identification level.
+            if object_id not in objects:
+                object_id = 0
+            selected = [key for key in objects if key >= object_id]
+
+        # 0x81 advertises basic identification, stream and individual access.
+        # The three pinned ASCII objects fit one PDU: no continuation needed.
+        response = bytes((0x2B, 0x0E, read_code, 0x81, 0, 0, len(selected)))
+        for key in selected:
+            response += bytes((key, len(objects[key]))) + objects[key]
+        return response
+
+
+def _exception_pdu(function_code, code):
+    pdu = ExceptionResponse(function_code, int(code))
+    return struct.pack(">B", pdu.function_code) + pdu.encode()
+
+
+def _success_pdu(pdu):
+    return struct.pack(">B", pdu.function_code) + pdu.encode()

@@ -33,7 +33,9 @@ jobs:
   extended-fuzz:
     name: Fuzz each target (${{ github.event.inputs.fuzztime || '120' }}s)
     runs-on: ubuntu-latest
-    timeout-minutes: 90
+    # The current 75 targets need 150 minutes at the default 120s each.
+    # Leave headroom for setup, compilation and occasional retries.
+    timeout-minutes: 210
     steps:
       - uses: actions/checkout@v4
 

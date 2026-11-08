@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -62,7 +63,7 @@ func TestValidateSettingsRefuses(t *testing.T) {
 		{"nosuch", ParseSettingArgs([]string{"a=b"}), ErrUnknownHoneypot, `unknown honeypot "nosuch" (see: qpot honeypot list)`},
 		{"<img src=x onerror=alert(1)>", ParseSettingArgs([]string{"persona=rhel-9"}), ErrUnknownHoneypot, "unknown honeypot"},
 		{"endlessh", ParseSettingArgs([]string{"a=b"}), ErrNoSettings, "endlessh has no settings to set"},
-		{"cowrie", ParseSettingArgs([]string{"persona"}), ErrInvalidSetting, `invalid setting "persona" for cowrie (allowed: bait, persona, persona_rotation)`},
+		{"cowrie", ParseSettingArgs([]string{"persona"}), ErrInvalidSetting, `invalid setting "persona" for cowrie (allowed: bait, bait_profile, bait_target, persona, persona_rotation)`},
 		{"cowrie", ParseSettingArgs([]string{"Persona=rhel-9"}), ErrInvalidSetting, "invalid setting"},
 		{"cowrie", ParseSettingArgs([]string{"persona=rhel-9\nx"}), ErrInvalidSetting, "persona: value must be a single line"},
 		{"cowrie", ParseSettingArgs([]string{"persona=<script>alert(1)</script>"}), ErrInvalidSetting, "persona must be one of"},
@@ -216,6 +217,7 @@ func TestApplySettings(t *testing.T) {
 
 	t.Run("save fails: config in memory unchanged", func(t *testing.T) {
 		cfg := settingsTestConfig(t, "apply-nosave")
+		beforeConpot, _ := cfg.GetHoneypotConfig("conpot")
 		// A directory where the file should be: the write fails.
 		if err := os.MkdirAll(cfg.ConfigPath, 0o750); err != nil {
 			t.Fatal(err)
@@ -226,6 +228,9 @@ func TestApplySettings(t *testing.T) {
 		}
 		if hp, _ := cfg.GetHoneypotConfig("cowrie"); hp.CustomConfig["bait"] != "" {
 			t.Fatalf("unsaved change kept in memory: %v", hp.CustomConfig)
+		}
+		if afterConpot, _ := cfg.GetHoneypotConfig("conpot"); afterConpot.DeviceProfile != beforeConpot.DeviceProfile {
+			t.Fatalf("failed settings save froze an unsaved device profile: %+v", afterConpot.DeviceProfile)
 		}
 	})
 }
@@ -263,5 +268,145 @@ func TestDescribeSettings(t *testing.T) {
 	}
 	if DescribeSettings(cfg, "nosuch") != nil {
 		t.Fatal("unknown honeypot described")
+	}
+}
+
+func TestDescribeDeviceChoicesMatchRuntimeWithoutRewritingYAML(t *testing.T) {
+	for _, tc := range []struct{ name, key, value string }{
+		{"conpot", "template", "plc_modbus"},
+		{"cowrie", "bait", "off"},
+		{"cowrie", "persona", "ipcam"},
+		{"cowrie", "bait_profile", "industrial"},
+		{"cowrie", "bait_target", "refrigeration"},
+		{"refrigeration", "site_profile", "plasma"},
+	} {
+		for _, blank := range []bool{false, true} {
+			t.Run(tc.name+"/"+tc.key+"/blank="+strconv.FormatBool(blank), func(t *testing.T) {
+				raw, want := "  "+tc.value+"  ", tc.value
+				if blank {
+					raw, want = " \t ", ""
+				}
+				cfg := settingsTestConfig(t, "describe-device")
+				cfg.SetHoneypotCustomConfig(tc.name, map[string]string{tc.key: raw})
+				// Clone round-trips the actual YAML parser, without saving a
+				// normalized value over the operator's original configuration.
+				parsed, err := cfg.Clone()
+				if err != nil {
+					t.Fatal(err)
+				}
+				var choice *SettingInfo
+				for _, setting := range DescribeSettings(parsed, tc.name) {
+					if setting.Key == tc.key {
+						choice = &setting
+						break
+					}
+				}
+				if choice == nil || choice.Value != want || choice.Set != !blank || choice.Type != "choice" {
+					t.Fatalf("dropdown cannot preserve parsed YAML choice %q: %+v", raw, choice)
+				}
+				selected := choice.Value
+				if selected == "" {
+					selected = choice.Effective
+				}
+				if selected != effectiveSetting(parsed, tc.name, tc.key) || !slices.Contains(choice.Allowed, selected) {
+					t.Fatalf("dropdown %q differs from runtime or has no matching option: %+v", selected, choice)
+				}
+				hp, _ := parsed.GetHoneypotConfig(tc.name)
+				if hp.CustomConfig[tc.key] != raw {
+					t.Fatalf("reading settings rewrote YAML value: %q", hp.CustomConfig[tc.key])
+				}
+			})
+		}
+	}
+}
+
+func TestCowrieArchiveSavePreservesManualIdentityAndFileOptOut(t *testing.T) {
+	for _, tc := range []struct{ name, persona, bait, rotation string }{
+		{"server files off", "debian-bookworm", "off", " 7 "},
+		{"embedded camera", "ipcam", "on", "007"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := settingsTestConfig(t, "archive-manual-options")
+			raw := map[string]string{
+				"persona": " " + tc.persona + " ", "bait": " " + tc.bait + " ",
+				"persona_rotation": tc.rotation, "bait_profile": "industrial", "bait_target": "conpot",
+			}
+			cfg.SetHoneypotCustomConfig("cowrie", raw)
+			if err := config.Save(cfg); err != nil {
+				t.Fatal(err)
+			}
+			before, err := os.ReadFile(cfg.ConfigPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			parsed, err := config.Parse(before, cfg.ConfigPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			want := map[string]string{"persona": tc.persona, "bait": tc.bait, "persona_rotation": "7"}
+			for _, setting := range DescribeSettings(parsed, "cowrie") {
+				if value, ok := want[setting.Key]; ok && setting.Value != value {
+					t.Errorf("browser control cannot preserve %s: metadata=%q, runtime=%q", setting.Key, setting.Value, value)
+				}
+			}
+			afterRead, err := os.ReadFile(cfg.ConfigPath)
+			if err != nil || string(afterRead) != string(before) {
+				t.Fatalf("reading options rewrote manual YAML: %v", err)
+			}
+			result, err := ApplySettings(t.Context(), parsed, "cowrie", []SettingChange{{Key: baitTargetSetting, Value: "refrigeration"}}, &fakeRunner{})
+			if err != nil || result == nil || !result.Saved {
+				t.Fatalf("save unrelated archive reference: result=%+v error=%v", result, err)
+			}
+			data, err := os.ReadFile(cfg.ConfigPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			persisted, err := config.Parse(data, cfg.ConfigPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			hp, _ := persisted.GetHoneypotConfig("cowrie")
+			for _, key := range []string{"persona", "bait", "persona_rotation"} {
+				if hp.CustomConfig[key] != raw[key] {
+					t.Errorf("changing the archive reference rewrote %s: %q", key, hp.CustomConfig[key])
+				}
+			}
+			if cowriePersona(persisted) != tc.persona || cowriePersonaRotation(persisted) != 7 || baitOn(persisted) != (tc.bait == "on") {
+				t.Fatal("archive reference change altered identity, rotation or file opt-out")
+			}
+			plan, _ := cowrieBait(persisted)
+			if len(plan.Files) != 0 {
+				t.Fatal("archive settings planted files on an opted-out server or embedded camera")
+			}
+		})
+	}
+}
+
+func TestDescribeCowrieRotationUsesValidBrowserNumberWithoutMaskingInvalidYAML(t *testing.T) {
+	for _, tc := range []struct{ raw, value, effective string }{
+		{" 7 ", "7", ""}, {"007", "7", ""}, {" 0 ", "0", ""},
+		{"365", "365", ""}, {" \t ", "", "365"}, {" 366 ", " 366 ", "365"},
+	} {
+		t.Run(tc.raw, func(t *testing.T) {
+			cfg := settingsTestConfig(t, "rotation-metadata")
+			cfg.SetHoneypotCustomConfig("cowrie", map[string]string{"persona_rotation": tc.raw})
+			parsed, err := cfg.Clone()
+			if err != nil {
+				t.Fatal(err)
+			}
+			var found bool
+			for _, setting := range DescribeSettings(parsed, "cowrie") {
+				if setting.Key == "persona_rotation" {
+					found = true
+					if setting.Type != "number" || setting.Value != tc.value || setting.Effective != tc.effective || setting.Set != (tc.value != "") {
+						t.Errorf("rotation %q is not represented faithfully: %+v", tc.raw, setting)
+					}
+				}
+			}
+			hp, _ := parsed.GetHoneypotConfig("cowrie")
+			if !found || hp.CustomConfig["persona_rotation"] != tc.raw {
+				t.Fatal("rotation field missing or raw YAML changed on read")
+			}
+		})
 	}
 }

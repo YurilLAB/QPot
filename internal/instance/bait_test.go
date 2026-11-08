@@ -3,12 +3,16 @@ package instance
 import (
 	"bytes"
 	"crypto/ed25519"
+	"encoding/csv"
 	"encoding/json"
 	"fmt"
+	"net"
 	"path"
 	"regexp"
+	"runtime"
 	"slices"
 	"strings"
+	"sync"
 	"testing"
 
 	"golang.org/x/crypto/ssh"
@@ -389,6 +393,207 @@ func TestBaitCacheFollowsConfig(t *testing.T) {
 func mustPlan(cfg *config.Config) baitPlan {
 	p, _ := cowrieBait(cfg)
 	return p
+}
+
+// TestIndustrialBaitReferencesMatchDevice checks the separately archived asset
+// against the selected device for every OS/role combination. A meter, BMC or
+// building controller must not turn into an invented pump PLC in its files.
+func TestIndustrialBaitReferencesMatchDevice(t *testing.T) {
+	for _, p := range serverPersonas() {
+		for _, device := range ConpotProfiles() {
+			t.Run(p.ID+"/"+device.ID, func(t *testing.T) {
+				cfg := baitCfg("qp_industrial00000000000001", p.ID)
+				cfg.Honeypots["cowrie"].CustomConfig[baitProfileSetting] = "industrial"
+				hp := cfg.Honeypots["conpot"]
+				hp.CustomConfig = map[string]string{"template": device.ID}
+				cfg.Honeypots["conpot"] = hp // A disabled Conpot may still have an archive reference.
+				plan, planted := cowrieBait(cfg)
+				checkBaitPlan(t, p, plan, planted)
+				var inventory industrialInventory
+				if err := json.Unmarshal([]byte(baitFileAt(t, plan, industrialRoot+"/inventory.json").Text), &inventory); err != nil {
+					t.Fatal(err)
+				}
+				if inventory.Version != 1 || inventory.SourceHost != "{{host}}" || inventory.RecordType != "maintenance reference" || len(inventory.Assets) != 1 {
+					t.Fatalf("invalid reference inventory: %+v", inventory)
+				}
+				for _, f := range plan.Files {
+					if strings.Contains(f.Text, "reference_profile") || strings.Contains(f.Text, device.ID) {
+						t.Fatalf("attacker-facing archive exposes internal profile metadata: %s", f.Path)
+					}
+				}
+				a := inventory.Assets[0]
+				if a.Model != device.Model || a.Role != device.Category || !slices.Equal(a.Protocols, device.Protocols) ||
+					len(a.Endpoints) != len(device.TCP)+len(device.UDP) {
+					t.Fatalf("archive contradicts device: %+v vs %+v", a, device)
+				}
+				if ip := net.ParseIP(a.Address); ip == nil || !ip.IsPrivate() {
+					t.Fatalf("asset has no synthetic private address: %q", a.Address)
+				}
+				rows, err := csv.NewReader(strings.NewReader(baitFileAt(t, plan, industrialRoot+"/exports/"+a.ID+"/communications.csv").Text)).ReadAll()
+				if err != nil || len(rows) != len(a.Endpoints)+1 {
+					t.Fatalf("communications CSV: %v; %v", rows, err)
+				}
+				for i, ep := range a.Endpoints {
+					ports := device.TCP
+					if ep.Transport == "udp" {
+						ports = device.UDP
+					} else if ep.Transport != "tcp" {
+						t.Fatalf("unknown transport %q", ep.Transport)
+					}
+					if ep.Protocol == "" || !slices.Contains(ports, ep.Port) ||
+						!slices.Equal(rows[i+1], []string{a.ID, a.Address, ep.Transport, fmt.Sprint(ep.Port), ep.Protocol}) {
+						t.Fatalf("endpoint/CSV disagree: %+v / %v", ep, rows[i+1])
+					}
+				}
+				if len(planted) != 2 || planted[0].Kind != canary.KindSSHKey || planted[1].Kind != canary.KindCredential {
+					t.Fatalf("unregistered archive credential or unrelated canary: %+v", planted)
+				}
+				netrc := baitFileAt(t, plan, "/root/.netrc")
+				if netrc.Mode != 0o600 || !strings.Contains(netrc.Text, "login svc_otbackup\n") ||
+					!strings.Contains(netrc.Text, "password "+planted[1].Values[0]+"\n") {
+					t.Fatal("archive credential is unprotected or disagrees with canary")
+				}
+				if len(plan.Hosts) != 2 || plan.Hosts[0].IP == a.Address || plan.Hosts[1].IP != a.Address {
+					t.Fatal("archive server and reference device must have separate addresses")
+				}
+				for _, f := range plan.Files {
+					if strings.HasSuffix(f.Path, ".sql.gz") || strings.Contains(f.Path, "/.aws/") || strings.HasSuffix(f.Path, ".st") {
+						t.Fatalf("unrelated runtime/project claim: %s", f.Path)
+					}
+				}
+			})
+		}
+	}
+}
+
+func TestIndustrialBaitSettingAndCache(t *testing.T) {
+	cfg := baitCfg("qp_industrialcache000000001", "debian-bookworm")
+	if cowrieBaitProfile(cfg) != "ops" || effectiveSetting(cfg, "cowrie", baitProfileSetting) != "ops" {
+		t.Fatal("existing ops default changed")
+	}
+	for _, value := range []string{"", "ops", "industrial"} {
+		if err := CheckSetting("cowrie", baitProfileSetting, value); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := CheckSetting("cowrie", baitProfileSetting, "plc"); err == nil {
+		t.Fatal("unknown industrial file profile accepted")
+	}
+	ops := cowrieBaitJSON(cfg)
+	var firstCanaries []byte
+	seen := map[string]bool{}
+	for _, device := range ConpotProfiles() {
+		cfg.Honeypots["cowrie"].CustomConfig[baitProfileSetting] = "industrial"
+		hp := cfg.Honeypots["conpot"]
+		hp.CustomConfig = map[string]string{"template": device.ID}
+		cfg.Honeypots["conpot"] = hp
+		plan, planted := cowrieBait(cfg)
+		fresh, _ := json.MarshalIndent(plan, "", " ")
+		got := cowrieBaitJSON(cfg)
+		if bytes.Equal(got, ops) || !bytes.Equal(got, append(fresh, '\n')) || seen[string(got)] {
+			t.Fatalf("profile %s did not invalidate the cache", device.ID)
+		}
+		seen[string(got)] = true
+		canariesJSON, _ := json.Marshal(planted)
+		if firstCanaries == nil {
+			firstCanaries = canariesJSON
+		} else if !bytes.Equal(firstCanaries, canariesJSON) {
+			t.Fatal("changing a reference device unnecessarily rotates the active archive credentials")
+		}
+	}
+	for _, persona := range tpotCowriePersonas {
+		cfg.Honeypots["cowrie"].CustomConfig["persona"] = persona.ID
+		plan, planted := cowrieBait(cfg)
+		if !persona.Server && (len(plan.Files) != 0 || len(planted) != 0) {
+			t.Fatalf("industrial files on device persona %s", persona.ID)
+		}
+	}
+	cfg.Honeypots["cowrie"].CustomConfig["persona"] = "debian-bookworm"
+	cfg.Honeypots["cowrie"].CustomConfig[baitSetting] = "off"
+	if plan, planted := cowrieBait(cfg); len(plan.Files) != 0 || len(planted) != 0 {
+		t.Fatal("bait=off did not disable industrial files")
+	}
+	cfg.Honeypots["cowrie"].CustomConfig[baitSetting] = "on"
+	cfg.Honeypots["cowrie"].CustomConfig[baitProfileSetting] = ""
+	if !bytes.Equal(ops, cowrieBaitJSON(cfg)) {
+		t.Fatal("clearing bait_profile did not restore the ops files")
+	}
+}
+
+// TestBaitCacheConsistentAfterConcurrentSettingChanges reproduces a cache
+// poisoning bug: separate reads formerly cached one role/device's files under
+// another's key. After the writer stops, every stable selection must return
+// the right files and contain the credentials PlantedCanaries watches.
+func TestBaitCacheConsistentAfterConcurrentSettingChanges(t *testing.T) {
+	for _, tc := range []struct {
+		name, honeypot, key string
+		values              []string
+	}{
+		{"device", "conpot", "template", []string{"plc_modbus", "beckhoff_cx"}},
+		{"role", "cowrie", baitProfileSetting, []string{"ops", "industrial"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := baitCfg("qp_concurrentbait0000000001", "debian-bookworm")
+			cfg.SetHoneypotCustomConfig("cowrie", map[string]string{"persona": "debian-bookworm", baitProfileSetting: "industrial"})
+			cfg.SetHoneypotCustomConfig("conpot", map[string]string{"template": "plc_modbus"})
+			set := func(value string) {
+				custom := map[string]string{tc.key: value}
+				if tc.honeypot == "cowrie" {
+					custom["persona"] = "debian-bookworm"
+				}
+				cfg.SetHoneypotCustomConfig(tc.honeypot, custom)
+			}
+			for attempt := 0; attempt < 40; attempt++ {
+				baitCache.Lock()
+				baitCache.json = nil
+				baitCache.Unlock()
+				stop := make(chan struct{})
+				var writer sync.WaitGroup
+				writer.Add(1)
+				go func() {
+					defer writer.Done()
+					for i := 0; ; i++ {
+						select {
+						case <-stop:
+							return
+						default:
+						}
+						set(tc.values[i%len(tc.values)])
+						runtime.Gosched()
+					}
+				}()
+				for i := 0; i < 4; i++ {
+					_ = cowrieBaitJSON(cfg)
+					runtime.Gosched()
+				}
+				close(stop)
+				writer.Wait()
+				for _, value := range tc.values {
+					set(value)
+					var plan baitPlan
+					if err := json.Unmarshal(cowrieBaitJSON(cfg), &plan); err != nil {
+						t.Fatal(err)
+					}
+					checkBaitPlan(t, tpotCowriePersona{ID: "debian-bookworm", Server: true, Family: "debian", User: "debian"}, plan, PlantedCanaries(cfg))
+					var inventory *industrialInventory
+					for _, f := range plan.Files {
+						if f.Path == industrialRoot+"/inventory.json" {
+							if err := json.Unmarshal([]byte(f.Text), &inventory); err != nil {
+								t.Fatal(err)
+							}
+						}
+					}
+					industrial := tc.honeypot != "cowrie" || value == "industrial"
+					if (inventory != nil) != industrial {
+						t.Fatalf("stable %s=%s returned wrong role after attempt %d", tc.key, value, attempt)
+					}
+					if industrial && (len(inventory.Assets) != 1 || inventory.Assets[0].Model != ConpotProfile(cfg).Model) {
+						t.Fatalf("stable %s=%s returned another device's archive after attempt %d", tc.key, value, attempt)
+					}
+				}
+			}
+		})
+	}
 }
 
 // TestBaitHostsTimeOut: the hosts the files name are the ones Cowrie's ssh

@@ -49,6 +49,10 @@ device, are changed with `qpot honeypot set`:
 qpot honeypot set cowrie persona=rhel-9
 qpot honeypot set cowrie persona_rotation=30
 qpot honeypot set cowrie bait=off
+qpot honeypot set cowrie persona=debian-bookworm bait_profile=industrial
+qpot honeypot set cowrie bait_target=refrigeration
+qpot honeypot set refrigeration site_profile=plasma
+qpot honeypot profiles conpot
 qpot honeypot set conpot template=plc_modbus
 ```
 
@@ -56,6 +60,18 @@ Unknown keys and values outside their allowed range are refused with a plain
 explanation. A running honeypot is then recreated in a new container, so the
 change takes effect at once. The dashboard's settings dialog offers the same
 settings, with the allowed values listed.
+
+Conpot also keeps its resolved automatic choice in
+`honeypots.conpot.device_profile` (`id` and `version`). QPot preserves the old
+selection while loading and records it on the next save, after the runtime
+identity has been loaded. The explicit
+`custom_config.template` setting takes precedence; clearing it restores the
+saved automatic choice. Unsupported saved IDs, versions and template pins
+are rejected with an explanation rather than silently changing devices.
+
+Configuration saves stage and validate a private snapshot, replace the YAML
+atomically, then adopt the saved automatic profile. A failed write does not
+change the in-memory profile or partially overwrite the earlier settings.
 
 ## Other sections
 

@@ -21,6 +21,11 @@ attacker, every QPot instance is a believable machine of its own. QPot also
 keeps the honeypots away from your network, analyses what attackers do, and
 brings T-Pot's web interface with a dashboard for all of it.
 
+This README describes `main`. The new industrial profile catalog and refrigeration
+supervisor are unreleased; the installers below still install v1.0.0. To try these
+additions, [build the current source](doc/installation.md#install-the-qpot-program)
+and run the resulting `./qpot` binary.
+
 ## Contents
 
 - [Features](#features)
@@ -34,8 +39,8 @@ brings T-Pot's web interface with a dashboard for all of it.
 
 ## Features
 
-- **27 honeypots** from T-Pot's upstream images, covering SSH, Telnet, web,
-  mail, databases, industrial control systems, medical systems and more.
+- **28 honeypots**, combining T-Pot services, HiFi SSH and a native refrigeration
+  supervisor, covering SSH, web, industrial control, medical systems and more.
 - **A believable identity per instance.** Each instance gets its own operating
   system, SSH version, host name, users and files, kept across restarts. Shell
   commands answer the way the real tools do. An optional high-interaction mode
@@ -116,6 +121,9 @@ qpot doctor                        # check every part, with a fix for each probl
 qpot honeypot list                 # honeypots, ports and risk levels
 qpot honeypot enable dionaea       # turn a honeypot on
 qpot honeypot set cowrie persona=rhel-9
+qpot honeypot profiles conpot      # industrial device models, protocols and ports
+qpot honeypot set cowrie bait_profile=industrial  # optional OT support-host archives
+qpot honeypot enable refrigeration # legacy cold storage supervisor with virtual equipment
 qpot logs cowrie -f                # follow a honeypot's log
 qpot overview                      # activity and host load in the terminal
 qpot down                          # stop the instance
@@ -132,7 +140,7 @@ them all.
 | [Installation and setup](doc/installation.md) | Requirements, installers, guided setup |
 | [Web UI](doc/web-ui.md) | The landing page, attack map and dashboard |
 | [Configuration](doc/configuration.md) | The settings file and what you can change |
-| [Honeypots](doc/honeypots.md) | The 27 honeypots and how to manage them |
+| [Honeypots](doc/honeypots.md) | The 28 honeypots and how to manage them |
 | [Deception](doc/deception.md) | How each instance gets its own identity |
 | [Data and threat intelligence](doc/intelligence.md) | Collection, ATT&CK tagging, IOCs and campaigns |
 | [Canaries](doc/canary.md) | Decoys, bait and what a trip means |

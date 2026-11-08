@@ -14,6 +14,7 @@ import (
 	"text/template"
 
 	"github.com/qpot/qpot/internal/config"
+	"github.com/qpot/qpot/internal/refrigeration"
 	"github.com/qpot/qpot/internal/security"
 )
 
@@ -96,6 +97,9 @@ func (g *ComposeGenerator) buildHostPortMap() map[string]int {
 	}
 
 	used := map[int]bool{}
+	if g.Config.WebUI.Enabled && g.Config.WebUI.Port > 0 {
+		used[g.Config.WebUI.Port] = true
+	}
 	for p := range g.ReservedPorts {
 		used[p] = true
 	}
@@ -411,6 +415,11 @@ func dbPidsLimit(globalMax int64) int64 {
 }
 
 func (g *ComposeGenerator) Generate() (string, error) {
+	if hp, ok := g.Config.GetHoneypotConfig("refrigeration"); ok && hp.Enabled {
+		if err := CheckSetting("refrigeration", "site_profile", refrigerationSiteProfile(g.Config)); err != nil {
+			return "", err
+		}
+	}
 	tmpl := `# QPot Instance: {{.Config.InstanceName}}
 # QPot ID: {{.Config.QPotID}}
 # Auto-generated - Do not edit manually
@@ -764,7 +773,14 @@ services:
 {{define "honeypot"}}
   # Honeypot: {{.Name}}
   {{.Name}}:
+    {{- $d := deployFor .Name}}
     image: {{GetHoneypotImage .Name}}
+    {{- if $d.LocalBuild}}
+    build:
+      context: {{yamlStr (refrigerationBuildPath $.Config)}}
+      dockerfile: Dockerfile
+    pull_policy: build
+    {{- end}}
     container_name: {{$.Config.InstanceName}}_{{.Name}}
     restart: on-failure:{{$.Config.Security.ResourceLimits.RestartAttempts}}
     {{- $eg := egressGuard $.Config}}
@@ -782,8 +798,12 @@ services:
     {{if $.Sandbox.ContainerRuntime}}# Stronger isolation runtime (gVisor/Kata) for this attacker-facing container
     runtime: {{$.Sandbox.ContainerRuntime}}
     {{end}}
-    {{- $d := deployFor .Name}}
     {{- $hpName := .Name}}
+    {{- if eq .Name "conpot"}}
+    # Preserve the image launcher while avoiding duplicate proxy env names
+    # rejected by its case-insensitive ConfigParser.
+    command: ["/bin/sh", "-c", {{yamlStr (conpotStart)}}]
+    {{- end}}
     {{- if not $d.Internal}}
     ports:
     {{- if or $d.Ports $d.UDPPorts}}
@@ -973,11 +993,12 @@ services:
     {{- $dep := deployFor .Name}}
     {{if .Config.Security.DropCapabilities}}cap_drop:
       - ALL
+    {{- if not $dep.NoCapabilities}}
     cap_add:
       - SETUID
       - SETGID
       {{if or $dep.NeedsNetBind (and .HP.Port (lt .HP.Port 1024))}}- NET_BIND_SERVICE{{end}}{{range $dep.ExtraCaps}}
-      - {{.}}{{end}}{{end}}
+      - {{.}}{{end}}{{end}}{{end}}
 
     # No user override: each honeypot image already runs as its own non-root
     # user (e.g. cowrie=2000). Forcing a different uid breaks the image's file
@@ -1015,11 +1036,20 @@ services:
 	// Pre-assign collision-free host ports and subnets for the whole stack
 	// before rendering, so no two honeypots clash on a host port or a /24.
 	hostPortMap := g.buildHostPortMap()
+	if g.Config.WebUI.Enabled && g.Config.WebUI.Port > 0 {
+		for key, port := range hostPortMap {
+			if port == g.Config.WebUI.Port {
+				name, _, _ := strings.Cut(key, "\x00")
+				return "", fmt.Errorf("honeypot %s would publish the management web port %d; enable ports.auto_allocate or change web_ui.port", name, port)
+			}
+		}
+	}
 	subnetMap := g.buildSubnetMap()
 	dbHostPort := g.databaseHostPort()
 
 	funcMap := template.FuncMap{
 		"yamlStr":                 yamlInterpolatedStr,
+		"conpotStart":             conpotStartScript,
 		"databaseHostPort":        func() int { return dbHostPort },
 		"sshProxyGenerationsPath": func() string { return sshProxyGenerationsPath },
 		"pgReadyCmd":              pgReadyCommand,
@@ -1047,12 +1077,13 @@ services:
 		"lt": func(a, b int) bool {
 			return a < b
 		},
-		"GetHoneypotImage": GetHoneypotImage,
-		"subnetFor":        subnetForNetwork,
-		"bridgeName":       bridgeName,
-		"macFor":           macForSeed,
-		"deployFor":        func(name string) honeypotDeploy { return deployProfile(g.Config, name) },
-		"egressGuard":      egressGuardFor,
+		"GetHoneypotImage":       GetHoneypotImage,
+		"refrigerationBuildPath": refrigerationBuildPath,
+		"subnetFor":              subnetForNetwork,
+		"bridgeName":             bridgeName,
+		"macFor":                 macForSeed,
+		"deployFor":              func(name string) honeypotDeploy { return deployProfile(g.Config, name) },
+		"egressGuard":            egressGuardFor,
 		// listenCheck builds the container healthcheck command, probing the actual
 		// INTERNAL listen ports from the deploy profile (not the host/config port)
 		// via /proc/net so it needs no netstat/ss. See listenHealthCheck.
@@ -1485,7 +1516,7 @@ transforms:
       }
       # Honeypots that do not log the port they listen on (as T-Pot adds it).
       if dp == 0 {
-        dp = to_int(get({"tanner": 80, "hellpot": 80, "endlessh": 22, "citrixhoneypot": 443, "medpot": 2575, "dicompot": 11112, "sentrypeer": 5060, "redishoneypot": 6379, "mailoney": 25}, [hp]) ?? 0) ?? 0
+        dp = to_int(get({"tanner": 80, "hellpot": 80, "endlessh": 22, "citrixhoneypot": 443, "medpot": 2575, "dicompot": 11112, "sentrypeer": 5060, "redishoneypot": 6379, "mailoney": 25, "refrigeration": 8080}, [hp]) ?? 0) ?? 0
       }
       if sp < 0 || sp > 65535 {
         sp = 0
@@ -1497,7 +1528,7 @@ transforms:
       .dest_port = dp
 
       # Protocol: cowrie/heralding "protocol", dionaea "connection.protocol",
-      # conpot "data_type".
+      # current conpot "protocol", legacy conpot "data_type".
       proto = ""
       if is_string(.protocol) {
         proto = string!(.protocol)
@@ -1520,16 +1551,49 @@ transforms:
       if et == "" && hp == "dionaea" {
         et = "dionaea.connection." + (to_string(.connection.type) ?? "event")
       }
+      # Conpot's current image logs protocol plus nested data, whereas older
+      # logs use data_type. Connection events retain their original names.
+      conpot_fc = -1
+      conpot_unit = -1
+      conpot_operation = ""
       if et == "" && hp == "conpot" {
-        orig = to_string(.event_type) ?? ""
-        dt = downcase(to_string(.data_type) ?? "")
+        orig = downcase(to_string(.event_type) ?? "")
+        orig = replace(orig, r'[^a-z0-9_.]+', "_")
+        orig = truncate(replace(orig, r'^_+|_+$', ""), 64)
+        dt = string!(.protocol)
         if dt == "" {
           dt = "unknown"
         }
+        if dt == "modbus" {
+          if is_integer(.data.function_code) {
+            conpot_fc = to_int(.data.function_code) ?? -1
+          }
+          if conpot_fc < 0 || conpot_fc > 127 { conpot_fc = -1 }
+          if is_integer(.data.slave_id) {
+            conpot_unit = to_int(.data.slave_id) ?? -1
+          }
+          if conpot_unit < 0 || conpot_unit > 255 { conpot_unit = -1 }
+          if orig == "" || orig == "request" {
+            # A read is not an unauthorized control command. Diagnostics and
+            # unknown function codes remain requests rather than guessed writes.
+            if includes([1, 2, 3, 4, 7, 11, 12, 17, 20, 24, 43], conpot_fc) {
+              orig = "read"
+              conpot_operation = "read"
+            } else if includes([5, 6, 15, 16, 21, 22, 23], conpot_fc) {
+              orig = "command"
+              conpot_operation = "write"
+            } else {
+              orig = "request"
+            }
+          }
+        } else if dt == "dnp3" && orig == "request" && upcase(to_string(.request) ?? "") == "READ" {
+          orig = "read"
+          conpot_operation = "read"
+        }
         if orig != "" {
           et = "conpot." + dt + "." + orig
-        } else if includes(["modbus", "s7comm", "bacnet", "enip", "ipmi", "iec104", "guardian_ast", "kamstrup_protocol", "kamstrup_management_protocol"], dt) {
-          et = "conpot." + dt + ".command"
+        } else if .request != null && includes(["s7comm", "bacnet", "enip", "ipmi", "iec104", "guardian_ast", "kamstrup_protocol", "kamstrup_management_protocol", "ads", "opcua", "opc_ua", "hart_ip", "hart", "knx", "iccp", "dnp3"], dt) {
+          et = "conpot." + dt + ".request"
         } else {
           et = "conpot." + dt + ".probe"
         }
@@ -1539,6 +1603,17 @@ transforms:
           et = "heralding.login.failed"
         } else {
           et = "heralding.session.connect"
+        }
+      }
+      if hp == "refrigeration" {
+        # Native events describe the emulator's observations and outcomes.
+        # A successful write changes simulated state only; it is not evidence
+        # of a physical process change or an attributed attack campaign.
+        native_event = to_string(.event_type) ?? ""
+        if includes(["refrigeration.auth.failed", "refrigeration.auth.success", "refrigeration.read", "refrigeration.write.attempt", "refrigeration.write.success", "refrigeration.write.denied", "refrigeration.malformed", "refrigeration.exploit.attempt", "refrigeration.export", "refrigeration.alarm"], native_event) {
+          et = native_event
+        } else {
+          et = "refrigeration.request"
         }
       }
       # Otherwise name it after the honeypot's own event/message field,
@@ -1578,6 +1653,10 @@ transforms:
       }
       .username = user
       .password = pass
+      if hp == "refrigeration" {
+        .username = truncate(user, 256)
+        .password = truncate(pass, 256)
+      }
 
       # Attacker input: cowrie/adbhoney log commands as "input".
       cmd = ""
@@ -1587,6 +1666,7 @@ transforms:
         cmd = string!(.command)
       }
       .command = cmd
+      if hp == "refrigeration" { .command = "" }
 
       # Payload: download URL (cowrie/adbhoney), raw request (conpot).
       pl = ""
@@ -1598,6 +1678,7 @@ transforms:
         pl = string!(.payload)
       }
       .payload = pl
+      if hp == "refrigeration" { .payload = truncate(pl, 4096) }
 
       # metadata is Map(String, String) / JSONB: rebuild it from a fixed set
       # of string-coerced keys so an odd honeypot field type can never make the
@@ -1613,6 +1694,52 @@ transforms:
             md = set!(md, [k], sv)
           }
         }
+      }
+      if hp == "conpot" {
+        # Keep the profile from this log event, not today's configured profile:
+        # buffered events can belong to the device used before a profile change.
+        profile = to_string(.template) ?? ""
+        if includes([{{range $i, $id := conpotIDs}}{{if $i}}, {{end}}{{vrlStr $id}}{{end}}], profile) {
+          md.device_profile = profile
+        }
+        if conpot_fc >= 0 { md.function_code = to_string!(conpot_fc) }
+        if conpot_unit >= 0 { md.unit_id = to_string!(conpot_unit) }
+        if conpot_operation != "" { md.operation = conpot_operation }
+        response = downcase(to_string(.response) ?? "")
+        if .protocol == "modbus" && match(response, r'^b\x27[89a-f][0-9a-f][0-9a-f]{2}\x27$') {
+          md.exception_code = slice!(response, 4, 6)
+        }
+      }
+      if hp == "refrigeration" {
+        # Copy a finite schema, never arbitrary input metadata or response
+        # content. Maintenance exports contain decoy credentials, so logging
+        # the response would falsely report their reuse as a canary trip.
+        md = {}
+        for_each(["action", "method", "path", "device_id", "success"]) -> |_i, k| {
+          v = get(., [k]) ?? null
+          if is_string(v) || is_boolean(v) || is_integer(v) {
+            md = set!(md, [k], truncate(to_string(v) ?? "", 256))
+          }
+        }
+        for_each(["profile", "site_profile", "model", "firmware", "role", "reason", "result", "parameter", "value", "previous_value", "outcome"]) -> |_i, k| {
+          v = get(., ["metadata", k]) ?? null
+          if is_string(v) || is_boolean(v) || is_integer(v) || is_float(v) {
+            md = set!(md, [k], truncate(to_string(v) ?? "", 256))
+          }
+        }
+        # HTTP request targets and selected client headers are observations
+        # too. Keep the decoded query alongside the exact target so encoded
+        # credential reuse can be watched without interpreting it as a CVE.
+        if is_string(.metadata.request_uri) {
+          md.request_uri = truncate(string!(.metadata.request_uri), 2048)
+        }
+        if is_string(.metadata.query) {
+          md.query = truncate(string!(.metadata.query), 1024)
+        }
+        if is_string(.metadata.user_agent) {
+          md.user_agent = truncate(string!(.metadata.user_agent), 512)
+        }
+        md.state_scope = "simulated"
       }
       .metadata = md
 
@@ -1813,6 +1940,10 @@ sinks:
     inputs:
       - filter_stealth
     endpoint: "http://database:8123"
+    # This endpoint is always the instance's internal Docker service. Docker
+    # client proxy defaults must not route event batches outside that network.
+    proxy:
+      enabled: false
     database: {{yamlStr .Config.Database.Database}}
     table: events
     # The enriched event carries fields that are not columns in the events
@@ -1868,9 +1999,10 @@ sinks:
 `
 
 	t := template.Must(template.New("vector").Funcs(template.FuncMap{
-		"vrlStr":  vrlStringLiteral,
-		"yamlStr": yamlInterpolatedStr,
-		"pgDSN":   postgresDSN,
+		"vrlStr":    vrlStringLiteral,
+		"yamlStr":   yamlInterpolatedStr,
+		"pgDSN":     postgresDSN,
+		"conpotIDs": ConpotTemplateIDs,
 	}).Parse(config))
 
 	var buf bytes.Buffer
@@ -1886,6 +2018,14 @@ sinks:
 // T-Pot 25 yet); bump it here when T-Pot publishes a new release.
 const TPotVersion = "24.04.2"
 
+// Conpot's mounted protocol patches target this immutable image index. Pin the
+// index rather than an architecture-specific manifest to retain amd64 and arm64.
+// Updating it requires reviewing the patched modules against the new image.
+const (
+	conpotImageVersion = "24.04.2"
+	conpotImageDigest  = "sha256:be17a238709c78909c7d2e0da55bc3ea66dc3aa46618f0d89b7080f3e7dda3e8"
+)
+
 // tpotPinned lists honeypots whose image T-Pot did not rebuild for
 // TPotVersion; they stay on the newest tag that exists.
 var tpotPinned = map[string]string{
@@ -1897,6 +2037,9 @@ var tpotPinned = map[string]string{
 
 // tpotImage returns T-Pot's image for name at TPotVersion (or its pin).
 func tpotImage(name string) string {
+	if name == "conpot" {
+		return "ghcr.io/telekom-security/conpot:" + conpotImageVersion + "@" + conpotImageDigest
+	}
 	tag := TPotVersion
 	if v, ok := tpotPinned[name]; ok {
 		tag = v
@@ -1906,6 +2049,9 @@ func tpotImage(name string) string {
 
 // GetHoneypotImage returns the Docker image for a honeypot
 func GetHoneypotImage(name string) string {
+	if name == "refrigeration" {
+		return refrigeration.BuildImage()
+	}
 	images := map[string]string{
 		"cowrie":         tpotImage("cowrie"),
 		"dionaea":        tpotImage("dionaea"),
@@ -1955,7 +2101,7 @@ func (g *ComposeGenerator) ValidateHoneypot(name string) error {
 		"mailoney", "medpot", "dicompot", "redishoneypot",
 		"beelzebub", "galah", "go-pot", "h0neytr4p", "hellpot",
 		"log4pot", "miniprint", "sentrypeer", "wordpot",
-		"ssh-proxy",
+		"ssh-proxy", "refrigeration",
 	}
 
 	for _, s := range supported {

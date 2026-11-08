@@ -1,6 +1,10 @@
 package instance
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
+	"regexp"
 	"slices"
 	"strings"
 	"testing"
@@ -265,18 +269,18 @@ func TestDionaeaUDPAndNetBind(t *testing.T) {
 	}
 }
 
-// allSupportedHoneypots is every honeypot QPot ships an image for.
+// allSupportedHoneypots covers upstream images and QPot's bundled native image.
 var allSupportedHoneypots = []string{
 	"cowrie", "dionaea", "conpot", "tanner", "adbhoney", "endlessh",
 	"heralding", "honeyaml", "elasticpot", "ciscoasa", "citrixhoneypot",
 	"ddospot", "ipphoney", "mailoney", "medpot", "dicompot", "redishoneypot",
 	"beelzebub", "galah", "go-pot", "h0neytr4p", "hellpot", "log4pot",
-	"miniprint", "sentrypeer", "wordpot",
+	"miniprint", "sentrypeer", "wordpot", "refrigeration",
 }
 
 // TestEveryConfigHoneypotIsWired guards the inverse direction: every honeypot
 // that ships in config.Default (and is therefore enable-able by a user) must
-// pass ValidateHoneypot and resolve to a real, pullable image. dicompot
+// pass ValidateHoneypot and resolve to an upstream or locally buildable image. dicompot
 // regressed this — it was in config.Default but missing from both the image map
 // and the supported list, so enabling it produced a dead "qpot/dicompot:latest"
 // pull.
@@ -289,7 +293,7 @@ func TestEveryConfigHoneypotIsWired(t *testing.T) {
 		}
 		img := GetHoneypotImage(name)
 		if img == "" || strings.HasPrefix(img, "qpot/") {
-			t.Errorf("%s is in config.Default but has no published image (got %q)", name, img)
+			t.Errorf("%s is in config.Default but has no explicit image (got %q)", name, img)
 		}
 	}
 }
@@ -307,7 +311,7 @@ func TestEverySupportedHoneypotIsFullyWired(t *testing.T) {
 		}
 		// Guard against silently falling through to the "qpot/<name>:latest"
 		// default, which is not a published image — every supported honeypot
-		// must have an explicit, pullable image mapping (this is the bug that
+		// must have an explicit upstream or local image mapping (the bug that
 		// left dicompot resolving to the nonexistent qpot/dicompot:latest).
 		if strings.HasPrefix(img, "qpot/") {
 			t.Errorf("%s: resolves to unpublished default image %q; add it to GetHoneypotImage", n, img)
@@ -513,5 +517,113 @@ func TestDeployPortsMatchProfile(t *testing.T) {
 				t.Errorf("%s (conpot %s): ports %v/%v, profile %v/%v", name, id, tcp, udp, d.Ports, d.UDPPorts)
 			}
 		}
+	}
+}
+
+// TestConpotImageIsReviewedMultiarchIndex prevents mutable release tags from
+// bypassing protocol-patch compatibility review. The registry response below
+// was fetched by digest, and its exact bytes hash to the production image pin.
+func TestConpotImageIsReviewedMultiarchIndex(t *testing.T) {
+	if conpotImageVersion != TPotVersion {
+		t.Fatalf("Conpot image release %s and T-Pot release %s must be reviewed together", conpotImageVersion, TPotVersion)
+	}
+	if conpotImageVersion != conpotPatchVersion {
+		t.Fatalf("Conpot image release %s and patch release %s must be reviewed together", conpotImageVersion, conpotPatchVersion)
+	}
+	if !regexp.MustCompile(`^sha256:[a-f0-9]{64}$`).MatchString(conpotImageDigest) {
+		t.Fatalf("invalid immutable Conpot image digest %q", conpotImageDigest)
+	}
+	const index = `{
+  "schemaVersion": 2,
+  "mediaType": "application/vnd.oci.image.index.v1+json",
+  "manifests": [
+    {
+      "mediaType": "application/vnd.oci.image.manifest.v1+json",
+      "digest": "sha256:73fe69aaa802fc463ede526da35023568c7be7c9a9dd06b666ef95b9af771edc",
+      "size": 863,
+      "platform": {
+        "architecture": "amd64",
+        "os": "linux"
+      }
+    },
+    {
+      "mediaType": "application/vnd.oci.image.manifest.v1+json",
+      "digest": "sha256:3e5c9729ce47ef601e36427d2905dd6320bdc60901e4c8aa66dca18e434dddd7",
+      "size": 863,
+      "platform": {
+        "architecture": "arm64",
+        "os": "linux"
+      }
+    },
+    {
+      "mediaType": "application/vnd.oci.image.manifest.v1+json",
+      "digest": "sha256:2b1d1bba4ce6c57a8bf9e0624247677741618f1898e96df557b2d8a6c2abf555",
+      "size": 836,
+      "annotations": {
+        "vnd.docker.reference.digest": "sha256:73fe69aaa802fc463ede526da35023568c7be7c9a9dd06b666ef95b9af771edc",
+        "vnd.docker.reference.type": "attestation-manifest"
+      },
+      "platform": {
+        "architecture": "unknown",
+        "os": "unknown"
+      }
+    },
+    {
+      "mediaType": "application/vnd.oci.image.manifest.v1+json",
+      "digest": "sha256:e07724de21beddc06eb0aa54e30c3ccf6db234ca42000f15cdb76de02b2159db",
+      "size": 836,
+      "annotations": {
+        "vnd.docker.reference.digest": "sha256:3e5c9729ce47ef601e36427d2905dd6320bdc60901e4c8aa66dca18e434dddd7",
+        "vnd.docker.reference.type": "attestation-manifest"
+      },
+      "platform": {
+        "architecture": "unknown",
+        "os": "unknown"
+      }
+    }
+  ]
+}`
+	sum := sha256.Sum256([]byte(index))
+	if got := "sha256:" + hex.EncodeToString(sum[:]); got != conpotImageDigest {
+		t.Fatalf("reviewed multiarch index has digest %s; image is pinned to %s", got, conpotImageDigest)
+	}
+	type platformManifest struct {
+		MediaType string `json:"mediaType"`
+		Digest    string `json:"digest"`
+		Platform  struct {
+			Architecture string `json:"architecture"`
+			OS           string `json:"os"`
+		} `json:"platform"`
+	}
+	var manifest struct {
+		SchemaVersion int                `json:"schemaVersion"`
+		MediaType     string             `json:"mediaType"`
+		Manifests     []platformManifest `json:"manifests"`
+	}
+	if err := json.Unmarshal([]byte(index), &manifest); err != nil {
+		t.Fatal(err)
+	}
+	if manifest.SchemaVersion != 2 || manifest.MediaType != "application/vnd.oci.image.index.v1+json" {
+		t.Fatalf("Conpot pin must reference an OCI image index: %+v", manifest)
+	}
+	for _, architecture := range []string{"amd64", "arm64"} {
+		if !slices.ContainsFunc(manifest.Manifests, func(m platformManifest) bool {
+			return m.Platform.OS == "linux" && m.Platform.Architecture == architecture &&
+				m.MediaType == "application/vnd.oci.image.manifest.v1+json" &&
+				regexp.MustCompile(`^sha256:[a-f0-9]{64}$`).MatchString(m.Digest)
+		}) {
+			t.Errorf("reviewed Conpot index lacks linux/%s", architecture)
+		}
+	}
+	want := "ghcr.io/telekom-security/conpot:" + conpotImageVersion + "@" + conpotImageDigest
+	if got := GetHoneypotImage("conpot"); got != want {
+		t.Fatalf("production Conpot image = %q, want immutable %q", got, want)
+	}
+	// Other honeypots keep their existing release policy.
+	if got := tpotImage("cowrie"); got != "ghcr.io/telekom-security/cowrie:"+TPotVersion {
+		t.Fatalf("Conpot pin changed another honeypot's image: %s", got)
+	}
+	if got := tpotImage("tanner"); got != "ghcr.io/telekom-security/tanner:24.04.1" {
+		t.Fatalf("Conpot pin changed a legacy image pin: %s", got)
 	}
 }

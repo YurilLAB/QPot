@@ -309,6 +309,9 @@ type HoneypotConfig struct {
 	Environment  map[string]string `yaml:"environment"`
 	Stealth      HoneypotStealth   `yaml:"stealth"`
 	CustomConfig map[string]string `yaml:"custom_config"` // TPOT config overrides
+	// DeviceProfile records the automatic device selection independently of a
+	// user pin, so catalog updates and removing a pin keep the same device.
+	DeviceProfile ResolvedDeviceProfile `yaml:"device_profile,omitempty"`
 }
 
 // HoneypotResources contains per-honeypot resource limits
@@ -565,6 +568,7 @@ func Default(instanceName string) *Config {
 			"honeyaml":       {Enabled: false, Port: 8080, RiskLevel: "low", Sandbox: true},
 			"tanner":         {Enabled: false, Port: 80, RiskLevel: "medium", Sandbox: true},
 			"redishoneypot":  {Enabled: false, Port: 6379, RiskLevel: "low", Sandbox: true},
+			"refrigeration":  defaultRefrigerationConfig(),
 			// Newer / 2024-2026 honeypots. beelzebub and galah are LLM-backed and
 			// need an Ollama/API provider configured to be fully convincing.
 			"beelzebub":  {Enabled: false, Port: 22, RiskLevel: "high", Sandbox: true},
@@ -714,6 +718,23 @@ func Load(instanceName string) (*Config, error) {
 		return nil, err
 	}
 
+	// qpot.id is authoritative, as it is in loadInstance. A legacy YAML file
+	// may omit the ID or retain an older credential after rotation. Parse only
+	// validates profiles; any missing selection is resolved on the next Save,
+	// after this runtime identity is known.
+	idPath := filepath.Join(filepath.Dir(configPath), "qpot.id")
+	idData, idErr := os.ReadFile(idPath)
+	switch {
+	case idErr == nil:
+		id := strings.TrimSpace(string(idData))
+		if !qpotIDPattern.MatchString(id) {
+			return nil, fmt.Errorf("invalid QPot ID file %s; restore this instance's saved identity", idPath)
+		}
+		cfg.QPotID = id
+	case !os.IsNotExist(idErr):
+		return nil, fmt.Errorf("failed to read QPot ID file: %w", idErr)
+	}
+
 	configMu.Lock()
 	configs[instanceName] = cfg
 	configMu.Unlock()
@@ -736,6 +757,14 @@ func Parse(data []byte, configPath string) (*Config, error) {
 	cfg := Config{WebUI: WebUIConfig{QPotIDAuth: true}}
 	if err := yaml.Unmarshal(data, &cfg); err != nil {
 		return nil, fmt.Errorf("failed to parse config file: %w", err)
+	}
+	// New services remain disabled on upgrade, but must be available to enable
+	// from the same catalog and settings API as services in a fresh instance.
+	if cfg.Honeypots == nil {
+		cfg.Honeypots = map[string]HoneypotConfig{}
+	}
+	if _, exists := cfg.Honeypots["refrigeration"]; !exists {
+		cfg.Honeypots["refrigeration"] = defaultRefrigerationConfig()
 	}
 	if strings.TrimSpace(cfg.WebUI.BindAddr) == "" {
 		cfg.WebUI.BindAddr = "127.0.0.1"
@@ -802,6 +831,10 @@ func Parse(data []byte, configPath string) (*Config, error) {
 		cfg.Security.SandboxMode = "gvisor"
 	}
 
+	if err := cfg.resolveDeviceProfiles(false); err != nil {
+		return nil, fmt.Errorf("invalid config file %s: %w", configPath, err)
+	}
+
 	// Surface obvious misconfigurations at load time. We log instead of
 	// returning an error so a broken sub-section (e.g. a bad alert webhook
 	// URL) doesn't prevent QPot from starting and serving honeypots —
@@ -814,6 +847,7 @@ func Parse(data []byte, configPath string) (*Config, error) {
 }
 
 var (
+	qpotIDPattern = regexp.MustCompile(`^qp_[a-z2-7]{24}$`)
 	// instanceNamePattern is the instance name the CLI accepts (qpot setup,
 	// qpot instance create): a single path component, a docker name.
 	instanceNamePattern = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9_-]{0,31}$`)
@@ -899,8 +933,32 @@ func (c *Config) Validate() []string {
 	return warnings
 }
 
-// Save saves configuration to disk
+// Save saves configuration to disk. Device-profile migration is adopted only
+// after the complete file has been written and atomically activated.
 func Save(cfg *Config) error {
+	// Serialize saves and honeypot setters through activation. Otherwise a
+	// slower save could replace a newer one, or adopting its resolved profile
+	// could overwrite a concurrent honeypot change. Other config fields are
+	// immutable after startup.
+	cfg.hpMu.Lock()
+	defer cfg.hpMu.Unlock()
+	data, err := yaml.Marshal(cfg)
+	if err != nil {
+		return fmt.Errorf("failed to marshal config: %w", err)
+	}
+	// Decode into a fresh config rather than copying the live RWMutex. Unlike
+	// Parse, this snapshot applies no load-time defaults or other migrations.
+	var pending Config
+	if err := yaml.Unmarshal(data, &pending); err != nil {
+		return fmt.Errorf("failed to copy config for save: %w", err)
+	}
+	if err := pending.resolveDeviceProfiles(true); err != nil {
+		return fmt.Errorf("invalid device profile: %w", err)
+	}
+	data, err = yaml.Marshal(&pending)
+	if err != nil {
+		return fmt.Errorf("failed to marshal config: %w", err)
+	}
 	// Ensure both the data directory and the config file's directory exist.
 	if err := os.MkdirAll(cfg.DataPath, 0750); err != nil {
 		return fmt.Errorf("failed to create data directory: %w", err)
@@ -911,17 +969,13 @@ func Save(cfg *Config) error {
 		}
 	}
 
-	// Read-lock while marshalling: yaml.Marshal iterates the Honeypots map, which
-	// a concurrent EnableHoneypot/DisableHoneypot would otherwise be writing.
-	cfg.hpMu.RLock()
-	data, err := yaml.Marshal(cfg)
-	cfg.hpMu.RUnlock()
-	if err != nil {
-		return fmt.Errorf("failed to marshal config: %w", err)
-	}
-
-	if err := os.WriteFile(cfg.ConfigPath, data, 0600); err != nil {
+	if err := writeConfigFile(cfg.ConfigPath, data); err != nil {
 		return fmt.Errorf("failed to write config file: %w", err)
+	}
+	if hp, ok := pending.Honeypots["conpot"]; ok {
+		current := cfg.Honeypots["conpot"]
+		current.DeviceProfile = hp.DeviceProfile
+		cfg.Honeypots["conpot"] = current
 	}
 
 	configMu.Lock()
@@ -929,6 +983,28 @@ func Save(cfg *Config) error {
 	configMu.Unlock()
 
 	return nil
+}
+
+// writeConfigFile keeps the previous file intact on staging or activation
+// failure. The same-directory temporary file is private from creation onward.
+func writeConfigFile(path string, data []byte) error {
+	tmp, err := os.CreateTemp(filepath.Dir(path), ".qpot-config-*.tmp")
+	if err != nil {
+		return err
+	}
+	defer os.Remove(tmp.Name())
+	if _, err := tmp.Write(data); err != nil {
+		tmp.Close()
+		return err
+	}
+	if err := tmp.Sync(); err != nil {
+		tmp.Close()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	return os.Rename(tmp.Name(), path)
 }
 
 // EnableHoneypot enables a honeypot

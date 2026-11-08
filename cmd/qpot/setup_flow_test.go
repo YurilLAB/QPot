@@ -545,6 +545,9 @@ func TestSetupPortClashFixNamesInstance(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// Automatic mappings now avoid the management port. Use fixed ports to
+	// exercise the actual collision and its instance-specific recovery advice.
+	cfg.Ports.AutoAllocate = false
 	for _, p := range instance.PublishedHostPorts(cfg) {
 		cfg.WebUI.Port = p
 		break

@@ -40,8 +40,8 @@ func TestRestart(t *testing.T) {
 	}{
 		{`{"name":"<script>alert(1)</script>"}`, 400, "QP-INPUT-003"},
 		{`{"name":"-f"}`, 400, "QP-INPUT-003"},
-		{`{"name":"cowrie","x":1}`, 400, ""},
-		{`{"name":"conpot"}`, 409, ""}, // turned off
+		{`{"name":"cowrie","x":1}`, 400, "QP-WEB-004"},
+		{`{"name":"conpot"}`, 409, "QP-INST-010"}, // turned off
 		{`{"name":"cowrie"}`, 409, "QP-INST-007"},
 	} {
 		rec := a.do(http.MethodPost, "/api/honeypots/restart", c.body)
@@ -70,7 +70,7 @@ func TestRestart(t *testing.T) {
 	a.s.api.change.Lock()
 	rec = a.do(http.MethodPost, "/api/honeypots/restart", `{"name":"cowrie"}`)
 	a.s.api.change.Unlock()
-	if rec.Code != http.StatusConflict {
-		t.Fatalf("restart during another change: %d", rec.Code)
+	if e := decodeAPIError(t, rec); rec.Code != http.StatusConflict || e.Code != "QP-INST-009" {
+		t.Fatalf("restart during another change: %d %+v", rec.Code, e)
 	}
 }

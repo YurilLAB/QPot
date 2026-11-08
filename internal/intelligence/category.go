@@ -281,7 +281,7 @@ var (
 	// command (a Redis or SMTP command, a DICOM verb, an IDS signature, an
 	// OS fingerprint), or no command at all.
 	catOtherHoneypots = map[string]bool{
-		"conpot": true, "dionaea": true, "heralding": true, "mailoney": true, "redishoneypot": true,
+		"conpot": true, "refrigeration": true, "dionaea": true, "heralding": true, "mailoney": true, "redishoneypot": true,
 		"dicompot": true, "medpot": true, "ddospot": true, "sentrypeer": true, "ipphoney": true,
 		"miniprint": true, "endlessh": true, "suricata": true, "p0f": true, "fatt": true, "canary": true,
 	}

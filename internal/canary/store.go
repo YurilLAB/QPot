@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"os"
 	"path/filepath"
 	"slices"
@@ -163,14 +164,14 @@ func (s *Store) List() []*Canary {
 	return out
 }
 
-// ErrPlanted is returned for a change only QPot makes to the canaries it
-// planted itself: they come back with the next start, so they are not
-// deleted one by one; turning the honeypot's bait off removes them.
-var ErrPlanted = errors.New("canary is planted by QPot in Cowrie's bait files; " +
-	"turn the bait off with 'qpot honeypot set cowrie bait=off'")
+// ErrPlanted is returned when deleting an active planted canary. Once absent
+// from the desired bait plan it becomes historical and may be deleted, or its
+// watch may be disabled at any time.
+var ErrPlanted = errors.New("canary is active in QPot's desired honeypot bait plan; " +
+	"remove it from the bait plan before deleting its historical watch")
 
 // Delete removes a canary and persists. Returns false if it did not exist,
-// and ErrPlanted for a planted canary.
+// and ErrPlanted for an active planted canary. Historical watches can be deleted.
 func (s *Store) Delete(id string) (bool, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -178,7 +179,7 @@ func (s *Store) Delete(id string) (bool, error) {
 	if !ok {
 		return false, nil
 	}
-	if c.Planted {
+	if c.Planted && !c.Historical {
 		return false, ErrPlanted
 	}
 	s.deindex(c)
@@ -190,12 +191,12 @@ func (s *Store) Delete(id string) (bool, error) {
 	return true, nil
 }
 
-// SyncPlanted makes the planted canaries of the store exactly planned (the
-// canaries QPot plants in its honeypots, derived from the instance): a new one
-// is added enabled; one already there takes the planned kind, name, memo and
-// values but keeps its enabled state, trip count and creation time; a planted
-// canary no longer planned (its honeypot or bait turned off) is removed, its
-// trips stay in the history. The store is written only when something changed.
+// SyncPlanted reconciles the desired bait plan without discarding earlier
+// watches. Missing planted entries become historical: an old Cowrie process
+// may still be running after a failed recreation, and copied values may be
+// reused later. Desired entries become active and retain their enabled state,
+// trip counts and creation time. Manual canaries are unchanged. A failed save
+// restores the previous in-memory registry and lookup indexes.
 func (s *Store) SyncPlanted(planned []*Canary) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -209,16 +210,26 @@ func (s *Store) SyncPlanted(planned []*Canary) error {
 		}
 		want[p.ID] = p
 	}
+	previousCanaries, previousTokens, previousValues := s.canaries, s.byToken, s.byValue
+	// Work on independent maps and replace changed records instead of mutating
+	// their pointers, so a persistence failure can roll back every lookup.
+	s.canaries, s.byToken, s.byValue = maps.Clone(s.canaries), maps.Clone(s.byToken), maps.Clone(s.byValue)
+	restore := func() {
+		s.canaries, s.byToken, s.byValue = previousCanaries, previousTokens, previousValues
+	}
 	changed := false
-	for id, c := range s.canaries {
-		if c.Planted && want[id] == nil {
-			s.deindex(c)
+	for id, c := range previousCanaries {
+		if c.Planted && want[id] == nil && !c.Historical {
+			next := *c
+			next.Historical = true
+			s.index(&next)
 			changed = true
 		}
 	}
 	for _, p := range planned {
 		cur, ok := s.canaries[p.ID]
 		next := *p
+		next.Historical = false
 		next.Values = append([]string(nil), p.Values...)
 		if ok {
 			next.Enabled = cur.Enabled
@@ -239,14 +250,19 @@ func (s *Store) SyncPlanted(planned []*Canary) error {
 		changed = true
 	}
 	if !changed {
+		restore()
 		return nil
 	}
-	return s.saveLocked()
+	if err := s.saveLocked(); err != nil {
+		restore()
+		return err
+	}
+	return nil
 }
 
 // plantedEqual reports whether two versions of a planted canary are the same.
 func plantedEqual(a, b *Canary) bool {
-	return a.Kind == b.Kind && a.Name == b.Name && a.Memo == b.Memo && a.Token == b.Token &&
+	return a.Kind == b.Kind && a.Name == b.Name && a.Memo == b.Memo && a.Token == b.Token && a.Historical == b.Historical &&
 		a.AccessKeyID == b.AccessKeyID && a.SecretAccessKey == b.SecretAccessKey &&
 		a.PublicKey == b.PublicKey && a.Planted == b.Planted && slices.Equal(a.Values, b.Values)
 }

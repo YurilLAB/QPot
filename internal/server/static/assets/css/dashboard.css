@@ -398,6 +398,36 @@ a.navbar-brand:hover {
     gap: var(--spacing-xs);
 }
 
+.industrial-entry {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    flex-wrap: wrap;
+    gap: var(--spacing-md);
+}
+
+.industrial-entry p {
+    margin: 0 0 var(--spacing-xs);
+}
+
+#industrial-controls .card-header,
+#refrigeration-controls .card-header {
+    flex-wrap: wrap;
+    gap: var(--spacing-xs) var(--spacing-md);
+}
+
+#industrial-controls[hidden],
+#industrial-enable[hidden],
+#industrial-apply-warning[hidden],
+#refrigeration-controls[hidden],
+#refrigeration-enable[hidden],
+#refrigeration-apply-warning[hidden],
+#refrigeration-open[hidden],
+#refresh-industrial-archives[hidden],
+#industrial-bait-note[hidden] {
+    display: none;
+}
+
 /* ---------- lists of the intel panels ---------- */
 
 .rank-list {
@@ -643,6 +673,52 @@ a.navbar-brand:hover {
     width: 100%;
 }
 
+.device-preview {
+    margin-top: var(--spacing-md);
+    padding: var(--spacing-md);
+    background: var(--bg-secondary);
+    border: 1px solid var(--border-primary);
+    border-radius: var(--radius-md);
+    overflow-wrap: anywhere;
+}
+
+.device-preview h4,
+.device-preview h5 {
+    margin: 0 0 var(--spacing-sm);
+}
+
+.device-preview h5 {
+    margin-top: var(--spacing-md);
+}
+
+.device-details {
+    display: grid;
+    grid-template-columns: max-content minmax(0, 1fr);
+    gap: var(--spacing-xs) var(--spacing-md);
+    font-size: var(--font-xs);
+    margin: var(--spacing-sm) 0;
+}
+
+.device-details dt {
+    color: var(--text-secondary);
+}
+
+.device-details dd {
+    margin: 0;
+}
+
+.device-mappings {
+    margin: 0;
+    padding-left: var(--spacing-md);
+    font-family: var(--font-mono);
+    font-size: var(--font-xs);
+}
+
+.device-pending {
+    color: var(--warning-color);
+    font-size: var(--font-xs);
+}
+
 .pager {
     display: flex;
     flex-wrap: wrap;
@@ -746,6 +822,10 @@ a.navbar-brand:hover {
 .modal-content.wide {
     max-width: 960px;
     width: min(94vw, 960px);
+}
+
+#settings-modal .modal-body {
+    overscroll-behavior-y: contain;
 }
 
 .modal-body .setting-item + .setting-item {
@@ -1148,6 +1228,15 @@ a.navbar-brand:hover {
 }
 
 @media (max-width: 480px) {
+    #settings-modal .modal-footer {
+        flex-wrap: wrap;
+        gap: var(--spacing-sm);
+    }
+
+    #settings-modal .modal-footer .btn-base {
+        flex: 1 0 auto;
+    }
+
     .phone-only {
         display: block;
     }

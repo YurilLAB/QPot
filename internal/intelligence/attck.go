@@ -564,9 +564,14 @@ func (a *ATTCKLoader) loadEmbedded() {
 			URL: "https://attack.mitre.org/techniques/T1190/",
 		},
 		{
-			ID: "T0840", SubID: "T0840", Name: "Network Scanning",
+			ID: "T0840", SubID: "T0840", Name: "Network Connection Enumeration",
 			TacticIDs: []string{"TA0102"}, TacticNames: []string{"discovery"},
 			URL: "https://attack.mitre.org/techniques/T0840/",
+		},
+		{
+			ID: "T0846", SubID: "T0846", Name: "Remote System Discovery",
+			TacticIDs: []string{"TA0102"}, TacticNames: []string{"discovery"},
+			URL: "https://attack.mitre.org/techniques/T0846/",
 		},
 		{
 			ID: "T0855", SubID: "T0855", Name: "Unauthorized Command Message",

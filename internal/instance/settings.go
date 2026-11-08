@@ -212,9 +212,12 @@ var settingSpecs = map[string]settingSpec{
 
 // settingHelp explains the settings that have a fixed list of values.
 var settingHelp = map[string]string{
-	"persona":  "The system Cowrie presents. Empty: one server persona picked for this instance.",
-	"bait":     "Plant an ops box's files (SSH key, shell history, cloud credentials, a database dump) whose secrets are canaries. Empty: on.",
-	"template": "The industrial device Conpot emulates; only its ports are published. Empty: one picked for this instance.",
+	"persona":      "The system Cowrie presents. Empty: one server persona picked for this instance.",
+	"bait":         "Plant working files with synthetic credential canaries on server personas. Empty: on.",
+	"bait_profile": "Files for an ops server or a Linux industrial support host. Industrial archives reference bait_target; they do not make Cowrie a PLC or start an engineering runtime. Server personas only. Empty: ops.",
+	"bait_target":  "Asset referenced by industrial support files: the selected Conpot device or the refrigeration controller. This does not enable the referenced service. Used with bait_profile=industrial. Empty: conpot.",
+	"template":     "The industrial device Conpot emulates; only its ports are published. Empty: the saved automatic device, kept across restarts and upgrades.",
+	"site_profile": "Refrigeration site: retail food cabinets or plasma cold storage. Each site keeps its own temperatures, settings and history across restarts and profile switches. Empty: retail.",
 }
 
 var (
@@ -301,8 +304,12 @@ type SettingInfo struct {
 	// Value (a default, or one picked for this instance).
 	Effective string `json:"effective,omitempty"`
 	// Type is "choice", "number", "url", "name" or "secret".
-	Type     string   `json:"type"`
-	Allowed  []string `json:"allowed,omitempty"`
+	Type    string   `json:"type"`
+	Allowed []string `json:"allowed,omitempty"`
+	// Options enrich device choices without changing their accepted IDs.
+	Options []ConpotDeviceProfile `json:"options,omitempty"`
+	// Default is the saved automatic device, also provided while pinned.
+	Default  string   `json:"default,omitempty"`
 	Min      *float64 `json:"min,omitempty"`
 	Max      *float64 `json:"max,omitempty"`
 	Secret   bool     `json:"secret"`
@@ -328,6 +335,22 @@ func DescribeSettings(cfg *config.Config, name string) []SettingInfo {
 	var out []SettingInfo
 	for _, key := range SettingKeys(name) {
 		v := hp.CustomConfig[key]
+		switch name + "/" + key {
+		case "conpot/template", "refrigeration/site_profile", "cowrie/bait", "cowrie/persona", "cowrie/bait_profile", "cowrie/bait_target":
+			// Direct YAML accepts the same surrounding whitespace that runtime
+			// selection trims. A dropdown needs the canonical ID; an unmatched
+			// raw value would become empty and clear a valid choice on save.
+			v = strings.TrimSpace(v)
+		case "cowrie/persona_rotation":
+			// Number inputs also discard padded values. Show the decimal value
+			// the launcher accepts, without changing the underlying YAML or
+			// presenting an invalid manual value as the default.
+			if days, ok := parsePersonaRotation(v); ok {
+				v = strconv.Itoa(days)
+			} else if strings.TrimSpace(v) == "" {
+				v = ""
+			}
+		}
 		si := SettingInfo{Key: key, Value: v, Set: v != "", Required: slices.Contains(d.LLMRequired, key)}
 		if allowed := d.Values[key]; len(allowed) > 0 {
 			si.Type, si.Allowed, si.Help = "choice", slices.Clone(allowed), settingHelp[key]
@@ -341,6 +364,10 @@ func DescribeSettings(cfg *config.Config, name string) []SettingInfo {
 				lo, hi := spec.min, spec.max
 				si.Min, si.Max = &lo, &hi
 			}
+		}
+		if name == "conpot" && key == "template" {
+			si.Options = ConpotProfiles()
+			si.Default = config.ConpotAutomaticProfileID(cfg)
 		}
 		if IsSecretSetting(key) {
 			si.Secret, si.Value = true, ""
@@ -366,8 +393,14 @@ func effectiveSetting(cfg *config.Config, name, key string) string {
 			return "on"
 		}
 		return "off"
+	case "cowrie/bait_profile":
+		return cowrieBaitProfile(cfg)
+	case "cowrie/bait_target":
+		return cowrieBaitTarget(cfg)
 	case "conpot/template":
 		return conpotTemplate(cfg).ID
+	case "refrigeration/site_profile":
+		return refrigerationSiteProfile(cfg)
 	case "ssh-proxy/backends":
 		return strconv.Itoa(sshBackendCount(cfg))
 	}

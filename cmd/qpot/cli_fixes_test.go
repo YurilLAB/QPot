@@ -1,6 +1,8 @@
 package main
 
 import (
+	"bytes"
+	"errors"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -10,6 +12,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/qpot/qpot/internal/config"
+	"github.com/qpot/qpot/internal/hostsetup"
 	"github.com/qpot/qpot/internal/instance"
 )
 
@@ -108,5 +111,133 @@ func TestHoneypotSetHelpListsConpotTemplates(t *testing.T) {
 		if !strings.Contains(help, id) {
 			t.Errorf("honeypot set help does not list conpot template %q", id)
 		}
+	}
+}
+
+// Explore the industrial catalog before creating an instance, without Docker or writes.
+func TestIndustrialProfilesCatalogCLI(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	root := &cobra.Command{Use: "qpot", PersistentPreRunE: checkInstanceFlag, SilenceErrors: true, SilenceUsage: true}
+	root.AddCommand(newHoneypotCommand())
+	var output bytes.Buffer
+	root.SetOut(&output)
+	root.SetArgs([]string{"honeypot", "profiles", "conpot", "-i", "not-created"})
+	if err := root.Execute(); err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"Industrial control systems", "plc_modbus", "Modbus", "502/tcp", "IEC104", "Host ports", "Limits:"} {
+		if !strings.Contains(output.String(), want) {
+			t.Errorf("catalog omits %q: %s", want, output.String())
+		}
+	}
+	if _, err := os.Stat(filepath.Join(home, ".qpot")); !os.IsNotExist(err) {
+		t.Fatalf("read-only catalog created instance files: %v", err)
+	}
+	root.SetArgs([]string{"honeypot", "profiles", "cowrie"})
+	if err := root.Execute(); err == nil {
+		t.Fatal("unsupported profiles accepted")
+	}
+}
+
+func TestIndustrialProfilesCatalogWithBrokenConfig(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	dir := filepath.Join(home, ".qpot", "instances", "broken-industrial")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	data := []byte("honeypots:\n  conpot:\n    custom_config:\n      template: unsupported-device\n")
+	path := filepath.Join(dir, "config.yaml")
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	root := &cobra.Command{Use: "qpot", PersistentPreRunE: checkInstanceFlag}
+	root.AddCommand(newHoneypotCommand())
+	var output bytes.Buffer
+	root.SetOut(&output)
+	root.SetArgs([]string{"honeypot", "profiles", "-i", "broken-industrial"})
+	if err := root.Execute(); err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"Effective device unavailable", "unsupported-device", "plc_modbus", "Catalog only"} {
+		if !strings.Contains(output.String(), want) {
+			t.Errorf("recovery catalog omits %q", want)
+		}
+	}
+	after, err := os.ReadFile(path)
+	if err != nil || !bytes.Equal(after, data) {
+		t.Fatal("catalog changed broken configuration")
+	}
+}
+
+func TestIndustrialHoneypotCommandErrorsAreCoded(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("USERPROFILE", os.Getenv("HOME"))
+	cfg := config.Default("coded-industrial")
+	if err := config.Save(cfg); err != nil {
+		t.Fatal(err)
+	}
+	before, err := os.ReadFile(cfg.ConfigPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		args []string
+		code string
+	}{
+		{[]string{"set", "refrigeration", "site_profile=invalid"}, "QP-INPUT-012"},
+		{[]string{"set", "conpot", "template=invalid"}, "QP-INPUT-012"},
+		{[]string{"set", "cowrie", "bait_target=invalid"}, "QP-INPUT-012"},
+		{[]string{"enable", "unknown-native"}, "QP-INPUT-003"},
+		{[]string{"disable", "unknown-native"}, "QP-INPUT-003"},
+	} {
+		root := &cobra.Command{Use: "qpot", SilenceErrors: true, SilenceUsage: true}
+		root.AddCommand(newHoneypotCommand())
+		root.SetArgs(append(append([]string{"honeypot"}, tc.args...), "-i", "coded-industrial"))
+		err := root.Execute()
+		var coded *hostsetup.Error
+		if !errors.As(err, &coded) || coded.Code != tc.code || !strings.Contains(err.Error(), "Fix:") {
+			t.Errorf("%v: %v, want %s with guidance", tc.args, err, tc.code)
+		}
+		if commandExitStatus(err) != 1 {
+			t.Errorf("%v changed existing CLI exit status", tc.args)
+		}
+	}
+	after, err := os.ReadFile(cfg.ConfigPath)
+	if err != nil || !bytes.Equal(before, after) {
+		t.Fatal("invalid newtemplate/scenario command changed configuration")
+	}
+}
+
+func TestHoneypotCommandErrorRetainsCauseAndSavedState(t *testing.T) {
+	cause := errors.New("local image builder unavailable")
+	for _, tc := range []struct {
+		name  string
+		err   error
+		saved bool
+		code  string
+	}{
+		{"refrigeration", cause, true, "QP-INST-008"},
+		{"conpot", &instance.SettingsError{Kind: instance.ErrRecreateFailed, Msg: "settings saved, but container failed", Err: cause}, true, "QP-INST-008"},
+		{"refrigeration", &instance.SettingsError{Kind: instance.ErrSaveFailed, Msg: "failed to save config", Err: cause}, false, "QP-INST-002"},
+	} {
+		err := honeypotCommandError(tc.name, tc.err, tc.saved)
+		var coded *hostsetup.Error
+		if !errors.As(err, &coded) || coded.Code != tc.code || !errors.Is(err, cause) {
+			t.Fatalf("%+v: %v", tc, err)
+		}
+		if tc.saved && !strings.Contains(err.Error(), "configuration was saved") {
+			t.Errorf("saved failure lost saved status: %v", err)
+		}
+		if tc.name == "refrigeration" && tc.saved && (!strings.Contains(err.Error(), "QPot service output") || !strings.Contains(err.Error(), "saved scenario may not be live")) {
+			t.Errorf("local build failure has misleading log advice: %v", err)
+		}
+	}
+	if honeypotCommandError("conpot", nil, false) != nil {
+		t.Fatal("nil became error")
+	}
+	if got := honeypotCommandError("conpot", cause, false); got != cause {
+		t.Fatal("unexpected failure was mislabeled")
 	}
 }

@@ -18,6 +18,7 @@ import (
 	"github.com/qpot/qpot/internal/canary"
 	"github.com/qpot/qpot/internal/config"
 	"github.com/qpot/qpot/internal/instance"
+	"gopkg.in/yaml.v3"
 )
 
 // fakeHPRunner stands in for the instance's containers in API tests.
@@ -253,7 +254,7 @@ func TestSettingsGet(t *testing.T) {
 	for _, si := range one.Settings {
 		keys = append(keys, si.Key)
 	}
-	if one.Name != "cowrie" || strings.Join(keys, ",") != "bait,persona,persona_rotation" {
+	if one.Name != "cowrie" || strings.Join(keys, ",") != "bait,bait_profile,bait_target,persona,persona_rotation" {
 		t.Fatalf("cowrie settings: %+v", one)
 	}
 
@@ -268,7 +269,7 @@ func TestSettingsGet(t *testing.T) {
 	for _, hp := range all.Honeypots {
 		names = append(names, hp.Name)
 	}
-	if got := strings.Join(names, ","); got != "beelzebub,conpot,cowrie,galah,ssh-proxy" {
+	if got := strings.Join(names, ","); got != "beelzebub,conpot,cowrie,galah,refrigeration,ssh-proxy" {
 		t.Fatalf("honeypots with settings: %s", got)
 	}
 	if strings.Contains(rec.Body.String(), apiKey) {
@@ -382,11 +383,12 @@ func TestSettingsPutRefusesHostileInput(t *testing.T) {
 		{`{"name":"galah","settings":{"llm_provider":"ollama\nINJECT=1"}}`, "QP-INPUT-012", 400},
 		{`{"name":"endlessh","settings":{"x":"y"}}`, "QP-INPUT-012", 400},
 		{`{"name":"cowrie","settings":{}}`, "QP-INPUT-012", 400},
-		{`{"name":"cowrie","settings":{"bait":"off"},"extra":1}`, "", 400},
-		{`{"name":"cowrie","settings":{"bait":"off"}} {"x":1}`, "", 400},
-		{`{"name":"cowrie","settings":{"bait":1}}`, "", 400},
-		{`[]`, "", 400},
-		{`{"name":"cowrie","settings":{"bait":"` + strings.Repeat("x", maxSettingsBody) + `"}}`, "", 400},
+		{`{"name":"cowrie","settings":{"bait":"off"},"extra":1}`, "QP-WEB-004", 400},
+		{`{"name":"cowrie","settings":{"bait":"off"}} {"x":1}`, "QP-WEB-004", 400},
+		{`{"name":"cowrie","settings":{"bait":1}}`, "QP-WEB-004", 400},
+		{`[]`, "QP-WEB-004", 400},
+		{`null`, "QP-WEB-004", 400},
+		{`{"name":"cowrie","settings":{"bait":"` + strings.Repeat("x", maxSettingsBody) + `"}}`, "QP-WEB-004", 400},
 	}
 	for _, c := range cases {
 		rec := a.do(http.MethodPut, "/api/honeypots/settings", c.body)
@@ -420,6 +422,9 @@ func TestSettingsPutOneChangeAtATime(t *testing.T) {
 	a.s.api.change.Unlock()
 	if rec.Code != http.StatusConflict {
 		t.Fatalf("PUT during another change: %d, want 409", rec.Code)
+	}
+	if e := decodeAPIError(t, rec); e.Code != "QP-INST-009" {
+		t.Fatalf("busy settings change lacks its stable error code: %+v", e)
 	}
 	if rec := a.do(http.MethodPut, "/api/honeypots/settings", `{"name":"cowrie","settings":{"bait":"off"}}`); rec.Code != http.StatusOK {
 		t.Fatalf("PUT after it: %d", rec.Code)
@@ -459,8 +464,8 @@ func TestSettingsPutKeepsCLIChanges(t *testing.T) {
 }
 
 // Turning Cowrie's bait off (or picking a device persona) through the API
-// takes its planted canaries out of the store at once; turning it on plants
-// them again.
+// marks its previous canaries historical at once; turning it on makes them
+// current again. Historical credentials remain watched if reused later.
 func TestSettingsPutPlantedCanariesFollow(t *testing.T) {
 	a := newAPITestServer(t, "api-set-plant", func(c *config.Config) {
 		c.EnableHoneypot("cowrie")
@@ -476,7 +481,7 @@ func TestSettingsPutPlantedCanariesFollow(t *testing.T) {
 		}
 		n := 0
 		for _, c := range body.Canaries {
-			if c["planted"] == true {
+			if c["planted"] == true && c["historical"] != true {
 				n++
 			}
 		}
@@ -502,5 +507,411 @@ func TestSettingsPutPlantedCanariesFollow(t *testing.T) {
 	}
 	if n := planted(); n != 0 {
 		t.Fatalf("device persona: %d planted canaries still watched", n)
+	}
+}
+
+// Switching the file profile updates the current canaries immediately, while
+// preserving older credentials that may already have been stolen. Invalid
+// choices cannot leave config and the registry describing different files.
+func TestSettingsPutBaitProfile(t *testing.T) {
+	a := newAPITestServer(t, "api-set-bait-profile", func(c *config.Config) {
+		c.EnableHoneypot("cowrie")
+		c.SetHoneypotCustomConfig("cowrie", map[string]string{"persona": "debian-bookworm"})
+		c.SetHoneypotCustomConfig("conpot", map[string]string{"template": "plc_modbus"})
+	})
+	manual, err := a.s.canaries.Create(canary.KindWeb, "user-created canary", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	profile := func() instance.SettingInfo {
+		t.Helper()
+		rec := a.do(http.MethodGet, "/api/honeypots/settings?name=cowrie", "")
+		var view honeypotSettingsView
+		if rec.Code != http.StatusOK || json.Unmarshal(rec.Body.Bytes(), &view) != nil {
+			t.Fatalf("GET Cowrie: %d %s", rec.Code, rec.Body.String())
+		}
+		for _, setting := range view.Settings {
+			if setting.Key == "bait_profile" {
+				return setting
+			}
+		}
+		t.Fatal("bait_profile missing from settings API")
+		return instance.SettingInfo{}
+	}
+	planted := func(wantIndustrial bool) []string {
+		t.Helper()
+		rec := a.do(http.MethodGet, "/api/canaries", "")
+		var body struct {
+			Canaries []struct {
+				ID         string `json:"id"`
+				Name       string `json:"name"`
+				Planted    bool   `json:"planted"`
+				Historical bool   `json:"historical"`
+			} `json:"canaries"`
+		}
+		if rec.Code != http.StatusOK || json.Unmarshal(rec.Body.Bytes(), &body) != nil {
+			t.Fatalf("GET canaries: %d %s", rec.Code, rec.Body.String())
+		}
+		var ids []string
+		foundManual, foundIndustrial := false, false
+		for _, c := range body.Canaries {
+			foundManual = foundManual || c.ID == manual.ID
+			if c.Planted && !c.Historical {
+				ids = append(ids, c.ID)
+				foundIndustrial = foundIndustrial || c.Name == "cowrie bait: OT archive credential"
+			}
+		}
+		if !foundManual || len(ids) == 0 || foundIndustrial != wantIndustrial {
+			t.Fatalf("canary registry: manual=%v planted=%d industrial=%v, want industrial=%v", foundManual, len(ids), foundIndustrial, wantIndustrial)
+		}
+		slices.Sort(ids)
+		return ids
+	}
+	initial := profile()
+	if initial.Value != "" || initial.Set || initial.Effective != "ops" || initial.Type != "choice" ||
+		!slices.Equal(initial.Allowed, []string{"ops", "industrial"}) || !strings.Contains(initial.Help, "Linux industrial support host") {
+		t.Fatalf("default file profile metadata: %+v", initial)
+	}
+	ops := planted(false)
+	oldCanaries := a.s.canaries.List()
+	setProfile := func(value string) {
+		t.Helper()
+		body, err := json.Marshal(map[string]any{"name": "cowrie", "settings": map[string]string{"bait_profile": value}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		rec := a.do(http.MethodPut, "/api/honeypots/settings", string(body))
+		if rec.Code != http.StatusOK {
+			t.Fatalf("PUT file profile %q: %d %s", value, rec.Code, rec.Body.String())
+		}
+	}
+	setProfile("industrial")
+	industrial := planted(true)
+	for _, id := range industrial {
+		if slices.Contains(ops, id) {
+			t.Fatalf("old ops credential %s still shown as current in industrial profile", id)
+		}
+	}
+	for _, c := range oldCanaries {
+		if !c.Planted {
+			continue
+		}
+		retained, ok := a.s.canaries.Get(c.ID)
+		if !ok || !retained.Planted || !retained.Historical {
+			t.Fatalf("previous credential %s was not retained as historical", c.ID)
+		}
+		if c.Kind == canary.KindCredential && len(c.Values) > 0 {
+			trips, err := a.s.canaries.MatchObservation(canary.Observation{
+				Text: c.Values[0], SourceIP: "192.0.2.34", EventKey: "old-ops-value-after-successful-profile-change-" + c.ID,
+			})
+			if err != nil || len(trips) != 1 || trips[0].CanaryID != c.ID {
+				t.Fatalf("historical credential %s no longer matched: trips=%d err=%v", c.ID, len(trips), err)
+			}
+		}
+	}
+	if got := profile(); got.Value != "industrial" || !got.Set || got.Effective != "" {
+		t.Fatalf("saved industrial metadata: %+v", got)
+	}
+	before := a.configFile(t)
+	beforeRunnerCalls := len(a.runner.cfgs)
+	rec := a.do(http.MethodPut, "/api/honeypots/settings", `{"name":"cowrie","settings":{"bait_profile":"unsupported","persona":"rhel-9"}}`)
+	if rec.Code != http.StatusBadRequest || !bytes.Equal(before, a.configFile(t)) || len(a.runner.cfgs) != beforeRunnerCalls || !slices.Equal(industrial, planted(true)) {
+		t.Fatalf("invalid profile changed state or reached runner: %d %s", rec.Code, rec.Body.String())
+	}
+	setProfile("ops")
+	if !slices.Equal(ops, planted(false)) {
+		t.Fatal("switching to ops did not restore its original watched credentials")
+	}
+	for _, id := range industrial {
+		if c, ok := a.s.canaries.Get(id); !ok || !c.Historical {
+			t.Fatalf("industrial credential %s not retained as historical after returning to ops", id)
+		}
+	}
+	if got := profile(); got.Value != "ops" || !got.Set || got.Effective != "" {
+		t.Fatalf("saved ops metadata: %+v", got)
+	}
+	setProfile("")
+	if got := profile(); got.Value != "" || got.Set || got.Effective != "ops" || !slices.Equal(ops, planted(false)) {
+		t.Fatalf("clearing the profile did not restore ops default: %+v", got)
+	}
+	if len(a.runner.started)+len(a.runner.recreated) != 0 {
+		t.Fatal("changing a stopped instance unexpectedly started a honeypot")
+	}
+}
+
+// A failed recreation can leave the previous container's files in use. Saving
+// the desired profile must not create a blind spot for those old credentials.
+func TestSettingsPutBaitProfileRecreateFailureKeepsOldCanaries(t *testing.T) {
+	a := newAPITestServer(t, "api-set-bait-failure", func(c *config.Config) {
+		c.EnableHoneypot("cowrie")
+		c.SetHoneypotCustomConfig("cowrie", map[string]string{"persona": "debian-bookworm", "bait_profile": "ops"})
+	})
+	old := a.s.canaries.List()
+	a.runner.running = true
+	a.runner.startErr = errors.New("container recreation failed")
+	rec := a.do(http.MethodPut, "/api/honeypots/settings", `{"name":"cowrie","settings":{"bait_profile":"industrial"}}`)
+	if rec.Code != http.StatusBadGateway || !decodeAPIError(t, rec).Saved || !bytes.Contains(a.configFile(t), []byte("bait_profile: industrial")) || !slices.Equal(a.runner.recreated, []string{"cowrie"}) {
+		t.Fatalf("failed recreation did not retain desired settings: %d %s", rec.Code, rec.Body.String())
+	}
+	// Exercise the config follower as the UI's next canary-list request does.
+	if rec = a.do(http.MethodGet, "/api/canaries", ""); rec.Code != http.StatusOK {
+		t.Fatalf("GET canaries after failed recreation: %d %s", rec.Code, rec.Body.String())
+	}
+	matched := false
+	for _, c := range old {
+		if !c.Planted || c.Kind != canary.KindCredential || len(c.Values) == 0 {
+			continue
+		}
+		if retained, ok := a.s.canaries.Get(c.ID); !ok || !retained.Historical {
+			t.Fatalf("previous credential %s was not retained as historical after failed recreation", c.ID)
+		}
+		trips, err := a.s.canaries.MatchObservation(canary.Observation{
+			Text: c.Values[0], SourceIP: "192.0.2.33", EventKey: "old-cowrie-credential-after-failed-recreation-" + c.ID,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(trips) != 1 || trips[0].CanaryID != c.ID {
+			t.Fatalf("previous container credential %s was no longer watched after failed recreation", c.ID)
+		}
+		matched = true
+	}
+	if !matched {
+		t.Fatal("no old credential canary exercised")
+	}
+	newActive := false
+	for _, c := range a.s.canaries.List() {
+		newActive = newActive || (c.Name == "cowrie bait: OT archive credential" && !c.Historical)
+	}
+	if !newActive {
+		t.Fatal("desired industrial credential missing after failed recreation")
+	}
+}
+
+func (a *apiTestServer) setting(t *testing.T, name, key string) instance.SettingInfo {
+	t.Helper()
+	rec := a.do(http.MethodGet, "/api/honeypots/settings?name="+name, "")
+	var view honeypotSettingsView
+	if rec.Code != http.StatusOK || json.Unmarshal(rec.Body.Bytes(), &view) != nil {
+		t.Fatalf("GET %s settings: %d %s", name, rec.Code, rec.Body.String())
+	}
+	for _, setting := range view.Settings {
+		if setting.Key == key {
+			return setting
+		}
+	}
+	t.Fatalf("%s setting %s missing", name, key)
+	return instance.SettingInfo{}
+}
+
+// A scenario is a desired configuration, not proof that the corresponding
+// container is live. Its maintenance credential is stable across scenarios.
+func TestSettingsPutRefrigerationSiteProfile(t *testing.T) {
+	a := newAPITestServer(t, "api-refrigeration-profile", func(c *config.Config) {
+		for name := range c.Honeypots {
+			c.DisableHoneypot(name)
+		}
+	})
+	initial := a.setting(t, "refrigeration", "site_profile")
+	if initial.Set || initial.Value != "" || initial.Effective != "retail" || initial.Type != "choice" ||
+		!slices.Equal(initial.Allowed, []string{"retail", "plasma"}) || !strings.Contains(initial.Help, "history across restarts") {
+		t.Fatalf("default refrigeration metadata: %+v", initial)
+	}
+	before := a.configFile(t)
+	assertAuthRequired(t, a.h, http.MethodGet, "/api/honeypots/settings?name=refrigeration", "")
+	assertAuthRequired(t, a.h, http.MethodPut, "/api/honeypots/settings", `{"name":"refrigeration","settings":{"site_profile":"plasma"}}`)
+	for _, body := range []string{
+		`{"name":"refrigeration","settings":{"site_profile":"unsupported"}}`,
+		`{"name":"refrigeration","settings":{"site_profile":"plasma","unknown":"x"}}`,
+		`{"name":"refrigeration","settings":{"site_profile":"plasma\nINJECT=1"}}`,
+	} {
+		rec := a.do(http.MethodPut, "/api/honeypots/settings", body)
+		if rec.Code != http.StatusBadRequest || !bytes.Equal(before, a.configFile(t)) || len(a.runner.cfgs) != 0 {
+			t.Fatalf("invalid scene reached runner or changed config: %d %s", rec.Code, rec.Body.String())
+		}
+		if e := decodeAPIError(t, rec); e.Code != "QP-INPUT-012" || e.Error == "" || strings.Contains(e.Error, "INJECT") {
+			t.Fatalf("invalid scene lacks a stable safe error: %+v", e)
+		}
+	}
+	a.runner.running = true
+	rec := a.do(http.MethodPut, "/api/honeypots/settings", `{"name":"refrigeration","settings":{"site_profile":"plasma"}}`)
+	var response settingsChangeResponse
+	if rec.Code != http.StatusOK || json.Unmarshal(rec.Body.Bytes(), &response) != nil || !response.Saved || response.Enabled || response.Recreated || len(a.runner.recreated) != 0 {
+		t.Fatalf("saving a disabled scene started a service: %d %s", rec.Code, rec.Body.String())
+	}
+	if got := a.setting(t, "refrigeration", "site_profile"); !got.Set || got.Value != "plasma" || got.Effective != "" {
+		t.Fatalf("saved plasma scene metadata: %+v", got)
+	}
+	if hp, _ := fileConfig(t, a).GetHoneypotConfig("refrigeration"); hp.Enabled || hp.CustomConfig["site_profile"] != "plasma" {
+		t.Fatalf("saved scene was not retained independently of enablement: %+v", hp)
+	}
+	if rec = a.do(http.MethodPost, "/api/honeypots", `{"name":"refrigeration","enabled":true}`); rec.Code != http.StatusOK {
+		t.Fatalf("enable refrigeration: %d %s", rec.Code, rec.Body.String())
+	}
+	// A prior read must not throttle away the explicit API change's new watch.
+	if rec = a.do(http.MethodGet, "/api/canaries", ""); rec.Code != http.StatusOK {
+		t.Fatal(rec.Body.String())
+	}
+	current := a.s.canaries.List()
+	if len(current) != 1 || !current[0].Planted || current[0].Historical || !current[0].Enabled || len(current[0].Values) != 1 {
+		t.Fatalf("enabling the native export did not register one active credential: %+v", current)
+	}
+	credential := current[0]
+	a.runner.startErr = errors.New("private builder details must not be reflected")
+	rec = a.do(http.MethodPut, "/api/honeypots/settings", `{"name":"refrigeration","settings":{"site_profile":"retail"}}`)
+	if e := decodeAPIError(t, rec); rec.Code != http.StatusBadGateway || !e.Saved || e.Code != "QP-INST-008" || strings.Contains(e.Error, "private builder") || !slices.Equal(a.runner.recreated, []string{"refrigeration"}) {
+		t.Fatalf("failed build/recreate did not distinguish saved from applied: %d %s", rec.Code, rec.Body.String())
+	}
+	if got := a.setting(t, "refrigeration", "site_profile"); got.Value != "retail" || !got.Set {
+		t.Fatalf("desired scene lost after failed build: %+v", got)
+	}
+	a.do(http.MethodGet, "/api/canaries", "")
+	if got, ok := a.s.canaries.Get(credential.ID); !ok || got.Historical || !got.Enabled || !slices.Equal(got.Values, credential.Values) {
+		t.Fatal("scene switch replaced or retired the same instance archive credential")
+	}
+	a.runner.startErr = nil
+	if rec = a.do(http.MethodPost, "/api/honeypots", `{"name":"refrigeration","enabled":false}`); rec.Code != http.StatusOK {
+		t.Fatalf("disable refrigeration: %d %s", rec.Code, rec.Body.String())
+	}
+	a.do(http.MethodGet, "/api/canaries", "")
+	if got, ok := a.s.canaries.Get(credential.ID); !ok || !got.Historical || !got.Enabled {
+		t.Fatal("disabled controller's previously exported credential is no longer watched")
+	}
+	trips, err := a.s.canaries.MatchObservation(canary.Observation{Text: credential.Values[0], SourceIP: "192.0.2.45", EventKey: "refrigeration-copy-after-disable"})
+	if err != nil || len(trips) != 1 || trips[0].CanaryID != credential.ID {
+		t.Fatalf("previous export reuse was missed: trips=%d err=%v", len(trips), err)
+	}
+	rec = a.do(http.MethodPut, "/api/honeypots/settings", `{"name":"refrigeration","settings":{"site_profile":""}}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("clear scene: %d %s", rec.Code, rec.Body.String())
+	}
+	if got := a.setting(t, "refrigeration", "site_profile"); got.Set || got.Value != "" || got.Effective != "retail" {
+		t.Fatalf("clearing scenario did not restore retail default: %+v", got)
+	}
+	if rec = a.do(http.MethodPost, "/api/honeypots", `{"name":"refrigeration","enabled":true}`); rec.Code != http.StatusOK {
+		t.Fatalf("re-enable refrigeration: %d %s", rec.Code, rec.Body.String())
+	}
+	a.do(http.MethodGet, "/api/canaries", "")
+	if got, ok := a.s.canaries.Get(credential.ID); !ok || got.Historical || !got.Enabled || len(a.s.canaries.Trips(0)) != 1 {
+		t.Fatal("re-enabling lost the original watch or its trip history")
+	}
+}
+
+// A failed apply can leave Conpot reference files in the old Cowrie process.
+// Both those values and the desired refrigeration archive must remain watched.
+func TestSettingsPutRefrigerationBaitTarget(t *testing.T) {
+	a := newAPITestServer(t, "api-refrigeration-bait", func(c *config.Config) {
+		for name := range c.Honeypots {
+			c.DisableHoneypot(name)
+		}
+		c.EnableHoneypot("cowrie")
+		c.SetHoneypotCustomConfig("cowrie", map[string]string{"persona": "debian-bookworm", "bait_profile": "industrial", "bait_target": "conpot"})
+	})
+	manual, err := a.s.canaries.Create(canary.KindWeb, "operator-created", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	old := a.s.canaries.List()
+	if initial := a.setting(t, "cowrie", "bait_target"); initial.Value != "conpot" || !slices.Equal(initial.Allowed, []string{"conpot", "refrigeration"}) {
+		t.Fatalf("bait target metadata: %+v", initial)
+	}
+	a.do(http.MethodGet, "/api/canaries", "")
+	a.runner.running = true
+	a.runner.startErr = errors.New("old support process still running")
+	rec := a.do(http.MethodPut, "/api/honeypots/settings", `{"name":"cowrie","settings":{"bait_target":"refrigeration"}}`)
+	if e := decodeAPIError(t, rec); rec.Code != http.StatusBadGateway || !e.Saved || e.Code != "QP-INST-008" {
+		t.Fatalf("failed target recreation: %d %s", rec.Code, rec.Body.String())
+	}
+	a.do(http.MethodGet, "/api/canaries", "")
+	var active []*canary.Canary
+	for _, c := range a.s.canaries.List() {
+		if c.Planted && !c.Historical {
+			active = append(active, c)
+		}
+	}
+	if len(active) != 1 || !strings.Contains(active[0].Name, "refrigeration") || !active[0].Enabled {
+		t.Fatalf("desired refrigeration support credential missing: %+v", active)
+	}
+	newCredential := active[0]
+	oldCredentialMatched := false
+	for _, c := range old {
+		if !c.Planted {
+			continue
+		}
+		if retained, ok := a.s.canaries.Get(c.ID); !ok || !retained.Historical || !retained.Enabled {
+			t.Fatalf("old support value %s disappeared after failed target apply", c.ID)
+		}
+		if c.Kind == canary.KindCredential && len(c.Values) > 0 {
+			trips, err := a.s.canaries.MatchObservation(canary.Observation{Text: c.Values[0], SourceIP: "192.0.2.46", EventKey: "old-support-after-failed-target"})
+			if err != nil || len(trips) != 1 || trips[0].CanaryID != c.ID {
+				t.Fatalf("old support credential no longer matches: trips=%d err=%v", len(trips), err)
+			}
+			oldCredentialMatched = true
+		}
+	}
+	if !oldCredentialMatched {
+		t.Fatal("no prior archive password was exercised")
+	}
+	if m, ok := a.s.canaries.Get(manual.ID); !ok || m.Planted || m.Historical {
+		t.Fatal("target transition altered a manual canary")
+	}
+	if hp, _ := fileConfig(t, a).GetHoneypotConfig("refrigeration"); hp.Enabled {
+		t.Fatal("choosing reference files enabled the referenced controller")
+	}
+	before := a.configFile(t)
+	calls := len(a.runner.cfgs)
+	rec = a.do(http.MethodPut, "/api/honeypots/settings", `{"name":"cowrie","settings":{"bait_target":"unsupported","bait_profile":"ops"}}`)
+	if rec.Code != http.StatusBadRequest || !bytes.Equal(before, a.configFile(t)) || len(a.runner.cfgs) != calls {
+		t.Fatalf("invalid target partially applied or reached runner: %d %s", rec.Code, rec.Body.String())
+	}
+	if e := decodeAPIError(t, rec); e.Code != "QP-INPUT-012" {
+		t.Fatalf("invalid target lost its stable setting error: %+v", e)
+	}
+	a.runner.startErr = nil
+	rec = a.do(http.MethodPut, "/api/honeypots/settings", `{"name":"cowrie","settings":{"bait_target":""}}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("clear bait target: %d %s", rec.Code, rec.Body.String())
+	}
+	if got := a.setting(t, "cowrie", "bait_target"); got.Set || got.Value != "" || got.Effective != "conpot" {
+		t.Fatalf("clearing target did not restore Conpot default: %+v", got)
+	}
+	a.do(http.MethodGet, "/api/canaries", "")
+	if c, ok := a.s.canaries.Get(newCredential.ID); !ok || !c.Historical || !c.Enabled {
+		t.Fatal("previous refrigeration support credential was removed after clearing target")
+	}
+	trips, err := a.s.canaries.MatchObservation(canary.Observation{Text: newCredential.Values[0], SourceIP: "192.0.2.47", EventKey: "previous-refrigeration-support"})
+	if err != nil || len(trips) != 1 || trips[0].CanaryID != newCredential.ID {
+		t.Fatalf("previous refrigeration support credential no longer matches: trips=%d err=%v", len(trips), err)
+	}
+}
+
+// An existing config written before the service existed acquires a disabled
+// entry through the API. Editing its scenario alone must never opt it in.
+func TestSettingsRefrigerationLegacyBackfillStaysOff(t *testing.T) {
+	a := newAPITestServer(t, "api-refrigeration-legacy", nil)
+	var legacy map[string]any
+	if err := yaml.Unmarshal(a.configFile(t), &legacy); err != nil {
+		t.Fatal(err)
+	}
+	delete(legacy["honeypots"].(map[string]any), "refrigeration")
+	data, err := yaml.Marshal(legacy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(a.cfg.ConfigPath, data, 0600); err != nil {
+		t.Fatal(err)
+	}
+	a.runner.running = true
+	rec := a.do(http.MethodGet, "/api/honeypots/settings?name=refrigeration", "")
+	var view honeypotSettingsView
+	if rec.Code != http.StatusOK || json.Unmarshal(rec.Body.Bytes(), &view) != nil || view.Enabled || len(view.Settings) != 1 || view.Settings[0].Effective != "retail" || !bytes.Equal(data, a.configFile(t)) {
+		t.Fatalf("legacy GET enabled or rewrote config: %d %s", rec.Code, rec.Body.String())
+	}
+	rec = a.do(http.MethodPut, "/api/honeypots/settings", `{"name":"refrigeration","settings":{"site_profile":"plasma"}}`)
+	if rec.Code != http.StatusOK || len(a.runner.started)+len(a.runner.recreated) != 0 {
+		t.Fatalf("legacy scene edit started a controller: %d %s", rec.Code, rec.Body.String())
+	}
+	if hp, ok := fileConfig(t, a).GetHoneypotConfig("refrigeration"); !ok || hp.Enabled || hp.CustomConfig["site_profile"] != "plasma" {
+		t.Fatalf("legacy backfill settings not retained safely: %+v", hp)
 	}
 }

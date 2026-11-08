@@ -44,7 +44,7 @@ var reValidName = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9_-]{0,31}$`)
 // -i existing: the ones that create it, and `honeypot list`, which shows the
 // catalogue with default settings. Every other command requires it to exist.
 var instanceOptional = map[string]bool{
-	"qpot setup": true, "qpot up": true, "qpot cluster join": true, "qpot honeypot list": true,
+	"qpot setup": true, "qpot up": true, "qpot cluster join": true, "qpot honeypot list": true, "qpot honeypot profiles": true,
 }
 
 // checkInstanceFlag validates the -i/--instance value of every command. Only
@@ -445,6 +445,39 @@ func newInstanceCommand() *cobra.Command {
 	return cmd
 }
 
+// honeypotCommandError attaches the same stable failure code the web API
+// returns. The existing CLI exit status remains unchanged; callers can explain
+// the code with qpot doctor --explain without losing the underlying cause.
+func honeypotCommandError(name string, err error, saved bool) error {
+	if err == nil {
+		return nil
+	}
+	code := ""
+	switch {
+	case saved:
+		code = "QP-INST-008"
+	case errors.Is(err, instance.ErrUnknownHoneypot):
+		code = "QP-INPUT-003"
+	case errors.Is(err, instance.ErrNoSettings), errors.Is(err, instance.ErrInvalidSetting), errors.Is(err, instance.ErrNeedsSettings):
+		code = "QP-INPUT-012"
+	case errors.Is(err, instance.ErrSaveFailed):
+		code = "QP-INST-002"
+	default:
+		return err
+	}
+	coded := hostsetup.E(code).WithWhy("%s", termSafe(err.Error())).Wrap(err)
+	if code == "QP-INPUT-012" {
+		coded.WithFix("See accepted values with qpot honeypot set --help. Explore industrial devices with qpot honeypot profiles conpot.")
+	}
+	if saved {
+		coded.WithFix("The configuration was saved. Check the honeypot status and logs before retrying, or start the instance with qpot up -d.")
+		if name == "refrigeration" {
+			coded.WithFix("The configuration was saved. Check QPot service output for local image-build or startup errors, and refrigeration logs if a container exists. The first build needs Docker access to the builder image; the saved scenario may not be live.")
+		}
+	}
+	return fmt.Errorf("%w: %s Fix: %s", coded, coded.Cause(), coded.Remedy())
+}
+
 func newHoneypotCommand() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "honeypot",
@@ -462,7 +495,7 @@ func newHoneypotCommand() *cobra.Command {
 			// instance (falls back to defaults for an uncreated instance).
 			cfg, err := config.Load(instanceName)
 			if err != nil {
-				cfg = config.Default(instanceName)
+				return fmt.Errorf("failed to load config: %w", err)
 			}
 
 			names := make([]string, 0, len(cfg.Honeypots))
@@ -472,17 +505,27 @@ func newHoneypotCommand() *cobra.Command {
 			sort.Strings(names)
 
 			fmt.Printf("Available honeypots (instance %q):\n", instanceName)
-			fmt.Println("Name             Port  Risk     On  Description")
-			fmt.Println("---------------- ----- -------- --- -------------------------------------------")
+			ports := instance.HostPortMappings(cfg)
+			fmt.Println("Name             Host ports                 Risk     On  Description")
+			fmt.Println("---------------- -------------------------- -------- --- -------------------------------------------")
 			for _, n := range names {
 				hp := cfg.Honeypots[n]
 				on := " "
 				if hp.Enabled {
 					on = "x"
 				}
-				fmt.Printf("%-16s %5d %-8s [%s] %s\n", n, hp.Port, hp.RiskLevel, on, instance.HoneypotDescription(n))
+				var published []string
+				for _, m := range ports[n] {
+					published = append(published, fmt.Sprintf("%d/%s", m.HostPort, m.Protocol))
+				}
+				portText := strings.Join(published, ", ")
+				if portText == "" {
+					portText = "—"
+				}
+				fmt.Printf("%-16s %-26s %-8s [%s] %s\n", n, portText, hp.RiskLevel, on, instance.HoneypotDescription(n))
 			}
 			fmt.Printf("\n%d honeypots supported. Enable one with: qpot honeypot enable <name>\n", len(names))
+			fmt.Println("Host ports are configured mappings, not a live reachability check. Industrial devices: qpot honeypot profiles conpot")
 			return nil
 		},
 	}
@@ -507,12 +550,12 @@ func newHoneypotCommand() *cobra.Command {
 			// starts the honeypot.
 			res, err := instance.SaveHoneypotEnabled(cfg, hpName, true)
 			if err != nil {
-				return err
+				return honeypotCommandError(hpName, err, false)
 			}
 			fmt.Printf("[OK] Enabled honeypot '%s' for instance '%s'\n", hpName, instanceName)
 			fmt.Println("     Run 'qpot up' to apply changes")
 			if err := instance.ApplyHoneypotEnabled(ctx, cfg, res, nil); err != nil {
-				return err
+				return honeypotCommandError(hpName, err, true)
 			}
 			if res.Applied {
 				fmt.Printf("[OK] Started honeypot '%s'\n", hpName)
@@ -539,11 +582,11 @@ func newHoneypotCommand() *cobra.Command {
 			// and a running instance stops the honeypot.
 			res, err := instance.SaveHoneypotEnabled(cfg, hpName, false)
 			if err != nil {
-				return err
+				return honeypotCommandError(hpName, err, false)
 			}
 			fmt.Printf("[OK] Disabled honeypot '%s' for instance '%s'\n", hpName, instanceName)
 			if err := instance.ApplyHoneypotEnabled(ctx, cfg, res, nil); err != nil {
-				return err
+				return honeypotCommandError(hpName, err, true)
 			}
 			if res.Applied {
 				fmt.Printf("[OK] Stopped honeypot '%s'\n", hpName)
@@ -575,12 +618,39 @@ canaries (doc/canary.md). Turn them off:
 
   qpot honeypot set cowrie bait=off
 
+For a Linux industrial support host, select archived maintenance inventories,
+communication exports and planted credentials instead of generic ops files:
+
+  qpot honeypot set cowrie persona=debian-bookworm bait_profile=industrial
+
+The files reference the selected Conpot device as a separate archived asset;
+they do not turn Cowrie into a PLC or install an engineering runtime. Reapply
+bait_profile=industrial to refresh them after changing the device reference.
+Use bait_target=refrigeration to reference the separate cold storage supervisor:
+
+  qpot honeypot set cowrie bait_profile=industrial bait_target=refrigeration
+
+Empty bait_profile= restores ops files. Reading files alone does not trip a
+canary: a watched value must be observed in captured activity. Previously
+planted values remain watched across role changes or failed recreations.
+
 Conpot emulates one of the Conpot image's devices, also picked per instance,
 and publishes only that device's ports. Pin one (IEC104, guardian_ast, ipmi,
 kamstrup_382, beckhoff_cx, building_automation, hart_gateway, iccp,
 plc_modbus):
 
   qpot honeypot set conpot template=plc_modbus
+
+The refrigeration service presents a legacy cold storage supervisor with a
+documented XML management subset and simulated equipment. Its site scenarios
+keep separate settings and histories:
+
+  qpot honeypot set refrigeration site_profile=plasma
+  qpot honeypot enable refrigeration
+
+Empty site_profile= restores retail. First start builds its image locally from
+bundled source; Docker needs access to the builder image. It never controls real
+refrigeration equipment.
 
 An empty value (key=) removes a setting. If the honeypot is enabled and the
 instance is running, it is recreated with the new settings.`,
@@ -597,7 +667,7 @@ instance is running, it is recreated with the new settings.`,
 				fmt.Printf("[OK] Updated %s settings for instance '%s'\n", hpName, instanceName)
 			}
 			if err != nil {
-				return err
+				return honeypotCommandError(hpName, err, res != nil && res.Saved)
 			}
 			if len(res.Missing) > 0 {
 				fmt.Printf("     %s still needs: %s\n", hpName, strings.Join(res.Missing, ", "))
@@ -610,7 +680,49 @@ instance is running, it is recreated with the new settings.`,
 	}
 	setCmd.Flags().StringVarP(&instanceName, "instance", "i", "default", "instance name")
 
-	cmd.AddCommand(listCmd, enableCmd, disableCmd, setCmd)
+	profilesCmd := &cobra.Command{
+		Use:   "profiles [honeypot]",
+		Short: "Explore industrial devices, protocols and ports (Conpot)",
+		Args:  cobra.MaximumNArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if len(args) > 0 && args[0] != "conpot" {
+				return fmt.Errorf("device profiles are available for conpot; use: qpot honeypot profiles conpot")
+			}
+			cfg, err := config.Load(instanceName)
+			out := cmd.OutOrStdout()
+			fmt.Fprintf(out, "Industrial control systems and related devices (instance %q)\n", instanceName)
+			if err != nil {
+				// Keep recovery possible without pretending the broken instance has defaults.
+				fmt.Fprintf(out, "Effective device unavailable: %v\nCatalog only; no settings were changed.\n\n", err)
+			} else {
+				selected := instance.ConpotProfile(cfg)
+				hp, _ := cfg.GetHoneypotConfig("conpot")
+				mode := "automatic choice"
+				if hp.CustomConfig["template"] != "" {
+					mode = "explicit template"
+				}
+				fmt.Fprintf(out, "Effective device: %s · %s [%s] (%s)\n\n", selected.Label, selected.Model, selected.ID, mode)
+			}
+			for _, p := range instance.ConpotProfiles() {
+				fmt.Fprintf(out, "%s — %s [%s]\n  Model: %s\n  %s\n  Protocols: %s\n", p.ID, p.Label, p.Category, p.Model, p.Description, strings.Join(p.Protocols, ", "))
+				var ports []string
+				for _, n := range p.TCP {
+					ports = append(ports, fmt.Sprintf("%d/tcp", n))
+				}
+				for _, n := range p.UDP {
+					ports = append(ports, fmt.Sprintf("%d/udp", n))
+				}
+				fmt.Fprintf(out, "  Device ports (container): %s\n  Limits: %s\n\n", strings.Join(ports, ", "), p.Limitations)
+			}
+			fmt.Fprintln(out, "Select: qpot honeypot set conpot template=<id> -i "+instanceName)
+			fmt.Fprintln(out, "Enable separately: qpot honeypot enable conpot -i "+instanceName)
+			fmt.Fprintln(out, "Host ports may differ; qpot honeypot list shows configured mappings, not live reachability.")
+			return nil
+		},
+	}
+	profilesCmd.Flags().StringVarP(&instanceName, "instance", "i", "default", "instance name")
+
+	cmd.AddCommand(listCmd, profilesCmd, enableCmd, disableCmd, setCmd)
 
 	return cmd
 }

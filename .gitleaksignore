@@ -23,3 +23,8 @@ a61bcc50343c2198a8ba8d35c121218877c6e94a:internal/instance/compose.go:generic-ap
 # id, an input the account decoding must refuse; it is now put together at
 # runtime.
 619564a54d777fd3fe28498e5e273a350ffa6719:internal/canary/derive_test.go:aws-access-token:81
+
+# generic-api-key matched the public character alphabets used to generate
+# canary AWS key IDs and secrets; these constants are not credentials.
+121ff173fa9fa5350c6186fd492f3368499cf36c:internal/canary/canary.go:generic-api-key:135
+121ff173fa9fa5350c6186fd492f3368499cf36c:internal/canary/canary.go:generic-api-key:136

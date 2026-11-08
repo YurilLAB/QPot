@@ -2,9 +2,10 @@
 
 ![QPot anti-fingerprint demo](qpot-fingerprint-demo.gif)
 
-A stock T-Pot install is easy to recognise, because every install is
-identical. QPot gives each instance a distinct, self-consistent identity, and
-keeps it across restarts so a returning attacker meets the same machine.
+Shared default identities and protocol quirks can reveal a honeypot. QPot varies
+identities where its image supports them, preserves selections across restarts,
+and tests selected protocol behavior. These measures reduce specific clues;
+they do not establish that an emulator is indistinguishable from hardware.
 
 - [Cowrie personas](#cowrie-personas)
 - [Cowrie patch layer](#cowrie-patch-layer)
@@ -66,8 +67,24 @@ Server personas carry the files an intruder expects on an operations box:
 - AWS and git credentials;
 - a database dump.
 
-Every secret in them is a planted canary, so using one raises an alert. Turn
-them off with `qpot honeypot set cowrie bait=off`. Details:
+Choose the files with `cowrie bait_profile=ops` (the default) or
+`cowrie bait_profile=industrial`. Industrial support archives contain a parseable
+inventory, communication exports, maintenance notes and dated compressed snapshots
+under `/srv/ot`, plus a maintenance SSH identity and archive credentials. They
+belong to a Linux support host and reference a separate asset using the selected
+Conpot device model and protocols. They do not install a Windows engineering
+runtime, add a filesystem to a PLC, or claim a live connection to Conpot.
+
+```bash
+qpot honeypot set cowrie persona=debian-bookworm bait_profile=industrial
+```
+
+The archive is rendered when Cowrie starts. After changing the referenced device,
+reapply `bait_profile=industrial` to recreate Cowrie and refresh it. The credentials
+remain stable while the device reference changes. `bait_profile=` restores ops;
+`bait=off` stops planting either profile. Previously exposed credentials remain
+watched and are labelled as historical in the canary UI. Reading a file alone is
+not an alert: QPot must observe reuse of a watched value. Details:
 [canary.md](canary.md#canaries-planted-in-the-honeypots).
 
 ## Other honeypots
@@ -77,7 +94,7 @@ them off with `qpot honeypot set cowrie bait=off`. Details:
   everywhere as one Windows 7 machine of its own (`<USER>-PC`, or `WIN-` and
   11 characters) in `WORKGROUP`.
 - **Conpot.** Conpot emulates one device from the T-Pot image, picked per
-  instance:
+  instance and recorded with a profile version:
   - a Siemens substation RTU (IEC 104, DNP3, SNMP);
   - a Veeder-Root tank gauge;
   - a Supermicro BMC;
@@ -88,10 +105,22 @@ them off with `qpot honeypot set cowrie bait=off`. Details:
   - an ICCP server;
   - a Modicon PLC (Modbus).
 
-  It publishes only that device's ports, and keeps the device's address, MAC,
-  serials and PINs across restarts. The image's multi-protocol `default`
+  It publishes only that device's ports and persists the generated identity
+  fields supported by that template (addresses, MACs, serials or PINs where
+  available). The Modbus template exposes manufacturer/product/firmware objects;
+  it does not generate a serial number or emulate a PLC program. The image's multi-protocol `default`
   template, the same on every install, is never used. Pin one with
-  `qpot honeypot set conpot template=<id>`.
+  `qpot honeypot set conpot template=<id>`. Explore device descriptions and
+  protocols with `qpot honeypot profiles conpot` or the dashboard's Industrial
+  control systems card. The automatic choice survives catalog updates; clearing
+  a pin restores that saved choice. These are device protocol emulations, not
+  complete physical processes or industrial sites. The Modbus profile also uses
+  read-only patches of the immutable image's Modbus modules. Identification
+  requests honor object/read-code semantics; unsupported serial-only diagnostics
+  return an exception. Segmented frames remain valid within a bounded request
+  time budget, non-Modbus protocol IDs are discarded before executing a request,
+  and length limits remain enforced. Tests use raw packets and an independent
+  Modbus client; full assertions run once after separate readiness checks.
 - **Heralding.** Every service answers as the machine its persona describes,
   an Ubuntu, Debian, RHEL or Windows Server host. The FTP, SSH, SMTP, POP3 and
   IMAP greetings, the web server header and the certificate subject all agree. The image's
@@ -105,6 +134,51 @@ them off with `qpot honeypot set cowrie bait=off`. Details:
 - **HiFi credential personas.** HiFi mode's real-OpenSSH backends accept a
   persona's believable weak passwords (30 personas, such as a corporate Ubuntu
   host, a database server or a Proxmox host) under a matching host name.
+
+## Refrigeration supervisor
+
+The native `refrigeration` honeypot presents one legacy AK-SM 800A / StoreView
+management generation, with documented XML requests, original browser assets
+and coherent virtual retail or plasma storage. Device identity, controls, alarms,
+history and maintenance exports share its state. It is built locally from the
+sources bundled into QPot and does not run vendor firmware. Details and
+limitations: [refrigeration.md](refrigeration.md).
+
+## Industrial fidelity and its limits
+
+An attacker can compare service identity, supported function codes, object lists,
+protocol errors, session state, timing and network endpoints. A believable file
+name cannot repair a contradictory protocol response. Identification, read/write,
+negative, fragmented-frame and restart tests therefore complement the profile
+picker. These checks establish selected behavior, not complete vendor firmware
+conformance or compatibility with every engineering tool.
+
+The existing Modbus register map remains compatible with earlier QPot versions;
+its unusual raw wire addresses are not presented as a verified M340 process map.
+Beckhoff OPC UA values are static; its build date, state dynamics and advertised
+internal endpoints still need product-specific comparison. IEC 104/DNP3 session
+and point tests do not implement a complete station, select/operate process or
+programming environment. Standard ports may be remapped by Docker/NAT. The
+support-host exports use device ports and distinct private asset references, not
+the deployment's published endpoints.
+
+The building controller's BACnet Who-Is and Who-Has discovery respects paired,
+inclusive device-instance limits. Out-of-range or incomplete discovery ranges
+do not produce an identity reply. The read-only patch is tied to the pinned
+Conpot module, with packet tests across startup, restart and recreation.
+
+Research informing these checks includes [Vetterl and Clayton (WOOT18)](https://www.usenix.org/conference/woot18/presentation/vetterl)
+and [Gotta Catch 'em All](https://dl.acm.org/doi/full/10.1145/3584976).
+Their published Conpot signatures concern older revisions; they are not proof
+that the same signature occurs in this pinned image. Protocol requirements come
+from the [Modbus application specification](https://www.modbus.org/file/secure/modbusprotocolspecification.pdf),
+[official Nmap identification documentation](https://nmap.org/nsedoc/scripts/modbus-discover.html),
+[OPC UA ServerStatus/BuildInfo](https://reference.opcfoundation.org/specs/OPC-10000-5/8.3.2)
+and [Beckhoff ADS ReadDeviceInfo](https://infosys.beckhoff.com/content/1033/tcadscommon/12440288395.html).
+[Beckhoff's engineering file table](https://infosys.beckhoff.com/content/1033/tc3_sourcecontrol/18014398915785483.html)
+helps distinguish real engineering project files from arbitrary files merely
+renamed with a vendor extension. QPot's industrial exports are documented local
+CSV/JSON/text formats, rather than fabricated importable vendor projects.
 
 ## No giveaways
 

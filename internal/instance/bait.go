@@ -126,6 +126,25 @@ type baitHost struct {
 // baitSetting is the cowrie custom_config key that turns the bait off.
 const baitSetting = "bait"
 
+// baitProfileSetting selects the working files, independently of the OS persona.
+const baitProfileSetting = "bait_profile"
+
+const baitTargetSetting = "bait_target"
+
+func cowrieBaitTarget(cfg *config.Config) string {
+	if hp, ok := cfg.GetHoneypotConfig("cowrie"); ok && strings.TrimSpace(hp.CustomConfig[baitTargetSetting]) == "refrigeration" {
+		return "refrigeration"
+	}
+	return "conpot"
+}
+
+func cowrieBaitProfile(cfg *config.Config) string {
+	if hp, ok := cfg.GetHoneypotConfig("cowrie"); ok && strings.TrimSpace(hp.CustomConfig[baitProfileSetting]) == "industrial" {
+		return "industrial"
+	}
+	return "ops"
+}
+
 // baitOn reports whether cfg plants bait in Cowrie (custom_config bait=off
 // turns it off).
 func baitOn(cfg *config.Config) bool {
@@ -135,18 +154,42 @@ func baitOn(cfg *config.Config) bool {
 	return true
 }
 
+// baitConfigSnapshot captures all inputs the builders read, with a fresh
+// Config mutex. Honeypot setters replace their maps rather than mutate them,
+// so one snapshot keeps the cache key, generated files and canaries coherent
+// while settings change. The remaining identity/beacon fields are immutable
+// within the running config and are replaced by callers when reloading it.
+func baitConfigSnapshot(cfg *config.Config) *config.Config {
+	return &config.Config{Honeypots: cfg.SnapshotHoneypots(), InstanceName: cfg.InstanceName,
+		QPotID: cfg.QPotID, Canary: cfg.Canary}
+}
+
 // PlantedCanaries returns the canaries this instance plants in its honeypots,
-// for the canary store to watch. Empty when Cowrie is off, its bait is turned
-// off or its persona is a device.
+// for the canary store to watch. Each honeypot contributes independently;
+// refrigeration exports remain watched when Cowrie is off.
 func PlantedCanaries(cfg *config.Config) []*canary.Canary {
 	if cfg == nil {
 		return nil
 	}
-	if hp, ok := cfg.GetHoneypotConfig("cowrie"); !ok || !hp.Enabled {
-		return nil
+	cfg = baitConfigSnapshot(cfg)
+	var planted []*canary.Canary
+	if hp, ok := cfg.GetHoneypotConfig("cowrie"); ok && hp.Enabled {
+		_, planted = cowrieBait(cfg)
 	}
-	_, planted := cowrieBait(cfg)
-	return planted
+	if hp, ok := cfg.GetHoneypotConfig("refrigeration"); ok && hp.Enabled {
+		planted = append(planted, refrigerationArchiveCanary(cfg))
+	}
+	// The same maintenance account can be carried in both the controller's
+	// export and the support host. Register one watch, preserving its trips.
+	seen := map[string]bool{}
+	var unique []*canary.Canary
+	for _, c := range planted {
+		if !seen[c.ID] {
+			seen[c.ID] = true
+			unique = append(unique, c)
+		}
+	}
+	return unique
 }
 
 // cowrieBaitJSON is the content of the plan file mounted into Cowrie.
@@ -154,6 +197,7 @@ func PlantedCanaries(cfg *config.Config) []*canary.Canary {
 // template call that many times per render), so a plan is built once per set
 // of what it is drawn from and kept (baitCache).
 func cowrieBaitJSON(cfg *config.Config) []byte {
+	cfg = baitConfigSnapshot(cfg)
 	key := baitCacheKey(cfg)
 	baitCache.Lock()
 	b, ok := baitCache.json[key]
@@ -189,8 +233,17 @@ const baitCacheMax = 16
 // baitCacheKey is everything of cfg a plan is drawn from: the persona, whether
 // the bait is on, the deception seed and the beacon base of the healthcheck.
 func baitCacheKey(cfg *config.Config) string {
-	return strings.Join([]string{cowriePersona(cfg), fmt.Sprint(baitOn(cfg)), deceptionSeed(cfg),
-		baitBeaconBase(cfg.Canary.BaseURL)}, "\x00")
+	parts := []string{cowriePersona(cfg), fmt.Sprint(baitOn(cfg)), deceptionSeed(cfg),
+		baitBeaconBase(cfg.Canary.BaseURL), cowrieBaitProfile(cfg)}
+	if cowrieBaitProfile(cfg) == "industrial" {
+		parts = append(parts, cowrieBaitTarget(cfg))
+		if cowrieBaitTarget(cfg) == "conpot" {
+			parts = append(parts, conpotTemplate(cfg).ID)
+		} else {
+			parts = append(parts, refrigerationSiteProfile(cfg))
+		}
+	}
+	return strings.Join(parts, "\x00")
 }
 
 // cowrieBait returns the plan for cfg's Cowrie persona and the canaries in it.
@@ -203,7 +256,15 @@ func cowrieBait(cfg *config.Config) (baitPlan, []*canary.Canary) {
 	}
 	s := newBaitScene(cfg, p)
 	s.plan = empty
-	s.build()
+	if cowrieBaitProfile(cfg) == "industrial" {
+		if cowrieBaitTarget(cfg) == "refrigeration" {
+			s.buildRefrigeration()
+		} else {
+			s.buildIndustrial()
+		}
+	} else {
+		s.build()
+	}
 	return s.plan, s.canaries
 }
 

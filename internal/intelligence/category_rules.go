@@ -95,6 +95,20 @@ func catByEvent(in *catInput, s *catSet) {
 			s.add(CatICSAttack)
 			return
 		}
+	case "refrigeration":
+		if et == "refrigeration.write.attempt" || et == "refrigeration.write.success" || et == "refrigeration.write.denied" {
+			s.add(CatICSAttack)
+			return
+		}
+		if et == "refrigeration.exploit.attempt" {
+			s.add(CatExploitAttempt)
+		}
+		if et == "refrigeration.auth.failed" {
+			s.add(CatBruteForce)
+		}
+		// An authenticated reader's username is context, not a new password
+		// attempt. Successful login and ordinary exports remain observations.
+		return
 	case "heralding":
 		if in.proto == "socks5" || in.proto == "socks" {
 			s.add(CatProxyAbuse)

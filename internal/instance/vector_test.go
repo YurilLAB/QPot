@@ -4,6 +4,8 @@ import (
 	"strings"
 	"testing"
 
+	"gopkg.in/yaml.v3"
+
 	"github.com/qpot/qpot/internal/config"
 	"github.com/qpot/qpot/internal/security"
 )
@@ -298,5 +300,26 @@ func TestVectorGeoIPOptional(t *testing.T) {
 	}
 	if !strings.Contains(out2, "- enrich_geoip") {
 		t.Error("filter_stealth should feed from enrich_geoip when GeoIP is on")
+	}
+}
+
+// Docker client proxy defaults must never send internal event batches to an
+// external HTTP proxy. Generated ClickHouse config fixes the internal endpoint.
+func TestVectorClickHouseDatabaseStaysInternal(t *testing.T) {
+	out := genVector(t, "clickhouse")
+	var cfg struct {
+		Sinks map[string]struct {
+			Endpoint string `yaml:"endpoint"`
+			Proxy    struct {
+				Enabled *bool `yaml:"enabled"`
+			} `yaml:"proxy"`
+		} `yaml:"sinks"`
+	}
+	if err := yaml.Unmarshal([]byte(out), &cfg); err != nil {
+		t.Fatal(err)
+	}
+	sink := cfg.Sinks["clickhouse"]
+	if sink.Endpoint != "http://database:8123" || sink.Proxy.Enabled == nil || *sink.Proxy.Enabled {
+		t.Fatalf("internal ClickHouse requests can inherit an external proxy: %+v", sink)
 	}
 }

@@ -116,8 +116,13 @@ type Canary struct {
 	// PublicKey is the authorized_keys line of an SSH key canary.
 	PublicKey string `json:"public_key,omitempty"`
 	// Planted marks a canary QPot planted in its own honeypots (see
-	// Store.SyncPlanted): derived from the instance, not deletable.
+	// Store.SyncPlanted): derived from the instance. Active planted canaries
+	// cannot be deleted; historical ones can.
 	Planted bool `json:"planted,omitempty"`
+	// Historical retains the watch for a previously planted artifact absent
+	// from the desired plan. The old process or a copied credential may still
+	// be in use. Enabled remains the operator's choice; history can be deleted.
+	Historical bool `json:"historical,omitempty"`
 }
 
 // Trip is a single recorded interaction with a canary. Trips are the alert.

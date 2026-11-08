@@ -7,6 +7,7 @@ QPot's colours, plus a dashboard for everything QPot adds.
 - [Signing in](#signing-in)
 - [Pages](#pages)
 - [Dashboard tabs](#dashboard-tabs)
+- [Choosing industrial and cold-storage templates](#choosing-industrial-and-cold-storage-templates)
 - [Reaching it from another computer](#reaching-it-from-another-computer)
 - [Overview from the terminal](#overview-from-the-terminal)
 
@@ -46,6 +47,34 @@ Log in with the instance's **QPot ID**, which `qpot id` prints.
 
 The LLM API key of galah and beelzebub is write-only: it is never sent back to
 the browser, and it must be entered again whenever the LLM address changes.
+
+## Choosing industrial and cold-storage templates
+
+On the Dashboard tab, **Industrial control systems → Choose device** opens
+Conpot's device picker. Choices are grouped by role. Selecting one shows its
+model, protocols, device ports and emulation limits before you save. The
+automatic choice shows which device was assigned to this instance. The card
+shows the configured selection; the preview marks changes that are still unsaved.
+
+**Refrigeration and cold storage → Choose scenario** offers retail refrigeration
+or plasma cold storage. Its preview describes the equipment and initial
+setpoints, with a shared browser console, XML controls, alarms and history. Each
+scenario retains its own saved settings and history when switching away and
+back. Saving changes on a running service recreates it; saving while it is off
+keeps it off. A failed apply is shown separately from the saved choice.
+
+Configured host mappings appear below each preview. They describe the saved
+deployment, not an unsaved selection or verified network reachability. The
+refrigeration card's **Open decoy console** link appears when a container is
+running with a configured HTTP mapping. Its decoy login is separate from QPot.
+
+For an optional Linux support host, open Cowrie settings and select
+**Files and canaries → Industrial support archives**, then choose its
+**Archive reference**: Conpot or refrigeration. **Save and refresh archives**
+rebuilds those files after the referenced device or scenario changes. These files
+contain watched decoy credentials; reading them alone does not trip a canary.
+See [Honeypots](honeypots.md), [Refrigeration supervisor](refrigeration.md) and
+[Canaries](canary.md) for behavior and limits.
 
 ![Dashboard](images/web-ui-dashboard.png)
 
