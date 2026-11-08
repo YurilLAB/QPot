@@ -29,14 +29,23 @@ banners, errors) are dropped. Data is kept for 90 days.
 
 ## The intelligence worker
 
-The worker runs every 15 minutes by default; `intelligence.worker_interval`
-changes that. It does three things:
+The worker runs every 5 minutes by default; `intelligence.worker_interval`
+changes that (at least 1 minute: each run that finds new events writes their
+tags to the database). A config saved with the earlier 15-minute default moves
+to 5 minutes when it is loaded. It does three things:
 
-- **Classifies** each event with MITRE ATT&CK. It uses 16 curated rules plus
-  rules generated from the ATT&CK dataset (fetched from MITRE, with an embedded
-  fallback when offline), each with a confidence score. For example, `uname -a`
-  maps to T1082, `wget …` to T1105, failed logins to T1110 and Modbus probes to
-  T0840.
+- **Classifies** each event with a MITRE ATT&CK technique. The event's attack
+  categories (below) come first; the technique is then the most specific one
+  the recorded evidence supports. For example, `sudo` abuse maps to T1548.003,
+  a cron job to T1053.003, a key added to `authorized_keys` to T1098.004,
+  `uname -a` to T1082, a `wget` fetch to T1105, failed logins to T1110, a
+  Modbus read to T0801 and a write to a controller to T1692.001 (Command
+  Message). Every category has a technique, and the rules use current ATT&CK
+  IDs (v18), never revoked ones such as T1562.001. Rules generated from the
+  ATT&CK dataset (fetched from MITRE, with an embedded fallback when offline)
+  cover other commands; a shell command that matches nothing more specific
+  gets T1059.004 (Unix Shell) at low confidence. Each technique carries a
+  confidence score.
 - **Extracts IOCs:**
   - public attacker IPs and credential pairs;
   - URLs and domains;

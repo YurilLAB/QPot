@@ -269,7 +269,7 @@ instance reloads it.
 - **Captured-value matches wait for the event to be stored.** The quick check
   reads at most 5,000 events from the last two minutes on each run; an event
   it misses (a larger burst, or a stopped control plane) is matched when the
-  intelligence worker classifies it (`worker_interval`, default 15m). Beacon
+  intelligence worker classifies it (`worker_interval`, default 5m). Beacon
   requests are handled as they arrive. Backlogs, stopped workers or database
   failures can delay or prevent alerts.
 - **False positives are possible.** A scanner or authorized user can fetch a

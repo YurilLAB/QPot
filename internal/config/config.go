@@ -67,11 +67,24 @@ type ResponseAction struct {
 type IntelligenceConfig struct {
 	Enabled          bool          `yaml:"enabled"`
 	ATTCKDataPath    string        `yaml:"attck_data_path"`   // where to cache downloaded ATT&CK data
-	WorkerInterval   time.Duration `yaml:"worker_interval"`   // default 15min
+	WorkerInterval   time.Duration `yaml:"worker_interval"`   // default 5min, at least 1min
 	WorkerBatchSize  int           `yaml:"worker_batch_size"` // default 500
 	InactivityWindow time.Duration `yaml:"inactivity_window"` // TTP session inactivity, default 30min
 	FetchATTCK       bool          `yaml:"fetch_attck"`       // try to fetch latest from MITRE, default true
 }
+
+// The intelligence worker's cadence. Each run that finds new events tags
+// them in the database (a ClickHouse mutation per batch), so the cadence
+// trades how soon attack categories show against write load.
+const (
+	DefaultWorkerInterval = 5 * time.Minute
+	// MinWorkerInterval is the shortest cadence a config may set.
+	MinWorkerInterval = time.Minute
+	// legacyWorkerInterval was the default before DefaultWorkerInterval.
+	// Save writes the whole config, so every config saved then holds it:
+	// it is read as that old default and moved to the new one.
+	legacyWorkerInterval = 15 * time.Minute
+)
 
 // Config represents QPot configuration
 type Config struct {
@@ -647,7 +660,7 @@ func Default(instanceName string) *Config {
 		Intelligence: IntelligenceConfig{
 			Enabled:          true,
 			ATTCKDataPath:    filepath.Join(dataPath, "intelligence"),
-			WorkerInterval:   15 * time.Minute,
+			WorkerInterval:   DefaultWorkerInterval,
 			WorkerBatchSize:  500,
 			InactivityWindow: 30 * time.Minute,
 			FetchATTCK:       true,
@@ -786,8 +799,11 @@ func Parse(data []byte, configPath string) (*Config, error) {
 	// enables intelligence but omits the worker tunables would leave them at
 	// the zero value. A zero WorkerInterval panics time.NewTicker, and a zero
 	// WorkerBatchSize makes the classifier a silent no-op. Clamp them here.
-	if cfg.Intelligence.WorkerInterval <= 0 {
-		cfg.Intelligence.WorkerInterval = 15 * time.Minute
+	switch iv := cfg.Intelligence.WorkerInterval; {
+	case iv <= 0, iv == legacyWorkerInterval:
+		cfg.Intelligence.WorkerInterval = DefaultWorkerInterval
+	case iv < MinWorkerInterval:
+		cfg.Intelligence.WorkerInterval = MinWorkerInterval
 	}
 	if cfg.Intelligence.WorkerBatchSize <= 0 {
 		cfg.Intelligence.WorkerBatchSize = 500

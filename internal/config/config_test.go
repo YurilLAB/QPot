@@ -9,6 +9,7 @@ import (
 	"runtime"
 	"sync"
 	"testing"
+	"time"
 
 	"gopkg.in/yaml.v3"
 )
@@ -256,6 +257,42 @@ func TestLoadClampsIntelligenceDefaults(t *testing.T) {
 	}
 	if cfg.Intelligence.InactivityWindow <= 0 {
 		t.Errorf("InactivityWindow not clamped on load: got %v", cfg.Intelligence.InactivityWindow)
+	}
+}
+
+// TestParseMovesWorkerInterval: a saved config holds the old 15m default and
+// moves to the new one; a set cadence is kept, and one too short is raised to
+// the floor.
+func TestParseMovesWorkerInterval(t *testing.T) {
+	for _, c := range []struct {
+		in   string
+		want time.Duration
+	}{
+		{"", DefaultWorkerInterval},
+		{"0s", DefaultWorkerInterval},
+		{"15m0s", DefaultWorkerInterval},
+		// Negative controls: only the old default exactly is moved.
+		{"15m1s", 15*time.Minute + time.Second},
+		{"10m", 10 * time.Minute},
+		{"2m", 2 * time.Minute},
+		{"1m", time.Minute},
+		{"30s", MinWorkerInterval},
+		{"1ns", MinWorkerInterval},
+	} {
+		data := "instance_name: x\nintelligence:\n  enabled: true\n"
+		if c.in != "" {
+			data += "  worker_interval: " + c.in + "\n"
+		}
+		cfg, err := Parse([]byte(data), filepath.Join(t.TempDir(), "config.yaml"))
+		if err != nil {
+			t.Fatalf("%q: %v", c.in, err)
+		}
+		if got := cfg.Intelligence.WorkerInterval; got != c.want {
+			t.Errorf("worker_interval %q: got %v, want %v", c.in, got, c.want)
+		}
+	}
+	if d := Default("x").Intelligence.WorkerInterval; d != DefaultWorkerInterval {
+		t.Errorf("new configs get %v, want %v", d, DefaultWorkerInterval)
 	}
 }
 

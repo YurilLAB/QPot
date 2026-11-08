@@ -110,7 +110,7 @@ inside `qpot up`. It is not a container: it runs on the host as your user.
   and a dashboard for everything QPot adds. The attack map receives live
   attacks as a server-sent event stream. Every request must carry the
   instance's QPot ID. See [web-ui.md](web-ui.md) and [api.md](api.md).
-- **Intelligence worker.** Every 15 minutes it reads new events, tags them
+- **Intelligence worker.** Every 5 minutes it reads new events, tags them
   with MITRE ATT&CK techniques, extracts indicators of compromise and groups
   related activity into campaigns. It checkpoints its work, so a crash never
   counts an observation twice. See [intelligence.md](intelligence.md).

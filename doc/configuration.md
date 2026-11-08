@@ -32,7 +32,7 @@ honeypots:
       max_pids: 50
 
 intelligence:
-  worker_interval: 15m
+  worker_interval: 5m            # default 5m; at least 1m
 
 security:
   network_isolation:

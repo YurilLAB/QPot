@@ -45,7 +45,7 @@ type Worker struct {
 }
 
 const (
-	defaultWorkerInterval  = 15 * time.Minute
+	defaultWorkerInterval  = 5 * time.Minute // config.DefaultWorkerInterval
 	defaultWorkerBatchSize = 500
 	shutdownTimeout        = 10 * time.Second
 	maxBatchesPerTick      = 200
