@@ -19,14 +19,16 @@ import (
 // Limits on what one container's capture can make the host keep. The stream
 // is the guest's sshd's, and guest root can write to it: every count and name
 // in it is untrusted, so the per-account limits sit inside limits for the
-// whole container that no account or session number can get round.
+// whole container that no account or session number can get round. Bytes
+// count everything written: streams, timing lines and record lines alike.
+// Sessions open when a limit is reached may still add their finish lines.
 const (
 	maxUserBytes      = 64 << 20
 	maxUserFiles      = 2048
 	maxContainerBytes = 256 << 20
 	maxContainerFiles = 8192
 	maxAccounts       = 64      // account folders per container
-	maxOpen           = 1024    // pending commands, and open sessions, held in memory
+	maxOpen           = 256     // pending commands, and open sessions, held in memory
 	maxSessions       = 1 << 16 // distinct sessions per container
 	maxCommand        = 16 << 10
 	previewBytes      = 4096
@@ -220,7 +222,7 @@ func (w *Writer) open(key string, r Record) error {
 		u = &usage{}
 		w.usage[o.UID] = u
 	}
-	if u.files >= maxUserFiles {
+	if u.files >= maxUserFiles || u.bytes >= maxUserBytes || w.total.bytes >= maxContainerBytes {
 		return nil
 	}
 	w.ordinals[key]++
@@ -339,19 +341,24 @@ func (w *Writer) data(e *entry, r Record) error {
 		}
 		e.lastMS = r.Millis
 		line := fmt.Sprintf("%s %d.%03d000 %d\n", stream, delta/1000, delta%1000, keep)
+		if room := min(maxUserBytes-e.user.bytes, maxContainerBytes-w.total.bytes); int64(len(line)) > room {
+			e.truncated = true // a timing line per byte must not outgrow the limits
+			return nil
+		}
 		if _, err := timing.WriteAt([]byte(line), e.offsets[KindTruncated]); err != nil {
 			e.errs = append(e.errs, "timing write failed")
 		}
 		e.offsets[KindTruncated] += int64(len(line))
+		e.user.bytes += int64(len(line))
+		w.total.bytes += int64(len(line))
 	}
 	return nil
 }
 
 func (w *Writer) finish(e *entry, millis int64) error {
 	defer w.close(e)
-	if n, err := w.existingLines(e.base + ".json"); err != nil || n >= 2 {
-		return err // finished already, by this replay's twin
-	}
+	// Built and counted even when another replay already wrote it, so every
+	// replay of the container makes the same limit decisions.
 	ev := e.event
 	ev.EventType, ev.Phase = "ssh_backend_command", "finish"
 	ev.Timestamp = e.start.Add(time.Duration(millis) * time.Millisecond).Format(time.RFC3339Nano)
@@ -456,13 +463,15 @@ func (w *Writer) close(e *entry) {
 }
 
 // appendLine writes a record's line number index (0 start, 1 finish) unless
-// the file already holds it.
+// the file already holds it. The line counts against the limits either way.
 func (w *Writer) appendLine(e *entry, ev SessionEvent, index int) error {
-	if n, err := w.existingLines(e.base + ".json"); err != nil || n != index {
-		return err
-	}
 	data, err := json.Marshal(ev)
 	if err != nil {
+		return err
+	}
+	e.user.bytes += int64(len(data) + 1)
+	w.total.bytes += int64(len(data) + 1)
+	if n, err := w.existingLines(e.base + ".json"); err != nil || n != index {
 		return err
 	}
 	root, err := w.ensureRoot()

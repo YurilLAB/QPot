@@ -441,18 +441,79 @@ func TestWriterBoundsWhatAForgedStreamCanMakeTheHostKeep(t *testing.T) {
 		}
 		return w, dir
 	}
-	// Room for one more session's files, but only ten more bytes.
-	w2, dir2 := one(usage{bytes: maxContainerBytes - 10, files: maxContainerFiles - filesPerEntry - 1})
+	// Room for one more session's files, but only a little more data: the
+	// record line counts too, and the output is cut at the limit.
+	w2, dir2 := one(usage{bytes: maxContainerBytes - 1500, files: maxContainerFiles - filesPerEntry - 1})
 	outputs, _ := filepath.Glob(filepath.Join(dir2, "uid-5", "*.out"))
-	if w2.total.bytes != maxContainerBytes || w2.total.files != maxContainerFiles-1 || len(outputs) != 1 {
+	if w2.total.files != maxContainerFiles-1 || len(outputs) != 1 {
 		t.Fatalf("container byte limit not applied: %+v %v", w2.total, outputs)
 	}
-	if data, _ := os.ReadFile(outputs[0]); len(data) != 10 {
-		t.Fatalf("kept %d bytes past the container limit", len(data))
+	if data, _ := os.ReadFile(outputs[0]); len(data) == 0 || len(data) >= len(big) {
+		t.Fatalf("kept %d of %d bytes at the container limit", len(data), len(big))
+	}
+	// A timing line per output byte counts too: a PTY stream of single bytes
+	// cannot make the host keep many times the limit.
+	dir4 := t.TempDir()
+	w4, err := NewWriter(dir4, testContainer, testCreated, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	w4.total = usage{bytes: maxContainerBytes - 4000}
+	e4 := newEmitter(testConn)
+	e4.open(0, 5, true, 41000, "")
+	for i := 0; i < 1000; i++ {
+		e4.rec(0, KindOutput, int64(i), []byte("x"))
+	}
+	e4.rec(0, KindExit, 1000, []byte("exit=0"))
+	e4.rec(0, KindClosed, 1000, nil)
+	for _, l := range e4.lines {
+		if err := w4.Apply(l); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := w4.Finish(); err != nil {
+		t.Fatal(err)
+	}
+	kept := 0
+	for _, suffix := range []string{"*.out", "*.timing", "*.json"} {
+		files, _ := filepath.Glob(filepath.Join(dir4, "uid-5", suffix))
+		for _, f := range files {
+			info, _ := os.Stat(f)
+			kept += int(info.Size())
+		}
+	}
+	if kept > 4000+8<<10 { // the limit, plus the finish line of the open session
+		t.Fatalf("a single-byte PTY stream kept %d bytes against a 4000-byte allowance", kept)
 	}
 	// No room for a session's files: its record alone, one file.
 	w3, dir3 := one(usage{files: maxContainerFiles - filesPerEntry + 1})
-	if outputs, _ := filepath.Glob(filepath.Join(dir3, "uid-5", "*.out")); w3.total.files != maxContainerFiles-filesPerEntry+2 || w3.total.bytes != 0 || len(outputs) != 0 {
+	if outputs, _ := filepath.Glob(filepath.Join(dir3, "uid-5", "*.out")); w3.total.files != maxContainerFiles-filesPerEntry+2 || w3.total.bytes > 4096 || len(outputs) != 0 {
 		t.Fatalf("container file limit not applied: %+v %v", w3.total, outputs)
+	}
+	// Record lines count too: sessions with long commands and no data stop
+	// opening once the container is at its limit.
+	dir5 := t.TempDir()
+	w5, err := NewWriter(dir5, testContainer, testCreated, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	w5.total = usage{bytes: maxContainerBytes - 100<<10}
+	e5 := newEmitter(testConn)
+	command := strings.Repeat("c", maxCommand)
+	for ch := 0; ch < 50; ch++ {
+		e5.open(ch, 5, false, 41000, command)
+		e5.rec(ch, KindExit, 1, []byte("exit=0"))
+		e5.rec(ch, KindClosed, 1, nil)
+	}
+	for _, l := range e5.lines {
+		if err := w5.Apply(l); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := w5.Finish(); err != nil {
+		t.Fatal(err)
+	}
+	if records, _ := filepath.Glob(filepath.Join(dir5, "uid-5", "*.json")); len(records) == 0 || len(records) > 4 {
+		t.Fatalf("%d records kept against a 100 KiB allowance of 32 KiB records", len(records))
 	}
 }

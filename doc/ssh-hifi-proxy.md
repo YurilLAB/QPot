@@ -426,8 +426,10 @@ audit. Capture is limited to 8 MiB per channel and 64 MiB per connection and
 reports truncation without truncating the actual SSH byte stream; each
 backend's container log keeps room for one such connection until it is
 converted. Per-account limits (64 MiB, 2,048 files), inside limits for the whole
-container, bound the retained files and bytes; arbitrary guest files still
-require host disk quotas.
+container, bound the retained files and every byte written for them: streams,
+timing lines and record lines alike, so a stream of single bytes cannot make
+the host keep many times the limit. Arbitrary guest files still require host
+disk quotas.
 
 The conversion is a deterministic replay of a backend's container log: a
 follower converts it live while the control plane runs and replays it from the
