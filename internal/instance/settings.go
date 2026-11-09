@@ -205,6 +205,7 @@ type settingSpec struct {
 var settingSpecs = map[string]settingSpec{
 	"persona_rotation":   {kind: "number", min: 0, max: cowriePersonaMaxRotation, integer: true, help: "Days Cowrie keeps the identity it drew (host name, uptime, addresses) across restarts. Empty: 365."},
 	"backends":           {kind: "number", min: 1, max: maxSSHBackends, integer: true, help: "How many real-OpenSSH backends run behind the HiFi broker. Empty: 2."},
+	"cell_hold_minutes":  {kind: "number", min: 0, max: config.SSHCellHoldMax, integer: true, help: "Minutes a visitor's address keeps its HiFi cell after its last connection closes, so its next connections find what it left. 0 resets the cell after every connection. Empty: 30."},
 	"llm_model":          {kind: "name", help: "The model the honeypot asks, e.g. llama3.1 or gpt-4o-mini."},
 	"llm_host":           {kind: "url", help: "URL of the Ollama or OpenAI-compatible chat endpoint, e.g. http://10.0.0.5:11434/api/chat."},
 	"llm_server_url":     {kind: "url", help: "URL of the Ollama server, e.g. http://10.0.0.5:11434."},
@@ -223,7 +224,7 @@ var settingHelp = map[string]string{
 	"bait_target":  "Asset referenced by industrial support files: the selected Conpot device or the refrigeration controller. This does not enable the referenced service. Used with bait_profile=industrial. Empty: conpot.",
 	"template":     "The industrial device Conpot emulates; only its ports are published. Empty: the saved automatic device, kept across restarts and upgrades.",
 	"site_profile": "Refrigeration site: retail food cabinets or plasma cold storage. Each site keeps its own temperatures, settings and history across restarts and profile switches. Empty: retail.",
-	"environment":  "HiFi SSH environment. Standalone is one real Debian 12 server per SSH connection. Organization adds a PostgreSQL database and an SSH backup host, using three decoy containers per slot. State lasts for that SSH connection and resets before reuse. These real shells have writable container filesystems. Official releases select matching published images; development checkouts should build both current images and choose image_source=local. Empty: standalone.",
+	"environment":  "HiFi SSH environment. Standalone is one real Debian 12 server per visitor. Organization adds a PostgreSQL database and an SSH backup host, using three decoy containers per slot. State lasts for a visitor's connections and cell_hold_minutes after them, then resets before reuse. These real shells have writable container filesystems. Official releases select matching published images; development checkouts should build both current images and choose image_source=local. Empty: standalone.",
 	"image_source": "Published uses QPot's registry images. Local uses qpot-local/ssh-proxy:development and qpot-local/ssh-backend:development, built from your checkout; build both before starting. Local tags are not pulled from a registry. This also selects the HiFi egress-guard helper image, so use only images you trust. Empty: published.",
 }
 
@@ -418,6 +419,8 @@ func effectiveSetting(cfg *config.Config, name, key string) string {
 		return refrigerationSiteProfile(cfg)
 	case "ssh-proxy/backends":
 		return strconv.Itoa(sshBackendCount(cfg))
+	case "ssh-proxy/cell_hold_minutes":
+		return strconv.Itoa(config.SSHCellHoldMinutes(cfg))
 	case "ssh-proxy/environment":
 		return config.SSHEnvironment(cfg)
 	case "ssh-proxy/image_source":

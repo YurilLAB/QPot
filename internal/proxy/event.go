@@ -25,7 +25,7 @@
 // only from a fixed, operator-configured pool — no SSRF). The genuinely
 // dangerous part is the backend (real code execution), which the orchestration
 // layer isolates (gVisor/Kata), pins to an egress-locked internal network, caps
-// for resources, and resets between sessions. See doc/ssh-hifi-proxy.md.
+// for resources, and resets between visitors. See doc/ssh-hifi-proxy.md.
 package proxy
 
 import (
@@ -79,6 +79,11 @@ const (
 	// EventConnect records a connection reaching its backend, before any byte
 	// is forwarded. The collector drops it; the host's capture converter reads it.
 	EventConnect = "ssh_proxy_connect"
+	// EventCellReset asks the host to recreate a cell its source let go of
+	// (or, at startup, every cell). It is the host recycler's only trigger;
+	// it names no visitor, so the collector drops it. Generation is the
+	// cell's lease snapshot.
+	EventCellReset = "ssh_proxy_cell_reset"
 )
 
 // Reasons a connection is rejected or torn down. Kept as constants so dashboards
@@ -96,6 +101,10 @@ const (
 	ReasonIdleTimeout          = "idle_timeout"
 	ReasonSessionTimeout       = "max_session_reached"
 	ReasonClosed               = "closed"
+	// A cell freed because its source's hold ran out, or because the pool
+	// was short and it had been idle the longest.
+	ReasonCellIdle    = "cell_hold_expired"
+	ReasonCellEvicted = "cell_evicted"
 )
 
 // EventSink receives Events. Implementations must be safe for concurrent use by

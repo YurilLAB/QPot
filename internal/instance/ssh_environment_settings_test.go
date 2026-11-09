@@ -57,7 +57,7 @@ func TestSSHEnvironmentSettingsAndDescriptions(t *testing.T) {
 				if selected == "" {
 					selected = setting.Effective
 				}
-				if selected != config.SSHEnvironment(parsed) || !strings.Contains(setting.Help, "SSH connection") || !strings.Contains(setting.Help, "three") {
+				if selected != config.SSHEnvironment(parsed) || !strings.Contains(setting.Help, "visitor") || !strings.Contains(setting.Help, "cell_hold_minutes") || !strings.Contains(setting.Help, "three") {
 					t.Fatalf("description differs from runtime/lifetime/resource cost: %+v", setting)
 				}
 			case "backends":

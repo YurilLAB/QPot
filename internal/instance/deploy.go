@@ -658,7 +658,7 @@ func deployProfileFor(name string) honeypotDeploy {
 				{HostSubdir: "generations", ContainerPath: sshProxyGenerationsPath, ReadOnly: true},
 			},
 			Ports:    []int{2222},
-			Settings: []string{"backends", "environment", "image_source"},
+			Settings: []string{"backends", "environment", "image_source", "cell_hold_minutes"},
 			Values: map[string][]string{
 				"environment":  {config.SSHEnvironmentStandalone, config.SSHEnvironmentOrganization},
 				"image_source": {config.SSHImageSourcePublished, config.SSHImageSourceLocal},

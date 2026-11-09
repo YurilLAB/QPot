@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/qpot/qpot/internal/proxy"
 )
@@ -140,7 +141,7 @@ func TestStartupPoolCapturesBeforeRequestAndRejectsFirstLease(t *testing.T) {
 		if i == 0 {
 			want = 3
 		}
-		if event.EventType != proxy.EventBackendError || event.Reason != proxy.ReasonStartupReset ||
+		if event.EventType != proxy.EventCellReset || event.Reason != proxy.ReasonStartupReset ||
 			event.Backend != backends[i].ID || event.Generation == nil || *event.Generation != want {
 			t.Fatalf("startup event %+v want backend=%s generation=%d", event, backends[i].ID, want)
 		}
@@ -190,5 +191,16 @@ func TestFailedListenerDoesNotRequestBackendRecreation(t *testing.T) {
 	}
 	if len(data) != 0 {
 		t.Fatalf("failed startup requested a reset: %s", data)
+	}
+}
+
+// A zero hold is a real choice (a cell per connection), unlike a zero idle
+// timeout; anything unreadable keeps the default.
+func TestEnvHoldAcceptsZero(t *testing.T) {
+	for value, want := range map[string]time.Duration{"": 30 * time.Minute, "0": 0, "0m": 0, "45m": 45 * time.Minute, "-1m": 30 * time.Minute, "soon": 30 * time.Minute} {
+		t.Setenv("QPOT_SSHPROXY_CELL_HOLD", value)
+		if got := envHold("QPOT_SSHPROXY_CELL_HOLD", 30*time.Minute); got != want {
+			t.Errorf("%q read as %s, want %s", value, got, want)
+		}
 	}
 }

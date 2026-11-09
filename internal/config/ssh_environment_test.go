@@ -202,8 +202,15 @@ func TestSSHEnvironmentInvalidConfigNeverReplacesSavedFile(t *testing.T) {
 		{"image_source": "Local"},
 		{"image_source": "local\x00"},
 		{"environment": "organization", "forward\nto": "10.0.0.1:22"},
+		{"cell_hold_minutes": "-1"},
+		{"cell_hold_minutes": "121"},
+		{"cell_hold_minutes": "01"},
+		{"cell_hold_minutes": "1.5"},
+		{"cell_hold_minutes": "30m"},
+		{"cell_hold_minutes": "+30"},
+		{"cell_hold_minutes": "3\n0"},
 	} {
-		t.Run(custom["environment"]+custom["environmnt"]+custom["forward_to"]+custom["image_source"], func(t *testing.T) {
+		t.Run(custom["environment"]+custom["environmnt"]+custom["forward_to"]+custom["image_source"]+custom["cell_hold_minutes"], func(t *testing.T) {
 			cfg := Default("ssh-invalid")
 			cfg.DataPath = t.TempDir()
 			cfg.ConfigPath = filepath.Join(cfg.DataPath, "config.yaml")
@@ -235,5 +242,26 @@ func TestSSHEnvironmentInvalidConfigNeverReplacesSavedFile(t *testing.T) {
 				t.Fatalf("hand-written unsupported scene setting accepted: %v", err)
 			}
 		})
+	}
+}
+
+func TestSSHCellHoldMinutes(t *testing.T) {
+	if got := SSHCellHoldMinutes(nil); got != SSHCellHoldDefault {
+		t.Fatalf("no config: %d", got)
+	}
+	for raw, want := range map[string]int{"": 30, "0": 0, "7": 7, "120": 120, " 45 ": 45} {
+		cfg := Default("ssh-hold")
+		cfg.SetHoneypotCustomConfig("ssh-proxy", map[string]string{"cell_hold_minutes": raw})
+		if err := ValidateSSHEnvironment(cfg); err != nil {
+			t.Fatalf("%q rejected: %v", raw, err)
+		}
+		if got := SSHCellHoldMinutes(cfg); got != want {
+			t.Fatalf("%q read as %d, want %d", raw, got, want)
+		}
+	}
+	cfg := Default("ssh-hold")
+	cfg.SetHoneypotCustomConfig("ssh-proxy", map[string]string{"cell_hold_minutes": "999"})
+	if SSHCellHoldMinutes(cfg) != SSHCellHoldDefault {
+		t.Fatal("an out-of-range hold was not read as the default")
 	}
 }

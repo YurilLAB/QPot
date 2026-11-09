@@ -256,6 +256,8 @@ func TestSettingsPutHiFiKeepsInvalidInputAtomic(t *testing.T) {
 		`{"name":"ssh-proxy","settings":{"environment":"Organization"}}`,
 		`{"name":"ssh-proxy","settings":{"environment":"organization","max_pids":"-1"}}`,
 		`{"name":"ssh-proxy","settings":{"environment":"organization","image_source":"Local"}}`,
+		`{"name":"ssh-proxy","settings":{"environment":"organization","cell_hold_minutes":"121"}}`,
+		`{"name":"ssh-proxy","settings":{"environment":"organization","cell_hold_minutes":"1.5"}}`,
 	} {
 		rec := a.do(http.MethodPut, "/api/honeypots/settings", body)
 		if e := decodeAPIError(t, rec); rec.Code != http.StatusBadRequest || e.Code != "QP-INPUT-012" || e.Saved {

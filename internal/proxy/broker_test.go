@@ -301,6 +301,12 @@ func TestBrokerEventsKeepLeaseGeneration(t *testing.T) {
 			if event.Generation == nil || *event.Generation != 7 {
 				t.Fatalf("event generation %+v want original lease7, current disk99", event)
 			}
+			// The host acts on the reset request alone: it must name the
+			// lease too, or a replayed one could reset a newer visitor.
+			reset := sink.wait(t, EventCellReset, 2*time.Second)
+			if reset.Backend != "b" || reset.Generation == nil || *reset.Generation != 7 {
+				t.Fatalf("reset request %+v want backend b at lease generation 7", reset)
+			}
 		})
 	}
 }

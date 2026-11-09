@@ -209,10 +209,12 @@ beelzebub, conpot, cowrie, galah, refrigeration and ssh-proxy), sorted by name.
 - A secret's `value` is always `""`; `set` says whether one is stored.
 - `missing` lists required settings that are still unset.
 - `ssh-proxy` provides `backends` (1-16, default 2), `environment`
-  (`standalone`/`organization`, default standalone), and `image_source`
-  (`published`/`local`, default published). Organization uses app, PostgreSQL and
-  SSH backup containers for each slot, reset together after one ingress SSH
-  connection. Local selects fixed development tags built from the same checkout;
+  (`standalone`/`organization`, default standalone), `image_source`
+  (`published`/`local`, default published) and `cell_hold_minutes` (0-120,
+  default 30: how long a visitor's address keeps its cell after its last
+  connection; 0 resets after every connection). Organization uses app,
+  PostgreSQL and SSH backup containers for each slot, reset together after
+  each visitor. Local selects fixed development tags built from the same checkout;
   it does not accept arbitrary image URLs or pull over a local build. Saving a
   disabled honeypot's settings does not enable it. See [HiFi deployment](ssh-hifi-proxy.md#5-deployment).
 - `400 QP-INPUT-003` for an unknown name, `500 QP-INST-002` when the

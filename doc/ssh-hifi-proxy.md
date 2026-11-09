@@ -45,7 +45,7 @@ OpenSSH**, with nothing of ours speaking SSH on that path.
 
 QPot HiFi mode puts a **transparent TCP broker** in front of a pool of
 disposable **real-OpenSSH backend containers**. The default is one standalone
-server per connection; the optional organization environment adds a real
+server per visitor; the optional organization environment adds a real
 PostgreSQL database and an SSH backup host to each private cell:
 
 ```
@@ -119,7 +119,8 @@ tamper-proof command audit.
 | `QPOT_SSHPROXY_LOG` | `/var/log/ssh-proxy/sessions.json` | NDJSON session log |
 | `QPOT_SSHPROXY_HOST_READABLE_LOG` | unset (false) | Trusted opt-in to host-readable broker metadata; generated only after the neutral private store is verified ready. Custom deployments retain `0640` by default |
 | `QPOT_SSHPROXY_IDLE` | `15m` | Idle-session timeout |
-| `QPOT_SSHPROXY_MAXSESSION` | `2h` | Absolute session cap |
+| `QPOT_SSHPROXY_MAXSESSION` | `2h` | A cell's whole life, from its first connection; its connections close then |
+| `QPOT_SSHPROXY_CELL_HOLD` | `30m` | How long a source keeps its cell after its last connection closes; `0` resets the cell after every connection. Generated Compose sets it from `cell_hold_minutes` |
 | `QPOT_SSHPROXY_RATE_IP` | `5` | New conns/sec per IP (token bucket) |
 | `QPOT_SSHPROXY_BURST_IP` | `10` | Rate burst per IP |
 | `QPOT_SSHPROXY_CONC_IP` | `3` | Max concurrent sessions per IP |
@@ -192,11 +193,13 @@ parties, is a liability — so the backend is wrapped in defense-in-depth:
    and rootless VFS does not provide such quotas. Run genuine root shells on a
    dedicated sensor VM with an appropriate isolation runtime and storage bounds
    for that VM/driver. Verify cgroup enforcement on the host you deploy.
-5. **Ephemerality.** State belongs to one ingress SSH TCP connection. Multiple
-   SSH channels on that connection share the same server/cell. All cell services
-   are recreated before another connection can use the slot; failed reset or
-   health checks quarantine it. Reconnecting gets fresh state, even from the
-   same source IP. See "Backend reset".
+5. **Ephemerality.** State belongs to one visitor: a source address (an IPv4
+   address, or an IPv6 /64). Its connections, and their channels, share one
+   server/cell while any is open and for `cell_hold_minutes` (default 30) after
+   the last one closes, at most two hours from its first connection. All cell
+   services are then recreated before anyone else can use the slot; failed
+   reset or health checks quarantine it. Another source never shares a cell.
+   See "Backend reset".
 6. **No privilege bridge.** The QPot ID (management-API credential) is never
    mounted into honeypot containers, HiFi included.
 
@@ -296,13 +299,12 @@ repositories reachable, and unsupported installs must fail rather than produce
 a fabricated success message.
 
 The database is a digest-pinned official `postgres:15-bookworm` image. Its data
-is ephemeral for this connection; the initial schema and backup come from the
+is ephemeral for this visitor; the initial schema and backup come from the
 same scene definition. The database has no published host port and is separate
 from QPot's telemetry database. The backup host likewise has no published port.
 Connection aliases and credentials describe only these controlled decoys.
 
-`backends` is the number of simultaneous ingress SSH connections, from 1 to 16,
-default 2. Standalone uses one decoy container per slot; organization uses three.
+`backends` is the number of visitors served at once, from 1 to 16, default 2. Standalone uses one decoy container per slot; organization uses three.
 For two organization slots that is six decoy containers plus the shared broker
 and existing instance services. CPU, memory and PID limits apply per container;
 plan for the total, not only the app's limits. Finite admission and storage limits
@@ -344,15 +346,18 @@ this specific topology or certify QPot's implementation.
 
 ### Backend reset (ephemerality)
 
-A lease lasts for one ingress SSH TCP connection. Multiple channels on the same
-connection share state; a separate connection does not inherit it. The entire
-cell is recreated after the connection ends, including its database and backup
-in organization mode. The work is split so the attacker-facing broker still
-holds no Docker privilege. A starting or restarted broker begins with its slots
-quarantined and requests a trusted reset before its first lease:
+A cell is held for one visitor's source address, across its connections (see
+"State across connections" below). The entire cell is recreated when its
+source lets go of it, including its database and backup in organization mode.
+The work is split so the attacker-facing broker still holds no Docker
+privilege. A starting or restarted broker begins with its slots quarantined and
+requests a trusted reset before its first lease:
 
-1. The broker logs each finished session (`ssh_proxy_session`, or
-   `ssh_proxy_backend_error`) with the backend id to its session log.
+1. When a source lets go of its cell, the broker logs a reset request
+   (`ssh_proxy_cell_reset`) with the backend id and the generation of the
+   lease to its session log. Finished connections (`ssh_proxy_session`) and
+   failed dials (`ssh_proxy_backend_error`) are reported but reset nothing on
+   their own: the cell may still serve its source's other connections.
 2. The trusted host-side control plane (`qpot up` in the foreground, or the
    background `qpot serve` that `qpot up -d` starts) follows that log and runs
    stop, conversion of what the stopped backends still hold, host-only
@@ -374,11 +379,40 @@ quarantined and requests a trusted reset before its first lease:
    failing) the backend is quarantined - never reused dirty - and rejoins the
    pool after a later recreation is observed.
 
-Consequences: with the control plane stopped, each backend serves one session
+Consequences: with the control plane stopped, each backend serves one visitor
 and is then held back (fail closed). A backend is unavailable for a few seconds
-after each connection, and an organization cell needs its database/backup ready
-too. Raise `backends` (honeypot `custom_config`) for expected concurrency while
-accounting for the extra containers. The shared host keys are generated by
+after its visitor lets go of it, and an organization cell needs its
+database/backup ready too. Raise `backends` (honeypot `custom_config`) for
+expected concurrent visitors while accounting for the extra containers.
+
+### State across connections
+
+Attackers routinely open more than one connection: a second shell, an `scp`
+upload, a tool that connects per command. If every connection got a fresh
+server, a file uploaded over one connection would be gone in the next, which no
+real server does. The broker therefore keeps a visitor on its cell:
+
+- A visitor is a source address: an IPv4 address, or an IPv6 /64, the unit the
+  per-source rate and concurrency limits also count. Its connections share one
+  cell while any of them is open, and for `cell_hold_minutes` (default 30,
+  0 to 120) after the last one closes. A new connection inside the hold
+  starts it again.
+- A cell lives at most `QPOT_SSHPROXY_MAXSESSION` (two hours) from its first
+  connection. Its connections are closed then, and the visitor's next
+  connection gets a fresh cell.
+- When every cell is taken, the one idle the longest is reset first and the
+  connection that found none is turned away; it gets that cell once the reset
+  is done. A cell with an open connection is never taken.
+- A cell whose backend fails takes no more connections and is reset when its
+  last one closes.
+- `cell_hold_minutes=0` gives every connection a cell of its own, reset when it
+  closes: strict isolation, at the cost of the inconsistency above.
+
+Different addresses never share a cell, so a visitor that changes address (a
+botnet, a proxy pool, a new IPv6 /64) starts afresh, as it would reaching
+another server. Visitors behind one address, such as a NAT, share a cell, as
+they would share a real server. The hold keeps a cell out of the pool while it
+waits: `backends` bounds how many visitors are held at once. The shared host keys are generated by
 `qpot` on the host and copied into each backend at start: root on a backend can
 read its copy, as root on any server can, but cannot change the key the pool
 presents.
@@ -480,8 +514,8 @@ records into sshd's error stream: they land only in its own cell's evidence,
 within limits for the whole container (256 MiB, 8,192 files, 64 account
 folders, bounded sessions held in memory) that no account or session number
 gets round, and they are joined only to broker connections made after that
-container was created. One container serves one lease, so a forged record
-can never name an earlier visitor. It cannot alter the broker's records or the
+container was created. One container serves one visitor's address, so a
+forged record can never name an earlier visitor. It cannot alter the broker's records or the
 evidence already converted on the host. This is useful evidence, not a
 tamper-proof command audit. Shared application and separate backup host keys
 remain protected in the persistent runtime store described below.

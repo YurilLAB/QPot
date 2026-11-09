@@ -17,6 +17,7 @@ import (
 
 	"github.com/qpot/qpot/internal/config"
 	"github.com/qpot/qpot/internal/hostsetup"
+	"github.com/qpot/qpot/internal/proxy"
 )
 
 // BackendRecycler is the trusted, host-side half of HiFi backend reset. It
@@ -364,8 +365,10 @@ func readBrokerLog(path string, offset int64, partial []byte, previous *os.FileI
 	return offset, append([]byte(nil), buf...), lines, nil
 }
 
-// recycleTarget returns the backend a session-log line says must be recycled
-// (a finished session, or a backend error), or "".
+// recycleTarget returns the backend a session-log line says must be recycled,
+// or "". Only the broker's cell reset request counts: a cell outlives the
+// connections of the source that holds it, so a finished connection or a
+// failed dial alone must not recreate it under its source's other connections.
 func recycleTarget(line []byte) string {
 	return parseRecycleRequest(line).Service
 }
@@ -379,11 +382,10 @@ func parseRecycleRequest(line []byte) recycleRequest {
 	if json.Unmarshal(line, &ev) != nil {
 		return recycleRequest{}
 	}
-	switch ev.EventType {
-	case "ssh_proxy_session", "ssh_proxy_backend_error":
-		return recycleRequest{Service: ev.Backend, Generation: ev.Generation}
+	if ev.EventType != proxy.EventCellReset {
+		return recycleRequest{}
 	}
-	return recycleRequest{}
+	return recycleRequest{Service: ev.Backend, Generation: ev.Generation}
 }
 
 // sshProxyGenerationsPath is where the broker sees the generation counters.

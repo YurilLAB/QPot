@@ -215,6 +215,13 @@ func sshBackendCount(cfg *config.Config) int {
 	return n
 }
 
+// sshCellHold returns the broker's QPOT_SSHPROXY_CELL_HOLD value: how long a
+// source keeps its cell after its last connection closes ("0m": a cell per
+// connection).
+func sshCellHold(cfg *config.Config) string {
+	return fmt.Sprintf("%dm", config.SSHCellHoldMinutes(cfg))
+}
+
 // sshBackendServiceNames returns the deterministic backend service names
 // ("ssh-backend-1", …). Shared by the compose renderer (to emit the services)
 // and the manager (to start/stop them alongside the broker).

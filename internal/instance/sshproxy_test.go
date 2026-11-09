@@ -306,3 +306,24 @@ func TestSSHProxyGenerationsMountedReadOnly(t *testing.T) {
 		}
 	}
 }
+
+// The broker's cell hold follows cell_hold_minutes; 0 gives every connection
+// a cell of its own.
+func TestSSHProxyCellHoldReachesTheBroker(t *testing.T) {
+	for raw, want := range map[string]string{"": "30m", "0": "0m", "45": "45m"} {
+		cfg := enableSSHProxy(t, "hold")
+		hp := cfg.Honeypots[sshProxyHoneypot]
+		if hp.CustomConfig == nil {
+			hp.CustomConfig = map[string]string{}
+		}
+		hp.CustomConfig["cell_hold_minutes"] = raw
+		cfg.Honeypots[sshProxyHoneypot] = hp
+		blk := serviceBlock(renderComposeCfg(t, cfg), "ssh-proxy")
+		if !strings.Contains(blk, "- QPOT_SSHPROXY_CELL_HOLD="+want+"\n") {
+			t.Errorf("cell_hold_minutes %q: broker not given %s:\n%s", raw, want, blk)
+		}
+		if got := effectiveSetting(cfg, sshProxyHoneypot, "cell_hold_minutes"); got+"m" != want {
+			t.Errorf("cell_hold_minutes %q reported as %q", raw, got)
+		}
+	}
+}

@@ -26,10 +26,26 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-// This explicitly gated test uses production-generated Compose, mandatory host
-// guard, the real broker and host recycler. A host unable to apply the guard
-// fails the test; it never substitutes a permissive network or fake service.
-func TestSSHOrganizationLive(t *testing.T) {
+// sshOrganizationLive is a production-generated HiFi organization stack on
+// real Docker, owned by one test, with the SSH helpers its checks use.
+type sshOrganizationLive struct {
+	ctx       context.Context
+	cfg       *config.Config
+	recycler  *BackendRecycler
+	runDocker func(context.Context, ...string) ([]byte, error)
+	compose   func(context.Context, ...string) ([]byte, error)
+	connect   func() *ssh.Client
+	command   func(*ssh.Client, string) string
+	lease     func(*ssh.Client) (string, uint64)
+}
+
+// startSSHOrganizationLive deploys the organization environment with these
+// ssh-proxy settings, using production-generated Compose, the mandatory host
+// guard, the real broker and host recycler, and removes it after the test. A
+// host unable to apply the guard fails the test; it never substitutes a
+// permissive network or fake service.
+func startSSHOrganizationLive(t *testing.T, settings map[string]string) *sshOrganizationLive {
+	t.Helper()
 	if os.Getenv("QPOT_TEST_HIFI_LIVE") != "1" {
 		t.Skip("set QPOT_TEST_HIFI_LIVE=1 on an isolated Docker host with NET_ADMIN and the locally built HiFi images")
 	}
@@ -40,7 +56,7 @@ func TestSSHOrganizationLive(t *testing.T) {
 	// Software-emulated validation hosts exercise the same real services and
 	// controls. Keep the complete case bounded while allowing their slower I/O.
 	ctx, cancel := context.WithTimeout(context.Background(), 12*time.Minute)
-	defer cancel()
+	t.Cleanup(cancel)
 	cfg := config.Default(fmt.Sprintf("hifi-live-%d", time.Now().UnixNano()))
 	// Compose names the project after this folder, as it does a real
 	// instance's. t.TempDir() alone ends in the same "002" on every run, and
@@ -55,7 +71,10 @@ func TestSSHOrganizationLive(t *testing.T) {
 	cfg.WebUI.Enabled = false
 	enableOnly(cfg, sshProxyHoneypot)
 	hp := cfg.Honeypots[sshProxyHoneypot]
-	hp.CustomConfig = map[string]string{"backends": "2", "environment": "organization", "image_source": "local"}
+	hp.CustomConfig = map[string]string{"environment": "organization", "image_source": "local"}
+	for key, value := range settings {
+		hp.CustomConfig[key] = value
+	}
 	hp.Stealth.CredentialTemplate = "abandoned-vps" // explicit root account for genuine state mutations
 	cfg.Honeypots[sshProxyHoneypot] = hp
 	runDocker := func(runCtx context.Context, args ...string) ([]byte, error) {
@@ -237,6 +256,19 @@ func TestSSHOrganizationLive(t *testing.T) {
 		})
 		return app, generation
 	}
+	return &sshOrganizationLive{ctx: ctx, cfg: cfg, recycler: recycler, runDocker: runDocker, compose: compose,
+		connect: connect, command: command, lease: lease}
+}
+
+// The organization's isolation: concurrent visitors get separate cells, and a
+// cell is recreated whole before the next visitor.
+func TestSSHOrganizationLive(t *testing.T) {
+	// Every connection here comes from this host, one source: without a hold
+	// each still gets a cell of its own, which these checks need.
+	live := startSSHOrganizationLive(t, map[string]string{"backends": "2", "cell_hold_minutes": "0"})
+	ctx, cfg, recycler := live.ctx, live.cfg, live.recycler
+	runDocker, compose := live.runDocker, live.compose
+	connect, command, lease := live.connect, live.command, live.lease
 	first, second := connect(), connect()
 	// The guest's own view names nothing of the host: no mount, no recorder.
 	store, err := sshStoreAt(cfg.DataPath)
@@ -481,6 +513,43 @@ func TestSSHOrganizationLive(t *testing.T) {
 			t.Fatalf("the reset archived %s without the first visitor's finished transcript", service)
 		}
 	}
+}
+
+// A visitor's connections share its cell, and what one leaves the next finds,
+// until the hold after its last connection runs out: the host then recreates
+// the cell and the visitor's next connection starts afresh.
+func TestSSHStickyCellLive(t *testing.T) {
+	live := startSSHOrganizationLive(t, map[string]string{"backends": "1", "cell_hold_minutes": "1"})
+	first := live.connect()
+	live.command(first, "printf sticky > /root/sticky-marker")
+	app, generation := live.lease(first)
+	second := live.connect()
+	if got, gen := live.lease(second); got != app || gen != generation {
+		t.Fatalf("a second connection from the source reached %s at generation %d, not its cell %s at %d", got, gen, app, generation)
+	}
+	_ = first.Close()
+	_ = second.Close()
+	third := live.connect()
+	if output := live.command(third, "cat /root/sticky-marker"); output != "sticky" {
+		t.Fatalf("a returning visitor did not find what it left: %q", output)
+	}
+	if got, gen := live.lease(third); got != app || gen != generation {
+		t.Fatalf("a returning visitor reached %s at generation %d, not its cell %s at %d", got, gen, app, generation)
+	}
+	if live.recycler.generation(app) != generation {
+		t.Fatal("the cell was recreated while its source held it")
+	}
+	_ = third.Close()
+	closed := time.Now()
+	sshLiveResetWait(t, live.ctx, "cell recreated after the hold", func() bool { return live.recycler.generation(app) > generation })
+	if waited := time.Since(closed); waited < 55*time.Second {
+		t.Fatalf("the cell was recreated %s after its last connection closed, inside its one-minute hold", waited)
+	}
+	fresh := live.connect()
+	if got, gen := live.lease(fresh); got != app || gen <= generation {
+		t.Fatalf("after the hold the visitor reached %s at generation %d, not a recreated %s", got, gen, app)
+	}
+	live.command(fresh, "test ! -e /root/sticky-marker")
 }
 
 // A whole-cell reset has a three-minute production recreation deadline plus

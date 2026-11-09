@@ -18,7 +18,9 @@
 //	QPOT_SSHPROXY_LOG        NDJSON session log path  (default "/var/log/ssh-proxy/sessions.json")
 //	QPOT_SSHPROXY_HOST_READABLE_LOG optional bool; generated private host storage only
 //	QPOT_SSHPROXY_IDLE       idle timeout             (default "15m")
-//	QPOT_SSHPROXY_MAXSESSION absolute session cap     (default "2h")
+//	QPOT_SSHPROXY_MAXSESSION absolute cell life, from its first connection (default "2h")
+//	QPOT_SSHPROXY_CELL_HOLD  how long a source keeps its cell after its last
+//	                         connection; "0" resets after every connection (default "30m")
 //	QPOT_SSHPROXY_RATE_IP    new conns/sec per IP     (default "5")
 //	QPOT_SSHPROXY_BURST_IP   rate burst per IP        (default "10")
 //	QPOT_SSHPROXY_CONC_IP    max concurrent per IP    (default "3")
@@ -70,6 +72,7 @@ func run() error {
 		Honeypot:        name,
 		IdleTimeout:     envDuration("QPOT_SSHPROXY_IDLE", 15*time.Minute),
 		MaxSession:      envDuration("QPOT_SSHPROXY_MAXSESSION", 2*time.Hour),
+		CellHold:        envHold("QPOT_SSHPROXY_CELL_HOLD", 30*time.Minute),
 		RatePerSecPerIP: envFloat("QPOT_SSHPROXY_RATE_IP", 5),
 		BurstPerIP:      envFloat("QPOT_SSHPROXY_BURST_IP", 10),
 		MaxConcurrentIP: envInt("QPOT_SSHPROXY_CONC_IP", 3),
@@ -126,8 +129,8 @@ func run() error {
 	go pool.WatchQuarantined(ctx, 10*time.Second)
 
 	available, _, quarantined := pool.Stats()
-	log.Printf("qpot-sshproxy %q listening on %s -> %d configured backend(s); available=%d quarantined=%d; idle=%s maxSession=%s",
-		name, ln.Addr(), len(backends), available, quarantined, cfg.IdleTimeout, cfg.MaxSession)
+	log.Printf("qpot-sshproxy %q listening on %s -> %d configured backend(s); available=%d quarantined=%d; idle=%s maxSession=%s cellHold=%s",
+		name, ln.Addr(), len(backends), available, quarantined, cfg.IdleTimeout, cfg.MaxSession, cfg.CellHold)
 	err = broker.Serve(ctx, ln)
 	if errors.Is(err, context.Canceled) {
 		return nil // SIGINT/SIGTERM: a clean, drained shutdown
@@ -244,7 +247,7 @@ func requestStartupResets(sink proxy.EventSink, name string, backends []proxy.Ba
 	for _, backend := range backends {
 		baseline, ok := gate.BaseGeneration(backend.ID)
 		if ok {
-			sink.Emit(proxy.Event{EventType: proxy.EventBackendError, Honeypot: name,
+			sink.Emit(proxy.Event{EventType: proxy.EventCellReset, Honeypot: name,
 				Backend: backend.ID, Generation: &baseline, Reason: proxy.ReasonStartupReset})
 		}
 	}
@@ -263,6 +266,17 @@ func envDuration(key string, def time.Duration) time.Duration {
 			return d
 		}
 		log.Printf("warning: %s=%q is not a valid positive duration; using %s", key, v, def)
+	}
+	return def
+}
+
+// envHold reads a duration that may be zero: no hold.
+func envHold(key string, def time.Duration) time.Duration {
+	if v := os.Getenv(key); v != "" {
+		if d, err := time.ParseDuration(v); err == nil && d >= 0 {
+			return d
+		}
+		log.Printf("warning: %s=%q is not a valid duration; using %s", key, v, def)
 	}
 	return def
 }

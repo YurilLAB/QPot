@@ -339,7 +339,7 @@ start without a provider, so `enable` asks for these first:
 | `galah` | `llm_provider`, `llm_server_url`, `llm_model`, `llm_temperature`, `llm_api_key`, `llm_cloud_location`, `llm_cloud_project` | `llm_provider`, `llm_model` |
 | `cowrie` | `persona` (one of the image's persona IDs), `persona_rotation` (days, 0-365), `bait` (`on`/`off`), `bait_profile` (`ops`/`industrial`), `bait_target` (`conpot`/`refrigeration`) | – |
 | `conpot` | `template` (one of the image's deployed device templates) | – |
-| `ssh-proxy` | `backends` (1-16, default 2), `environment` (`standalone`/`organization`), `image_source` (`published`/`local`) | – |
+| `ssh-proxy` | `backends` (1-16, default 2), `environment` (`standalone`/`organization`), `image_source` (`published`/`local`), `cell_hold_minutes` (0-120, default 30) | – |
 | `refrigeration` | `site_profile` (`retail`/`plasma`; empty restores retail) | – |
 
 ```bash
@@ -349,7 +349,8 @@ qpot honeypot enable beelzebub
 
 HiFi defaults to a standalone Debian 12 server and published images. The
 connected organization adds a real PostgreSQL database and SSH backup per slot;
-all three reset after the ingress SSH connection ends. For this development
+all three reset once the visitor lets go: `cell_hold_minutes` (default 30)
+after its address's last connection, or after every connection when 0. For this development
 feature, build both current HiFi images first, then select the fixed local tags:
 
 ```bash

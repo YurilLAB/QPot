@@ -1566,10 +1566,15 @@
             const sourceField = $('set-image_source');
             const sourceSetting = (settingsView && Array.isArray(settingsView.settings) ? settingsView.settings : []).find((s) => s && s.key === 'image_source');
             const source = sourceField ? sourceField.value || 'published' : sourceSetting && (sourceSetting.value || sourceSetting.effective) || 'published';
+            const holdField = $('set-cell_hold_minutes');
+            const holdSetting = (settingsView && Array.isArray(settingsView.settings) ? settingsView.settings : []).find((s) => s && s.key === 'cell_hold_minutes');
+            const holdRaw = holdField ? holdField.value : holdSetting ? holdSetting.value || holdSetting.effective || '' : '';
+            const holdNumber = holdRaw === '' ? 30 : Number(holdRaw);
+            const hold = Number.isInteger(holdNumber) && holdNumber >= 0 && holdNumber <= 120 ? holdNumber : 30;
             target.replaceChildren(
                 h('strong', {}, organization ? 'Application, database and backup' : 'Standalone Debian server'),
-                h('p', { class: 'setting-description' }, organization ? 'Each SSH connection gets a real Debian 12 application server, a PostgreSQL database and an SSH backup host. Their files, addresses and decoy credentials describe the same environment.' : 'Each SSH connection gets one real Debian 12 server with OpenSSH. This is the existing HiFi environment.'),
-                h('p', { class: 'setting-description' }, 'Changes last for that SSH connection, including its multiplexed channels. Disconnecting resets the environment before it can be reused. A new connection starts with fresh state.'),
+                h('p', { class: 'setting-description' }, organization ? 'Each visitor gets a real Debian 12 application server, a PostgreSQL database and an SSH backup host. Their files, addresses and decoy credentials describe the same environment.' : 'Each visitor gets one real Debian 12 server with OpenSSH. This is the existing HiFi environment.'),
+                h('p', { class: 'setting-description' }, hold > 0 ? `Connections from one visitor's address share the environment and what earlier ones changed, while any is open and for ${hold} minute${hold === 1 ? '' : 's'} after the last one closes, at most two hours in all. It is then reset before anyone else uses it.` : 'Changes last for that SSH connection, including its multiplexed channels. Disconnecting resets the environment before it can be reused. A new connection starts with fresh state.'),
                 h('p', { class: 'setting-description' }, validCount ? `${count} backend slot${count === 1 ? '' : 's'} run${count === 1 ? 's' : ''} ${count * (organization ? 3 : 1)} decoy container${count * (organization ? 3 : 1) === 1 ? '' : 's'}, plus the shared broker. CPU, memory and process limits apply to each container.` : 'Enter a backend count from 1 to 16. Organization runs three decoy containers per slot, plus the shared broker.'),
                 h('p', { class: 'setting-description' }, 'These real shells use writable container filesystems. Use a dedicated sensor VM and suitable isolation. Writable-layer disk quotas need a supported Docker storage driver.'),
                 h('p', { class: 'setting-description' }, organization ? 'Connections are restricted to the services in this environment. The host, LAN, management services and other environments remain outside it.' : 'The server has no outbound access.'),
@@ -1595,6 +1600,7 @@
                 const siteProfile = v.name === 'refrigeration' && s.key === 'site_profile';
                 const sshEnvironment = v.name === 'ssh-proxy' && s.key === 'environment';
                 const sshImageSource = v.name === 'ssh-proxy' && s.key === 'image_source';
+                const sshCellHold = v.name === 'ssh-proxy' && s.key === 'cell_hold_minutes';
                 const labels = baitProfile ? { ops: 'Linux operations files', industrial: 'Industrial support archives' } : baitTarget ? { conpot: 'Conpot device', refrigeration: 'Refrigeration supervisor' } : siteProfile ? Object.fromEntries(Object.entries(coldStorageScenarios).map(([key, scene]) => [key, scene.label])) : sshEnvironment ? { standalone: 'Standalone Debian server', organization: 'Application, database and backup' } : sshImageSource ? { published: 'Published registry images', local: 'Images built locally' } : {};
                 const choiceLabel = (a) => labels[a] || String(a);
                 const defaultChoice = baitProfile ? 'ops' : baitTarget ? 'conpot' : siteProfile ? 'retail' : sshEnvironment ? 'standalone' : sshImageSource ? 'published' : '';
@@ -1632,7 +1638,7 @@
                 }
                 control.dataset.orig = s.type === 'secret' ? '' : String(s.value || '');
                 const item = h('div', { class: 'setting-item' },
-                    h('label', { class: 'setting-title', for: id }, options.length ? 'Industrial device' : baitProfile ? 'Files and canaries' : baitTarget ? 'Archive reference' : siteProfile ? 'Cold storage scenario' : sshEnvironment ? 'HiFi environment' : sshImageSource ? 'HiFi images' : s.key, s.required ? ' (required)' : ''),
+                    h('label', { class: 'setting-title', for: id }, options.length ? 'Industrial device' : baitProfile ? 'Files and canaries' : baitTarget ? 'Archive reference' : siteProfile ? 'Cold storage scenario' : sshEnvironment ? 'HiFi environment' : sshImageSource ? 'HiFi images' : sshCellHold ? 'Visitor hold (minutes)' : s.key, s.required ? ' (required)' : ''),
                     s.help ? h('span', { class: 'setting-description' }, String(s.help)) : null,
                     control);
                 if (options.length) {
@@ -1661,8 +1667,8 @@
                     update();
                     item.append(preview);
                 }
-                if (sshImageSource) {
-                    control.addEventListener('change', () => {
+                if (sshImageSource || sshCellHold) {
+                    control.addEventListener(sshCellHold ? 'input' : 'change', () => {
                         const preview = $('ssh-environment-preview');
                         const environment = $('set-environment');
                         const environmentSetting = list.find((setting) => setting && setting.key === 'environment');

@@ -1014,6 +1014,8 @@ services:
       {{- end}}
       - QPOT_SSHPROXY_BACKENDS={{sshBackendCSV $.Config}}
       - QPOT_SSHPROXY_GENERATIONS={{sshProxyGenerationsPath}}
+      # How long a visitor's source keeps its cell after its last connection.
+      - QPOT_SSHPROXY_CELL_HOLD={{sshCellHold $.Config}}
       {{- range $key := runtimeProxyKeys}}
       - {{$key}}=
       {{- end}}
@@ -1266,6 +1268,7 @@ services:
 		"tannerCompanions":       tannerCompanions,
 		"sshProxyBackends":       sshProxyBackends,
 		"sshBackendCSV":          sshBackendCSV,
+		"sshCellHold":            sshCellHold,
 		"sshBackendHostname":     sshBackendHostname,
 		// Cowrie's persona and identity lifetime (see deception.go).
 		"cowriePersona":         cowriePersona,

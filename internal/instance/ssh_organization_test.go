@@ -626,7 +626,7 @@ func TestSSHRecyclerPreservesNewStartupWhilePreviousResetFinishes(t *testing.T) 
 		if err != nil {
 			t.Fatal(err)
 		}
-		err = json.NewEncoder(file).Encode(map[string]any{"event_type": "ssh_proxy_backend_error", "backend": "ssh-backend-1", "generation": g})
+		err = json.NewEncoder(file).Encode(map[string]any{"event_type": "ssh_proxy_cell_reset", "backend": "ssh-backend-1", "generation": g})
 		file.Close()
 		if err != nil {
 			t.Fatal(err)
@@ -713,7 +713,7 @@ func TestSSHRecyclerRejectsFutureGenerationsAndFollowsRotatedLog(t *testing.T) {
 	dir := t.TempDir()
 	logPath := filepath.Join(dir, "sessions.json")
 	line := func(g uint64) string {
-		return fmt.Sprintf("{\"event_type\":\"ssh_proxy_backend_error\",\"backend\":\"ssh-backend-1\",\"generation\":%d}\n", g)
+		return fmt.Sprintf("{\"event_type\":\"ssh_proxy_cell_reset\",\"backend\":\"ssh-backend-1\",\"generation\":%d}\n", g)
 	}
 	if err := os.WriteFile(logPath, []byte(line(99)+line(0)), 0o600); err != nil {
 		t.Fatal(err)

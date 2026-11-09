@@ -118,15 +118,17 @@ credentials, host keys, database contents and backups to the same scene. These
 are real service relationships within one private cell, distinct from the
 reference-only internal hosts in Cowrie's ops bait files.
 
-State lasts for one ingress SSH connection, including all multiplexed channels
-on it. Files, accounts and database writes reflect real changes in that cell.
+State lasts for one visitor: every connection from its address, and their
+multiplexed channels, while any is open and for `cell_hold_minutes` (default
+30) after the last one closes, at most two hours in all. Files, accounts and database writes reflect real changes in that cell.
 HiFi app/backup roots are deliberately writable, unlike the static honeypots'
 read-only roots. This allows ordinary OS consequences for permissions, accounts
 and tools. A dedicated sensor VM and suitable isolation/storage limits remain
 necessary; log cleanup is not a portable hard quota on writable image layers.
 The app, database and backup reset together before the slot serves another
-connection; reconnecting gets fresh state, even from the same IP. The broker
-neither identifies a continuing attacker nor promises cross-connection state.
+visitor. The broker knows a visitor only by its address: one that changes
+address starts afresh, and `cell_hold_minutes=0` resets after every
+connection.
 Logs and session evidence follow QPot's retention policy independently of the
 reset. Failed reset/health checks keep the cell out of the pool.
 
@@ -256,7 +258,7 @@ OpenSSH.
 **HiFi mode** closes that gap. A transparent TCP broker, the `ssh-proxy`
 honeypot, passes the attacker straight to real OpenSSH backends. Standalone
 servers have no outbound access; connected mode permits only its controlled
-cell peers. The entire cell is recreated after every ingress SSH connection. Enable it with
+cell peers. The entire cell is recreated after each visitor. Enable it with
 `qpot setup --profile hifi` or `qpot honeypot enable ssh-proxy`.
 
 - [ssh-hifi-proxy.md](ssh-hifi-proxy.md): how HiFi mode works.

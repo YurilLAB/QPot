@@ -39,7 +39,7 @@ brings T-Pot's web interface with a dashboard for all of it.
 - **A believable identity per instance.** Each instance gets its own operating
   system, SSH version, host name, users and files, kept across restarts. Shell
   commands answer the way the real tools do. An optional high-interaction mode
-  puts attackers on real OpenSSH servers that are rebuilt after every session.
+  puts attackers on real OpenSSH servers that are rebuilt after each visitor.
 - **Safe by default.** Every honeypot has its own network, no Linux
   capabilities beyond what it needs, a read-only filesystem and resource
   limits. An egress guard stops honeypots reaching your local network, the host

@@ -24,9 +24,14 @@ type Config struct {
 	// IdleTimeout tears down a session after this long with no bytes in a
 	// direction. Bounds slowloris / abandoned sessions. Default 15m.
 	IdleTimeout time.Duration
-	// MaxSession is an absolute per-session lifetime cap regardless of activity.
-	// Bounds a single attacker monopolizing a backend. Default 2h.
+	// MaxSession is an absolute lifetime cap on a cell, from its first
+	// connection, regardless of activity: its connections close then. Bounds
+	// a single attacker monopolizing a backend. Default 2h.
 	MaxSession time.Duration
+	// CellHold is how long a source keeps its cell after its last connection
+	// closes, so its later connections find the state it left (see cellSet).
+	// Zero gives every connection a cell of its own, reset when it closes.
+	CellHold time.Duration
 	// DialTimeout bounds the backend connect. Default 5s.
 	DialTimeout time.Duration
 
@@ -85,6 +90,7 @@ func (c *Config) withDefaults() {
 type Broker struct {
 	cfg     Config
 	pool    *Pool
+	cells   *cellSet
 	lim     *limiter
 	dial    DialFunc
 	wg      sync.WaitGroup
@@ -100,11 +106,25 @@ func NewBroker(cfg Config, pool *Pool) *Broker {
 		lim:  newLimiter(cfg.RatePerSecPerIP, cfg.BurstPerIP, cfg.MaxConcurrentIP, cfg.MaxConcurrent),
 		dial: cfg.Dial,
 	}
+	b.cells = newCellSet(pool, cfg.Gate, max(cfg.CellHold, 0), cfg.MaxSession, b.freeCell)
 	if b.dial == nil {
 		d := &net.Dialer{Timeout: cfg.DialTimeout}
 		b.dial = d.DialContext
 	}
 	return b
+}
+
+// freeCell asks the host to recreate a cell, then hands its backend back to
+// the pool, which takes it into rotation only once the recreation is seen.
+// The request goes first: the pool's reset waits for what it starts.
+func (b *Broker) freeCell(c *cell, reason string) {
+	b.cfg.Sink.Emit(Event{EventType: EventCellReset, Honeypot: b.cfg.Honeypot,
+		Backend: c.backend.ID, Generation: c.generation, Reason: reason})
+	if c.quarantine {
+		b.pool.Quarantine(c.backend)
+		return
+	}
+	b.pool.Release(c.backend)
 }
 
 // Serve accepts connections on ln until ctx is cancelled or ln is closed, then
@@ -146,6 +166,7 @@ func (b *Broker) Serve(ctx context.Context, ln net.Listener) error {
 	}
 
 	b.wg.Wait()
+	b.cells.close()
 	return ctx.Err()
 }
 
@@ -198,36 +219,29 @@ func (b *Broker) handle(ctx context.Context, client net.Conn) {
 	}
 	defer release()
 
-	// 2) Lease a backend (fixed pool; never attacker-influenced).
-	backend, err := b.pool.Lease()
+	// 2) Join the source's cell, or lease one (fixed pool; never
+	// attacker-influenced).
+	c, err := b.cells.join(sourceKey(ip))
 	if err != nil {
 		reject(ReasonPoolExhausted)
 		return
 	}
-	var generation *uint64
-	if b.cfg.Gate != nil {
-		if baseline, ok := b.cfg.Gate.BaseGeneration(backend.ID); ok {
-			generation = &baseline
-		}
-	}
-	releaseBackend := true
-	// Release runs the backend reset, which can take minutes. The attacker's
+	backend, generation := c.backend, c.generation
+	// Freeing a cell runs its reset, which can take minutes. The attacker's
 	// connection is closed first: a failed dial otherwise left an accepted,
 	// silent connection open for the whole reset. Its limiter slot stays
 	// taken until the reset ends (the deferred release above runs after
 	// this), so a source at its cap cannot park more backends in reset than
-	// it may hold and drain the pool by connecting and dropping.
+	// it may hold and drain the pool by breaking cells.
 	defer func() {
 		_ = client.Close()
-		if releaseBackend {
-			b.pool.Release(backend)
-		} else {
-			b.pool.Quarantine(backend)
+		if reason := b.cells.leave(c); reason != "" {
+			b.freeCell(c, reason)
 		}
 	}()
 	sessionID, err := newSessionID()
 	if err != nil {
-		releaseBackend = false
+		b.cells.fail(c, ReasonBackendDialError, true)
 		b.cfg.Sink.Emit(Event{EventType: EventBackendError, Honeypot: b.cfg.Honeypot,
 			SrcIP: ip, SrcPort: port, Backend: backend.ID, Generation: generation,
 			Reason: ReasonBackendDialError})
@@ -239,6 +253,7 @@ func (b *Broker) handle(ctx context.Context, client net.Conn) {
 	upstream, err := b.dial(dialCtx, "tcp", backend.Addr)
 	cancelDial()
 	if err != nil {
+		b.cells.fail(c, ReasonBackendDialError, false)
 		b.cfg.Sink.Emit(Event{
 			EventType: EventBackendError, Honeypot: b.cfg.Honeypot,
 			SrcIP: ip, SrcPort: port, Backend: backend.ID, Generation: generation,
@@ -256,11 +271,11 @@ func (b *Broker) handle(ctx context.Context, client net.Conn) {
 	}
 	b.cfg.Sink.Emit(connected)
 
-	// 4) Splice. The whole session is bounded by MaxSession; idleness within it
-	// is bounded by IdleTimeout. Either bound, ctx cancellation, or a peer close
-	// tears the session down.
+	// 4) Splice. The session ends with its cell's life (MaxSession from the
+	// cell's first connection); idleness within it is bounded by IdleTimeout.
+	// Either bound, ctx cancellation, or a peer close tears the session down.
 	start := time.Now()
-	in, out, reason := b.splice(ctx, client, upstream)
+	in, out, reason := b.splice(ctx, client, upstream, c.deadline(b.cfg.MaxSession))
 
 	b.cfg.Sink.Emit(Event{
 		EventType: EventSession, Honeypot: b.cfg.Honeypot,
@@ -275,8 +290,8 @@ func (b *Broker) handle(ctx context.Context, client net.Conn) {
 // splice copies bytes in both directions until one side closes, the session
 // times out, or ctx is cancelled. It returns bytes client->backend (in),
 // backend->client (out), and the teardown reason.
-func (b *Broker) splice(ctx context.Context, client, upstream net.Conn) (in, out int64, reason string) {
-	sessCtx, cancel := context.WithTimeout(ctx, b.cfg.MaxSession)
+func (b *Broker) splice(ctx context.Context, client, upstream net.Conn, deadline time.Time) (in, out int64, reason string) {
+	sessCtx, cancel := context.WithDeadline(ctx, deadline)
 	defer cancel()
 
 	// When the session context fires (absolute timeout or broker shutdown),

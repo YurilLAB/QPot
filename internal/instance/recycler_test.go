@@ -50,8 +50,10 @@ func TestReadNewLinesHandlesPartialAndTruncation(t *testing.T) {
 
 func TestRecycleTarget(t *testing.T) {
 	cases := map[string]string{
-		`{"event_type":"ssh_proxy_session","backend":"ssh-backend-1"}`:       "ssh-backend-1",
-		`{"event_type":"ssh_proxy_backend_error","backend":"ssh-backend-2"}`: "ssh-backend-2",
+		`{"event_type":"ssh_proxy_cell_reset","backend":"ssh-backend-1"}`: "ssh-backend-1",
+		// A cell outlives its source's connections and failed dials.
+		`{"event_type":"ssh_proxy_session","backend":"ssh-backend-1"}`:       "",
+		`{"event_type":"ssh_proxy_backend_error","backend":"ssh-backend-2"}`: "",
 		`{"event_type":"ssh_proxy_rejected","backend":"ssh-backend-1"}`:      "",
 		`not json`: "",
 	}
@@ -62,9 +64,9 @@ func TestRecycleTarget(t *testing.T) {
 	}
 }
 
-// The recycler recreates every backend at start, then each backend whose
-// session ends - and never anything outside the configured pool.
-func TestBackendRecyclerRecreatesAfterSessions(t *testing.T) {
+// The recycler recreates every backend at start, then each backend the broker
+// asks to reset - and never anything outside the configured pool.
+func TestBackendRecyclerRecreatesOnCellResets(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "sessions.json")
 	if err := os.WriteFile(path, []byte(`{"event_type":"ssh_proxy_session","backend":"ssh-backend-1"}`+"\n"), 0o600); err != nil {
 		t.Fatal(err)
@@ -99,8 +101,10 @@ func TestBackendRecyclerRecreatesAfterSessions(t *testing.T) {
 	waitFor(func() bool { return count("ssh-backend-1") == 1 && count("ssh-backend-2") == 1 })
 
 	f, _ := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0o600)
-	f.WriteString(`{"event_type":"ssh_proxy_session","backend":"ssh-backend-2"}` + "\n")
-	f.WriteString(`{"event_type":"ssh_proxy_session","backend":"evil; rm -rf /"}` + "\n")
+	f.WriteString(`{"event_type":"ssh_proxy_cell_reset","backend":"ssh-backend-2"}` + "\n")
+	f.WriteString(`{"event_type":"ssh_proxy_cell_reset","backend":"evil; rm -rf /"}` + "\n")
+	f.WriteString(`{"event_type":"ssh_proxy_session","backend":"ssh-backend-1"}` + "\n")
+	f.WriteString(`{"event_type":"ssh_proxy_backend_error","backend":"ssh-backend-1"}` + "\n")
 	f.WriteString(`{"event_type":"ssh_proxy_rejected","backend":"ssh-backend-1"}` + "\n")
 	f.Close()
 	waitFor(func() bool { return count("ssh-backend-2") == 2 })
@@ -161,7 +165,7 @@ func (b *recyclerLogBuffer) records() []map[string]any {
 
 func TestRecyclerMetadataReadFailureReportsOnceAndRecoversWithoutLostAuthority(t *testing.T) {
 	file := filepath.Join(t.TempDir(), "sessions.json")
-	event := []byte(`{"event_type":"ssh_proxy_backend_error","backend":"ssh-backend-1","generation":0}`)
+	event := []byte(`{"event_type":"ssh_proxy_cell_reset","backend":"ssh-backend-1","generation":0}`)
 	content := append(append([]byte(nil), event...), '\n')
 	if err := os.WriteFile(file, content, 0o600); err != nil {
 		t.Fatal(err)

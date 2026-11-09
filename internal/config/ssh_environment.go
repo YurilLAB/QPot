@@ -10,13 +10,18 @@ import (
 const (
 	// SSHEnvironmentStandalone keeps the ordinary disposable SSH backend pool.
 	SSHEnvironmentStandalone = "standalone"
-	// SSHEnvironmentOrganization gives each SSH connection its own application,
-	// database and backup cell, recycled together before the next connection.
+	// SSHEnvironmentOrganization gives each visitor its own application,
+	// database and backup cell, recycled together before the next visitor.
 	SSHEnvironmentOrganization = "organization"
 	// SSHImageSourcePublished uses QPot's published HiFi images.
 	SSHImageSourcePublished = "published"
 	// SSHImageSourceLocal uses the fixed development tags built by the operator.
 	SSHImageSourceLocal = "local"
+	// SSHCellHoldDefault is how many minutes a source keeps its cell after its
+	// last connection closes, unless cell_hold_minutes says otherwise.
+	SSHCellHoldDefault = 30
+	// SSHCellHoldMax is the longest hold: a cell's whole life is two hours.
+	SSHCellHoldMax = 120
 )
 
 // Docker uses a 100ms CFS period for the cpus setting; Linux's minimum positive
@@ -58,6 +63,42 @@ func SSHImageSource(cfg *Config) string {
 		return SSHImageSourcePublished
 	}
 	return source
+}
+
+// SSHCellHoldMinutes returns how many minutes a source keeps its HiFi cell
+// after its last connection closes; zero resets the cell after every
+// connection. Invalid values are left to ValidateSSHEnvironment and read here
+// as the default.
+func SSHCellHoldMinutes(cfg *Config) int {
+	if cfg == nil {
+		return SSHCellHoldDefault
+	}
+	hp, _ := cfg.GetHoneypotConfig("ssh-proxy")
+	minutes, ok := parseSSHCellHold(hp.CustomConfig["cell_hold_minutes"])
+	if !ok {
+		return SSHCellHoldDefault
+	}
+	return minutes
+}
+
+// parseSSHCellHold parses a plain whole number of minutes, 0 to SSHCellHoldMax.
+// Empty is the default.
+func parseSSHCellHold(raw string) (int, bool) {
+	value := strings.TrimSpace(raw)
+	if value == "" {
+		return SSHCellHoldDefault, true
+	}
+	if len(value) > 3 || (len(value) > 1 && value[0] == '0') {
+		return 0, false
+	}
+	minutes := 0
+	for _, c := range value {
+		if c < '0' || c > '9' {
+			return 0, false
+		}
+		minutes = minutes*10 + int(c-'0')
+	}
+	return minutes, minutes <= SSHCellHoldMax
 }
 
 // ValidateSSHEnvironment checks the HiFi environment and its supported setting
@@ -117,9 +158,12 @@ func ValidateSSHEnvironmentSettings(custom map[string]string) error {
 	}
 	slices.Sort(keys)
 	for _, key := range keys {
-		if key != "backends" && key != "environment" && key != "image_source" {
-			return fmt.Errorf("honeypots.ssh-proxy.custom_config: unsupported setting %q (use backends, environment or image_source)", key)
+		if key != "backends" && key != "environment" && key != "image_source" && key != "cell_hold_minutes" {
+			return fmt.Errorf("honeypots.ssh-proxy.custom_config: unsupported setting %q (use backends, environment, image_source or cell_hold_minutes)", key)
 		}
+	}
+	if _, ok := parseSSHCellHold(custom["cell_hold_minutes"]); !ok {
+		return fmt.Errorf("honeypots.ssh-proxy.custom_config.cell_hold_minutes %q: use a whole number of minutes from 0 to %d", custom["cell_hold_minutes"], SSHCellHoldMax)
 	}
 	mode := strings.TrimSpace(custom["environment"])
 	switch mode {
