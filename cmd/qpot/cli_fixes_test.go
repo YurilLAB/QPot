@@ -118,6 +118,7 @@ func TestHoneypotSetHelpListsConpotTemplates(t *testing.T) {
 func TestIndustrialProfilesCatalogCLI(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
 	root := &cobra.Command{Use: "qpot", PersistentPreRunE: checkInstanceFlag, SilenceErrors: true, SilenceUsage: true}
 	root.AddCommand(newHoneypotCommand())
 	var output bytes.Buffer
@@ -143,6 +144,7 @@ func TestIndustrialProfilesCatalogCLI(t *testing.T) {
 func TestIndustrialProfilesCatalogWithBrokenConfig(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
 	dir := filepath.Join(home, ".qpot", "instances", "broken-industrial")
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		t.Fatal(err)

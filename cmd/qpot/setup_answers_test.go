@@ -150,6 +150,7 @@ func TestSetupStateRoundTripAndDistrust(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	t.Setenv("USERPROFILE", home)
+	t.Setenv("USERPROFILE", home)
 	if _, ok := loadSetupState(); ok {
 		t.Fatal("no state yet")
 	}
