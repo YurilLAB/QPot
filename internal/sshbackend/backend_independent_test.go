@@ -179,6 +179,9 @@ func FuzzBootstrapEnvironment(f *testing.F) {
 // This isolated reproducer uses a sparse preexisting record (under 2 MiB of
 // actual new capture data) to test admission near the per-user logical quota.
 func TestConcurrentRecorderCapacity(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("the packaged SSH recorder runs on Linux")
+	}
 	for _, near := range []bool{true, false} {
 		t.Run(map[bool]string{true: "near-capacity", false: "parallel-admission"}[near], func(t *testing.T) {
 			concurrentRecorderCapacity(t, near)
@@ -291,6 +294,9 @@ func concurrentRecorderCapacity(t *testing.T, near bool) {
 }
 
 func TestCaptureReservationsIncludePendingFiles(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("the packaged SSH recorder runs on Linux")
+	}
 	dir := t.TempDir()
 	// 408 completed sessions leave 2040 ordinary files. Two admissions can
 	// interleave before either has created its five output/metadata files.
@@ -312,6 +318,9 @@ func TestCaptureReservationsIncludePendingFiles(t *testing.T) {
 }
 
 func TestAbandonedCaptureClaimRemainsConservative(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("the packaged SSH recorder runs on Linux")
+	}
 	dir := t.TempDir()
 	existing, err := os.Create(filepath.Join(dir, "existing.out"))
 	if err != nil {

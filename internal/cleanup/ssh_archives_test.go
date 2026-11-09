@@ -395,3 +395,27 @@ func TestSSHArchiveSelectionCancellationClosesCellHandles(t *testing.T) {
 		t.Fatalf("cancelled archive scan leaked a directory handle: %v", err)
 	}
 }
+
+// TestSSHArchiveWithAHardLinkIsKept: a guest can hard-link a file into its
+// recording. A file with a second link is not the archive's alone, so the
+// expired archive stays; the same archive without the link is removed by
+// TestSSHArchiveRetentionPrunesClosedTreesAndPreservesLiveAndFreshLogs.
+func TestSSHArchiveWithAHardLinkIsKept(t *testing.T) {
+	cfg := testInstance(t)
+	base := "honeypots/ssh-proxy/logs/cells/ssh-backend-1/"
+	victim := putLog(t, cfg, base+"archive-g42-123456789/logs/0/events.json", 1, 128, -day)
+	deliver(t, cfg, "ssh_backend", victim, -1)
+	archive := filepath.Dir(filepath.Dir(filepath.Dir(victim)))
+	other := filepath.Join(cfg.DataPath, "elsewhere.json")
+	if err := os.Link(victim, other); err != nil {
+		t.Skipf("hard links unavailable here: %v", err)
+	}
+	old := now.Add(-40 * day)
+	if err := os.Chtimes(archive, old, old); err != nil {
+		t.Fatal(err)
+	}
+	Run(context.Background(), cfg, limits(), Options{Now: now, CollectorRunning: true})
+	if !exists(archive) || !exists(victim) || !exists(other) {
+		t.Fatal("removed an archive holding a hard-linked file")
+	}
+}

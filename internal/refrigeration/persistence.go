@@ -8,6 +8,7 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"runtime"
 	"time"
 )
 
@@ -159,8 +160,12 @@ func (s *Server) saveLocked() error {
 	if err = os.Rename(name, s.statePath()); err != nil {
 		return fmt.Errorf("replace refrigeration state: %w", err)
 	}
-	if err = dir.Sync(); err != nil {
-		return &committedStateError{fmt.Errorf("sync committed refrigeration state directory: %w", err)}
+	// Windows cannot sync a directory handle (Access is denied); there the
+	// rename itself is atomic, as for every other state file QPot keeps.
+	if runtime.GOOS != "windows" {
+		if err = dir.Sync(); err != nil {
+			return &committedStateError{fmt.Errorf("sync committed refrigeration state directory: %w", err)}
+		}
 	}
 	return nil
 }

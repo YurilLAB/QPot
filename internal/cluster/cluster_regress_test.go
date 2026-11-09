@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"sync"
 	"testing"
@@ -158,7 +159,8 @@ func TestClusterSecretPersistsAndUnlocks(t *testing.T) {
 		t.Fatal(err)
 	}
 	st, err := os.Stat(filepath.Join(dir, secretFile))
-	if err != nil || st.Mode().Perm() != 0o600 {
+	// Windows has no Unix modes; the profile folder's ACL keeps it private.
+	if err != nil || runtime.GOOS != "windows" && st.Mode().Perm() != 0o600 {
 		t.Fatalf("secret file: %v mode=%v, want 0600", err, st.Mode().Perm())
 	}
 

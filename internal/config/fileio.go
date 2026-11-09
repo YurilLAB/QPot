@@ -5,6 +5,10 @@ import (
 	"io"
 )
 
+// ReplaceFile renames from over to, as a Save does; on Windows it waits out a
+// reader that has to open for that moment.
+func ReplaceFile(from, to string) error { return renameFile(from, to) }
+
 // ReadFile reads a config file, refusing one larger than limit bytes (0: no
 // limit). It sees either the whole file before a Save or the whole file after
 // it; on Windows it waits out a Save that is replacing the file that moment.

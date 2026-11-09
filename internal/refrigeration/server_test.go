@@ -18,6 +18,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -475,6 +476,9 @@ func TestPrecommitStateFailureKeepsMemoryAndDisk(t *testing.T) {
 	if os.Geteuid() == 0 {
 		t.Skip("permission-failure fixture requires unprivileged UID")
 	}
+	if runtime.GOOS == "windows" {
+		t.Skip("permission-failure fixture needs Unix directory modes")
+	}
 	s, _ := newProtocolRig(t)
 	c := loginCookie(t, s, "Supervisor", "12345")
 	if err := os.Chmod(s.cfg.StateDir, 0o300); err != nil {
@@ -720,7 +724,7 @@ func TestJournalRotationAndPrivateFiles(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if info.Size() > maxEventFile || info.Mode().Perm() != 0o600 {
+		if info.Size() > maxEventFile || runtime.GOOS != "windows" && info.Mode().Perm() != 0o600 {
 			t.Fatal("journal escaped size/privacy bounds", file, info)
 		}
 	}

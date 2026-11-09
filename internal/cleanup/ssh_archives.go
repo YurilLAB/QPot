@@ -334,7 +334,7 @@ func readSSHInventory(ctx context.Context, root *os.Root, dir string, helper Hel
 				}
 			}
 		}
-		if !info.Mode().IsRegular() || !singleEvidenceLink(info) {
+		if !info.Mode().IsRegular() || !singleEvidenceLink(root, rel, info) {
 			return errors.New("SSH evidence contains an unsupported object or hard link")
 		}
 		entry := sshEvidenceFile{rel: rel, size: info.Size(), disk: onDisk(info)}

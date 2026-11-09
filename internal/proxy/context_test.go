@@ -8,6 +8,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -22,6 +23,11 @@ func contextFixture() ConnectionContext {
 }
 
 func TestConnectionContextAtomicReplacement(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		// Windows refuses to replace a file another handle has open. The
+		// broker and its readers run in Linux containers.
+		t.Skip("rename over an open file is Linux semantics")
+	}
 	dir := t.TempDir()
 	first := contextFixture()
 	if err := writeConnectionContext(dir, "be1", first); err != nil {

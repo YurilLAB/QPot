@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"testing"
 	"time"
 )
@@ -127,7 +128,7 @@ func TestUpgradeCrashBoundariesPreserveRecoverableState(t *testing.T) {
 					if err != nil || !bytes.Equal(got, raw) {
 						t.Fatal("backup is not exact original state")
 					}
-					if info, err := os.Stat(path); err != nil || info.Mode().Perm() != 0600 {
+					if info, err := os.Stat(path); err != nil || runtime.GOOS != "windows" && info.Mode().Perm() != 0600 {
 						t.Fatal("backup permissions expose recovery credentials")
 					}
 				}

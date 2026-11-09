@@ -73,7 +73,7 @@ func TestComposeHostKeysReadOnly(t *testing.T) {
 	for _, backend := range sshBackendServiceNames(cfg) {
 		found := false
 		for _, mount := range doc.Services[backend].Volumes {
-			if strings.HasSuffix(mount, "/shared-hostkeys:/run/sshd/bootstrap/keys:ro") {
+			if strings.HasSuffix(filepath.ToSlash(mount), "/shared-hostkeys:/run/sshd/bootstrap/keys:ro") {
 				found = true
 			}
 		}

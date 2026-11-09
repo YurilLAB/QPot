@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 
 	"github.com/qpot/qpot/internal/config"
@@ -61,7 +62,12 @@ func TestNewSandboxUnknownModeDegrades(t *testing.T) {
 // the generated compose names a runtime docker refuses.
 func TestRuntimeUsableRequiresDockerRegistration(t *testing.T) {
 	dir := t.TempDir()
-	if err := os.WriteFile(filepath.Join(dir, "runsc"), []byte("#!/bin/sh\n"), 0o755); err != nil {
+	// Windows finds a program on PATH only with an executable extension.
+	name := "runsc"
+	if runtime.GOOS == "windows" {
+		name += ".exe"
+	}
+	if err := os.WriteFile(filepath.Join(dir, name), []byte("#!/bin/sh\n"), 0o755); err != nil {
 		t.Fatal(err)
 	}
 	t.Setenv("PATH", dir)

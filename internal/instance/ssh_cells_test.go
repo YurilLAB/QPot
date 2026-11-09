@@ -457,7 +457,7 @@ func TestHiFiPrivateCellTopologyAndIngress(t *testing.T) {
 								if err != nil {
 									t.Fatal(err)
 								}
-								contextMount = strings.HasPrefix(mount, filepath.ToSlash(contextDir)+":")
+								contextMount = strings.HasPrefix(filepath.ToSlash(mount), filepath.ToSlash(contextDir)+":")
 							}
 						}
 						if !contextMount {

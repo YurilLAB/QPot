@@ -20,6 +20,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"testing"
@@ -655,7 +656,7 @@ func TestClusterUpgradePreservesSettingsAndDataWithNewTrust(t *testing.T) {
 	if err != nil || !bytes.Equal(backedUp, raw) {
 		t.Fatalf("old configuration was not preserved byte-for-byte: %v", err)
 	}
-	if info, err := os.Stat(backup); err != nil || info.Mode().Perm() != 0600 {
+	if info, err := os.Stat(backup); err != nil || runtime.GOOS != "windows" && info.Mode().Perm() != 0600 {
 		t.Fatalf("backup is not private: %v", err)
 	}
 	if data, err := os.ReadFile(instancePath); err != nil || !bytes.Equal(data, instanceData) {

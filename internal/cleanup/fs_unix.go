@@ -4,6 +4,7 @@ package cleanup
 
 import (
 	"io/fs"
+	"os"
 	"syscall"
 )
 
@@ -20,7 +21,7 @@ func onDisk(fi fs.FileInfo) int64 {
 	return fi.Size()
 }
 
-func singleEvidenceLink(fi fs.FileInfo) bool {
+func singleEvidenceLink(_ *os.Root, _ string, fi fs.FileInfo) bool {
 	st, ok := fi.Sys().(*syscall.Stat_t)
 	return ok && st.Nlink == 1
 }

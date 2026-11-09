@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -35,6 +36,9 @@ func TestCowrieMachineState(t *testing.T) {
 }
 
 func TestCowrieActorPermissions(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("the patched Cowrie runs in its Linux container; Windows Python has no os.O_ACCMODE")
+	}
 	py := python(t)
 	patch, err := filepath.Abs(filepath.Join("honeypotfiles", "cowrie"))
 	if err != nil {

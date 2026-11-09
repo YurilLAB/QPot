@@ -25,6 +25,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/qpot/qpot/internal/config"
 	"github.com/qpot/qpot/internal/hostsetup"
 	"golang.org/x/crypto/bcrypt"
 )
@@ -2584,13 +2585,15 @@ func (m *Manager) saveClusterLocked() error {
 	if err := os.WriteFile(tmp, data, 0600); err != nil {
 		return err
 	}
-	return os.Rename(tmp, clusterPath)
+	// Gossip, the API and the CLI read cluster.json while it is saved; on
+	// Windows the replace and the read each wait out the other.
+	return config.ReplaceFile(tmp, clusterPath)
 }
 
 // LoadCluster loads cluster configuration from disk
 func (m *Manager) LoadCluster() (*Cluster, error) {
 	clusterPath := filepath.Join(m.dataPath, "cluster.json")
-	data, err := os.ReadFile(clusterPath)
+	data, err := config.ReadFile(clusterPath, 0)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return nil, nil

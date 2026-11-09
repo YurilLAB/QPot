@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -80,7 +81,7 @@ func TestDownloadDBIPCountry(t *testing.T) {
 		t.Fatalf("file %d bytes, requests %v", len(got), hits)
 	}
 	st, _ := os.Stat(dest)
-	if st.Mode().Perm() != 0o644 {
+	if runtime.GOOS != "windows" && st.Mode().Perm() != 0o644 {
 		t.Errorf("mode %v", st.Mode().Perm())
 	}
 

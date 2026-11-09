@@ -620,7 +620,7 @@ func TestSSHBrokerHostReadableOnlyForVerifiedReadyPrivateStore(t *testing.T) {
 			expected := filepath.ToSlash(filepath.Join(store.area(), "logs", "broker")) + ":/var/log/ssh-proxy"
 			found := false
 			for _, mount := range service.Volumes {
-				found = found || mount == expected
+				found = found || filepath.ToSlash(mount) == expected
 			}
 			if !found {
 				t.Fatal("readable flag did not cover the actual broker bind source under private store")

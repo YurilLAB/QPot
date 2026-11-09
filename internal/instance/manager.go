@@ -1136,11 +1136,39 @@ func Remove(ctx context.Context, name string) error {
 		slog.Warn("The instance's data_path is outside its directory; left in place",
 			"data_path", cfg.DataPath, "instance_dir", dir)
 	}
+	// Windows cannot delete a file a handle holds open, and the lock file is
+	// in dir. Delete everything else while still holding the lock, then
+	// release it and remove what is left.
+	if err := removeAllBut(dir, filepath.Base(cellLock.Name())); err != nil {
+		return fmt.Errorf("failed to remove data directory: %w", err)
+	}
+	_ = cellLock.Close()
 	if err := os.RemoveAll(dir); err != nil {
 		return fmt.Errorf("failed to remove data directory: %w", err)
 	}
 
 	slog.Info("Instance removed", "name", name)
+	return nil
+}
+
+// removeAllBut removes every entry of dir except the one named keep. Like
+// os.RemoveAll, it removes a symlink itself, never what it points at.
+func removeAllBut(dir, keep string) error {
+	entries, err := os.ReadDir(dir)
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	for _, e := range entries {
+		if e.Name() == keep {
+			continue
+		}
+		if err := os.RemoveAll(filepath.Join(dir, e.Name())); err != nil {
+			return err
+		}
+	}
 	return nil
 }
 

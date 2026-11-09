@@ -82,7 +82,8 @@ func TestPersistenceRestartAndProfileSwitchRestoreSeparateScenes(t *testing.T) {
 			t.Fatalf("%s restart changed stored process/history: got %+v want %+v", tc.profile, s.plant, tc.want)
 		}
 		info, err := os.Stat(s.statePath())
-		if err != nil || info.Mode().Perm() != 0o600 {
+		// Windows has no Unix modes; the supervisor only runs on Linux.
+		if err != nil || runtime.GOOS != "windows" && info.Mode().Perm() != 0o600 {
 			t.Fatalf("state is not private: %v %v", info, err)
 		}
 		if err := s.Close(); err != nil {
