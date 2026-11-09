@@ -42,7 +42,13 @@ func TestSSHOrganizationLive(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 12*time.Minute)
 	defer cancel()
 	cfg := config.Default(fmt.Sprintf("hifi-live-%d", time.Now().UnixNano()))
-	cfg.DataPath = t.TempDir()
+	// Compose names the project after this folder, as it does a real
+	// instance's. t.TempDir() alone ends in the same "002" on every run, and
+	// a run then reused an earlier run's networks.
+	cfg.DataPath = filepath.Join(t.TempDir(), cfg.InstanceName)
+	if err := os.MkdirAll(cfg.DataPath, 0o700); err != nil {
+		t.Fatal(err)
+	}
 	cfg.ConfigPath = filepath.Join(cfg.DataPath, "config.yaml")
 	cfg.QPotID = "qp_hifilive0000000000000001"
 	cfg.Security.SandboxMode = "none"
@@ -93,6 +99,10 @@ func TestSSHOrganizationLive(t *testing.T) {
 		// generated table after every owned guest has stopped.
 		if output, err := compose(cleanupCtx, "run", "--rm", "--no-deps", "netguard", "remove"); err != nil {
 			t.Logf("owned guard table cleanup (%v): %s", err, output)
+		}
+		// That run creates the project's networks again; remove them too.
+		if output, err := compose(cleanupCtx, "down", "--remove-orphans"); err != nil {
+			t.Errorf("remove owned integration networks: %v %s", err, output)
 		}
 		// Recorded UID directories may be private to container users. The
 		// disposable helper sees only this test's log folder and no network.
@@ -348,6 +358,18 @@ func TestSSHOrganizationLive(t *testing.T) {
 	inspectService(sshProxyHoneypot)
 	inspectService(secondApp)
 	appEndpoint := serviceEndpoint(firstApp)
+	if appEndpoint.Gateway == "" {
+		// Some Docker releases (26.1 among them) report no gateway for an
+		// internal network, yet the host still holds an address on the
+		// network's bridge: that address is the one the guard must block.
+		for network := range inspectService(firstApp).NetworkSettings.Networks {
+			bridge, err := runDocker(ctx, "network", "inspect", "-f", `{{index .Options "com.docker.network.bridge.name"}}`, network)
+			if err != nil {
+				t.Fatalf("inspect the app's network %s: %v %s", network, err, bridge)
+			}
+			appEndpoint.Gateway = bridgeHostIPv4(t, strings.TrimSpace(string(bridge)))
+		}
+	}
 	if gateway := net.ParseIP(appEndpoint.Gateway); gateway == nil || gateway.To4() == nil || !gateway.IsPrivate() {
 		t.Fatal("owned app has no private bridge gateway")
 	}
@@ -714,4 +736,24 @@ func TestSSHOrganizationServicesLive(t *testing.T) {
 	remote("/usr/local/bin/backup-db", 255)
 	remote("cp /tmp/component-original-hosts /srv/app/.ssh/known_hosts; /usr/local/bin/backup-db", 0)
 	t.Log("actual app SQL mutation -> planted pg_dump/gzip/strict-key SSH backup -> remote readback passed in a shared network-none namespace; production routing/isolation/reset is a separate gate")
+}
+
+// bridgeHostIPv4 is the host's own IPv4 address on a Docker bridge.
+func bridgeHostIPv4(t *testing.T, bridge string) string {
+	t.Helper()
+	iface, err := net.InterfaceByName(bridge)
+	if err != nil {
+		t.Fatalf("cell bridge %s: %v", bridge, err)
+	}
+	addrs, err := iface.Addrs()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, a := range addrs {
+		if n, ok := a.(*net.IPNet); ok && n.IP.To4() != nil {
+			return n.IP.String()
+		}
+	}
+	t.Fatalf("cell bridge %s has no IPv4 address", bridge)
+	return ""
 }

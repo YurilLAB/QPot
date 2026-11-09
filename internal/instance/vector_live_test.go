@@ -36,6 +36,19 @@ func vectorRunner(t *testing.T, dir string) []string {
 	if exec.Command(docker, "image", "inspect", img).Run() != nil {
 		t.Skip("vector image not present locally")
 	}
+	if uid, gid := os.Getuid(), os.Getgid(); uid > 0 {
+		// The container runs as root: a folder it makes (its checkpoint
+		// directory) is root's, and the test's own cleanup of dir cannot
+		// empty it. Hand everything back first; this cleanup runs before
+		// t.TempDir's, which was registered earlier.
+		t.Cleanup(func() {
+			out, err := exec.Command(docker, "run", "--rm", "--network", "none", "--user", "0:0",
+				"--entrypoint", "chown", "-v", dir+":"+dir, img, "-R", fmt.Sprintf("%d:%d", uid, gid), dir).CombinedOutput()
+			if err != nil {
+				t.Logf("hand the collector's files back: %v %s", err, out)
+			}
+		})
+	}
 	return []string{docker, "run", "--rm", "-i", "-v", dir + ":" + dir, img}
 }
 
