@@ -93,6 +93,10 @@ func RunSecretGateCommand(ctx context.Context, root, command string, args []stri
 		if *dir == "" || *base != ReviewedScanBaseline {
 			return errors.New("secrets-artifacts requires -dir and does not accept -base")
 		}
+		// Without go.sum nothing is proven and every checksum is scanned.
+		if data, err := os.ReadFile(filepath.Join(root, "go.sum")); err == nil {
+			scanner.moduleSums = goModuleSums(data)
+		}
 		return scanner.artifacts(ctx, *dir)
 	default:
 		return errors.New("unknown secret gate command")
@@ -102,6 +106,63 @@ func RunSecretGateCommand(ctx context.Context, root, command string, args []stri
 type secretScanner struct {
 	tool, config, work string
 	out                io.Writer
+	// moduleSums is go.sum's module checksums, "path version" -> "h1:...".
+	moduleSums map[string]string
+}
+
+// goModuleSums reads the module checksums in go.sum (not the go.mod ones).
+func goModuleSums(data []byte) map[string]string {
+	sums := make(map[string]string)
+	for _, line := range strings.Split(string(data), "\n") {
+		f := strings.Fields(line)
+		if len(f) != 3 || strings.HasSuffix(f[1], "/go.mod") || !strings.HasPrefix(f[2], "h1:") {
+			continue
+		}
+		sums[f[0]+" "+f[1]] = f[2]
+	}
+	return sums
+}
+
+// provenModuleSums lists the module checksums in a Go binary's embedded build
+// info that equal go.sum's entry for that module and version. They are public
+// hashes (sum.golang.org), yet Gitleaks' generic-api-key rule reads a line
+// such as "aws-sdk-go-v2/credentials v1.20.13 h1:..." as a key. A file that is
+// not a Go binary, or a checksum go.sum does not prove, gives nothing.
+func provenModuleSums(binary string, sums map[string]string) []string {
+	info, err := buildinfo.ReadFile(binary)
+	if err != nil || len(sums) == 0 {
+		return nil
+	}
+	var proven []string
+	for _, dep := range info.Deps {
+		for m := dep; m != nil; m = m.Replace {
+			if m.Sum != "" && sums[m.Path+" "+m.Version] == m.Sum {
+				proven = append(proven, m.Sum)
+			}
+		}
+	}
+	return proven
+}
+
+// maskProjection blanks each value in a text projection, keeping its length,
+// and reports how many it blanked. Only exact strings are touched.
+func maskProjection(path string, values []string) (int, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return 0, err
+	}
+	masked := 0
+	for _, v := range values {
+		if v == "" {
+			continue
+		}
+		masked += bytes.Count(data, []byte(v))
+		data = bytes.ReplaceAll(data, []byte(v), bytes.Repeat([]byte(" "), len(v)))
+	}
+	if masked == 0 {
+		return 0, nil
+	}
+	return masked, os.WriteFile(path, data, 0o600)
 }
 
 func (s secretScanner) scan(ctx context.Context, cwd, kind string, extra ...string) error {
@@ -388,7 +449,7 @@ func (s secretScanner) artifacts(ctx context.Context, dir string) error {
 	if err := os.Mkdir(stage, 0o700); err != nil {
 		return err
 	}
-	count := 0
+	count, masked := 0, 0
 	var total int64
 	for _, entry := range entries {
 		name := entry.Name()
@@ -452,6 +513,7 @@ func (s secretScanner) artifacts(ctx context.Context, dir string) error {
 		}
 		members := 0
 		seen := make(map[string]bool)
+		var proven []string
 		emit := func(name string, size int64, input io.Reader) error {
 			if !filepath.IsLocal(name) || name == "." || filepath.Base(name) != name || strings.ContainsAny(name, "/\\") || size < 0 || size > secretMemberLimit || total+size > secretArchiveLimit {
 				return errors.New("invalid, nested, or oversized standalone release member")
@@ -466,10 +528,23 @@ func (s secretScanner) artifacts(ctx context.Context, dir string) error {
 			if err != nil {
 				return errors.New("duplicate or unwritable standalone release member")
 			}
-			n, projectErr := secretProjectText(f, io.LimitReader(input, size+1))
-			closeErr := f.Close()
-			if projectErr != nil || closeErr != nil || n != size {
+			// The raw bytes, outside the scanned stage, only to read Go build
+			// info from; the scan itself reads the projection.
+			rawPath := filepath.Join(s.work, fmt.Sprintf("raw-%d-%d", count, members))
+			raw, err := os.OpenFile(rawPath, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+			if err != nil {
+				_ = f.Close()
+				return errors.New("unwritable standalone release member copy")
+			}
+			n, projectErr := secretProjectText(f, io.TeeReader(io.LimitReader(input, size+1), raw))
+			closeErr, rawErr := f.Close(), raw.Close()
+			if projectErr != nil || closeErr != nil || rawErr != nil || n != size {
+				_ = os.Remove(rawPath)
 				return errors.New("release member is corrupt or could not be read completely")
+			}
+			proven = append(proven, provenModuleSums(rawPath, s.moduleSums)...)
+			if err := os.Remove(rawPath); err != nil {
+				return err
 			}
 			members++
 			return nil
@@ -489,12 +564,31 @@ func (s secretScanner) artifacts(ctx context.Context, dir string) error {
 		if members == 0 {
 			return errors.New("standalone release archive has no regular members")
 		}
+		// A member's bytes are also in the archive's own projections (the
+		// decoded TAR stream, a stored ZIP entry): blank the same proven
+		// checksums in every projection of this archive.
+		if len(proven) > 0 {
+			projections, err := os.ReadDir(project)
+			if err != nil {
+				return err
+			}
+			for _, p := range projections {
+				n, err := maskProjection(filepath.Join(project, p.Name()), proven)
+				if err != nil {
+					return err
+				}
+				masked += n
+			}
+		}
 		count++
 	}
 	if count == 0 {
 		return errors.New("secret artifact gate found no standalone release archives")
 	}
 	fmt.Fprintf(s.out, "unsuppressed standalone artifact scan: %d archives, %d container/member bytes\n", count, total)
+	if masked > 0 {
+		fmt.Fprintf(s.out, "left out %d Go module checksums from embedded build info, each equal to go.sum's for its module and version\n", masked)
+	}
 	return s.scanStagedInput(ctx, stage)
 }
 

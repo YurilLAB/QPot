@@ -9,14 +9,17 @@ import (
 	"crypto/ed25519"
 	"crypto/rand"
 	"crypto/x509"
+	"debug/buildinfo"
 	"encoding/binary"
 	"encoding/pem"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"runtime/debug"
 	"strings"
 	"testing"
 	"time"
@@ -524,4 +527,69 @@ func FuzzSecretArchiveRead(f *testing.F) {
 			}
 		}
 	})
+}
+
+// TestProvenModuleSumsLeaveOutOnlyGoSumChecksums: the artifact gate leaves
+// out a Go binary's embedded module checksum only when go.sum gives the same
+// checksum for that module and version; anything else is still scanned.
+func TestProvenModuleSumsLeaveOutOnlyGoSumChecksums(t *testing.T) {
+	goTool, err := exec.LookPath("go")
+	if err != nil {
+		t.Skip("no go command to build a binary with module checksums")
+	}
+	// Test binaries carry no module checksums; a built command does.
+	dir := t.TempDir()
+	bin := filepath.Join(dir, "cirun")
+	if runtime.GOOS == "windows" {
+		bin += ".exe"
+	}
+	if out, err := exec.Command(goTool, "build", "-o", bin, "github.com/qpot/qpot/internal/cicheck/cirun").CombinedOutput(); err != nil {
+		t.Fatalf("build: %v %s", err, out)
+	}
+	info, err := buildinfo.ReadFile(bin)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var dep *debug.Module
+	for _, d := range info.Deps {
+		if d.Sum != "" {
+			dep = d
+			break
+		}
+	}
+	if dep == nil {
+		t.Fatal("the built command carries no module checksum")
+	}
+	line := func(sum string) string {
+		return fmt.Sprintf("%s %s %s\n%s %s/go.mod %s\n", dep.Path, dep.Version, sum, dep.Path, dep.Version, dep.Sum)
+	}
+	if got := provenModuleSums(bin, goModuleSums([]byte(line(dep.Sum)))); len(got) != 1 || got[0] != dep.Sum {
+		t.Fatalf("go.sum's own checksum was not proven: %q", got)
+	}
+	// go.sum naming another checksum (its go.mod line still matching) proves
+	// nothing: the embedded one stays in the scan.
+	if got := provenModuleSums(bin, goModuleSums([]byte(line(strings.Replace(dep.Sum, "h1:", "h1:X", 1))))); got != nil {
+		t.Fatalf("a checksum go.sum does not give was proven: %q", got)
+	}
+	projection := filepath.Join(dir, "member.txt")
+	text := "dep\t" + dep.Path + "\t" + dep.Version + "\t" + dep.Sum + "\ncredentials " + dep.Sum[:20] + "\n"
+	if err := os.WriteFile(projection, []byte(text), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	n, err := maskProjection(projection, []string{dep.Sum})
+	if err != nil {
+		t.Fatal(err)
+	}
+	out, err := os.ReadFile(projection)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Exactly the checksum goes, at the same length; a part of it elsewhere stays.
+	if n != 1 || len(out) != len(text) || bytes.Contains(out, []byte(dep.Sum)) || !bytes.Contains(out, []byte(dep.Sum[:20])) {
+		t.Fatalf("masked %d: %q", n, out)
+	}
+	// A file that is not a Go binary proves nothing.
+	if got := provenModuleSums(projection, goModuleSums([]byte(line(dep.Sum)))); got != nil {
+		t.Fatalf("a text file gave checksums %q", got)
+	}
 }
