@@ -49,7 +49,7 @@ type SessionEvent struct {
 	Attribution      string  `json:"attribution"`
 	AttributionError string  `json:"attribution_error,omitempty"`
 	Username         string  `json:"username"`
-	UID              int     `json:"uid"`
+	UID              int64   `json:"uid"`
 	Hostname         string  `json:"hostname"`
 	SrcIP            string  `json:"src_ip,omitempty"`
 	SrcPort          int     `json:"src_port,omitempty"`
@@ -102,7 +102,7 @@ type Writer struct {
 	pending  map[string]*command // command bytes before their open record
 	active   map[string]*entry
 	ordinals map[string]int
-	usage    map[int]*usage
+	usage    map[int64]*usage
 	total    usage
 }
 
@@ -143,7 +143,7 @@ func NewWriter(dir, containerID string, created time.Time, attribute Attributor)
 		return nil, errors.New("capture folder is not a directory")
 	}
 	return &Writer{dir: dir, container: containerID, created: created, attribute: attribute,
-		pending: map[string]*command{}, active: map[string]*entry{}, ordinals: map[string]int{}, usage: map[int]*usage{}}, nil
+		pending: map[string]*command{}, active: map[string]*entry{}, ordinals: map[string]int{}, usage: map[int64]*usage{}}, nil
 }
 
 // Apply consumes one capture line. Lines that are not records are ignored:
@@ -230,7 +230,7 @@ func (w *Writer) open(key string, r Record) error {
 	id := hex.EncodeToString(sum[:16])
 	start := time.UnixMilli(o.TimeMillis).UTC()
 	prefix := start.Format("20060102T150405Z") + "-" + id
-	dir := "uid-" + strconv.Itoa(o.UID)
+	dir := "uid-" + strconv.FormatInt(o.UID, 10)
 	e := &entry{base: path.Join(dir, prefix), start: start, files: map[Kind]*os.File{}, offsets: map[Kind]int64{}}
 	e.event = SessionEvent{
 		Timestamp: start.Format(time.RFC3339Nano), EventType: "ssh_backend_command_start", Phase: "start",

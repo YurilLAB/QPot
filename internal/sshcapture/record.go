@@ -63,7 +63,7 @@ func ParseRecord(line []byte) (Record, error) {
 	if len(conn) != 32 || strings.Trim(conn, "0123456789abcdef") != "" {
 		return r, errRecord
 	}
-	channel, err := decimal(fields[1], 1<<20)
+	channel, err := integer(fields[1], 1<<20)
 	if err != nil {
 		return r, errRecord
 	}
@@ -81,7 +81,7 @@ func ParseRecord(line []byte) (Record, error) {
 	default:
 		return r, errRecord
 	}
-	millis, err := decimal(fields[4], 1<<53)
+	millis, err := integer64(fields[4], 1<<53)
 	if err != nil {
 		return r, errRecord
 	}
@@ -105,20 +105,57 @@ func ParseRecord(line []byte) (Record, error) {
 			return r, errRecord
 		}
 	}
-	return Record{Conn: conn, Channel: int(channel), Seq: seq, Kind: kind, Millis: int64(millis), Payload: payload}, nil
+	return Record{Conn: conn, Channel: channel, Seq: seq, Kind: kind, Millis: millis, Payload: payload}, nil
 }
 
-// decimal parses a plain non-negative decimal no larger than limit.
-func decimal(field []byte, limit uint64) (uint64, error) {
+// plain reports whether field is a plain non-negative decimal: digits only,
+// no sign and no leading zero.
+func plain(field []byte) bool {
 	if len(field) == 0 || len(field) > 20 || (len(field) > 1 && field[0] == '0') {
-		return 0, errRecord
+		return false
 	}
 	for _, c := range field {
 		if c < '0' || c > '9' {
-			return 0, errRecord
+			return false
 		}
 	}
+	return true
+}
+
+// The parsers below return the type the value is kept in, so no value is
+// narrowed after its range check: a 32-bit build rejects what an int cannot
+// hold rather than wrapping it.
+
+// decimal parses a plain decimal no larger than limit, as a uint64.
+func decimal(field []byte, limit uint64) (uint64, error) {
+	if !plain(field) {
+		return 0, errRecord
+	}
 	v, err := strconv.ParseUint(string(field), 10, 64)
+	if err != nil || v > limit {
+		return 0, errRecord
+	}
+	return v, nil
+}
+
+// integer64 parses a plain decimal no larger than limit, as an int64.
+func integer64(field []byte, limit int64) (int64, error) {
+	if !plain(field) {
+		return 0, errRecord
+	}
+	v, err := strconv.ParseInt(string(field), 10, 64)
+	if err != nil || v > limit {
+		return 0, errRecord
+	}
+	return v, nil
+}
+
+// integer parses a plain decimal no larger than limit, as an int.
+func integer(field []byte, limit int) (int, error) {
+	if !plain(field) {
+		return 0, errRecord
+	}
+	v, err := strconv.Atoi(string(field))
 	if err != nil || v > limit {
 		return 0, errRecord
 	}
@@ -128,7 +165,7 @@ func decimal(field []byte, limit uint64) (uint64, error) {
 // Open is the metadata of a session's open record.
 type Open struct {
 	TimeMillis int64
-	UID        int
+	UID        int64
 	PTY        bool
 	Subsystem  bool
 	HasCommand bool
@@ -159,13 +196,9 @@ func ParseOpen(payload []byte) (Open, error) {
 		var err error
 		switch key {
 		case "time":
-			var v uint64
-			v, err = decimal([]byte(value), 1<<53)
-			o.TimeMillis = int64(v)
+			o.TimeMillis, err = integer64([]byte(value), 1<<53)
 		case "uid":
-			var v uint64
-			v, err = decimal([]byte(value), 1<<32-1)
-			o.UID = int(v)
+			o.UID, err = integer64([]byte(value), 1<<32-1)
 		case "pty", "sub", "cmd":
 			if value != "0" && value != "1" {
 				err = errRecord
@@ -178,14 +211,10 @@ func ParseOpen(payload []byte) (Open, error) {
 			default:
 				o.HasCommand = value == "1"
 			}
-		case "rport", "lport":
-			var v uint64
-			v, err = decimal([]byte(value), 65535)
-			if key == "rport" {
-				o.PeerPort = int(v)
-			} else {
-				o.LocalPort = int(v)
-			}
+		case "rport":
+			o.PeerPort, err = integer([]byte(value), 65535)
+		case "lport":
+			o.LocalPort, err = integer([]byte(value), 65535)
 		case "rip":
 			if value == "" || len(value) > 64 {
 				err = errRecord
@@ -223,18 +252,18 @@ func ParseExit(payload []byte) (Exit, error) {
 	if !ok {
 		return Exit{}, errRecord
 	}
-	v, err := decimal([]byte(value), 255)
+	v, err := integer([]byte(value), 255)
 	if err != nil {
 		return Exit{}, errRecord
 	}
 	switch key {
 	case "exit":
-		return Exit{Code: int(v)}, nil
+		return Exit{Code: v}, nil
 	case "signal":
 		if v == 0 {
 			return Exit{}, errRecord
 		}
-		return Exit{Code: 128 + int(v), Signal: int(v)}, nil
+		return Exit{Code: 128 + v, Signal: v}, nil
 	}
 	return Exit{}, errRecord
 }
