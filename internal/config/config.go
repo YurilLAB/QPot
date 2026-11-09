@@ -769,7 +769,7 @@ func Load(instanceName string) (*Config, error) {
 
 	configPath := filepath.Join(homeDir, ".qpot", "instances", instanceName, "config.yaml")
 
-	data, err := os.ReadFile(configPath)
+	data, err := ReadFile(configPath, 0)
 	if err != nil {
 		if os.IsNotExist(err) {
 			// Return default config
@@ -1073,7 +1073,7 @@ func writeConfigFile(path string, data []byte) error {
 	if err := tmp.Close(); err != nil {
 		return err
 	}
-	return os.Rename(tmp.Name(), path)
+	return renameFile(tmp.Name(), path)
 }
 
 // EnableHoneypot enables a honeypot

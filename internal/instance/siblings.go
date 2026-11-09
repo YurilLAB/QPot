@@ -11,6 +11,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/qpot/qpot/internal/config"
+
 	"gopkg.in/yaml.v3"
 )
 
@@ -42,7 +44,7 @@ func siblingReservations(dataPath string) (map[int]bool, map[string]bool) {
 		}
 		// QPot serves management in-process, so its listener has no compose
 		// service. Reserve it separately from a sibling's published decoy ports.
-		if data, err := os.ReadFile(filepath.Join(dir, "config.yaml")); err == nil {
+		if data, err := config.ReadFile(filepath.Join(dir, "config.yaml"), 0); err == nil {
 			var cfg struct {
 				WebUI struct {
 					Enabled bool `yaml:"enabled"`

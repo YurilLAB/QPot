@@ -15,11 +15,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"log/slog"
 	"net"
 	"net/http"
-	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -117,19 +115,7 @@ func (s *Server) followPlanted() {
 
 // readConfigBounded reads a config file of at most maxPlantedConfig bytes.
 func readConfigBounded(path string) ([]byte, error) {
-	fh, err := os.Open(path)
-	if err != nil {
-		return nil, err
-	}
-	defer fh.Close()
-	data, err := io.ReadAll(io.LimitReader(fh, maxPlantedConfig+1))
-	if err != nil {
-		return nil, err
-	}
-	if len(data) > maxPlantedConfig {
-		return nil, fmt.Errorf("config file larger than %d bytes", maxPlantedConfig)
-	}
-	return data, nil
+	return config.ReadFile(path, maxPlantedConfig)
 }
 
 // handleCanaryBeacon serves the public canary URL. A GET/HEAD of a known token

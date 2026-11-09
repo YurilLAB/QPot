@@ -514,7 +514,7 @@ func TestConcurrentSaveAndHoneypotChangesProduceCompleteFiles(t *testing.T) {
 				return
 			default:
 			}
-			data, err := os.ReadFile(cfg.ConfigPath)
+			data, err := ReadFile(cfg.ConfigPath, 0)
 			if err != nil {
 				errs <- err
 				return
