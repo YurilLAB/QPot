@@ -52,6 +52,16 @@ func TestNetguardKernelIsolation(t *testing.T) {
 		if err := Check(spec); err != nil {
 			t.Fatal(err)
 		}
+		// Rules for a bridge that is not there apply cleanly and guard
+		// nothing: the check must refuse them, not report the table whole.
+		gone := Spec{Table: "qpot_kernel_gone", Ifaces: []string{"br-qpot-gone"}, Cells: []string{"br-qpot-gone"}, Mode: ModePrivate}
+		if err := Apply(gone); err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = Remove(gone.Table) })
+		if err := Check(gone); err == nil || !strings.Contains(err.Error(), "not on this host") {
+			t.Fatalf("a table guarding a missing bridge passed its check: %v", err)
+		}
 		t.Log("actual nftables Apply and Check succeeded inside isolated user/network namespace")
 		for _, ipv6 := range []bool{false, true} {
 			name := "IPv4"

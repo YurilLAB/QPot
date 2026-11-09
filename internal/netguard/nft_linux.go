@@ -5,6 +5,7 @@ package netguard
 import (
 	"bytes"
 	"fmt"
+	"net"
 	"net/netip"
 	"slices"
 	"strings"
@@ -107,10 +108,21 @@ func Apply(s Spec) error {
 	return nil
 }
 
-// Check verifies the table is in place as Apply builds it for s.
+// Check verifies the table is in place as Apply builds it for s, and that
+// every interface it guards is on this host. nftables matches interface names
+// as strings, so rules for a bridge that does not exist apply cleanly and
+// contain nothing: a cell attached to a bridge of another name (a network
+// Compose reused from an earlier layout) would run unguarded while the table
+// looked complete. Then the healthcheck fails and nothing that waits on it
+// starts.
 func Check(s Spec) error {
 	if err := s.Validate(); err != nil {
 		return err
+	}
+	for _, iface := range s.Ifaces {
+		if _, err := net.InterfaceByName(iface); err != nil {
+			return fmt.Errorf("netguard: guarded interface %s is not on this host: %w", iface, err)
+		}
 	}
 	c, err := nftables.New()
 	if err != nil {
