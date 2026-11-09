@@ -967,7 +967,13 @@ func (m *Manager) generateServiceConfigs() error {
 			if err != nil {
 				return err
 			}
-			if err := os.MkdirAll(contextRoot, 0o755); err != nil {
+			// The broker runs as its own user (65532) and opens this root
+			// through its mount. Store preparation makes the folder 0750, and
+			// MkdirAll keeps an existing folder's mode: set it, not ask for it.
+			if err := os.MkdirAll(filepath.Dir(contextRoot), 0o700); err != nil {
+				return fmt.Errorf("prepare SSH audit context directory: %w", err)
+			}
+			if err := ensureContainerDir(contextRoot, 0o755); err != nil {
 				return fmt.Errorf("prepare SSH audit context directory: %w", err)
 			}
 			for _, app := range sshBackendServiceNames(m.config) {
