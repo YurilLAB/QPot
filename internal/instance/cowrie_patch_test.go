@@ -3,6 +3,9 @@ package instance
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -19,25 +22,74 @@ func TestCowriePatchPinned(t *testing.T) {
 		t.Fatalf("cowrie patch files were made from %s, the images are now %s: compare them with the new image",
 			cowriePatchVersion, TPotVersion)
 	}
+	index, err := os.ReadFile("testdata/cowrie-image-index.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := fmt.Sprintf("sha256:%x", sha256.Sum256(index)); got != cowrieImageDigest {
+		t.Fatalf("reviewed Cowrie image index digest %s differs from production %s", got, cowrieImageDigest)
+	}
+	var manifest struct {
+		MediaType string `json:"mediaType"`
+		Manifests []struct {
+			Platform struct{ OS, Architecture string } `json:"platform"`
+		} `json:"manifests"`
+	}
+	if err := json.Unmarshal(index, &manifest); err != nil {
+		t.Fatal(err)
+	}
+	platforms := map[string]bool{}
+	for _, entry := range manifest.Manifests {
+		if entry.Platform.OS == "linux" {
+			platforms[entry.Platform.Architecture] = true
+		}
+	}
+	if manifest.MediaType != "application/vnd.oci.image.index.v1+json" || !platforms["amd64"] || !platforms["arm64"] {
+		t.Fatal("reviewed Cowrie pin must support linux/amd64 and linux/arm64")
+	}
+	want := "ghcr.io/telekom-security/cowrie:" + cowriePatchVersion + "@" + cowrieImageDigest
+	if got := GetHoneypotImage("cowrie"); got != want {
+		t.Fatalf("Cowrie patch runtime uses %q, want immutable %q", got, want)
+	}
+	ci, err := os.ReadFile(filepath.Join("..", "..", ".github", "workflows", "ci.yml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	hifiScript, err := os.ReadFile(filepath.Join("..", "..", "scripts", "test-hifi.sh"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ci = append(ci, hifiScript...)
+	for _, image := range []string{want, CollectorImage, sshOrganizationDBImage} {
+		if !bytes.Contains(ci, []byte("docker pull "+image)) {
+			t.Fatalf("live CI does not pull the production image %s", image)
+		}
+	}
 }
 
 // TestCowriePatchMounts: every patched file is mounted read-only at the
 // image's own path, with its content written by setup.
 func TestCowriePatchMounts(t *testing.T) {
 	want := map[string][]byte{
-		cowrieSource + "/shell/protocol.py":     cowrieProtocolPy,
-		cowrieSource + "/commands/ping.py":      cowriePingPy,
-		cowrieSource + "/commands/coreutils.py": cowrieCoreutilsPy,
-		cowrieSource + "/commands/__init__.py":  cowrieCommandsInitPy,
-		cowrieSource + "/commands/ssh.py":       cowrieSSHPy,
-		cowrieSource + "/commands/awscli.py":    cowrieAWSCLIPy,
-		cowrieSource + "/core/honeyfs.py":       cowrieHoneyfsPy,
-		cowrieSource + "/core/qpot_bait.py":     cowrieQPotBaitPy,
-		cowrieSource + "/commands/find.py":      cowrieFindPy,
-		cowrieSource + "/shell/bashparse.py":    cowrieBashparsePy,
-		cowrieSource + "/commands/curl.py":      cowrieCurlPy,
-		cowrieSource + "/commands/wget.py":      cowrieWgetPy,
-		cowrieSource + "/commands/ls.py":        cowrieLsPy,
+		cowrieSource + "/shell/protocol.py":        cowrieProtocolPy,
+		cowrieSource + "/commands/ping.py":         cowriePingPy,
+		cowrieSource + "/commands/coreutils.py":    cowrieCoreutilsPy,
+		cowrieSource + "/commands/__init__.py":     cowrieCommandsInitPy,
+		cowrieSource + "/commands/ssh.py":          cowrieSSHPy,
+		cowrieSource + "/commands/awscli.py":       cowrieAWSCLIPy,
+		cowrieSource + "/core/honeyfs.py":          cowrieHoneyfsPy,
+		cowrieSource + "/core/qpot_bait.py":        cowrieQPotBaitPy,
+		cowrieSource + "/commands/find.py":         cowrieFindPy,
+		cowrieSource + "/shell/bashparse.py":       cowrieBashparsePy,
+		cowrieSource + "/commands/curl.py":         cowrieCurlPy,
+		cowrieSource + "/commands/wget.py":         cowrieWgetPy,
+		cowrieSource + "/commands/ls.py":           cowrieLsPy,
+		cowrieSource + "/core/qpot_state.py":       cowrieStatePy,
+		cowrieSource + "/commands/adduser.py":      cowrieAdduserPy,
+		cowrieSource + "/commands/su.py":           cowrieSuPy,
+		cowrieSource + "/commands/opkg.py":         cowrieOpkgPy,
+		cowrieSource + "/core/qpot_permissions.py": cowriePermissionsPy,
+		cowrieSource + "/commands/sudo.py":         cowrieSudoPy,
 	}
 	d := deployProfile(config.Default("cowrie-patch"), "cowrie")
 	for _, v := range d.Volumes {
@@ -71,6 +123,12 @@ func TestCowriePatchMounts(t *testing.T) {
 		"/honeypots/cowrie/patch/curl.py:" + cowrieSource + "/commands/curl.py:ro\n",
 		"/honeypots/cowrie/patch/wget.py:" + cowrieSource + "/commands/wget.py:ro\n",
 		"/honeypots/cowrie/patch/ls.py:" + cowrieSource + "/commands/ls.py:ro\n",
+		"/honeypots/cowrie/patch/qpot_state.py:" + cowrieSource + "/core/qpot_state.py:ro\n",
+		"/honeypots/cowrie/patch/adduser.py:" + cowrieSource + "/commands/adduser.py:ro\n",
+		"/honeypots/cowrie/patch/su.py:" + cowrieSource + "/commands/su.py:ro\n",
+		"/honeypots/cowrie/patch/opkg.py:" + cowrieSource + "/commands/opkg.py:ro\n",
+		"/honeypots/cowrie/patch/qpot_permissions.py:" + cowrieSource + "/core/qpot_permissions.py:ro\n",
+		"/honeypots/cowrie/patch/sudo.py:" + cowrieSource + "/commands/sudo.py:ro\n",
 	} {
 		if !strings.Contains(svc, line) {
 			t.Errorf("cowrie service lacks %q", strings.TrimSpace(line))
@@ -94,6 +152,10 @@ func TestCowriePatchFiles(t *testing.T) {
 	}
 	if aws := strings.Index(init, `"awscli",`); aws < 0 || aws > last {
 		t.Errorf("commands/__init__.py does not load awscli (before coreutils)")
+	}
+	if users := strings.Index(init, `"adduser",`); users < strings.Index(init, `"groups",`) || users > last ||
+		strings.Count(init, `"adduser",`) != 1 {
+		t.Error("commands/__init__.py must load the VFS-backed account commands after canned identity commands")
 	}
 	// the bait: honeyfs plants it once when it loads the tree, a broken plan
 	// never stops the tree from loading; the history file is read at login;
@@ -152,7 +214,8 @@ func TestCowriePatchFiles(t *testing.T) {
 		"coreutils.py": cowrieCoreutilsPy, "commands_init.py": cowrieCommandsInitPy, "ssh.py": cowrieSSHPy,
 		"awscli.py": cowrieAWSCLIPy, "honeyfs.py": cowrieHoneyfsPy, "qpot_bait.py": cowrieQPotBaitPy,
 		"find.py": cowrieFindPy, "bashparse.py": cowrieBashparsePy, "curl.py": cowrieCurlPy,
-		"wget.py": cowrieWgetPy, "ls.py": cowrieLsPy} {
+		"wget.py": cowrieWgetPy, "ls.py": cowrieLsPy, "qpot_state.py": cowrieStatePy,
+		"adduser.py": cowrieAdduserPy, "su.py": cowrieSuPy, "opkg.py": cowrieOpkgPy, "qpot_permissions.py": cowriePermissionsPy, "sudo.py": cowrieSudoPy} {
 		if bytes.Contains(content, []byte("\r")) {
 			t.Errorf("%s has CR bytes", name)
 		}
@@ -176,7 +239,8 @@ func TestCowriePatchWritten(t *testing.T) {
 		"coreutils.py": cowrieCoreutilsPy, "commands_init.py": cowrieCommandsInitPy, "ssh.py": cowrieSSHPy,
 		"awscli.py": cowrieAWSCLIPy, "honeyfs.py": cowrieHoneyfsPy, "qpot_bait.py": cowrieQPotBaitPy,
 		"find.py": cowrieFindPy, "bashparse.py": cowrieBashparsePy, "curl.py": cowrieCurlPy,
-		"wget.py": cowrieWgetPy, "ls.py": cowrieLsPy} {
+		"wget.py": cowrieWgetPy, "ls.py": cowrieLsPy, "qpot_state.py": cowrieStatePy,
+		"adduser.py": cowrieAdduserPy, "su.py": cowrieSuPy, "opkg.py": cowrieOpkgPy, "qpot_permissions.py": cowriePermissionsPy, "sudo.py": cowrieSudoPy} {
 		got, err := os.ReadFile(filepath.Join(cfg.DataPath, "honeypots", "cowrie", "patch", name))
 		if err != nil || !bytes.Equal(got, content) {
 			t.Errorf("patch/%s not written (err %v, %d bytes)", name, err, len(got))

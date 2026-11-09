@@ -125,6 +125,9 @@ func loginCookie(t *testing.T, s *Server, user, password string) *http.Cookie {
 			if len(c.Value) != 64 || !c.HttpOnly || c.SameSite != http.SameSiteStrictMode || c.MaxAge != 1800 {
 				t.Fatal("invalid session cookie", c)
 			}
+			if c.Secure {
+				t.Fatal("the synthetic controller's plaintext HTTP session cannot use a Secure cookie")
+			}
 			return c
 		}
 	}
@@ -266,6 +269,10 @@ func TestSessionsExpiryLogoutAndOrigin(t *testing.T) {
 	s.ServeHTTP(w, r)
 	if w.Code != 204 {
 		t.Fatal("logout failed")
+	}
+	deleted := w.Result().Cookies()
+	if len(deleted) != 1 || deleted[0].Name != "SMSESSION" || deleted[0].MaxAge >= 0 || deleted[0].Secure || !deleted[0].HttpOnly || deleted[0].SameSite != http.SameSiteStrictMode {
+		t.Fatal("logout did not delete the synthetic HTTP controller cookie")
 	}
 	decoded(t, callXML(t, s, `<cmd action="read_devices"/>`, c, false, nil), 15)
 	// Legacy body credentials remain valid after cookie logout and expiry.

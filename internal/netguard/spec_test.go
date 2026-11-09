@@ -18,6 +18,11 @@ func TestValidate(t *testing.T) {
 	if err := all.Validate(); err != nil {
 		t.Fatalf("ModeAll rejected: %v", err)
 	}
+	cell := ok
+	cell.Cells = []string{ok.Ifaces[0]}
+	if err := cell.Validate(); err != nil {
+		t.Fatalf("private cell rejected: %v", err)
+	}
 	bad := map[string]Spec{
 		"empty table":      {Table: "", Ifaces: ok.Ifaces, Mode: ModePrivate},
 		"table injection":  {Table: "x; flush ruleset", Ifaces: ok.Ifaces, Mode: ModePrivate},
@@ -30,6 +35,8 @@ func TestValidate(t *testing.T) {
 		"iface duplicated": {Table: "t", Ifaces: []string{"br-a", "br-a"}, Mode: ModePrivate},
 		"bad mode":         {Table: "t", Ifaces: ok.Ifaces, Mode: "off"},
 		"empty mode":       {Table: "t", Ifaces: ok.Ifaces},
+		"unguarded cell":   {Table: "t", Ifaces: ok.Ifaces, Mode: ModeAll, Cells: []string{"br-other"}},
+		"duplicate cell":   {Table: "t", Ifaces: ok.Ifaces, Mode: ModeAll, Cells: []string{ok.Ifaces[0], ok.Ifaces[0]}},
 		"zoned resolver":   {Table: "t", Ifaces: ok.Ifaces, Mode: ModePrivate, DNS: []netip.Addr{netip.MustParseAddr("fe80::1%eth0")}},
 		"mapped resolver":  {Table: "t", Ifaces: ok.Ifaces, Mode: ModePrivate, DNS: []netip.Addr{netip.MustParseAddr("::ffff:10.0.0.1")}},
 		"invalid resolver": {Table: "t", Ifaces: ok.Ifaces, Mode: ModePrivate, DNS: []netip.Addr{{}}},

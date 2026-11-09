@@ -9,6 +9,7 @@
 //
 //	QPOT_NETGUARD_TABLE     nftables table name (family inet), REQUIRED
 //	QPOT_NETGUARD_IFACES    comma-separated honeypot bridge interfaces, REQUIRED
+//	QPOT_NETGUARD_CELLS     optional private HiFi bridges (must be listed in IFACES)
 //	QPOT_NETGUARD_MODE      "private" (default) or "all"
 //	QPOT_NETGUARD_INTERVAL  re-apply interval (default "30s", 5s-10m)
 //	QPOT_NETGUARD_RESOLV    resolv.conf listing the host's resolvers (default "/etc/resolv.conf")
@@ -47,12 +48,20 @@ func main() {
 		err = netguard.Apply(spec)
 	case "check":
 		err = netguard.Check(spec)
+	case "check-cells":
+		// Generated HiFi composes require this command in their healthcheck.
+		// An older helper cannot silently ignore the private-cell policy.
+		if len(spec.Cells) == 0 {
+			err = fmt.Errorf("private cell interfaces are required")
+		} else {
+			err = netguard.Check(spec)
+		}
 	case "remove":
 		err = netguard.Remove(spec.Table)
 	case "run":
 		err = run(log, spec, interval)
 	default:
-		err = fmt.Errorf("unknown command %q (run, apply, check, remove)", cmd)
+		err = fmt.Errorf("unknown command %q (run, apply, check, check-cells, remove)", cmd)
 	}
 	if err != nil {
 		log.Error(cmd+" failed", "err", err)
@@ -64,6 +73,7 @@ func specFromEnv() (netguard.Spec, time.Duration, error) {
 	s := netguard.Spec{
 		Table:  os.Getenv("QPOT_NETGUARD_TABLE"),
 		Ifaces: netguard.ParseIfaces(os.Getenv("QPOT_NETGUARD_IFACES")),
+		Cells:  netguard.ParseIfaces(os.Getenv("QPOT_NETGUARD_CELLS")),
 		Mode:   netguard.Mode(os.Getenv("QPOT_NETGUARD_MODE")),
 	}
 	if s.Mode == "" {

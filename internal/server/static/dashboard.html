@@ -847,6 +847,7 @@
                 const msg = body && typeof body.error === 'string' && body.error ? body.error : plainStatus(r.status);
                 throw new ApiError(r.status, msg, body && typeof body.code === 'string' ? body.code : '', body);
             }
+            if (opts && typeof opts.onResponse === 'function') opts.onResponse(r);
             return body;
         }
 
@@ -1447,10 +1448,11 @@
             try {
                 const q = new URLSearchParams({ tail });
                 if (name) q.set('honeypot', name);
-                const lines = await api(`${API_BASE}/logs?${q}`);
+                let truncated = false;
+                const lines = await api(`${API_BASE}/logs?${q}`, { onResponse: r => { truncated = r.headers.get('X-QPot-Logs-Truncated') === 'true'; } });
                 const list = Array.isArray(lines) ? lines.map(String) : [];
                 view.textContent = list.length ? list.join('\n') : '';
-                callout(msg, list.length ? '' : 'info', list.length ? '' : 'No log lines. The honeypot may not have started yet.');
+                callout(msg, truncated ? 'warn' : list.length ? '' : 'info', truncated ? 'This log view reached its response limit. Reduce the requested tail or read the full retained logs on the host.' : list.length ? '' : 'No log lines. The honeypot may not have started yet.');
                 view.scrollTop = view.scrollHeight;
             } catch (e) {
                 if (e.status !== 401 && e.status !== 403) callout(msg, 'error', 'The logs could not be read: ' + errorText(e));
@@ -1551,6 +1553,30 @@
             }
         }
 
+        function renderSSHEnvironmentPreview(target, setting, value) {
+            const mode = value || setting.effective || 'standalone';
+            const organization = mode === 'organization';
+            if (!organization && mode !== 'standalone') {
+                target.replaceChildren(h('p', { class: 'setting-description' }, 'Environment details are unavailable for this selection.'));
+                return;
+            }
+            const slotsField = $('set-backends');
+            const count = Number(slotsField && slotsField.value ? slotsField.value : '2');
+            const validCount = Number.isInteger(count) && count >= 1 && count <= 16;
+            const sourceField = $('set-image_source');
+            const sourceSetting = (settingsView && Array.isArray(settingsView.settings) ? settingsView.settings : []).find((s) => s && s.key === 'image_source');
+            const source = sourceField ? sourceField.value || 'published' : sourceSetting && (sourceSetting.value || sourceSetting.effective) || 'published';
+            target.replaceChildren(
+                h('strong', {}, organization ? 'Application, database and backup' : 'Standalone Debian server'),
+                h('p', { class: 'setting-description' }, organization ? 'Each SSH connection gets a real Debian 12 application server, a PostgreSQL database and an SSH backup host. Their files, addresses and decoy credentials describe the same environment.' : 'Each SSH connection gets one real Debian 12 server with OpenSSH. This is the existing HiFi environment.'),
+                h('p', { class: 'setting-description' }, 'Changes last for that SSH connection, including its multiplexed channels. Disconnecting resets the environment before it can be reused. A new connection starts with fresh state.'),
+                h('p', { class: 'setting-description' }, validCount ? `${count} backend slot${count === 1 ? '' : 's'} run${count === 1 ? 's' : ''} ${count * (organization ? 3 : 1)} decoy container${count * (organization ? 3 : 1) === 1 ? '' : 's'}, plus the shared broker. CPU, memory and process limits apply to each container.` : 'Enter a backend count from 1 to 16. Organization runs three decoy containers per slot, plus the shared broker.'),
+                h('p', { class: 'setting-description' }, 'These real shells use writable container filesystems. Use a dedicated sensor VM and suitable isolation. Writable-layer disk quotas need a supported Docker storage driver.'),
+                h('p', { class: 'setting-description' }, organization ? 'Connections are restricted to the services in this environment. The host, LAN, management services and other environments remain outside it.' : 'The server has no outbound access.'),
+                h('p', { class: 'setting-description' }, source === 'local' ? 'Uses your locally built development images. Build both current HiFi images before starting; QPot does not replace these tags from a registry.' : organization ? 'Requires HiFi images matching QPot. Official releases select published images for their source commit. For a development checkout, build both images and choose Images built locally before starting.' : 'Uses QPot’s published registry images. Official releases select images for their source commit. Choose Images built locally to test a checkout without replacing those images during startup.')
+            );
+        }
+
         function renderSettings() {
             const v = settingsView || {};
             const list = Array.isArray(v.settings) ? v.settings : [];
@@ -1567,9 +1593,11 @@
                 const baitProfile = v.name === 'cowrie' && s.key === 'bait_profile';
                 const baitTarget = v.name === 'cowrie' && s.key === 'bait_target';
                 const siteProfile = v.name === 'refrigeration' && s.key === 'site_profile';
-                const labels = baitProfile ? { ops: 'Linux operations files', industrial: 'Industrial support archives' } : baitTarget ? { conpot: 'Conpot device', refrigeration: 'Refrigeration supervisor' } : siteProfile ? Object.fromEntries(Object.entries(coldStorageScenarios).map(([key, scene]) => [key, scene.label])) : {};
+                const sshEnvironment = v.name === 'ssh-proxy' && s.key === 'environment';
+                const sshImageSource = v.name === 'ssh-proxy' && s.key === 'image_source';
+                const labels = baitProfile ? { ops: 'Linux operations files', industrial: 'Industrial support archives' } : baitTarget ? { conpot: 'Conpot device', refrigeration: 'Refrigeration supervisor' } : siteProfile ? Object.fromEntries(Object.entries(coldStorageScenarios).map(([key, scene]) => [key, scene.label])) : sshEnvironment ? { standalone: 'Standalone Debian server', organization: 'Application, database and backup' } : sshImageSource ? { published: 'Published registry images', local: 'Images built locally' } : {};
                 const choiceLabel = (a) => labels[a] || String(a);
-                const defaultChoice = baitProfile ? 'ops' : baitTarget ? 'conpot' : siteProfile ? 'retail' : '';
+                const defaultChoice = baitProfile ? 'ops' : baitTarget ? 'conpot' : siteProfile ? 'retail' : sshEnvironment ? 'standalone' : sshImageSource ? 'published' : '';
                 const def = defaultChoice ? `default (${choiceLabel(defaultChoice)})` : options.length ? 'Automatic' + (automatic ? ' (' + deviceLabel(automatic) + ')' : '') : s.effective !== undefined && s.effective !== '' ? `default (${choiceLabel(s.effective)})` : 'default';
                 if (s.type === 'choice') {
                     control = h('select', { class: 'setting-select', id, 'data-key': s.key }, h('option', { value: '' }, def));
@@ -1604,7 +1632,7 @@
                 }
                 control.dataset.orig = s.type === 'secret' ? '' : String(s.value || '');
                 const item = h('div', { class: 'setting-item' },
-                    h('label', { class: 'setting-title', for: id }, options.length ? 'Industrial device' : baitProfile ? 'Files and canaries' : baitTarget ? 'Archive reference' : siteProfile ? 'Cold storage scenario' : s.key, s.required ? ' (required)' : ''),
+                    h('label', { class: 'setting-title', for: id }, options.length ? 'Industrial device' : baitProfile ? 'Files and canaries' : baitTarget ? 'Archive reference' : siteProfile ? 'Cold storage scenario' : sshEnvironment ? 'HiFi environment' : sshImageSource ? 'HiFi images' : s.key, s.required ? ' (required)' : ''),
                     s.help ? h('span', { class: 'setting-description' }, String(s.help)) : null,
                     control);
                 if (options.length) {
@@ -1622,6 +1650,24 @@
                     control.addEventListener('change', update);
                     update();
                     item.append(preview);
+                }
+                if (sshEnvironment) {
+                    const preview = h('div', { class: 'device-preview', id: 'ssh-environment-preview', 'aria-live': 'polite' });
+                    const update = () => renderSSHEnvironmentPreview(preview, s, control.value);
+                    control.setAttribute('aria-describedby', 'ssh-environment-preview');
+                    control.addEventListener('change', update);
+                    const slots = $('set-backends');
+                    if (slots) slots.addEventListener('input', update);
+                    update();
+                    item.append(preview);
+                }
+                if (sshImageSource) {
+                    control.addEventListener('change', () => {
+                        const preview = $('ssh-environment-preview');
+                        const environment = $('set-environment');
+                        const environmentSetting = list.find((setting) => setting && setting.key === 'environment');
+                        if (preview && environment && environmentSetting) renderSSHEnvironmentPreview(preview, environmentSetting, environment.value);
+                    });
                 }
                 if (baitProfile) {
                     const note = h('p', { class: 'setting-description', id: 'industrial-bait-note', 'aria-live': 'polite' });

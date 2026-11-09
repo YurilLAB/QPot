@@ -438,7 +438,7 @@ class Command_hostname(QpotCommand):
         return "3.23"
 
     def set_name(self, name: str) -> int:
-        if self.user.get("uid") != 0:
+        if self.user.get("uid") != 0 and not bool(getattr(getattr(self, "pp", None), "tpot_sudo", False)):
             self.errorWrite("hostname: you must be root to change the host name\n")
             return 1
         if not name or len(name) > 64 or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9.-]*", name):
@@ -475,6 +475,139 @@ class Command_hostname(QpotCommand):
 
 commands["/bin/hostname"] = Command_hostname
 commands["hostname"] = Command_hostname
+
+
+# --- free: the same KiB counters as /proc/meminfo -------------------------------------------
+
+try:
+    from cowrie.commands.free import Command_free as _CowrieFree, FREE_OUTPUT as _FREE_OUTPUT
+except ImportError:  # small standalone adapters do not include this image command
+    _CowrieFree = None
+
+if _CowrieFree is not None:
+
+    class Command_free(_CowrieFree):
+        """Retain the image's formats while scaling -m from KiB in binary units."""
+
+        def busybox_family(self) -> str:
+            if not qpot_busybox_applet(self.fs, "free"):
+                return ""
+            banner = CowrieConfig.get("shell", "text_banner", fallback="")
+            match = re.search(r"BusyBox v(\d+)\.(\d+)\.(\d+)", banner)
+            version = tuple(int(value) for value in match.groups()) if match else ()
+            # These are the actual finite catalog releases, verified against
+            # their released free.c. Do not project a modern applet onto old
+            # firmware merely because both programs are BusyBox links.
+            return {(1, 14, 1): "early", (1, 19, 4): "buffers",
+                    (1, 24, 1): "cached", (1, 26, 2): "cached",
+                    (1, 35, 0): "modern", (1, 37, 0): "modern"}.get(version, "")
+
+        def busybox_usage(self) -> None:
+            from cowrie.commands.uname import tpot_bb_usage_stop
+
+            if not tpot_bb_usage_stop(self, "free", ["--help"]):
+                family = self.busybox_family()
+                synopsis = "" if family == "early" else (" [-bkmgh]" if family == "modern" else " [-b/k/m/g]")
+                description = ("Display free and used memory" if family == "modern" else
+                               "Display the amount of free and used system memory")
+                banner = CowrieConfig.get("shell", "text_banner", fallback="BusyBox")
+                self.errorWrite(f"{banner} multi-call binary.\n\nUsage: free{synopsis}\n\n{description}\n")
+            self.exit_code = 1
+
+        def call(self) -> None:
+            busybox = qpot_busybox_applet(self.fs, "free")
+            if busybox:
+                from cowrie.commands.uname import tpot_bb_usage_stop
+
+                family = self.busybox_family()
+                if not family:
+                    return super().call()
+                if family == "early":
+                    if self.args and self.args[0].startswith("-"):
+                        self.busybox_usage()
+                        return
+                    return self.do_free()
+                # BusyBox free selects the first character of the first
+                # argument, rather than GNU's multiple-unit option parser.
+                selected = self.args[0][1:2] if self.args and self.args[0].startswith("-") else "k"
+                if not selected or selected not in ("bkmgh" if family == "modern" else "bkmg"):
+                    self.busybox_usage()
+                    return
+                if tpot_bb_usage_stop(self, "free", ["-" + selected]):
+                    return
+                self.do_free({"b": "bytes", "m": "megabytes", "g": "gigabytes", "h": "human"}.get(selected, "kilobytes"))
+                return
+            try:
+                options, operands = getopt.getopt(self.args, "kmh")
+            except getopt.GetoptError as error:
+                if len(error.opt) > 1:
+                    self.errorWrite(f"free: unrecognized option '--{error.opt}'\n")
+                else:
+                    self.errorWrite(f"free: invalid option -- '{error.opt}'\n")
+                self.exit_code = 1
+                return
+            if operands:
+                self.errorWrite("\nUsage:\n free [options]\n")
+                self.exit_code = 1
+                return
+            units = [option for option, _ in options if option in ("-k", "-m")]
+            if len(units) > 1:
+                self.errorWrite("free: Multiple unit options don't make sense.\n")
+                self.exit_code = 1
+                return
+            selected = "-h" if any(option == "-h" for option, _ in options) else (units[0] if units else "")
+            self.do_free({"-m": "megabytes", "-h": "human"}.get(selected, "kilobytes"))
+
+        def do_free(self, fmt: str = "kilobytes") -> None:
+            family = self.busybox_family()
+            if family in ("early", "buffers", "cached"):
+                return self.legacy_free(fmt, family)
+            divisors = {"bytes": 1, "megabytes": 1 << 20, "gigabytes": 1 << 30}
+            if fmt not in divisors:
+                return super().do_free(fmt)
+            values = self.get_free_stats()
+            if not values:
+                return
+            values["calc_total_buffers_and_cache"] = values["Buffers"] + values["Cached"]
+            values["calc_total_used"] = values["MemTotal"] - values["MemFree"] - values["calc_total_buffers_and_cache"]
+            values["calc_swap_used"] = values["SwapTotal"] - values["SwapFree"]
+            # Linux /proc reports KiB. GNU truncates MiB; BusyBox's
+            # make_human_readable_str rounds to the nearest display unit.
+            divisor = divisors[fmt]
+            rounding = divisor // 2 if family == "modern" else 0
+            self.write(_FREE_OUTPUT.format(**{key: (value * 1024 + rounding) // divisor
+                                             for key, value in values.items()}))
+
+        def legacy_free(self, fmt: str, family: str) -> None:
+            values = self.get_free_stats()
+            if not values:
+                return
+            divisor = {"bytes": 1, "megabytes": 1 << 20, "gigabytes": 1 << 30}.get(fmt, 1024)
+            scale = lambda value: value * 1024 // divisor
+            total, unused = values["MemTotal"], values["MemFree"]
+            buffers, cached = values["Buffers"], values["Cached"]
+            swap, swap_free = values["SwapTotal"], values["SwapFree"]
+            fields = [total, total - unused, unused, values["Shmem"], buffers]
+            labels = ["total", "used", "free", "shared", "buffers"]
+            if family == "cached":
+                fields.append(cached)
+                labels.append("cached")
+            width = 11 if family == "cached" else 13
+            prefix = "       " if family == "cached" else ("      " if family == "early" else "     ")
+            self.write(prefix + "".join(f"{label:>{width}}" for label in labels) + "\n")
+            row = lambda data: "".join(f"{scale(value):>{width}}" for value in data) + "\n"
+            self.write(("Mem:   " if family == "cached" else ("  Mem:" if family == "early" else "Mem: ")) + row(fields))
+            if family != "early":
+                reclaimable = buffers + (cached if family == "cached" else 0)
+                self.write(("-/+ buffers/cache:" if family == "cached" else "-/+ buffers:      ") +
+                           row([total - unused - reclaimable, unused + reclaimable]))
+            self.write(("Swap:  " if family == "cached" else (" Swap:" if family == "early" else "Swap:")) +
+                       row([swap, swap - swap_free, swap_free]))
+            if family == "early":
+                self.write("Total:" + row([total + swap, total - unused + swap - swap_free, unused + swap_free]))
+
+    commands["/usr/bin/free"] = Command_free
+    commands["free"] = Command_free
 
 
 # --- arch, sync, tty, printenv --------------------------------------------------------------
@@ -638,20 +771,14 @@ class QpotSum(QpotCommand):
         if self.fs.isdir(full):
             self.errorWrite(f"{name}: {path}: Is a directory\n")
             return None
-        node = self.fs.getfile(full)
-        size = int(node[tree_fs.A_SIZE] or 0) if node else 0
-        backed = (node is None or size == 0 or node[tree_fs.A_REALFILE]
-                  or isinstance(node[tree_fs.A_CONTENTS], bytes) or full in getattr(self.fs, "generated_files", {}))
-        if backed:
-            try:
-                return self.fs.file_contents(full)
-            except Exception:  # noqa: BLE001
-                self.errorWrite(f"{name}: {path}: No such file or directory\n")
-                return None
-        # A program of the tree without contents reads as the same generic header for every file, so
-        # two of them would hash alike: hash a few bytes that are its own and stable instead (not
-        # bytes of its size: summing a directory of large programs would stall the reactor).
-        return hashlib.sha256(f"{self.protocol.hostname}|{full}|{size}".encode()).digest()
+        try:
+            # The same bytes cat, a pipe and an export read. A pathname or the machine's runtime
+            # hostname is not file content: renaming either must not change an unchanged file's hash.
+            # Unbacked programs retain the image's bounded generic header, not invented file bytes.
+            return self.fs.file_contents(full)
+        except Exception:  # noqa: BLE001
+            self.errorWrite(f"{name}: {path}: No such file or directory\n")
+            return None
 
 
 def qpot_sum(algorithm: str, name: str):
@@ -1386,8 +1513,11 @@ def qpot_id_names(tree, path: str) -> dict[int, str]:
     names: dict[int, str] = {}
     for line in text.splitlines()[:8192]:
         parts = line.split(":")
-        if len(parts) >= 3 and parts[2].isdigit():
-            names.setdefault(int(parts[2]), parts[0])
+        if (len(parts) >= 3 and parts[0] and not line.lstrip().startswith("#")
+                and len(parts[2]) <= 10 and parts[2].isascii() and parts[2].isdigit()):
+            number = int(parts[2])
+            if number < 0xFFFFFFFF:
+                names.setdefault(number, parts[0])
     return names
 
 
@@ -1412,6 +1542,133 @@ def qpot_mode_string(mode: int) -> str:
         else:
             out.append("x" if x else "-")
     return "".join(out)
+
+
+class QpotFileState:
+    """Connection-owned identity and timestamps for the actual nodes of its virtual filesystem.
+
+    Nothing is attached to the shared persona tree. On its first write Cowrie deep-copies that tree;
+    remap the records to the copied nodes before the mutation continues. Read-only sessions keep the
+    image's copy-on-write behavior. Strong node references prevent a deleted node's id being reused.
+    """
+
+    def __init__(self, tree, hostname: str) -> None:
+        self.tree, self.hostname = tree, hostname
+        self.records: dict[int, dict] = {}
+        self.inodes: set[int] = set()
+        self.installed: float | None = None
+        private = getattr(tree, "_ensure_private_fs", None)
+        if callable(private):
+            def ensure_private() -> None:
+                before = tree.fs
+                private()
+                if tree.fs is not before:
+                    self.replaced(before, tree.fs)
+
+            tree._ensure_private_fs = ensure_private
+        tree.qpot_tree_replaced = self.replaced
+        for name in ("chmod", "chown", "utime", "rename"):
+            original = getattr(tree, name, None)
+            if callable(original):
+                setattr(tree, name, self.mutation(name, original))
+
+    def replaced(self, before, after, memo=None) -> None:
+        """Keep node identities across a copy, including a staged copy with additional entries."""
+        if not self.records:
+            return
+        if memo is not None:
+            linked, pending = set(), [after]
+            while pending:
+                node = pending.pop()
+                linked.add(id(node))
+                if node[tree_fs.A_TYPE] == tree_fs.T_DIR:
+                    pending.extend(node[tree_fs.A_CONTENTS])
+            for key, record in list(self.records.items()):
+                copied = memo.get(id(record["node"]))
+                if isinstance(copied, list) and id(copied) in linked:
+                    self.records.pop(key, None)
+                    record["node"] = copied
+                    self.records[id(copied)] = record
+            return
+        remapped, pending = dict(self.records), [(before, after)]
+        while pending:
+            old, new = pending.pop()
+            record = self.records.get(id(old))
+            if record is not None:
+                remapped.pop(id(old), None)
+                record["node"] = new
+                remapped[id(new)] = record
+            if old[tree_fs.A_TYPE] == new[tree_fs.A_TYPE] == tree_fs.T_DIR:
+                children = {child[tree_fs.A_NAME]: child for child in new[tree_fs.A_CONTENTS]}
+                pending.extend((child, children[child[tree_fs.A_NAME]])
+                               for child in old[tree_fs.A_CONTENTS] if child[tree_fs.A_NAME] in children)
+        # Retain removed nodes too: an existing reference must never acquire a new node's identity.
+        self.records = remapped
+
+    def record(self, path: str, node, installed: float | None = None) -> dict:
+        found = self.records.get(id(node))
+        if found is not None:
+            return found
+        if self.installed is None:
+            if installed is None:
+                from cowrie.core import qpot_bait
+
+                installed = qpot_bait._identity()[0]
+            self.installed = float(installed)
+        raw = float(node[tree_fs.A_CTIME] or 0)
+        seed = int(hashlib.sha256(f"{self.hostname}|{path}".encode()).hexdigest()[:12], 16)
+        if raw < self.installed:
+            born = self.installed + (seed % 600) + (seed % 999999937) / 1e9
+            access, modify = born, raw
+        else:
+            modify = raw + (seed % 999999937) / 1e9 if raw == int(raw) else raw
+            access = born = modify
+        inode = 2 if path == "/" else 131072 + int(hashlib.sha256(path.encode()).hexdigest()[:8], 16) % 2000000
+        while inode in self.inodes:
+            inode += 1
+        self.inodes.add(inode)
+        found = {"node": node, "raw": raw, "access": access, "modify": modify,
+                 "change": born, "birth": born, "inode": inode}
+        self.records[id(node)] = found
+        return found
+
+    def mutation(self, name: str, original):
+        def changed(*args, **kwargs):
+            path = args[0] if args else kwargs.get("path", kwargs.get("oldpath", ""))
+            node = self.tree.getfile(path, follow_symlinks=name != "rename")
+            record = self.record(path, node) if node is not None else None
+            result = original(*args, **kwargs)
+            if record is not None:
+                record["change"] = time.time()
+                if name == "utime":
+                    record["access"] = float(args[1] if len(args) > 1 else kwargs["_atime"])
+                    record["modify"] = float(record["node"][tree_fs.A_CTIME] or 0)
+                    record["raw"] = record["modify"]
+            return result
+
+        return changed
+
+    def times(self, path: str, node, installed: float) -> tuple[float, float, float, float]:
+        record = self.record(path, node, installed)
+        raw = float(node[tree_fs.A_CTIME] or 0)
+        if raw != record["raw"]:
+            # The image's writers put the write time in A_CTIME. Preserve birth and access instead
+            # of making the file appear to have been created again whenever its content changes.
+            record["raw"] = record["modify"] = raw
+            record["change"] = max(record["change"], raw)
+        return record["access"], record["modify"], record["change"], record["birth"]
+
+
+def qpot_track_files(protocol) -> QpotFileState | None:
+    """Install once on the connection's filesystem; every SSH channel shares the same records."""
+    tree = getattr(protocol, "fs", None)
+    if tree is None:
+        return None
+    state = getattr(tree, "_qpot_file_state", None)
+    if state is None:
+        state = QpotFileState(tree, str(getattr(protocol, "hostname", "") or ""))
+        tree._qpot_file_state = state
+    return state
 
 
 class Command_stat(QpotCommand):
@@ -1526,14 +1783,7 @@ class Command_stat(QpotCommand):
     def qpot_times(self, path: str, node) -> tuple[float, float, float, float]:
         """(access, modify, change, birth): a file older than the installation came from a package (its
         mtime kept, changed and born when it was unpacked), a later one was written then."""
-        mtime = float(node[tree_fs.A_CTIME] or 0)
-        seed = int(hashlib.sha256(f"{self.protocol.hostname}|{path}".encode()).hexdigest()[:12], 16)
-        if mtime < self.qpot_installed:
-            born = self.qpot_installed + (seed % 600) + (seed % 999999937) / 1e9
-            return born, mtime, born, born
-        if mtime == int(mtime):
-            mtime += (seed % 999999937) / 1e9
-        return mtime, mtime, mtime, mtime
+        return qpot_track_files(self.protocol).times(path, node, self.qpot_installed)
 
     def qpot_human_time(self, when: float) -> str:
         clock = time.localtime(int(when))
@@ -1604,7 +1854,7 @@ class Command_stat(QpotCommand):
                 return 2 + sum(1 for child in children if child[tree_fs.A_TYPE] == tree_fs.T_DIR)
             return 1
         if letter == "i":
-            return 2 if path == "/" else 131072 + int(hashlib.sha256(path.encode()).hexdigest()[:8], 16) % 2000000
+            return qpot_track_files(self.protocol).record(path, node, self.qpot_installed)["inode"]
         if letter == "d":
             return major * 256 + minor
         if letter == "D":

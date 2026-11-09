@@ -88,12 +88,18 @@ func TestStoppedServices(t *testing.T) {
 		[]string{"cowrie", "database", "netguard", "snare", "ssh-backend-1", "ssh-backend-2", "ssh-proxy",
 			"tanner", "tanner_api", "tanner_phpox", "tanner_redis"})
 
-	// No database container for Elasticsearch, no egress guard when it is off.
+	// No database container for Elasticsearch. HiFi's cell guard remains
+	// mandatory even when the ordinary honeypot egress override is permissive.
 	cfg.Database.Type = "elasticsearch"
 	cfg.Security.NetworkIsolation.AllowPrivateEgress = true
 	cfg.Security.NetworkIsolation.BlockOutbound = false
-	check(psRows("running", "collector", "cowrie", "snare", "ssh-backend-1", "ssh-backend-2", "ssh-proxy",
+	check(psRows("running", "collector", "cowrie", "netguard", "snare", "ssh-backend-1", "ssh-backend-2", "ssh-proxy",
 		"tanner", "tanner_api", "tanner_phpox", "tanner_redis"), nil)
+	// With HiFi disabled, the ordinary override can omit the egress guard.
+	hp := cfg.Honeypots[sshProxyHoneypot]
+	hp.Enabled = false
+	cfg.Honeypots[sshProxyHoneypot] = hp
+	check(psRows("running", "collector", "cowrie", "snare", "tanner", "tanner_api", "tanner_phpox", "tanner_redis"), nil)
 
 	// docker cannot be asked: not all running, and the error is returned.
 	psDocker(t, "fail")

@@ -1118,14 +1118,23 @@ func (s *Server) handleLogs(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Bound the buffered output so an enormous log stream can't exhaust memory.
+	// Bound both line count and raw bytes: many individually bounded attacker
+	// log lines must not accumulate hundreds of MiB in one dashboard request.
 	const maxLogLines = 10000
-	lines := make([]string, 0, tail)
+	const maxLogBytes = 4 << 20
+	lines := make([]string, 0, 100)
+	logBytes := 0
+	truncated := false
 	for line := range logs {
-		if len(lines) >= maxLogLines {
+		if len(lines) >= maxLogLines || len(line) > maxLogBytes-logBytes {
+			truncated = true
 			break
 		}
 		lines = append(lines, line)
+		logBytes += len(line)
+	}
+	if truncated {
+		w.Header().Set("X-QPot-Logs-Truncated", "true")
 	}
 
 	s.sendJSON(w, lines)

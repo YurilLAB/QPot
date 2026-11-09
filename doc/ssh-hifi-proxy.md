@@ -44,7 +44,9 @@ OpenSSH**, with nothing of ours speaking SSH on that path.
 ## 2. The approach: a transparent Layer-4 splice
 
 QPot HiFi mode puts a **transparent TCP broker** in front of a pool of
-disposable **real-OpenSSH backend containers**:
+disposable **real-OpenSSH backend containers**. The default is one standalone
+server per connection; the optional organization environment adds a real
+PostgreSQL database and an SSH backup host to each private cell:
 
 ```
    attacker ──TCP──▶  qpot-sshproxy (L4 splice)  ──TCP──▶  real sshd (backend)
@@ -64,10 +66,11 @@ buffers-to-inspect, or rewrites SSH. Therefore:
   **cannot be coerced into dialing attacker-chosen hosts** (no SSRF): backend
   addresses come only from operator configuration.
 
-Capture is done out-of-band, where we legitimately control it: **inside the
-backend** (sshd `VERBOSE` auth logging + full PTY session recording via
-`script(1)`), plus the broker’s own per-connection metadata (source, byte
-counts, duration, teardown reason). The broker never needs to see plaintext.
+Capture combines **inside-backend** sshd `VERBOSE` auth logging and PTY session
+recording via `script(1)` with the broker's independent per-connection metadata
+(source, byte counts, duration and teardown reason). The broker never sees SSH
+plaintext. A hostile guest root can interfere with guest-side logs; those
+recordings are useful evidence, not a tamper-proof command audit.
 
 ---
 
@@ -107,36 +110,44 @@ counts, duration, teardown reason). The broker never needs to see plaintext.
 | `QPOT_SSHPROXY_NAME` | `ssh-proxy` | Logical honeypot name in events |
 | `QPOT_SSHPROXY_BACKENDS` | *(required)* | `be1=ssh-backend-1:22,be2=ssh-backend-2:22` |
 | `QPOT_SSHPROXY_LOG` | `/var/log/ssh-proxy/sessions.json` | NDJSON session log |
+| `QPOT_SSHPROXY_HOST_READABLE_LOG` | unset (false) | Trusted opt-in to host-readable broker metadata; generated only after the neutral private store is verified ready. Custom deployments retain `0640` by default |
 | `QPOT_SSHPROXY_IDLE` | `15m` | Idle-session timeout |
 | `QPOT_SSHPROXY_MAXSESSION` | `2h` | Absolute session cap |
 | `QPOT_SSHPROXY_RATE_IP` | `5` | New conns/sec per IP (token bucket) |
 | `QPOT_SSHPROXY_BURST_IP` | `10` | Rate burst per IP |
 | `QPOT_SSHPROXY_CONC_IP` | `3` | Max concurrent sessions per IP |
 | `QPOT_SSHPROXY_CONC` | `128` | Max concurrent sessions globally |
+| `QPOT_SSHPROXY_GENERATIONS` | unset | Read-only host recreation counters; set by generated Compose |
+| `QPOT_SSHPROXY_CONTEXT_DIR` | unset | Per-cell context root; generated Compose sets `/run/audit-contexts`. Requires generation counters and a literal, non-wildcard listen address |
+| `QPOT_SSHPROXY_CONTEXT_NAMESPACE` | unset | Generated per-instance namespace mapping finite backend IDs to opaque context directories; empty retains compatibility for custom broker deployments |
 
 ---
 
 ## 4. Security model
 
-The broker is **safe by construction** (opaque bytes, no parser, no privilege, no
-SSRF). The genuinely dangerous component is the **backend: real code execution**.
+The broker forwards opaque bytes without SSH parsing or Docker privileges. The
+backend provides genuine code execution inside its disposable container.
 A high-interaction honeypot that an attacker can escape, or use to attack third
 parties, is a liability — so the backend is wrapped in defense-in-depth:
 
-1. **Egress lockdown (non-negotiable).** Backends sit on a docker network marked
-   `internal: true`, which removes the default gateway: **no outbound
-   connectivity at all**. A real shell on the backend cannot scan, pivot, mine,
-   join a botnet, or DDoS. This is the single most important control. As
-   belt-and-braces, the backend `sshd_config` also disables every forwarding/
-   tunnelling primitive (`AllowTcpForwarding no`, `PermitTunnel no`, …).
+1. **Egress lockdown.** Each backend slot has its own Docker bridge marked
+   `internal: true`. Standalone servers have no outbound access. In organization
+   mode, the application, database and backup host can communicate within that
+   cell; they cannot use that relationship to reach another cell, the Docker
+   host, LAN, management services or the Internet. The broker listens only on
+   its separate ingress address. The host egress guard independently enforces
+   private-cell boundaries, including the host gateway; `allow_private_egress`
+   does not relax HiFi isolation. Its `check-cells` health check must pass before
+   exposure. An older helper that lacks this check is incompatible and startup
+   fails closed. SSH forwarding and tunnelling remain disabled.
 2. **Stronger isolation runtime — with a deception trade-off to understand.**
    Run backends under gVisor (`runsc`) or Kata when available (QPot detects
    these) so real RCE sits behind more than namespaces. **But the choice affects
    deception, not just isolation:**
-   - **Kata Containers** runs a *real* Linux kernel in a lightweight VM. `uname`
-     reports a genuine, configurable kernel and there is no sandbox fingerprint,
-     so it is the **best choice for deception** as well as strong (VM-grade)
-     isolation. Cost: heavier, needs hardware/nested virtualization.
+   - **Kata Containers** runs a Linux guest kernel in a lightweight VM. This
+     avoids the host-kernel identity mismatch of plain containers, but VM
+     devices and behavior can still be fingerprinted. It needs suitable
+     hardware/nested virtualization and more resources.
    - **gVisor (`runsc`)** is excellent *isolation* (a userspace kernel intercepts
      syscalls), but it implements its own kernel and is **detectable from inside**
      — `uname`, parts of `/proc`, and the behaviour/availability of certain
@@ -149,11 +160,16 @@ parties, is a liability — so the backend is wrapped in defense-in-depth:
      is the host's kernel string. That is fine if the host kernel is plausible for
      the persona (e.g. a Debian/Ubuntu host), but inconsistent if, say, the host
      runs an Amazon-Linux kernel while `/etc/os-release` says Debian 12.
-   Guidance: for the most convincing HiFi box use **Kata**; with plain containers,
-   run QPot on a host whose kernel matches the advertised persona.
-3. **No docker access on the attacker path.** The broker and backend containers
-   never receive the docker socket or host mounts. Backend reset is performed by
-   an **external** supervisor, never by the attacker-facing containers.
+   The real backend userland is Debian 12 on the build host's architecture.
+   Credential names and host names do not turn it into Ubuntu, RHEL, Proxmox or
+   an emulated Cowrie persona. With plain containers, use a host kernel that is
+   plausible for Debian; a runtime choice does not make the environment
+   impossible to identify.
+3. **No Docker access on the attacker path.** The broker and backend containers
+   never receive the Docker socket or general host/control-plane filesystem
+   access. Their explicit mounts carry generated scene material, read-only host
+   keys and bounded logs. Backend reset is performed by the trusted host-side
+   supervisor, never by the attacker-facing containers.
 4. **Resource bounds.** Per-container CPU/memory/PID limits; broker admission
    control (rate + concurrency caps) bounds load on the finite, expensive pool.
    **Pool sizing matters:** the pool is non-blocking (one backend per live
@@ -163,9 +179,19 @@ parties, is a liability — so the backend is wrapped in defense-in-depth:
    `custom_config["backends"]` for expected concurrency; with the default 2, two
    simultaneous slow sessions can transiently exhaust the pool (further attempts
    are cleanly rejected with `no_backend_available`, never queued).
-5. **Ephemerality.** Backends are recreated between sessions
-   (host-side recycler + broker `RecycleReset`, see "Backend reset"), so no attacker
-   inherits another’s changes (planted creds, persistence, dropped tooling).
+   HiFi app/backup roots are intentionally writable so real file, account,
+   permission and installed-tool changes have normal OS consequences. This is
+   an exception to the static honeypots' read-only roots. PostgreSQL data is on
+   bounded ephemeral storage. QPot's log/capture cleanup budget is not a portable
+   hard quota for writable image layers: Docker storage-driver support varies,
+   and rootless VFS does not provide such quotas. Run genuine root shells on a
+   dedicated sensor VM with an appropriate isolation runtime and storage bounds
+   for that VM/driver. Verify cgroup enforcement on the host you deploy.
+5. **Ephemerality.** State belongs to one ingress SSH TCP connection. Multiple
+   SSH channels on that connection share the same server/cell. All cell services
+   are recreated before another connection can use the slot; failed reset or
+   health checks quarantine it. Reconnecting gets fresh state, even from the
+   same source IP. See "Backend reset".
 6. **No privilege bridge.** The QPot ID (management-API credential) is never
    mounted into honeypot containers, HiFi included.
 
@@ -174,7 +200,7 @@ parties, is a liability — so the backend is wrapped in defense-in-depth:
 | # | Risk | Mitigation (in code / config) |
 |---|---|---|
 | 1 | **SSRF** — broker tricked into dialing arbitrary hosts | Backends come only from `ParseBackends` of operator config; attacker input is never used as a dial target. |
-| 2 | **Protocol-parser exploit** in the broker | None exists — the broker speaks no SSH; it copies opaque bytes. |
+| 2 | **SSH-parser exploit** in the broker | The broker has no SSH parser; it copies opaque bytes. This does not claim that TCP handling or the real sshd has no attack surface. |
 | 3 | **Connection-flood DoS** exhausting the backend pool | `limiter`: per-source rate + per-source and global concurrency caps, a source being an IPv4 address or an IPv6 /64; `Pool.Lease` is non-blocking and fails fast (no unbounded queue). Rejections are thinned (and counted) so the flood does not move into the log and database. |
 | 4 | **Memory exhaustion** via churn of unique source IPs | `limiter.sweep` evicts idle per-source buckets; the map is capped at 65,536 sources between sweeps. |
 | 5 | **Slowloris / abandoned sessions** pinning backends | Per-direction **idle deadline** on reads and writes (a peer that stops reading is torn down too) + absolute **MaxSession** deadline. |
@@ -183,11 +209,11 @@ parties, is a liability — so the backend is wrapped in defense-in-depth:
 | 8 | **TCP half-close** truncating a direction | `halfCloseWrite` propagates FIN to the peer and keeps the other direction draining. Fuzz-verified for transparency. |
 | 9 | **Log injection** via attacker-controlled fields | Events carry only trusted fields, encoded with `encoding/json`; fuzz-verified to emit exactly one valid JSON line. |
 | 10 | **Panic in one session** taking down the listener | Per-connection `recover`. |
-| 11 | **Backend used as a pivot / outbound attack platform** | `internal: true` egress lock **and** sshd forwarding disabled. |
-| 12 | **Backend escape** | gVisor/Kata runtime, dropped/limited caps, resource limits, no host mounts. |
-| 13 | **Cross-attacker contamination / persistence** | Per-session reset; failed resets quarantine the backend. |
+| 11 | **Backend used as an outbound attack platform** | Private per-slot bridges, host cell guard, ingress-only broker listener and disabled sshd forwarding. Organization peers are the only connected decoys. |
+| 12 | **Backend escape** | gVisor/Kata when available, limited capabilities/resources and narrowly scoped mounts. Runtime boundaries still require validation on the deployment host. |
+| 13 | **Cross-connection contamination / persistence** | The entire leased cell resets; failed resets or peer health checks quarantine the slot. |
 | 14 | **Privileged broker** (docker socket) | Broker is distroless nonroot with no docker access; resets are done by the host-side qpot control plane. |
-| 15 | **Host-key rotation tell** | Backend host keys generated once and persisted in a SHARED volume mounted at `/etc/ssh/keys` (generation serialized with `flock`). |
+| 15 | **Host-key rotation tell** | The trusted host generates and persists app host keys once and mounts them read-only at `/run/sshd/bootstrap/keys`, below a root-only bootstrap directory even when the source reports permissive Desktop modes. Connected backup hosts have their own stable key, matching the scene's known_hosts. |
 | 16 | **Pool-inconsistency tell** (different host key / hostname per backend → SSH "host identification changed" warning on reconnect) | All backends share the SAME host keys (#15) AND the SAME hostname, so the pool presents as one server regardless of which backend a session lands on. |
 
 ---
@@ -200,105 +226,143 @@ parties, is a liability — so the backend is wrapped in defense-in-depth:
 qpot honeypot enable ssh-proxy        # then: qpot up
 ```
 
-QPot's compose generator emits the whole two-service stack automatically: the
-broker (publishing the SSH port), the configured number of real-OpenSSH backends
-(`custom_config["backends"]`, default 2), the egress-locked `ssh-proxy_backend`
-network, the broker's `QPOT_SSHPROXY_BACKENDS` wiring, the per-backend data dirs
-(persisted host keys + logs), and the hardening below. The manager starts/stops
-the backends together with the broker. `BACKEND_USERS` is derived from the same
-credential-persona system as the rest of QPot, so the HiFi box accepts the same
-realistic weak credentials the sensor advertises.
+HiFi supports private per-connection cells and an optional connected organization.
+Official release binaries select broker and backend images tagged with their full
+source commit. Release publication requires both image manifests to exist for
+the supported Linux architectures. Missing matching images fail startup; a
+release does not fall back to an older mutable `latest` tag.
 
-The equivalent compose it renders (shown for reference / manual tuning):
+For a development checkout, build both HiFi images from that checkout and select
+them explicitly:
 
-```yaml
-networks:
-  # EGRESS-LOCKED: internal:true removes the default gateway, so backends have
-  # NO outbound connectivity. This is the critical control for a real-RCE box.
-  ssh-proxy_backend:
-    internal: true
-
-services:
-  ssh-proxy:                         # attacker-facing broker (the ONLY published port)
-    image: ghcr.io/yurillab/qpot-ssh-proxy:latest
-    restart: unless-stopped
-    ports:
-      - "22:2222"                    # public SSH -> broker
-    networks: [ssh-proxy_backend]
-    environment:
-      QPOT_SSHPROXY_BACKENDS: "be1=ssh-backend-1:22,be2=ssh-backend-2:22"
-      QPOT_SSHPROXY_NAME: "ssh-proxy"
-    volumes:
-      - ./data/honeypots/ssh-proxy/logs:/var/log/ssh-proxy
-    read_only: true
-    security_opt: ["no-new-privileges:true"]
-    cap_drop: ["ALL"]                # broker needs no capabilities
-    tmpfs: ["/tmp"]
-    deploy:
-      resources:
-        limits: { cpus: "0.50", memory: 128M, pids: 64 }
-
-  ssh-backend-1: &backend
-    image: ghcr.io/yurillab/qpot-ssh-backend:latest
-    restart: unless-stopped          # cheap reset cadence; pair with an external roller
-    # All backends share ONE hostname + ONE host-key set, so the pool looks like
-    # a single server (a returning attacker never sees the identity change).
-    hostname: "web-prod-02"
-    # runtime: runsc                 # gVisor STRONGLY recommended (real RCE)
-    networks: [ssh-proxy_backend]      # internal only -> never published to the host
-    environment:
-      BACKEND_USERS: "admin:admin,ubuntu:ubuntu,root:root123"
-    volumes:
-      # SHARED host keys at /etc/ssh/keys (NOT /etc/ssh, so the mount can't shadow
-      # the hardened sshd_config). The same dir is mounted into every backend.
-      - ./data/honeypots/ssh-backend/shared-hostkeys:/etc/ssh/keys
-      - ./data/honeypots/ssh-backend/ssh-backend-1/logs:/var/log/ssh-backend
-    security_opt: ["no-new-privileges:true"]
-    # sshd privilege separation needs a small, specific capability set; drop the
-    # rest. (Do NOT cap_drop ALL — sshd auth would break.)
-    cap_drop: ["ALL"]
-    cap_add: ["SETUID", "SETGID", "CHOWN", "DAC_OVERRIDE", "SYS_CHROOT", "AUDIT_WRITE", "FOWNER", "KILL", "SETPCAP", "NET_BIND_SERVICE"]
-    deploy:
-      resources:
-        limits: { cpus: "1.00", memory: 512M, pids: 256 }
-
-  ssh-backend-2:
-    <<: *backend
-    volumes:
-      - ./data/honeypots/ssh-backend/shared-hostkeys:/etc/ssh/keys   # SAME shared keys
-      - ./data/honeypots/ssh-backend/ssh-backend-2/logs:/var/log/ssh-backend
+```sh
+make build
+docker build -f docker/ssh-proxy/Dockerfile -t qpot-local/ssh-proxy:development .
+docker build -f docker/ssh-backend/Dockerfile -t qpot-local/ssh-backend:development .
+./qpot honeypot set ssh-proxy image_source=local
+./qpot honeypot enable ssh-proxy
+./qpot up -d
 ```
 
-Key invariants the recipe enforces:
+`image_source=local` uses those two fixed tags with no registry pull. It selects
+the broker, SSH backends and required egress-guard helper, so build only from a
+checkout you trust. Missing local images or incompatible helpers produce a
+startup error; QPot does not substitute an older published image. The default
+`image_source=published` uses QPot's registry images and normal pull behavior.
+Official releases use their source-commit tag. Development builds without a
+valid embedded full source revision retain legacy `latest` references for offline
+rendering, but starting this newer HiFi wiring with them fails with
+`QP-INST-013`. Build both Dockerfiles above from the same checkout and select
+`image_source=local`, or use an official release with matching images.
+The legacy `latest` channel is kept for existing release binaries; this update
+publishes commit-specific images without moving that channel. Development
+checkouts exercising new HiFi features must build and select local images.
+`image_source=` restores that default. No image is published by these commands.
+The release installers and their version pins are unchanged by selecting a local
+image source.
 
-* **Only `ssh-proxy` publishes a host port.** Backends are reachable solely from
-  the broker over the internal network — never from the internet directly.
-* **`ssh-proxy_backend` is `internal: true`** — the egress lock.
-* The broker runs `cap_drop: ALL`, `read_only`, `no-new-privileges`; the backend
-  gets exactly the caps sshd privilege-separation needs and nothing more.
+The dashboard's **HiFi environment** and **HiFi images** settings expose the same
+choices. Changing settings while the honeypot is off only saves them; it does not
+enable it. Saving a running setting recreates the affected HiFi deployment and
+ends its active connections. A saved setting is not evidence that a failed
+recreation has become live; the API/UI reports that failure separately.
+Restart and recycling also check the actual stored broker, application and
+backup image references. Saving `image_source=local` alone does not upgrade an
+older stored deployment. Recreate with compatible images; if the whole instance
+is already running, stop it with `qpot down` before `qpot up -d`. These checks do
+not block stop/remove or offline configuration planning.
+
+### Connected application, database and backup
+
+```sh
+./qpot honeypot set ssh-proxy environment=organization image_source=local backends=2
+```
+
+Each slot contains a real Debian 12 application host, PostgreSQL 15 database and
+Debian 12 SSH backup host. They share one seeded organization: application
+connection settings, database names, decoy credentials, backup keys/host keys,
+SQL schema and backup files agree. The app is an operations/batch server, not a
+claim that an HTTP application or cron daemon is running. Its `backup-db` tool
+uses the real PostgreSQL client and SSH to write a compressed SQL backup to the
+connected backup host. SQL changes and file changes are real within the cell.
+The app and backup use genuine writable Linux filesystems. Available local
+packages/tools behave normally; network isolation does not make Internet package
+repositories reachable, and unsupported installs must fail rather than produce
+a fabricated success message.
+
+The database is a digest-pinned official `postgres:15-bookworm` image. Its data
+is ephemeral for this connection; the initial schema and backup come from the
+same scene definition. The database has no published host port and is separate
+from QPot's telemetry database. The backup host likewise has no published port.
+Connection aliases and credentials describe only these controlled decoys.
+
+`backends` is the number of simultaneous ingress SSH connections, from 1 to 16,
+default 2. Standalone uses one decoy container per slot; organization uses three.
+For two organization slots that is six decoy containers plus the shared broker
+and existing instance services. CPU, memory and PID limits apply per container;
+plan for the total, not only the app's limits. Finite admission and storage limits
+still apply. A full pool rejects further connections rather than sharing a dirty
+or already leased cell.
+
+The `ssh-proxy` sensor's custom CPU, memory and PID limits apply to every app,
+database and backup container as well as the broker. Unset custom fields inherit
+the global limits. CPU limits must be at least 1 percent with Docker's default
+CFS period, and memory must be at least Docker's 6 MiB minimum. These numeric
+minimums do not guarantee enough resources for the selected services to start.
+Reservations stay within the selected caps; invalid or overflowing values are
+rejected before deployment.
+Starting or restarting HiFi also requires Docker to confirm active CPU, memory
+and PID cgroup controls. Missing or unverified controls produce `QP-RES-005`;
+accepted Docker settings alone are not proof that the kernel enforces them.
+
+`environment=standalone` or `environment=` restores the standalone environment.
+Unknown environment/image-source values and unsupported HiFi setting names are
+rejected by the CLI, API and configuration loader/saver. No arbitrary image URL
+or extra routing destination can be supplied through these choices.
+
+The generated wiring is:
+
+| Component | Networks and exposure | State |
+|---|---|---|
+| `ssh-proxy` | Public ingress plus each private cell; listens only on ingress | Trusted broker metadata; no plaintext SSH or Docker access |
+| `ssh-backend-N` | Only `ssh-backend-N_net`; no host port | App filesystem/accounts and connection-local changes |
+| `ssh-backend-N-db` | Same cell only, organization mode; no host port | Ephemeral PostgreSQL data |
+| `ssh-backend-N-backup` | Same cell only, organization mode; no host port | Backup filesystem/accounts and connection-local changes |
+
+Do not replace the generated networks/guard with a shared unrestricted bridge.
+A Docker `internal` flag or valid Compose file alone does not prove effective
+host, peer and external isolation. Verify the guard and runtime reachability on
+the deployment host. The design follows the supporting-isolation principle in
+[NIST SP800-53 Rev5 SC-26](https://doi.org/10.6028/NIST.SP.800-53r5), together with
+controlled interfaces and deny-by-default communication; NIST does not prescribe
+this specific topology or certify QPot's implementation.
 
 ### Backend reset (ephemerality)
 
-Every backend is **recreated after every session**, so no attacker ever sees the
-previous attacker's files, accounts or persistence. The work is split so the
-attacker-facing broker still holds no privilege:
+A lease lasts for one ingress SSH TCP connection. Multiple channels on the same
+connection share state; a separate connection does not inherit it. The entire
+cell is recreated after the connection ends, including its database and backup
+in organization mode. The work is split so the attacker-facing broker still
+holds no Docker privilege. A starting or restarted broker begins with its slots
+quarantined and requests a trusted reset before its first lease:
 
 1. The broker logs each finished session (`ssh_proxy_session`, or
    `ssh_proxy_backend_error`) with the backend id to its session log.
 2. The trusted host-side control plane (`qpot up` in the foreground, or the
    background `qpot serve` that `qpot up -d` starts) follows that log and runs
-   `docker compose up -d --force-recreate --no-deps <backend>` for exactly that
-   backend. Only names from the instance's configured pool are acted on, and
-   docker is invoked without a shell. It also recreates every backend once when
-   it starts.
+   stop, host-only recording archival and fresh Docker recreation for exactly
+   that configured cell. In organization mode
+   the app, database and backup are one reset boundary. Only names from the
+   instance's configured pool are acted on, and Docker is invoked without a
+   shell. Startup also resets the configured cells.
 3. After each successful recreation the control plane increments that
    backend's counter in `honeypots/ssh-proxy/generations/<backend>`, which is
    mounted **read-only** into the broker and unreachable from any backend.
 4. The broker's `RecycleReset` hook keeps the backend out of rotation until it
-   has *seen* the recreation: the backend goes away, answers with an OpenSSH
-   banner again, **and** its generation counter has moved past the value it had
-   when the session started. The counter is what makes this trustworthy: root
-   on a backend can make sshd disappear and come back (e.g. `kill 1` with a
+   has *seen* the recreation: the app answers with an OpenSSH banner,
+   all required cell peers are healthy, **and** its generation counter has
+   moved past the value it had when the connection started. The counter is what
+   makes this trustworthy: root on a backend can make sshd disappear and come back (e.g. `kill 1` with a
    restart policy), but cannot make the host record a recreation. If a real
    recreation is not observed in time (no control plane running, docker
    failing) the backend is quarantined - never reused dirty - and rejoins the
@@ -306,37 +370,171 @@ attacker-facing broker still holds no privilege:
 
 Consequences: with the control plane stopped, each backend serves one session
 and is then held back (fail closed). A backend is unavailable for a few seconds
-after each session, so raise `backends` (honeypot `custom_config`) for busy
-sensors. The shared host keys are generated by `qpot` on the host and mounted
-read-only, so root on a backend cannot replace the pool's key.
+after each connection, and an organization cell needs its database/backup ready
+too. Raise `backends` (honeypot `custom_config`) for expected concurrency while
+accounting for the extra containers. The shared host keys are generated by
+`qpot` on the host and mounted read-only, so root on a backend cannot replace
+the pool's key.
 
 ---
 
 ## 6. Capture & analytics
 
-Capture is split deliberately, because **the broker never sees plaintext** — it
-forwards encrypted bytes. Anything inside the SSH session (credentials tried,
-commands run) is visible only at the backend, post-decryption.
+The TCP broker records connection metadata; genuine OpenSSH and the session
+recorder collect evidence after decryption. OpenSSH does not log plaintext
+passwords.
 
-* **Broker** → `honeypots/ssh-proxy/logs/sessions.json` (NDJSON): one record per
-  session/rejection with `src_ip`, `src_port`, `backend`, `bytes_in`,
-  `bytes_out`, `duration_ms`, `reason`, plus `ssh_proxy_rejected` records
-  (rate-limit/cap/pool-exhaustion) as an abuse signal. **This is ingested by the
-  existing Vector → ClickHouse pipeline** (the honeypot file source matches
-  `…/ssh-proxy/logs/**/*.json`), so connection-level telemetry and the attacker
-  source set land in analytics automatically.
-* **Backend** → `honeypots/ssh-backend/<svc>/logs/`: `sshd` `VERBOSE` auth log
-  (every credential attempt + offered key fingerprints — this is where the
-  **actual usernames/passwords** are captured, since the broker can't see them),
-  **full PTY recordings** (`*.ttyrec`), and one-shot command logs (`*.cmd`). The
-  pool's shared host keys are persisted under `honeypots/ssh-backend/shared-hostkeys/`.
+| Evidence | Logical collector location | Analytics |
+|---|---|---|
+| Broker connection, rejection and reset requests | `honeypots/ssh-proxy/logs/broker/sessions.json` | Original TCP source, opaque byte counts, reason, cell, lease ID and generation |
+| Command start and finish | `honeypots/ssh-proxy/logs/cells/<service>/current/uid-<uid>/*.json` | `ssh-proxy.command.start` and `ssh-proxy.command.finish`, command/input preview, source and capture metadata |
+| Binary stdin/stdout/stderr and PTY timing | Beside each command JSON record: `.in`, `.out`, `.err`, `.timing` | Retained files; output text is not copied into credential-watched metadata |
+| OpenSSH authentication diagnostics | `<service>/current/sshd.log` within the cells log tree | Retained text; not parsed into authentication events |
+| PostgreSQL JSON statement and connection logs | `<database-service>/current/*.json` within the cells log tree | Database role, actual internal client address, query preview and PostgreSQL session ID |
 
-  These backend artefacts are bind-mounted to disk for operator review and
-  forensics. Structured ingestion of the backend `sshd` auth log into ClickHouse
-  (parsing the credential attempts into the events schema) is a **follow-up**:
-  the text/`ttyrec` formats are not JSON, so they are captured but not yet parsed
-  into the pipeline. The broker's structured session telemetry already flows
-  end-to-end.
+The broker writes a separate, read-only connection context into each cell before
+forwarding its first byte. App and backup command events retain the original TCP
+source, outer `session_id`, lease `generation`, and per-command `capture_id`.
+`peer_ip`/`peer_port` identify the actual SSH hop. Missing or malformed context is
+reported as `peer-only` or `context-unavailable`; it is not presented as trusted
+original-source attribution. These files expose only that cell's context.
+
+Database events retain their actual internal client and `pg_session_id`.
+Correlate them with the cell, observed timestamp and command evidence; delayed
+SQL logs are never attributed using a newer visitor's current connection file.
+
+A command-start record is synced before the child starts. Its matching finish
+record carries the real exit code, including zero. Abrupt termination can leave
+a start without a finish. Non-interactive exec records the command and binary
+stdin, stdout, and stderr, including raw inbound SFTP requests and file bodies.
+Its cancellable input pump allows completed commands to return while the client
+still has stdin open. Interactive PTYs retain input/output and script timing;
+the input preview is not a parsed shell-command audit. Stream capture has a
+shared 8 MiB limit per command and reports truncation without truncating the
+actual SSH byte stream. Per-user admission checks limit retained files/bytes;
+concurrent commands and arbitrary guest files still require host disk quotas.
+
+The genuine SFTP subsystem retains both protocol directions as binary streams,
+subject to the shared capture limit. These streams are evidence, rather than a
+separate extracted-file archive. Files left only in a guest's writable layer
+disappear when that cell resets. Configured accounts and the default for new
+accounts use the recorder as their login shell, so writable shell startup files
+execute after recording starts. Authorized-key command restrictions retain
+OpenSSH's normal behavior. Guests can alter capture files owned by their account;
+genuine guest root can also replace shells and the in-guest recorder. Independent
+broker metadata and host-only archives have separate trust boundaries.
+
+Before a cell is reused, the trusted recycler stops all members, moves their
+recordings to host-only `archive-g<generation>-<random>/logs/` directories, and
+creates empty current directories. Only a successful fresh recreation and health
+check advances the generation. Operator recreation uses the same discard and
+archive boundary. The next guest mounts only its empty current directory; the
+collector reads both current and archived JSON. Existing age/size retention and
+archive cleanup apply under the logical `ssh-proxy` log tree. A closed archive is
+removed only after its JSON logs have complete, unambiguous acknowledged native
+source checkpoints. Missing checkpoints, unsupported file objects, fingerprint
+collisions, or incomplete bounded inventories retain the entire archive,
+including its binary captures. Cleanup reports that it retained evidence;
+configure host disk quotas and monitor remaining space. Closed-header selection
+shares a bounded scan fairly across finite cells and reuses unused work budget;
+unacknowledged headers do not consume deletion work. Where native hard-link
+counts cannot be verified, including Windows, nonempty archive inventory uses
+the isolated helper. If that helper is unavailable, evidence is retained;
+native empty-directory cleanup remains available.
+
+Vector's file checkpoints persist in the host-only `collector/` directory inside
+the instance data directory,
+mounted only into the collector at `/var/lib/vector`. Keep this directory when
+recreating or upgrading the collector and when restoring its retained logs.
+Removing checkpoints makes retained JSON start from the beginning again and can
+insert duplicate historical events. Log retention does not remove these cursors.
+
+Guest root can interfere with guest-side recording or replace its login shell
+and recorder. It cannot alter the independent broker records or the host-only archived
+recordings through its guest mount. This is useful evidence, not a tamper-proof
+command audit. Shared application and separate backup host keys remain protected
+in the persistent runtime store described below.
+
+### Persistent runtime storage and upgrades
+
+The canonical host sources of guest bind mounts use a persistent private store,
+so genuine Linux mount metadata does not expose QPot-generated instance or
+honeypot directory names. Public root IDs are derived separately from the
+private per-instance namespace used to name cells; the visible root ID cannot
+be used as a key for a service-name dictionary check. Keep that namespace in
+private control metadata and the trusted broker. No `/proc` contents are fabricated. Container/runtime
+artifacts and operator-selected home or data directory names can still be
+observable; this is not a claim that containers cannot be identified.
+
+Before first startup, QPot plans a store under
+`$XDG_DATA_HOME/session-store/<opaque-instance-id>/`, or
+`$HOME/.local/share/session-store/<opaque-instance-id>/` when XDG_DATA_HOME is
+unset. XDG_DATA_HOME must be absolute. The private
+`<instance-data>/.runtime-store.json` records the exact canonical `root`; its
+matching `.owner.json` belongs to that same instance. The root and ownership
+records must remain private and owned by the operating account. Future changes
+to HOME, XDG_DATA_HOME or the QPot ID do not relocate an existing store.
+Rendering or rejecting configuration does not reserve a store.
+
+The ready-store deployment opts its broker into
+`QPOT_SSHPROXY_HOST_READABLE_LOG=1`. New broker metadata uses `0644` so the
+trusted host recycler can read a file written by the broker's different
+container UID. The canonical host store remains private `0700`, and neither its
+broker metadata nor the private namespace is mounted into attacker-facing
+cells. Private guest capture files keep their existing protection. On Windows,
+keep the store in an ACL-private user directory; POSIX mode bits do not enforce
+Windows ACLs. An already readable file, such as a Desktop-shared `0777` file,
+keeps its mode; an existing broker-owned `0640` file is widened through its
+verified open descriptor without truncation or changing its inode. Standalone
+custom broker deployments keep `0640` unless the trusted operator explicitly
+opts in with a private host parent.
+
+If broker metadata cannot be read, the host reports `QP-INST-014` once for that
+failure episode and resumes after a successful read. Missing files before
+broker startup are expected. Failed reads consume no cursor bytes or new reset
+authority; already authorized full-cell resets can finish normally. Keep the
+log and generation counters. Recreate with matching updated images and
+regenerated private-store wiring so the broker can upgrade its existing log,
+or repair custom reader access. Do not delete, truncate, or forge metadata to
+make a cell available.
+
+Under that recorded root, `records/logs/cells/<opaque-cell-id>/` holds each
+cell's `current/` and closed archives; `records/logs/broker/` holds independent
+broker metadata. `identities/` holds stable host keys, `contexts/` holds opaque
+trusted per-cell connection contexts, and `bootstrap/` holds generated database
+initialization. The collector receives read-only log mounts with the logical
+service names in the table above, never the identity or context parents. A
+new guest receives only its own fresh current directory and read-only identity
+and context leaves. Service IDs and source event names in analytics are stable.
+
+The first upgrade stops the previous finite SSH layout while holding the
+lifecycle lock, then atomically renames existing keys, contexts, seeds, current
+logs and archives. File bytes, ownership, modes and inode identities are
+preserved. An interrupted upgrade retains its chosen location and resumes;
+conflicting source/destination data, changed ownership or symlinks fail closed
+with `QP-INST-011`. Cross-filesystem migration is deliberately refused. Keep the
+instance stopped, back up both roots, and complete an offline move into the exact
+pending destinations while preserving ownership, modes, hard links and symbolic
+links as links. Verify the backup and migrated evidence before removing the old
+source; do not dereference guest-created links, regenerate keys, merge conflicting
+archives, or bypass the location records. Retry startup only after resolving the
+reported paths.
+
+Back up **both** the instance data directory and the exact root recorded in
+`.runtime-store.json`, including both ownership records, host keys, current and
+archived evidence. Keep `collector/` and its source checkpoints with those logs.
+Restore to the same canonical paths with the same operating account, owners and
+private permissions while stopped. Restoring only `~/.qpot` loses the separate
+runtime data. Legacy `collector-state/` is atomically adopted as `collector/`;
+conflicting checkpoint directories fail with `QP-INST-012` rather than being
+merged or reseeded. Missing native-source checkpoints read retained records from
+the beginning, preferring possible duplicates to silent loss.
+
+Instance removal stops the owned deployment under the same lifecycle lock before
+removing its verified runtime root. If stopping or ownership verification fails,
+removal retains the data. A configuration whose data_path points outside its
+normal instance directory retains both that custom data and its runtime store;
+remove them separately only after verifying ownership and stopping all users.
 
 ---
 
@@ -364,8 +562,8 @@ commands run) is visible only at the backend, post-decryption.
   gVisor-detectability trade-off — gVisor closes the SSH tell but adds a
   sandbox tell.)
 * **`script(1)` recording** captures the PTY; for non-interactive `ssh host cmd`
-  invocations the command line is logged verbatim and output is captured via
-  sshd, but not as a ttyrec stream.
+  invocations the bounded command line is logged and all three streams are
+  captured as separate binary files under a shared capture budget.
 
 ---
 

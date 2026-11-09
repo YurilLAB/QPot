@@ -10,6 +10,7 @@ they do not establish that an emulator is indistinguishable from hardware.
 - [Cowrie personas](#cowrie-personas)
 - [Cowrie patch layer](#cowrie-patch-layer)
 - [Bait files](#bait-files)
+- [Connected HiFi environments](#connected-hifi-environments)
 - [Other honeypots](#other-honeypots)
 - [No giveaways](#no-giveaways)
 - [Limits and HiFi mode](#limits-and-hifi-mode)
@@ -34,6 +35,28 @@ name, patch level, boot time, addresses) for a year by default.
 qpot honeypot set cowrie persona=debian-bookworm   # optional; picked per instance if unset
 qpot honeypot set cowrie persona_rotation=30       # days to keep the drawn identity (0-365, default 365)
 ```
+
+Within one authenticated SSH TCP connection, shell, exec and SFTP channels now
+share a mutable filesystem, runtime hostname and package state. New files,
+renames, ownership and permission changes remain visible across those channels;
+SFTP uses the same current user/group database. Separate connections start with
+fresh visitor state. The stable persona identity is independent of that reset.
+Each channel keeps its own working directory, environment and process view.
+The generated `/proc` view is read-only to shell and SFTP mutations; trusted
+process rendering continues to update it.
+
+`useradd`/`adduser`, `passwd`/`chpasswd`, `su`, `sudo -u`, `id`, `groups`,
+`getent`, `chown` and `chgrp` use the virtual account files and process
+credentials. Newly managed accounts honor their virtual shadow entry when using
+`su`. Bad input, duplicate IDs, private-file access and failed writes return
+errors instead of reporting a successful change. This is a
+bounded Linux simulation, not a complete operating system or PAM implementation.
+Package managers retain their finite emulated catalogs. The OpenWrt curl path
+adds/removes the matching official package file bytes and executable visibility;
+unsupported OpenWrt package mutations fail rather than installing an unusable
+placeholder.
+Matching source and license notices are written for operators under
+`honeypots/cowrie/licenses/` and are not guest mounts.
 
 ## Cowrie patch layer
 
@@ -87,6 +110,41 @@ watched and are labelled as historical in the canary UI. Reading a file alone is
 not an alert: QPot must observe reuse of a watched value. Details:
 [canary.md](canary.md#canaries-planted-in-the-honeypots).
 
+## Connected HiFi environments
+
+HiFi can present an application server with a real PostgreSQL database and an
+SSH backup host. `environment=organization` ties their names, addresses, decoy
+credentials, host keys, database contents and backups to the same scene. These
+are real service relationships within one private cell, distinct from the
+reference-only internal hosts in Cowrie's ops bait files.
+
+State lasts for one ingress SSH connection, including all multiplexed channels
+on it. Files, accounts and database writes reflect real changes in that cell.
+HiFi app/backup roots are deliberately writable, unlike the static honeypots'
+read-only roots. This allows ordinary OS consequences for permissions, accounts
+and tools. A dedicated sensor VM and suitable isolation/storage limits remain
+necessary; log cleanup is not a portable hard quota on writable image layers.
+The app, database and backup reset together before the slot serves another
+connection; reconnecting gets fresh state, even from the same IP. The broker
+neither identifies a continuing attacker nor promises cross-connection state.
+Logs and session evidence follow QPot's retention policy independently of the
+reset. Failed reset/health checks keep the cell out of the pool.
+
+Standalone remains the default. The connected mode uses three decoy containers
+per backend slot, with per-container resource limits, private per-slot bridges
+and a host cell guard. The broker listens only on its ingress network; decoys
+cannot use its private interface to obtain a different cell. Host, LAN,
+management, unrelated cells and Internet destinations remain outside the scene.
+SSH forwarding remains disabled. Effective containment must be validated on a
+host that can apply the production guard; generated configuration is not enough.
+
+This development feature requires current HiFi images built from the same
+checkout, selected with `image_source=local`. Old published images cannot be
+silently substituted. The dashboard explains the environment, image source,
+connection lifetime and container cost; the CLI accepts the same settings.
+See [HiFi deployment](ssh-hifi-proxy.md#5-deployment) for build commands and
+operational limits. It does not add a new public sensor or change release pins.
+
 ## Other honeypots
 
 - **Dionaea.** Every T-Pot dionaea answered SMB as `ADFS` in `DACH`, and its
@@ -131,9 +189,11 @@ not an alert: QPot must observe reuse of a watched value. Details:
   instead of the stock banner every ADBHoney install sends. Fetching URLs from attacker
   commands is off: the image's downloader would request any address, including
   ones on your own network.
-- **HiFi credential personas.** HiFi mode's real-OpenSSH backends accept a
-  persona's believable weak passwords (30 personas, such as a corporate Ubuntu
-  host, a database server or a Proxmox host) under a matching host name.
+- **HiFi credentials.** HiFi uses real Debian 12/OpenSSH backends. Credential
+  and hostname selection does not make their userland or kernel another OS.
+  The optional organization environment uses coherent application/database/
+  backup roles, rather than presenting an arbitrary credential persona as a
+  different operating system.
 
 ## Refrigeration supervisor
 
@@ -194,8 +254,9 @@ stack, so a determined packet-level fingerprinter can still tell it from real
 OpenSSH.
 
 **HiFi mode** closes that gap. A transparent TCP broker, the `ssh-proxy`
-honeypot, passes the attacker straight to real OpenSSH backends on a network with no outbound
-access, and each backend is recreated after every session. Enable it with
+honeypot, passes the attacker straight to real OpenSSH backends. Standalone
+servers have no outbound access; connected mode permits only its controlled
+cell peers. The entire cell is recreated after every ingress SSH connection. Enable it with
 `qpot setup --profile hifi` or `qpot honeypot enable ssh-proxy`.
 
 - [ssh-hifi-proxy.md](ssh-hifi-proxy.md): how HiFi mode works.

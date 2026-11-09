@@ -460,6 +460,10 @@ func clusterHTTPClient(timeout time.Duration, clusterID string, caPool *x509.Cer
 // peerTLSClientConfig).
 func clusterPeerClient(timeout time.Duration, clusterID string, caPool *x509.CertPool, operatorCerts bool, node *tls.Certificate, expect func(nodeID string) error) *http.Client {
 	transport := http.DefaultTransport.(*http.Transport).Clone()
+	// Cluster peers are reached directly. A web proxy's CONNECT path bypasses
+	// DialTLSContext below, losing the cluster/node verification and client
+	// certificate setup; ambient HTTP(S)_PROXY must not change that contract.
+	transport.Proxy = nil
 	// Dial TLS ourselves so each connection verifies against the host it was
 	// actually opened to (see peerTLSClientConfig).
 	transport.DialTLSContext = func(ctx context.Context, network, addr string) (net.Conn, error) {

@@ -1,6 +1,7 @@
 package instance
 
 import (
+	"strconv"
 	"strings"
 	"testing"
 
@@ -111,6 +112,9 @@ func FuzzSSHProxyRenderInvariants(f *testing.F) {
 	f.Add("", "", "1")
 	f.Add("x", "evil\"\n    ports:\n      - \"2222:2222\"", "3")
 	f.Add("qp_zzz", "../../etc", "999")
+	f.Add("seed", "ssh-backend-1", "2")
+	f.Add("seed", "SSH-BACKEND-16-BACKUP", "1")
+	f.Add("seed", "ssh-backend-2-db", "16")
 	f.Fuzz(func(t *testing.T, seed, fakeHostname, backends string) {
 		cfg := config.Default("fzrender")
 		// A real QPotID is always "qp_" + base32 (guaranteed ASCII by GenerateID/
@@ -136,14 +140,29 @@ func FuzzSSHProxyRenderInvariants(f *testing.F) {
 		}
 		g := &ComposeGenerator{Config: cfg, Sandbox: sb}
 		out, err := g.Generate()
+		reserved := false
+		hostname := sanitizeHostname(fakeHostname)
+		for slot := 1; slot <= maxSSHBackends; slot++ {
+			for _, suffix := range []string{"", "-db", "-backup"} {
+				if strings.EqualFold(hostname, "ssh-backend-"+strconv.Itoa(slot)+suffix) {
+					reserved = true
+				}
+			}
+		}
 		if err != nil {
+			if reserved && out == "" && strings.Contains(err.Error(), "conflicts with an SSH pool service") {
+				return
+			}
 			t.Fatalf("Generate errored on seed=%q host=%q backends=%q: %v", seed, fakeHostname, backends, err)
+		}
+		if reserved {
+			t.Fatal("a reserved pool hostname was rendered instead of refused")
 		}
 
 		var doc struct {
 			Services map[string]struct {
 				Ports    []string `yaml:"ports"`
-				Networks []string `yaml:"networks"`
+				Networks any      `yaml:"networks"`
 			} `yaml:"services"`
 			Networks map[string]struct {
 				Internal bool `yaml:"internal"`
@@ -151,12 +170,6 @@ func FuzzSSHProxyRenderInvariants(f *testing.F) {
 		}
 		if err := yaml.Unmarshal([]byte(out), &doc); err != nil {
 			t.Fatalf("rendered compose is not valid YAML (seed=%q host=%q backends=%q): %v", seed, fakeHostname, backends, err)
-		}
-
-		// Egress-locked backend network must exist and be internal.
-		net, ok := doc.Networks["ssh-proxy_backend"]
-		if !ok || !net.Internal {
-			t.Fatalf("ssh-proxy_backend network missing or not internal: %+v", doc.Networks)
 		}
 
 		// Broker must publish a port.
@@ -176,8 +189,8 @@ func FuzzSSHProxyRenderInvariants(f *testing.F) {
 				t.Fatalf("backend %s publishes host ports %v (real RCE exposed!)", name, svc.Ports)
 			}
 			onBackendNet := false
-			for _, nw := range svc.Networks {
-				if nw == "ssh-proxy_backend" {
+			for _, nw := range netNames(svc.Networks) {
+				if nw == sshBackendNetwork(name) && doc.Networks[nw].Internal {
 					onBackendNet = true
 				}
 				if nw == "qpot_internal" {
@@ -186,6 +199,9 @@ func FuzzSSHProxyRenderInvariants(f *testing.F) {
 			}
 			if !onBackendNet {
 				t.Fatalf("backend %s not on the egress-locked network: %v", name, svc.Networks)
+			}
+			if len(netNames(svc.Networks)) != 1 {
+				t.Fatalf("backend %s joins more than its own private cell", name)
 			}
 		}
 		if nBackends < 1 || nBackends > maxSSHBackends {

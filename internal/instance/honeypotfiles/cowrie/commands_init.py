@@ -6,7 +6,6 @@
 from __future__ import annotations
 
 command_modules = [
-    "adduser",
     "apt",
     "awk",
     "base",
@@ -67,6 +66,9 @@ command_modules = [
     "yum",
     # QPot: the AWS CLI of the bait files (registered under its installer's paths only)
     "awscli",
+    # QPot: account mutations and their reads share the current virtual filesystem.
+    "adduser",
+    "opkg",
     # QPot: last, so its commands (hostname, bash, exit) win over those above
     "coreutils",
 ]

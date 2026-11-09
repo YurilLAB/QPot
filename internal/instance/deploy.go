@@ -22,7 +22,8 @@ import (
 )
 
 // deployVolume maps a host path (under {DataPath}/honeypots/<name>) to a path
-// inside the honeypot container.
+// inside the honeypot container. An empty ContainerPath is an operator-only
+// product asset, prepared on the host but never mounted into a honeypot.
 type deployVolume struct {
 	HostSubdir    string
 	ContainerPath string
@@ -158,6 +159,24 @@ var (
 	cowrieWgetPy []byte
 	//go:embed honeypotfiles/cowrie/ls.py
 	cowrieLsPy []byte
+	//go:embed honeypotfiles/cowrie/qpot_state.py
+	cowrieStatePy []byte
+	//go:embed honeypotfiles/cowrie/adduser.py
+	cowrieAdduserPy []byte
+	//go:embed honeypotfiles/cowrie/su.py
+	cowrieSuPy []byte
+	//go:embed honeypotfiles/cowrie/opkg.py
+	cowrieOpkgPy []byte
+	//go:embed honeypotfiles/cowrie/opkg_assets.zip
+	cowrieOpkgAssets []byte
+	//go:embed honeypotfiles/cowrie/opkg_sources.tar.xz
+	cowrieOpkgSources []byte
+	//go:embed honeypotfiles/cowrie/opkg-NOTICE.txt
+	cowrieOpkgNotice []byte
+	//go:embed honeypotfiles/cowrie/qpot_permissions.py
+	cowriePermissionsPy []byte
+	//go:embed honeypotfiles/cowrie/sudo.py
+	cowrieSudoPy []byte
 )
 
 // cowrieSource is where the image keeps Cowrie's Python package.
@@ -183,6 +202,13 @@ func cowriePatchVolumes() []deployVolume {
 		file("curl.py", "commands/curl.py", cowrieCurlPy),
 		file("wget.py", "commands/wget.py", cowrieWgetPy),
 		file("ls.py", "commands/ls.py", cowrieLsPy),
+		file("qpot_state.py", "core/qpot_state.py", cowrieStatePy),
+		file("adduser.py", "commands/adduser.py", cowrieAdduserPy),
+		file("su.py", "commands/su.py", cowrieSuPy),
+		file("opkg.py", "commands/opkg.py", cowrieOpkgPy),
+		file("opkg_assets.zip", "commands/opkg_assets.zip", cowrieOpkgAssets),
+		file("qpot_permissions.py", "core/qpot_permissions.py", cowriePermissionsPy),
+		file("sudo.py", "commands/sudo.py", cowrieSudoPy),
 	}
 }
 
@@ -599,6 +625,10 @@ func deployProfileFor(name string) honeypotDeploy {
 				// its tree by the patch layer's qpot_bait.py; the content depends
 				// on the instance (deployProfile).
 				{HostSubdir: "bait/plan.json", ContainerPath: baitPlanPath, File: true, ReadOnly: true},
+				// Corresponding source and notices accompany binary-only installs;
+				// these operator assets have no container mount destination.
+				{HostSubdir: "licenses/opkg_sources.tar.xz", File: true, ReadOnly: true, Content: cowrieOpkgSources},
+				{HostSubdir: "licenses/opkg-NOTICE.txt", File: true, ReadOnly: true, Content: cowrieOpkgNotice},
 			}, cowriePatchVolumes()...),
 			Ports:    []int{22, 23},
 			Settings: []string{"persona", "persona_rotation", baitSetting, baitProfileSetting, baitTargetSetting},
@@ -621,14 +651,18 @@ func deployProfileFor(name string) honeypotDeploy {
 		// real-OpenSSH backends are rendered as companion services (sshproxy.go).
 		return honeypotDeploy{
 			Volumes: []deployVolume{
-				{HostSubdir: "logs", ContainerPath: "/var/log/ssh-proxy"},
+				{HostSubdir: "logs/broker", ContainerPath: "/var/log/ssh-proxy"},
 				// Backend recreation counters, written by the host recycler
 				// (instance.BackendRecycler) and read by the broker's
 				// proxy.GenerationGate.
 				{HostSubdir: "generations", ContainerPath: sshProxyGenerationsPath, ReadOnly: true},
 			},
 			Ports:    []int{2222},
-			Settings: []string{"backends"},
+			Settings: []string{"backends", "environment", "image_source"},
+			Values: map[string][]string{
+				"environment":  {config.SSHEnvironmentStandalone, config.SSHEnvironmentOrganization},
+				"image_source": {config.SSHImageSourcePublished, config.SSHImageSourceLocal},
+			},
 		}
 	case "redishoneypot":
 		// Redis honeypot: single TCP port 6379, logs to /var/log/redishoneypot.

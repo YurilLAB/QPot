@@ -191,3 +191,72 @@ func dockerRun(ctx context.Context, args ...string) ([]byte, error) {
 	}
 	return stdout.Bytes(), nil
 }
+
+// SSHInventory reads only the native record tree, never identities or trusted
+// contexts. It does not mutate files, and an incomplete/oversized response
+// cannot authorize removal. The temporary helper remains network isolated.
+func (d *DockerHelper) SSHInventory(ctx context.Context, dir string) ([]sshEvidenceFile, error) {
+	if !filepath.IsAbs(dir) || filepath.Clean(dir) != dir || strings.ContainsAny(dir, ",\n\x00") {
+		return nil, fmt.Errorf("cleanup helper: invalid native inventory root")
+	}
+	run := d.Run
+	if run == nil {
+		run = dockerRun
+	}
+	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+	args := []string{"run", "--rm", "--network", "none", "--read-only", "--cap-drop", "ALL", "--cap-add", "DAC_OVERRIDE", "--security-opt", "no-new-privileges", "--pids-limit", "16", "--memory", "64m", "--user", "0:0", "--tmpfs", "/tmp:rw,nosuid,nodev,noexec,size=1m", "--mount", "type=bind,source=" + dir + ",target=/c,readonly", "--entrypoint", "sh", d.Image, "-c", sshInventoryScript}
+	out, err := run(ctx, args...)
+	if err != nil {
+		return nil, fmt.Errorf("SSH inventory helper: %w", err)
+	}
+	if len(out) > maxHelperOutput {
+		return nil, fmt.Errorf("SSH inventory helper output limit reached")
+	}
+	return decodeSSHInventory(out)
+}
+
+// find never follows a symbolic link. Every entry consumes the finite budget;
+// a directory at the depth bound, nonordinary object, or multiply linked file
+// prevents a complete result. Paths and first lines use hex, so tabs, newlines
+// and arbitrary guest-controlled filenames never change the record framing.
+var sshInventoryScript = `set -eu
+mkfifo /tmp/inventory
+find /c -xdev -maxdepth 25 -print0 > /tmp/inventory &
+scan=$!
+ n=0
+ while IFS= read -r -d '' f; do
+   n=$((n+1)); [ "$n" -le ` + strconv.Itoa(maxSSHArchiveEntries) + ` ] || exit 71
+   [ ! -L "$f" ] || continue
+   rel="${f#/c/}"
+   [ "$f" != /c ] || continue
+   if [ -d "$f" ]; then
+     depth="$(printf '%s' "$rel" | tr -cd / | wc -c)"
+     [ "$depth" -lt 24 ] || exit 72
+     continue
+   fi
+   [ -f "$f" ] || exit 73
+   [ "$(stat -c %h -- "$f")" -eq 1 ] || exit 74
+   stamp="$(stat -c '%d:%i:%s:%y:%z:%h:%F' -- "$f")"
+   name="$(printf '%s' "$rel" | od -A n -v -t x1 | tr -d ' \n')"
+   size="$(stat -c %s -- "$f")"
+   blocks="$(stat -c %b -- "$f")"
+   first=-
+   case "$rel" in
+     *.json) first="$(timeout 2 sh -ec '
+       f="$1"; expected="$2"
+       exec 3< "$f"
+       [ "$(stat -Lc "%d:%i:%s:%y:%z:%h:%F" /proc/self/fd/3)" = "$expected" ]
+       [ ! -L "$f" ]
+       head -c ` + strconv.Itoa(vectorstate.MaxLine+1) + ` <&3 > /tmp/first
+       [ "$(stat -Lc "%d:%i:%s:%y:%z:%h:%F" /proc/self/fd/3)" = "$expected" ]
+       [ "$(stat -c "%d:%i:%s:%y:%z:%h:%F" -- "$f")" = "$expected" ]
+       head -n 1 /tmp/first | od -A n -v -t x1 | tr -d " \n"
+     ' sh "$f" "$stamp")" || exit 75 ;;
+   esac
+   [ "$(stat -c '%d:%i:%s:%y:%z:%h:%F' -- "$f")" = "$stamp" ] || exit 76
+   printf '%s %s %s %s\n' "$name" "$size" "$blocks" "$first"
+ done < /tmp/inventory
+ wait "$scan"
+ echo complete
+`

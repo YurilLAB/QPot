@@ -11,6 +11,37 @@ import (
 	"github.com/google/nftables/expr"
 )
 
+func TestPrivateCellHealthRejectsBroaderAndReorderedRules(t *testing.T) {
+	iface := "br-cell01"
+	allow := &nftables.Rule{Exprs: cellAccept(iface)}
+	deny := &nftables.Rule{Exprs: jumpIfIface(iface, chainGuardCell)}
+	if !validCellBaseRules([]*nftables.Rule{allow, deny}, iface, true) ||
+		!validCellBaseRules([]*nftables.Rule{deny}, iface, false) {
+		t.Fatal("same-cell forwarding and host-denial rules must be recognized")
+	}
+	if validCellBaseRules([]*nftables.Rule{deny, allow}, iface, true) {
+		t.Fatal("drop before the in-cell exception is not a working cell")
+	}
+	cross := cellAccept(iface)
+	cross[3] = &expr.Cmp{Op: expr.CmpOpEq, Register: 1, Data: ifnameKey("br-cell02")}
+	if validCellBaseRules([]*nftables.Rule{{Exprs: cross}, deny}, iface, true) {
+		t.Fatal("a cross-cell allow must not pass the healthcheck")
+	}
+	legacy := &nftables.Rule{Exprs: jumpIfIface(iface, chainGuardForward)}
+	if validCellBaseRules([]*nftables.Rule{allow, legacy}, iface, true) ||
+		validCellBaseRules([]*nftables.Rule{legacy}, iface, false) {
+		t.Fatal("ordinary egress/DNS policy is not the private-cell policy")
+	}
+	guard := []*nftables.Rule{{Exprs: ctEstablishedAccept()}, {Exprs: []expr.Any{&expr.Counter{}, &expr.Verdict{Kind: expr.VerdictDrop}}}}
+	if !validCellGuard(guard) {
+		t.Fatal("established replies followed by drop must be recognized")
+	}
+	guard[1].Exprs[1] = &expr.Verdict{Kind: expr.VerdictAccept}
+	if validCellGuard(guard) {
+		t.Fatal("a permissive final verdict must fail private-cell health")
+	}
+}
+
 // TestResolverElementsHoldWireServer: the dns4 set always holds the Azure
 // WireServer, also when the host's resolv.conf names no resolver at all.
 func TestResolverElementsHoldWireServer(t *testing.T) {

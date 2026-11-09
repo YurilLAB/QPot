@@ -1,0 +1,30 @@
+QPot OpenWrt virtual-file data fixtures
+=======================================
+
+These unmodified MIPS32 little-endian ELF bytes come from the official OpenWrt
+21.02.7 and 22.03.7 mipsel_24kc package archives. They are read-only data for
+Cowrie's virtual filesystem. QPot never executes or loads these ELF objects.
+SHA256, package version, URL, modes and every file are in manifest.json.
+
+curl/libcurl 7.83.1 and 8.6.0: curl permission notice (OpenWrt metadata: MIT).
+nghttp2 1.43.0 and1.44.0: MIT.
+Mbed TLS 2.28.8: upstream Apache-2.0 OR GPL-2.0-or-later; the OpenWrt package
+is declared GPL-2.0-or-later. wolfSSL 5.5.3 is GPL-2.0-or-later/commercial;
+no commercial license is asserted. Matching source, original license texts,
+and OpenWrt package recipes/patches are supplied in opkg_sources.tar.xz.
+This distribution relies on accompanying source, not a written source offer.
+No additional source-delivery promise is made for the operator.
+
+The source bundle preserves each complete original source tar without its
+compression wrapper. No source member is removed or modified. SOURCE_MANIFEST
+records original-download and decompressed-tar hashes. Original archives can
+also be obtained from https://sources.openwrt.org/<archive-name>. curl sources
+are also at https://curl.se/download/<archive-name>. OpenWrt recipe revisions
+and hashes are in RECIPE_MANIFEST; those recipes contain their source hashes.
+For an offline OpenWrt build, recompress the provided tars as the recipe's
+PKG_SOURCE and update PKG_HASH to that local archive's SHA256, then use the
+provided package recipe/configuration/patches in the matching OpenWrt branch.
+Standard OpenWrt compiler/toolchain and base operating-system components are
+not included. The bundles are source/data only and are not build scripts run
+by QPot. Runtime snapshots remain finite emulation: actual commands are the
+existing Cowrie implementations, while reads/hash/stat use authentic bytes.

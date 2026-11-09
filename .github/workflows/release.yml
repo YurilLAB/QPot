@@ -23,7 +23,7 @@ name: Release
 #
 # Before tagging, make the tag match the version the installers download
 # (QPOT_VERSION in scripts/install.sh and install.ps1, VERSION in the
-# Makefile); the first step refuses a tag that does not. After the release,
+# Makefile); the version check refuses a tag that does not. After the release,
 # set QPOT_SOURCE_COMMIT_PINNED in both installers to the tag's commit.
 
 on:
@@ -38,8 +38,25 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  source-validation:
+    name: Complete source and platform validation
+    uses: ./.github/workflows/ci.yml
+    permissions:
+      contents: read
+      pull-requests: read
+      security-events: write
+
+  semantic-validation:
+    name: Complete semantic security analysis
+    uses: ./.github/workflows/codeql.yml
+    permissions:
+      contents: read
+      security-events: write
+
   release:
     name: Build, attest and publish
+    needs: [source-validation, semantic-validation]
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     timeout-minutes: 30
     permissions:
@@ -70,12 +87,39 @@ jobs:
           go test ./internal/release/... ./cmd/qpot-release/...
           bash scripts/test-install.sh
 
+      - name: Set up image index inspection
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+
+      - name: Require matching published HiFi images for both architectures
+        # The CLI embeds this full commit in its published image references.
+        # An unfinished or failed image publication must stop a CLI release.
+        run: |
+          set -euo pipefail
+          test "${#GITHUB_SHA}" -eq 40
+          [[ "$GITHUB_SHA" =~ ^[0-9a-f]{40}$ ]]
+          for image in ssh-proxy ssh-backend; do
+            index="$RUNNER_TEMP/${image}-published-index.json"
+            docker buildx imagetools inspect --raw "ghcr.io/yurillab/qpot-${image}:${GITHUB_SHA}" > "$index"
+            go run ./internal/cicheck/cirun check-image-index "$index"
+          done
+
       - name: Build the archives and SHA256SUMS
         env:
           TAG: ${{ github.ref_name }}
         run: |
           go run ./cmd/qpot-release pack -version "${TAG#v}" -commit "$GITHUB_SHA" -out dist
           (cd dist && sha256sum -c SHA256SUMS)
+
+      - name: Scan unpacked release artifacts without source allowlists
+        run: |
+          set -euo pipefail
+          GITLEAKS_VERSION=$(sed -n 's/^GITLEAKS_VERSION=//p' .github/ci-tools.env)
+          test -n "$GITLEAKS_VERSION"
+          go install "github.com/zricethezav/gitleaks/v8@v${GITLEAKS_VERSION}"
+          go run ./internal/cicheck/cirun -root . secrets-artifacts \
+            -gitleaks "$(go env GOPATH)/bin/gitleaks" \
+            -config "$(go env GOMODCACHE)/github.com/zricethezav/gitleaks/v8@v${GITLEAKS_VERSION}/config/gitleaks.toml" \
+            -dir dist
 
       - name: Attest build provenance
         id: attest
@@ -104,4 +148,4 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           gh release create "$TAG" --verify-tag --title "QPot $TAG" --generate-notes \
-            dist/qpot_* dist/SHA256SUMS
+            dist/qpot_*.tar.gz dist/qpot_*.zip "dist/qpot_${TAG#v}_provenance.sigstore.json" dist/SHA256SUMS

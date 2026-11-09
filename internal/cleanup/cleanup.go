@@ -184,6 +184,14 @@ func Run(ctx context.Context, cfg *config.Config, lim Limits, opt Options) *Repo
 			break
 		}
 		dir := filepath.Join(cfg.DataPath, "honeypots", name)
+		if name == "ssh-proxy" {
+			var err error
+			dir, err = instance.SSHRuntimeLogArea(cfg)
+			if err != nil {
+				rep.fail(err)
+				continue
+			}
+		}
 		if !isDir(dir) {
 			continue
 		}
@@ -195,7 +203,11 @@ func Run(ctx context.Context, cfg *config.Config, lim Limits, opt Options) *Repo
 		if opt.CollectorRunning {
 			got = vectorstate.Load(cfg.DataPath, vectorstate.HoneypotSource(name))
 		}
-		a, skipped, waiting := cleanHoneypot(ctx, rep, name, dir, limit, lim, opt, got)
+		var nativeGot vectorstate.Delivered
+		if name == "ssh-proxy" && opt.CollectorRunning {
+			nativeGot = vectorstate.Load(cfg.DataPath, instance.SSHBackendLogSource)
+		}
+		a, skipped, waiting := cleanHoneypot(ctx, rep, name, dir, limit, lim, opt, got, cfg.DataPath, nativeGot)
 		notCollected += skipped
 		undelivered += waiting
 		rep.Areas = append(rep.Areas, a)
@@ -232,7 +244,7 @@ func isDir(p string) bool {
 // delivered its logs. It returns the area, how many logs were over the log
 // limit but left alone with the collector stopped, and how many were left
 // alone because the collector had not delivered all of them.
-func cleanHoneypot(ctx context.Context, rep *Report, name, dir string, limit int64, lim Limits, opt Options, got vectorstate.Delivered) (Area, int, int) {
+func cleanHoneypot(ctx context.Context, rep *Report, name, dir string, limit int64, lim Limits, opt Options, got vectorstate.Delivered, dataPath string, nativeGot vectorstate.Delivered) (Area, int, int) {
 	area := Area{Name: name, Limit: limit}
 	root, err := os.OpenRoot(dir)
 	if err != nil {
@@ -244,14 +256,41 @@ func cleanHoneypot(ctx context.Context, rep *Report, name, dir string, limit int
 	captures := instance.CaptureDirs(name)
 	files, total, complete := list(root, captures)
 	if !complete {
-		rep.note("%s has more files than one run lists (%d); the rest wait for the next run.", name, maxFiles)
+		rep.note("%s could not list all stored files (entry limit %d or permissions); byte totals may exclude unseen files.", name, maxFiles)
 	}
 	area.Bytes = total
 	cutoff := opt.Now.Add(-lim.MaxAge)
+	var archives []sshArchive
+	if name == "ssh-proxy" && lim.MaxAge > 0 {
+		archives = expiredSSHArchives(ctx, root, cutoff, dataPath)
+	}
 	act := newActor(rep, &area, root, dir, opt)
 	defer act.close()
-	if got != nil && mayEmpty(files, total, limit, lim) {
+	if mayEmpty(files, total, limit, lim) {
 		act.fingerprints(ctx, files, got)
+		if name == "ssh-proxy" {
+			inventory, err := readSSHInventory(ctx, root, dir, opt.Helper)
+			if err == nil {
+				act.nativeGot = nativeGot
+				act.nativeShared = map[uint64]int{}
+				act.nativeFP = map[string]uint64{}
+				for _, entry := range inventory {
+					if entry.hasFP {
+						act.nativeShared[entry.fp]++
+						act.nativeFP[entry.rel] = entry.fp
+					}
+				}
+			}
+		}
+	}
+	if name == "ssh-proxy" {
+		// Archives remain in fingerprint collision checks, but no individual
+		// file inside one is eligible for generic prune or truncation.
+		for index := range files {
+			if isSSHArchiveFile(files[index].rel) {
+				files[index].kind = kindOther
+			}
+		}
 	}
 
 	// 1. Age: captured files and rotated logs. Never a log the collector
@@ -318,6 +357,7 @@ func cleanHoneypot(ctx context.Context, rep *Report, name, dir string, limit int
 		}
 	}
 	act.flush(ctx)
+	pruneSSHArchives(ctx, rep, &area, root, dir, archives, opt, nativeGot)
 	area.Over = limit > 0 && area.Bytes > limit
 	if area.Removed+area.Emptied > 0 {
 		slog.Info("Storage cleanup", "area", name, "removed", area.Removed, "emptied", area.Emptied,
@@ -348,23 +388,30 @@ type walker struct {
 	root     *os.Root
 	captures []string
 	files    []file
+	visited  int
 	total    int64
 	complete bool
 }
 
 func (w *walker) dir(rel string, depth int) {
-	if depth > maxDepth || len(w.files) >= maxFiles {
+	if depth > maxDepth || w.visited >= maxFiles {
 		w.complete = false
 		return
 	}
 	d, err := w.root.Open(rel)
 	if err != nil {
+		w.complete = false
 		return
 	}
 	defer d.Close()
 	for {
 		ents, err := d.ReadDir(512)
 		for _, e := range ents {
+			if w.visited >= maxFiles {
+				w.complete = false
+				return
+			}
+			w.visited++
 			child := path.Join(rel, e.Name())
 			if rel == "." {
 				child = e.Name()
@@ -434,9 +481,12 @@ type actor struct {
 	pending               int64
 	// got is how far the collector has delivered this folder's logs; fps
 	// their fingerprints, and shared how many logs have each.
-	got    vectorstate.Delivered
-	fps    map[string]uint64
-	shared map[uint64]int
+	got          vectorstate.Delivered
+	nativeGot    vectorstate.Delivered
+	nativeShared map[uint64]int
+	nativeFP     map[string]uint64
+	fps          map[string]uint64
+	shared       map[uint64]int
 	// waiting: logs not emptied because the collector has not delivered
 	// all of them yet.
 	waiting map[string]bool
@@ -527,7 +577,15 @@ func (a *actor) confirm(f file) (int64, bool) {
 	if !ok || a.shared[fp] != 1 {
 		return 0, false
 	}
-	pos, ok := a.got[fp]
+	got := a.got
+	if a.area.Name == "ssh-proxy" && strings.HasPrefix(f.rel, "logs/cells/") {
+		got = a.nativeGot
+		observed, seen := a.nativeFP[f.rel]
+		if !seen || observed != fp || a.nativeShared[fp] != 1 {
+			return 0, false
+		}
+	}
+	pos, ok := got[fp]
 	if !ok || pos < f.info.Size() {
 		return 0, false
 	}

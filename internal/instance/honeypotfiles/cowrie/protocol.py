@@ -19,13 +19,16 @@ from typing import TYPE_CHECKING, ClassVar
 from twisted.conch import recvline
 from twisted.conch.insults import insults
 from twisted.internet.protocol import connectionDone
+from twisted.internet import reactor
 from twisted.logger import Logger
 from twisted.protocols.policies import TimeoutMixin
 
 import cowrie.commands
 from cowrie.core.config import CowrieConfig
+from cowrie.core.qpot_state import SharedAttribute, machine_state
 from cowrie.core.resources import read_data_bytes
 from cowrie.shell import command, fs, honeypot
+from cowrie.core.qpot_permissions import install as qpot_install_permissions
 
 
 @functools.cache
@@ -80,9 +83,8 @@ import collections.abc
 
 
 class TpotCommands(collections.abc.MutableMapping):
-    """T-Pot: the commands of one connection. Cowrie's commands (the dict every session reads) stay as they are;
-    what the connection's package installs add is in added, what its removals take away in removed. Every
-    protocol of a connection (its channels) has its view on the same added and removed (tpot_commands)."""
+    """The commands of one virtual machine. Cowrie's original command dictionary stays unchanged;
+    installs/removals affect its overlay shared by all channels of the same machine."""
 
     def __init__(self, shared, added=None, removed=None) -> None:
         self.tpot_shared = shared
@@ -132,13 +134,17 @@ class TpotCommands(collections.abc.MutableMapping):
 
 
 def tpot_commands(avatar, shared) -> TpotCommands:
-    """The commands of the connection of avatar (protocol.user, which every channel of the connection shares, as
-    the time budget of shell/command.py): its own added and removed on Cowrie's commands."""
-    overlay = getattr(avatar, "tpot_commands", None)
+    """The command overlay belongs to the virtual server, like its filesystem.
+
+    Normally that is one authenticated connection. Small adapters without a
+    server retain avatar scope; the process-wide command table stays unchanged.
+    """
+    owner = getattr(avatar, "server", None) or avatar
+    overlay = getattr(owner, "tpot_commands", None)
     if not (isinstance(overlay, tuple) and len(overlay) == 2):
         overlay = ({}, set())
         try:
-            avatar.tpot_commands = overlay
+            owner.tpot_commands = overlay
         except (AttributeError, TypeError):
             pass
     return TpotCommands(shared, *overlay)
@@ -158,6 +164,33 @@ class HoneyPotBaseProtocol(insults.TerminalProtocol, TimeoutMixin):
     # instances created without __init__ (tests).
     _process_ended: bool = False
 
+    # QPot: the package database and command overlays belong to the virtual
+    # machine, like its filesystem and service state. Upstream apt/dnf/yum keep
+    # using their protocol attributes, but another channel sees the same values.
+    tpot_installed = SharedAttribute("tpot_installed")
+    tpot_faked = SharedAttribute("tpot_faked")
+    tpot_apt_db = SharedAttribute("tpot_apt_db")
+    tpot_apt_hidden = SharedAttribute("tpot_apt_hidden")
+    tpot_opkg_added = SharedAttribute("tpot_opkg_added")
+    tpot_opkg_lists = SharedAttribute("tpot_opkg_lists")
+    tpot_yum_db = SharedAttribute("tpot_yum_db")
+    tpot_yum_cache = SharedAttribute("tpot_yum_cache")
+    tpot_yum_history = SharedAttribute("tpot_yum_history")
+    tpot_dnf_session = SharedAttribute("tpot_dnf_session")
+
+    @property
+    def hostname(self) -> str:
+        return machine_state(self).hostname
+
+    @hostname.setter
+    def hostname(self, value: str) -> None:
+        # hostname(1) changes the runtime name, not /etc/hostname. Keep readers
+        # using the server directly consistent with every protocol channel.
+        machine_state(self).hostname = value
+        server = getattr(getattr(self, "user", None), "server", None)
+        if server is not None:
+            server.hostname = value
+
     commands: ClassVar[dict] = {}
     for c in cowrie.commands.command_modules:
         try:
@@ -173,6 +206,11 @@ class HoneyPotBaseProtocol(insults.TerminalProtocol, TimeoutMixin):
         self.environ = avatar.environ
         self.hostname: str = self.user.server.hostname
         self.fs = self.user.server.fs
+        # QPot: start tracking successful VFS mutations before a first stat or
+        # checksum, while preserving the image's copy-on-write base filesystem.
+        from cowrie.commands.coreutils import qpot_track_files
+
+        qpot_track_files(self)
         # The stdio wiring being handed to the command now starting, which the
         # command keeps as its own (HoneyPotCommand.pp). It stays set to the
         # most recently started command's afterwards, which is what a capture
@@ -350,6 +388,18 @@ class HoneyPotBaseProtocol(insults.TerminalProtocol, TimeoutMixin):
     def getCommand(self, cmd, paths, cwd):
         if not cmd.strip():
             return None
+        # OpenWrt's image has no curl until its finite opkg package is
+        # installed. A registered Python implementation is not a shell builtin.
+        if (Path(cmd).name == "curl" and
+                CowrieConfig.get("shell", "opkg_release", fallback="")):
+            candidates = ([self.fs.resolve_path(cmd, cwd)] if "/" in cmd else
+                          [self.fs.resolve_path(directory + "/curl", cwd) for directory in paths if directory])
+            existing = next((candidate for candidate in candidates if self.fs.isfile(candidate)), None)
+            if existing is None:
+                return None
+            actor = self.cmdstack[-1].user if self.cmdstack else {"uid": self.user.uid, "gid": self.user.gid}
+            if not self.fs.is_executable(existing, actor["uid"], actor["gid"]):
+                return self.scriptcmd(existing, cmd)
         path = None
         skip_python_commands = tpot_skip_python_commands()
         # the programs apt / dnf installed in this session ({name: version}) answer
@@ -729,7 +779,14 @@ class HoneyPotExecProtocol(HoneyPotBaseProtocol):
         qpot_shell_variables(self.cmdstack[0])
         # The parser treats newlines as statement separators, so a multi-line
         # exec payload (including loops/conditionals) is run as written.
-        self.cmdstack[0].lineReceived(self.execcmd)
+        # Reply to the SSH exec request before a synchronous command can send
+        # exit-status/CHANNEL_CLOSE. The channel's transport is also fully
+        # connected when this callback runs.
+        reactor.callLater(0, self._start_exec)
+
+    def _start_exec(self):
+        if not self._process_ended and self.terminal is not None and self.cmdstack:
+            self.cmdstack[0].lineReceived(self.execcmd)
 
     def keystrokeReceived(self, keyID, modifier):
         # T-Pot: a full screen command (top, ssh -t) takes the keys of the pty
@@ -1286,3 +1343,8 @@ class HoneyPotInteractiveTelnetProtocol(HoneyPotInteractiveProtocol):
         the proper transport to access underlying Telnet information.
         """
         return self.terminal.transport.session.transport
+
+
+# Adapter installation precedes SSH/SFTP adapter registration; every later
+# process receives its own credentials over the connection's shared filesystem.
+qpot_install_permissions()

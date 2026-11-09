@@ -3,7 +3,7 @@ name: HiFi images
 # Builds the HiFi SSH broker and backend images that the generated compose file
 # references (ghcr.io/yurillab/qpot-ssh-{proxy,backend}). Nothing else published
 # them, so HiFi mode could not be deployed. Every PR/push builds and smoke-tests
-# both images; pushes to main also publish multi-arch images to GHCR. The
+# both architectures; pushes to main publish those tested images to GHCR. The
 # ssh-proxy image also carries qpot-netguard, the egress guard every instance
 # runs; its smoke test checks the guard against real docker networking.
 #
@@ -13,25 +13,22 @@ name: HiFi images
 on:
   push:
     branches: [main]
-    paths:
-      - "docker/ssh-proxy/**"
-      - "docker/ssh-backend/**"
-      - "cmd/qpot-sshproxy/**"
-      - "cmd/qpot-netguard/**"
-      - "internal/proxy/**"
-      - "internal/netguard/**"
-      - "go.mod"
-      - "go.sum"
-      - ".github/workflows/images.yml"
   pull_request:
     branches: [main]
     paths:
       - "docker/ssh-proxy/**"
       - "docker/ssh-backend/**"
       - "cmd/qpot-sshproxy/**"
+      - "cmd/qpot-sshbackend/**"
       - "cmd/qpot-netguard/**"
       - "internal/proxy/**"
+      - "internal/sshbackend/**"
       - "internal/netguard/**"
+      - "internal/instance/**"
+      - "internal/config/**"
+      - "internal/cleanup/**"
+      - "scripts/test-hifi.sh"
+      - ".github/workflows/ci.yml"
       - "go.mod"
       - "go.sum"
       - ".github/workflows/images.yml"
@@ -45,44 +42,75 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  source-validation:
+    name: Complete source and platform validation
+    uses: ./.github/workflows/ci.yml
+    permissions:
+      contents: read
+      pull-requests: read
+      security-events: write
+
+  semantic-validation:
+    name: Complete semantic security analysis
+    uses: ./.github/workflows/codeql.yml
+    permissions:
+      contents: read
+      security-events: write
+
   build:
-    name: Build, smoke-test & publish ${{ matrix.image }}
-    runs-on: ubuntu-latest
+    name: Build and smoke-test ${{ matrix.image }} (${{ matrix.arch }})
+    runs-on: ${{ matrix.runner }}
     timeout-minutes: 30
     permissions:
       contents: read
-      packages: write # only used by the publish step on main
     strategy:
       fail-fast: false
       matrix:
-        image: [ssh-proxy, ssh-backend]
+        include:
+          - { image: ssh-proxy, arch: amd64, runner: ubuntu-latest }
+          - { image: ssh-backend, arch: amd64, runner: ubuntu-latest }
+          - { image: ssh-proxy, arch: arm64, runner: ubuntu-24.04-arm }
+          - { image: ssh-backend, arch: arm64, runner: ubuntu-24.04-arm }
     env:
       IMAGE: ghcr.io/yurillab/qpot-${{ matrix.image }}
+      TEST_IMAGE: ghcr.io/yurillab/qpot-${{ matrix.image }}:ci-${{ matrix.arch }}
     steps:
-      - uses: actions/checkout@v4
-
-      - name: Set up QEMU (arm64 builds)
-        uses: docker/setup-qemu-action@v3
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
       - name: Set up Buildx
-        uses: docker/setup-buildx-action@v3
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
 
-      - name: Build (amd64, for the smoke test)
-        uses: docker/build-push-action@v6
+      - name: Build the native image for acceptance
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
         with:
           context: .
           file: docker/${{ matrix.image }}/Dockerfile
-          platforms: linux/amd64
+          platforms: linux/${{ matrix.arch }}
           load: true
-          tags: ${{ env.IMAGE }}:ci
-          cache-from: type=gha,scope=${{ matrix.image }}
-          cache-to: type=gha,mode=max,scope=${{ matrix.image }}
+          tags: ${{ env.TEST_IMAGE }}
+          cache-from: type=gha,scope=${{ matrix.image }}-${{ matrix.arch }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.image }}-${{ matrix.arch }}
+
+      - name: Set up Go for backend acceptance
+        if: matrix.image == 'ssh-backend'
+        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Exercise real SSH state, recording and file transfer
+        if: matrix.image == 'ssh-backend'
+        env:
+          QPOT_TEST_SSH_BACKEND: "1"
+          QPOT_SSH_BACKEND_IMAGE: ${{ env.TEST_IMAGE }}
+        # Network-none: Docker exec carries the SSH bytes; no real targets.
+        run: go test -race -count=1 -timeout 4m ./internal/sshbackend -run '^TestSSHBackendLive$'
 
       - name: Smoke-test the backend (real sshd answers)
         if: matrix.image == 'ssh-backend'
         run: |
           set -euo pipefail
-          docker run -d --name be -p 127.0.0.1:2222:22 "${IMAGE}:ci"
+          docker run -d --name be -p 127.0.0.1:2222:22 "${TEST_IMAGE}"
           for _ in $(seq 1 30); do
             if banner=$(timeout 3 bash -c 'exec 3<>/dev/tcp/127.0.0.1/2222; head -n 1 <&3' 2>/dev/null) \
                && [[ "$banner" == SSH-2.0-OpenSSH* ]]; then
@@ -104,11 +132,11 @@ jobs:
         run: |
           set -euo pipefail
           keys=$(mktemp -d)
-          docker run --rm --network none --entrypoint sh -v "$keys:/k" "${IMAGE}:ci" -c \
-            'for t in rsa ecdsa ed25519; do ssh-keygen -q -t $t -f /k/ssh_host_${t}_key -N "" </dev/null; done; chmod 0777 /k/*'
-          want=$(docker run --rm --network none --entrypoint ssh-keygen -v "$keys:/k:ro" "${IMAGE}:ci" \
+          docker run --rm --network none --entrypoint sh -v "$keys:/k" "${TEST_IMAGE}" -c \
+            'for t in rsa ecdsa ed25519; do ssh-keygen -q -t $t -f /k/ssh_host_${t}_key -N "" </dev/null; done; chmod 0777 /k /k/*'
+          want=$(docker run --rm --network none --entrypoint ssh-keygen -v "$keys:/k:ro" "${TEST_IMAGE}" \
             -lf /k/ssh_host_ed25519_key.pub | awk '{print $2}')
-          docker run -d --name be2 --network none -v "$keys:/etc/ssh/keys:ro" "${IMAGE}:ci"
+          docker run -d --name be2 --network none -v "$keys:/run/sshd/bootstrap/keys:ro" "${TEST_IMAGE}"
           got=""
           for _ in $(seq 1 30); do
             got=$(docker exec be2 sh -c 'ssh-keyscan -t ed25519 127.0.0.1 2>/dev/null | ssh-keygen -lf -' 2>/dev/null | awk '{print $2}' || true)
@@ -121,6 +149,7 @@ jobs:
             exit 1
           fi
           echo "backend serves the mounted key: ${got}"
+          docker exec --user 65534:65534 be2 sh -c 'test ! -r /run/sshd/bootstrap/keys/ssh_host_ed25519_key'
           docker rm -f be2 >/dev/null
 
       - name: Smoke-test the broker (starts, refuses bad config)
@@ -128,11 +157,11 @@ jobs:
         run: |
           set -euo pipefail
           # Without backends it must refuse to start (fail loudly, not silently).
-          if docker run --rm "${IMAGE}:ci" 2>/dev/null; then
+          if docker run --rm "${TEST_IMAGE}" 2>/dev/null; then
             echo "::error::broker started without QPOT_SSHPROXY_BACKENDS"; exit 1
           fi
           docker run -d --name bk -e QPOT_SSHPROXY_BACKENDS="be1=127.0.0.1:22" \
-            -e QPOT_SSHPROXY_LOG=/tmp/sessions.json "${IMAGE}:ci"
+            -e QPOT_SSHPROXY_LOG=/tmp/sessions.json "${TEST_IMAGE}"
           sleep 3
           test "$(docker inspect -f '{{.State.Running}}' bk)" = "true" || { docker logs bk; exit 1; }
           docker logs bk
@@ -173,7 +202,7 @@ jobs:
             docker run -d --name ng --network host --user 0:0 --read-only \
               --cap-drop ALL --cap-add NET_ADMIN --security-opt no-new-privileges \
               --entrypoint /qpot-netguard -e QPOT_NETGUARD_TABLE=qpot_egress_ci \
-              -e QPOT_NETGUARD_IFACES=br-qpotci0001 -e QPOT_NETGUARD_MODE="$1" "${IMAGE}:ci" run >/dev/null
+              -e QPOT_NETGUARD_IFACES=br-qpotci0001 -e QPOT_NETGUARD_MODE="$1" "${TEST_IMAGE}" run >/dev/null
             for _ in $(seq 1 15); do
               if docker exec ng /qpot-netguard check >/dev/null 2>&1; then return 0; fi
               sleep 1
@@ -194,33 +223,116 @@ jobs:
           # It refuses a bad spec instead of applying something else.
           if docker run --rm --network host --user 0:0 --cap-drop ALL --cap-add NET_ADMIN \
                --entrypoint /qpot-netguard -e QPOT_NETGUARD_TABLE='x;y' \
-               -e QPOT_NETGUARD_IFACES=br-qpotci0001 "${IMAGE}:ci" apply 2>/dev/null; then
+               -e QPOT_NETGUARD_IFACES=br-qpotci0001 "${TEST_IMAGE}" apply 2>/dev/null; then
             echo "::error::netguard applied a bad table name"; exit 1
           fi
           docker logs ng
           docker rm -f ng hp >/dev/null
           docker network rm ngtest >/dev/null
 
+      - name: Save the tested image
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/hifi-image"
+          docker save "${TEST_IMAGE}" | gzip -1 > "$RUNNER_TEMP/hifi-image/${{ matrix.image }}-${{ matrix.arch }}.tar.gz"
+      - name: Retain the tested image for the integration gate
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: hifi-${{ matrix.image }}-${{ matrix.arch }}-${{ github.run_id }}
+          path: ${{ runner.temp }}/hifi-image/${{ matrix.image }}-${{ matrix.arch }}.tar.gz
+          if-no-files-found: error
+          retention-days: 1
+
+  hifi-validation:
+    name: Validate the tested images (${{ matrix.arch }})
+    needs: build
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { arch: amd64, runner: ubuntu-latest }
+          - { arch: arm64, runner: ubuntu-24.04-arm }
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Download only this workflow's tested images
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          pattern: hifi-*-${{ matrix.arch }}-${{ github.run_id }}
+          merge-multiple: true
+          path: ${{ runner.temp }}/hifi-images
+      - name: Load the tested images
+        env:
+          ARCH: ${{ matrix.arch }}
+        run: |
+          set -euo pipefail
+          for image in ssh-proxy ssh-backend; do
+            gzip -dc "$RUNNER_TEMP/hifi-images/${image}-${ARCH}.tar.gz" | docker load
+            docker tag "ghcr.io/yurillab/qpot-${image}:ci-${ARCH}" "ghcr.io/yurillab/qpot-${image}:ci"
+          done
+      - name: Require the same live gate used by CI
+        run: bash scripts/test-hifi.sh --use-built-images
+
+  publish:
+    name: Publish validated ${{ matrix.image }}
+    needs: [build, hifi-validation, source-validation, semantic-validation]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      fail-fast: false
+      matrix:
+        image: [ssh-proxy, ssh-backend]
+    env:
+      IMAGE: ghcr.io/yurillab/qpot-${{ matrix.image }}
+      IMAGE_NAME: ${{ matrix.image }}
+    steps:
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+      - name: Download only this workflow's tested architecture archives
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          pattern: hifi-${{ matrix.image }}-*-${{ github.run_id }}
+          merge-multiple: true
+          path: ${{ runner.temp }}/hifi-images
+
       - name: Log in to GHCR
-        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-        uses: docker/login-action@v3
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Publish (amd64 + arm64)
-        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-        uses: docker/build-push-action@v6
-        with:
-          context: .
-          file: docker/${{ matrix.image }}/Dockerfile
-          platforms: linux/amd64,linux/arm64
-          push: true
-          tags: |
-            ${{ env.IMAGE }}:latest
-            ${{ env.IMAGE }}:${{ github.sha }}
-          labels: |
-            org.opencontainers.image.source=https://github.com/YurilLAB/QPot
-            org.opencontainers.image.revision=${{ github.sha }}
-          cache-from: type=gha,scope=${{ matrix.image }}
+      # No source checkout or rebuild occurs with registry write permission.
+      # Each pushed image is the same saved image that passed native acceptance
+      # and the full same-architecture HiFi integration matrix in this run.
+      # Preserve :latest for older released CLIs whose image compatibility has
+      # not been established. New release binaries use their full commit ref.
+      - name: Publish the tested images and their immutable manifest
+        run: |
+          set -euo pipefail
+          digests=()
+          for arch in amd64 arm64; do
+            gzip -dc "$RUNNER_TEMP/hifi-images/${IMAGE_NAME}-${arch}.tar.gz" | docker load
+            tested="${IMAGE}:ci-${arch}"
+            actual_platform=$(docker image inspect --format '{{.Os}}/{{.Architecture}}' "$tested")
+            test "$actual_platform" = "linux/$arch"
+            ref="${IMAGE}:${GITHUB_SHA}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-${arch}"
+            docker tag "$tested" "$ref"
+            docker push "$ref"
+            digest_ref=$(docker image inspect --format '{{index .RepoDigests 0}}' "$ref")
+            digest=${digest_ref#"${IMAGE}@sha256:"}
+            if ! [[ "$digest" =~ ^[0-9a-f]{64}$ ]]; then
+              echo '::error::pushed image has no matching immutable repository digest' >&2
+              exit 1
+            fi
+            digests+=("$digest_ref")
+          done
+          docker buildx imagetools create --tag "${IMAGE}:${GITHUB_SHA}" "${digests[@]}"

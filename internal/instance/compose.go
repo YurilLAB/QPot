@@ -9,6 +9,7 @@ import (
 	"net"
 	"net/url"
 	"path"
+	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
@@ -17,6 +18,7 @@ import (
 	"github.com/qpot/qpot/internal/config"
 	"github.com/qpot/qpot/internal/refrigeration"
 	"github.com/qpot/qpot/internal/security"
+	"github.com/qpot/qpot/internal/sshbackend"
 	"github.com/qpot/qpot/internal/vectorstate"
 )
 
@@ -205,6 +207,10 @@ type ComposeGenerator struct {
 	// KeepPorts are the host ports of the compose file in use, by portKey
 	// (see ownHostPorts): pairs that still exist keep them.
 	KeepPorts map[string]int
+	// KeepSubnets are the actual Docker subnets of this project's networks
+	// still present in the candidate, keyed by allocation name. Reserve them
+	// before assigning any new network so a layout change cannot move them.
+	KeepSubnets map[string]string
 }
 
 // bridgeName builds the Linux bridge interface name for a honeypot network.
@@ -278,13 +284,9 @@ func nextSubnet(s string) string {
 	return fmt.Sprintf("172.%d.%d.0/24", x, y)
 }
 
-// buildSubnetMap assigns a unique /24 to every enabled honeypot network.
-// subnetForNetwork alone is a pure hash over ~3072 possible /24s, so a handful
-// of honeypots eventually collide and `docker compose up` fails with "Pool
-// overlaps with other one". Resolve deterministically: process honeypots in
-// sorted order, start at the hashed subnet, and probe to the next free /24.
-func (g *ComposeGenerator) buildSubnetMap() map[string]string {
-	names := make([]string, 0, len(g.Config.Honeypots)+3)
+// subnetNames lists allocation keys in their stable historical order.
+func (g *ComposeGenerator) subnetNames() []string {
+	names := make([]string, 0, len(g.Config.Honeypots))
 	for name, hp := range g.Config.Honeypots {
 		if hp.Enabled {
 			names = append(names, name)
@@ -295,11 +297,34 @@ func (g *ComposeGenerator) buildSubnetMap() map[string]string {
 	// them did not move any existing honeypot subnet).
 	names = append(names, "qpot_internal", "qpot_dbhost")
 	if sshProxyEnabled(g.Config) {
-		names = append(names, "ssh-proxy_backend")
+		for _, service := range sshBackendServiceNames(g.Config) {
+			names = append(names, sshBackendNetwork(service))
+		}
 	}
 	if tannerEnabled(g.Config) {
 		names = append(names, "tanner_backend")
 	}
+	return names
+}
+
+// currentNetworkNames maps Compose's logical network labels to allocation
+// names. Unknown and retired project networks must remain host reservations.
+func (g *ComposeGenerator) currentNetworkNames() map[string]string {
+	names := map[string]string{}
+	for _, name := range g.subnetNames() {
+		logical := name
+		if hp, ok := g.Config.Honeypots[name]; ok && hp.Enabled {
+			logical += "_net"
+		}
+		names[logical] = name
+	}
+	return names
+}
+
+// buildSubnetMap preserves current assignments before allocating collision-free
+// /24s to new networks, probing from each network's deterministic hash.
+func (g *ComposeGenerator) buildSubnetMap() map[string]string {
+	names := g.subnetNames()
 
 	used := map[string]bool{}
 	for s := range g.ReservedSubnets {
@@ -321,10 +346,29 @@ func (g *ComposeGenerator) buildSubnetMap() map[string]string {
 		return false
 	}
 	assign := make(map[string]string)
+	// Preserve every current assignment first. Otherwise a newly enabled
+	// honeypot sorted before an existing network could steal its actual /24.
 	for _, name := range names {
+		if sub := g.KeepSubnets[name]; sub != "" {
+			assign[name] = "" // Never silently move a conflicting current network.
+			if ip, n, err := net.ParseCIDR(sub); err == nil && ip.To4() != nil && !taken(n.String()) {
+				if ones, bits := n.Mask.Size(); ones == 24 && bits == 32 {
+					assign[name], used[n.String()] = n.String(), true
+				}
+			}
+		}
+	}
+	for _, name := range names {
+		if _, present := assign[name]; present {
+			continue
+		}
 		sub := subnetForNetwork(g.Config.InstanceName, name)
 		for tries := 0; taken(sub) && tries < 12*256; tries++ {
 			sub = nextSubnet(sub)
+		}
+		if taken(sub) {
+			assign[name] = "" // Generate rejects exhaustion before publishing.
+			continue
 		}
 		used[sub] = true
 		assign[name] = sub
@@ -417,6 +461,15 @@ func dbPidsLimit(globalMax int64) int64 {
 }
 
 func (g *ComposeGenerator) Generate() (string, error) {
+	if err := config.ValidateSSHEnvironment(g.Config); err != nil {
+		return "", err
+	}
+	if err := validateSSHHostnames(g.Config); err != nil {
+		return "", err
+	}
+	if err := validateSSHStorePlan(g.Config); err != nil {
+		return "", err
+	}
 	if hp, ok := g.Config.GetHoneypotConfig("refrigeration"); ok && hp.Enabled {
 		if err := CheckSetting("refrigeration", "site_profile", refrigerationSiteProfile(g.Config)); err != nil {
 			return "", err
@@ -446,17 +499,17 @@ networks:
     ipam:
       config:
         - subnet: {{netSubnet "qpot_dbhost"}}
-{{if sshProxyEnabled .Config}}
-  # HiFi backends sit here ONLY. internal:true removes the default gateway, so
-  # the real-OpenSSH backends (genuine attacker code execution) have NO outbound
-  # connectivity and can never be used to pivot, scan, mine, or DDoS. This egress
-  # lock is the single most important control for high-interaction mode.
-  ssh-proxy_backend:
+{{if sshProxyEnabled .Config}}{{range $b := sshProxyBackends .Config}}
+  # One private bridge per lease: unrelated SSH sessions never share a LAN.
+  # The guard also blocks host access and all traffic leaving this cell.
+  {{$b.Network}}:
     internal: true
+    driver_opts:
+      com.docker.network.bridge.name: {{sshCellBridge $.Config.InstanceName $b.Service}}
     ipam:
       config:
-        - subnet: {{netSubnet "ssh-proxy_backend"}}
-{{end}}{{if tannerEnabled .Config}}
+        - subnet: {{netSubnet $b.Network}}
+{{end}}{{end}}{{if tannerEnabled .Config}}
   # tanner's server, API, PHP sandbox (phpox executes attacker-supplied PHP)
   # and redis sit here with no default gateway: nothing in the stack can make
   # outbound connections. Only snare also joins tanner_net to serve attackers.
@@ -595,6 +648,9 @@ services:
   # interval. Turn it off with security.network_isolation.allow_private_egress.
   netguard:
     image: {{$eg.Image}}
+    {{- if and (sshProxyEnabled .Config) (sshLocalImages .Config)}}
+    pull_policy: never
+    {{- end}}
     container_name: {{.Config.InstanceName}}_netguard
     restart: unless-stopped
     entrypoint: ["/qpot-netguard"]
@@ -613,9 +669,10 @@ services:
     environment:
       QPOT_NETGUARD_TABLE: "{{$eg.Table}}"
       QPOT_NETGUARD_IFACES: "{{$eg.Ifaces}}"
+      QPOT_NETGUARD_CELLS: "{{$eg.Cells}}"
       QPOT_NETGUARD_MODE: "{{$eg.Mode}}"
     healthcheck:
-      test: ["CMD", "/qpot-netguard", "check"]
+      test: ["CMD", "/qpot-netguard", "{{if $eg.Cells}}check-cells{{else}}check{{end}}"]
       interval: 15s
       timeout: 5s
       retries: 3
@@ -630,79 +687,69 @@ services:
 {{range $name, $hp := .Config.Honeypots}}{{if $hp.Enabled}}
 {{template "honeypot" dict "Name" $name "HP" $hp "Config" $.Config "Sandbox" $.Sandbox}}
 {{end}}{{end}}
-{{if sshProxyEnabled .Config}}{{range $b := sshProxyBackends .Config}}
-  # HiFi backend: a REAL Debian + OpenSSH server. The attacker's SSH handshake
-  # terminates HERE (the broker only splices opaque TCP), which is what closes
-  # the protocol-fingerprinting gap. This is genuine code execution, made safe by
-  # the egress lock (ssh-proxy_backend is internal:true), the isolation runtime,
-  # a minimal capability set, resource caps, and being reset between sessions. It
-  # publishes NO host port - it is reachable only by the broker.
-  {{$b.Service}}:
-    image: {{GetHoneypotImage "ssh-backend"}}
-    container_name: {{$.Config.InstanceName}}_{{$b.Service}}
-    restart: unless-stopped
-    # Every backend presents the SAME hostname and SAME SSH host keys (shared
-    # volume below) so the pool looks like ONE server: a returning attacker routed
-    # to a different backend never sees the hostname or host-key fingerprint
-    # change (which would warn their SSH client / reveal the honeypot pool).
-    hostname: "{{sshBackendHostname $.Config}}"
+{{if sshOrganizationEnabled .Config}}{{$cellLimits := .Config.GetEffectiveResourceLimits "ssh-proxy"}}{{range $c := sshOrgCells .Config}}
+{{template "sshbackend" dict "Service" $c.App "Config" $.Config "Sandbox" $.Sandbox "Network" $c.Network "Offset" 10 "Hostname" $c.AppHostname "Aliases" $c.AppAliases "Users" (sshBackendUsersCSV $.Config) "KeyDir" (sshSharedKeys $.Config) "Scene" $c.AppSceneJSON "Database" $c.Database "Backup" $c.Backup "ContextDir" $c.ContextDir}}
+{{template "sshbackend" dict "Service" $c.Backup "Config" $.Config "Sandbox" $.Sandbox "Network" $c.Network "Offset" 30 "Hostname" $c.BackupHostname "Aliases" $c.BackupAliases "Users" $c.BackupUsersCSV "KeyDir" $c.BackupKeyDir "Scene" $c.BackupSceneJSON "ContextDir" $c.ContextDir}}
+  {{$c.Database}}:
+    image: {{$c.DBImage}}
+    container_name: {{$.Config.InstanceName}}_{{$c.Database}}
+    hostname: {{yamlStr $c.DBHostname}}
+    user: "999:999"
+    read_only: true
+    command: ["postgres", "-c", "log_statement=all", "-c", "log_connections=on", "-c", "log_disconnections=on", "-c", "logging_collector=on", "-c", "log_destination=jsonlog", "-c", "log_directory=/var/log/postgresql", "-c", "log_filename=queries-%Y%m%d-%H%M%S.log", "-c", "log_file_mode=0600", "-c", "log_rotation_age=1h", "-c", "log_rotation_size=10MB"]
+    restart: on-failure:{{$.Config.Security.ResourceLimits.RestartAttempts}}
+    depends_on:
+      netguard:
+        condition: service_healthy
+    networks:
+      {{$c.Network}}:
+        ipv4_address: {{netAddress $c.Network 20}}
+        aliases: [{{range $i, $alias := $c.DBAliases}}{{if $i}}, {{end}}{{yamlStr $alias}}{{end}}]
+    dns: ["127.0.0.1"]
+    environment:
+      POSTGRES_USER: {{yamlStr $c.DBUsername}}
+      POSTGRES_PASSWORD: {{yamlStr $c.DBPassword}}
+      POSTGRES_DB: {{yamlStr $c.DBName}}
+      PGDATA: /var/lib/postgresql/data
+      {{- range $key := runtimeProxyKeys}}
+      {{$key}}: ""
+      {{- end}}
+    volumes:
+      - {{yamlStr (printf "%s:/docker-entrypoint-initdb.d/10-organization.sql:ro" $c.DBInitSQLPath)}}
+      - {{yamlStr (printf "%s:/var/log/postgresql" $c.DBLogDir)}}
+    tmpfs:
+      - /var/lib/postgresql/data:rw,noexec,nosuid,nodev,size=256m,uid=999,gid=999,mode=0700
+      - /var/run/postgresql:rw,noexec,nosuid,nodev,size=16m,uid=999,gid=999,mode=0755
+      - /tmp:rw,noexec,nosuid,nodev,size=32m,mode=1777
+    cap_drop: ["ALL"]
+    security_opt: ["no-new-privileges:true"]
     {{- if $.Sandbox.ContainerRuntime}}
-    # Stronger isolation runtime (gVisor/Kata) - strongly recommended for real RCE.
     runtime: {{$.Sandbox.ContainerRuntime}}
     {{- end}}
-    networks:
-      - ssh-proxy_backend
-    environment:
-      - BACKEND_USERS={{$b.UsersCSV}}
-    volumes:
-      # SHARED host keys (one fingerprint for the whole pool), generated by qpot
-      # on the host and mounted READ-ONLY at /etc/ssh/keys (never shadowing the
-      # image's hardened sshd_config): root on a backend cannot swap or plant
-      # the pool's key. Plus this backend's own session recordings / sshd logs.
-      - {{$.Config.DataPath}}/honeypots/ssh-backend/shared-hostkeys:/etc/ssh/keys:ro
-      - {{$.Config.DataPath}}/honeypots/ssh-backend/{{$b.Service}}/logs:/var/log/ssh-backend
     labels:
-      qpot.instance: "{{$.Config.InstanceName}}"
+      qpot.instance: {{yamlStr $.Config.InstanceName}}
       qpot.honeypot: "ssh-backend"
-    security_opt:
-      - no-new-privileges:true
-    # sshd privilege separation needs a small, specific capability set; everything
-    # else is dropped. (Do NOT cap_drop ALL - sshd auth would break.)
-    cap_drop:
-      - ALL
-    cap_add:
-      - SETUID
-      - SETGID
-      - CHOWN
-      - DAC_OVERRIDE
-      - FOWNER
-      - SETPCAP
-      - KILL
-      - SYS_CHROOT
-      - AUDIT_WRITE
-      - NET_BIND_SERVICE
+      qpot.cell: {{yamlStr $c.App}}
+      qpot.role: "database"
+    healthcheck:
+      test: ["CMD", "pg_isready", "-h", "127.0.0.1", "-U", {{$c.DBUsername}}, "-d", {{$c.DBName}}]
+      interval: 2s
+      timeout: 3s
+      retries: 15
+      start_period: 20s
     deploy:
       resources:
         limits:
-          cpus: '{{divf $.Config.Security.ResourceLimits.MaxCPUPercent 100}}'
-          memory: {{$.Config.Security.ResourceLimits.MaxMemoryMB}}M
-          {{if $.Config.Security.ResourceLimits.MaxPids}}pids: {{$.Config.Security.ResourceLimits.MaxPids}}{{end}}
-        reservations:
-          cpus: '0.05'
-          memory: 32M
-      restart_policy:
-        condition: on-failure
-        delay: 5s
-        max_attempts: {{$.Config.Security.ResourceLimits.RestartAttempts}}
-        window: 120s
-    mem_swappiness: 0
-    oom_kill_disable: false
+          cpus: '{{divf $cellLimits.MaxCPUPercent 100}}'
+          memory: {{$cellLimits.MaxMemoryMB}}M
+          {{if $cellLimits.MaxPids}}pids: {{$cellLimits.MaxPids}}{{end}}
     logging:
       driver: "json-file"
       options:
         max-size: "10m"
         max-file: "3"
-        labels: "qpot.instance,qpot.honeypot"
+{{end}}{{else if sshProxyEnabled .Config}}{{range $b := sshProxyBackends .Config}}
+{{template "sshbackend" dict "Service" $b.Service "Config" $.Config "Sandbox" $.Sandbox "Network" $b.Network "Offset" 10 "Hostname" (sshBackendHostname $.Config) "Users" $b.UsersCSV "KeyDir" (sshSharedKeys $.Config) "ContextDir" (sshCellContext $.Config $b.Service)}}
 {{end}}{{end}}
 {{if tannerEnabled .Config}}{{range $c := tannerCompanions}}
   # tanner stack companion ({{$c.Role}}); see the tanner deploy profile.
@@ -773,11 +820,91 @@ services:
   # container — adding one here would both duplicate that listener (port
   # conflict) and depend on an image that isn't published.
 
+{{define "sshbackend"}}{{$cellLimits := .Config.GetEffectiveResourceLimits "ssh-proxy"}}
+  {{.Service}}:
+    image: {{sshBackendImage .Config}}
+    {{- if sshLocalImages .Config}}
+    pull_policy: never
+    {{- end}}
+    container_name: {{.Config.InstanceName}}_{{.Service}}
+    hostname: {{yamlStr .Hostname}}
+    restart: on-failure:{{.Config.Security.ResourceLimits.RestartAttempts}}
+    entrypoint: ["/usr/local/libexec/session-audit", "serve"]
+    depends_on:
+      netguard:
+        condition: service_healthy
+      {{- if .Database}}
+      {{.Database}}:
+        condition: service_healthy
+      {{.Backup}}:
+        condition: service_healthy
+      {{- end}}
+    {{- if .Sandbox.ContainerRuntime}}
+    runtime: {{.Sandbox.ContainerRuntime}}
+    {{- end}}
+    networks:
+      {{.Network}}:
+        ipv4_address: {{netAddress .Network .Offset}}
+        {{- if .Aliases}}
+        aliases: [{{range $i, $alias := .Aliases}}{{if $i}}, {{end}}{{yamlStr $alias}}{{end}}]
+        {{- end}}
+    # Docker resolves declared service names on this private bridge. All
+    # other DNS questions terminate in this container, never at real resolvers.
+    dns: ["127.0.0.1"]
+    environment:
+      {{- range $key := runtimeProxyKeys}}
+      - {{$key}}=
+      {{- end}}
+      - {{envEntry "BACKEND_USERS" .Users}}
+      {{- if .Scene}}
+      - {{envEntry "BACKEND_SCENE" .Scene}}
+      {{- end}}
+    volumes:
+      - {{yamlStr (printf "%s:%s:ro" .KeyDir (sshHostKeySource))}}
+      - {{yamlStr (printf "%s:/var/log/ssh-backend" (sshBackendLogDir .Config .Service))}}
+      - {{yamlStr (printf "%s:/run/audit-context:ro" .ContextDir)}}
+    labels:
+      qpot.instance: {{yamlStr .Config.InstanceName}}
+      qpot.honeypot: "ssh-backend"
+      qpot.role: "ssh"
+    # Real accounts, packages and file edits use the disposable writable image
+    # layer. Only logs and protected host keys survive a whole-cell recreation.
+    security_opt: ["no-new-privileges:true"]
+    cap_drop: ["ALL"]
+    cap_add: ["SETUID", "SETGID", "CHOWN", "DAC_OVERRIDE", "FOWNER", "SETPCAP", "KILL", "SYS_CHROOT", "AUDIT_WRITE", "NET_BIND_SERVICE"]
+    healthcheck:
+      test: ["CMD", "/usr/local/libexec/session-audit", "health"]
+      interval: 2s
+      timeout: 3s
+      retries: 15
+      start_period: 10s
+    deploy:
+      resources:
+        limits:
+          cpus: '{{divf $cellLimits.MaxCPUPercent 100}}'
+          memory: {{$cellLimits.MaxMemoryMB}}M
+          {{if $cellLimits.MaxPids}}pids: {{$cellLimits.MaxPids}}{{end}}
+        reservations:
+          cpus: '{{if gt 5.0 $cellLimits.MaxCPUPercent}}{{divf $cellLimits.MaxCPUPercent 100}}{{else}}0.05{{end}}'
+          memory: {{if gt 32 $cellLimits.MaxMemoryMB}}{{$cellLimits.MaxMemoryMB}}{{else}}32{{end}}M
+    mem_swappiness: 0
+    oom_kill_disable: false
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+        labels: "qpot.instance,qpot.honeypot"
+{{end}}
+
 {{define "honeypot"}}
   # Honeypot: {{.Name}}
   {{.Name}}:
     {{- $d := deployFor .Name}}
-    image: {{GetHoneypotImage .Name}}
+    image: {{if eq .Name "ssh-proxy"}}{{sshProxyImage .Config}}{{else}}{{GetHoneypotImage .Name}}{{end}}
+    {{- if and (eq .Name "ssh-proxy") (sshLocalImages .Config)}}
+    pull_policy: never
+    {{- end}}
     {{- if $d.LocalBuild}}
     build:
       context: {{yamlStr (refrigerationBuildPath $.Config)}}
@@ -828,21 +955,35 @@ services:
       # deployment profile (deploy.go), derived from T-Pot's reference composes
       # and verified by running the images.
     {{- range $v := $d.Volumes}}
+    {{- if $v.ContainerPath}}
+      {{- if and (eq $.Name "ssh-proxy") (eq $v.HostSubdir "logs/broker")}}
+      - {{yamlStr (printf "%s:%s" (sshBrokerLogDir $.Config) $v.ContainerPath)}}
+      {{- else}}
       - {{$.Config.DataPath}}/honeypots/{{$.Name}}/{{$v.HostSubdir}}:{{$v.ContainerPath}}{{if $v.ReadOnly}}:ro{{end}}
+      {{- end}}
+    {{- end}}
+    {{- end}}
+    {{- if eq .Name "ssh-proxy"}}
+      - {{yamlStr (printf "%s:/run/audit-contexts" (sshStoreContextRoot $.Config))}}
     {{- end}}
     networks:
       # Only its own network: the collector reads the honeypot's logs from the
       # bind mounts above, so nothing on qpot_internal (the database, the
       # collector) is reachable from a container that runs attacker input.
-      - {{.Name}}_net
     {{- if eq .Name "ssh-proxy"}}
-      # The broker also joins the egress-locked backend network so it can reach
-      # the real-OpenSSH backends (and nothing else can).
-      - ssh-proxy_backend
-    {{- end}}
+      # Listen only on the public ingress address. A guest must not re-enter
+      # the broker through its private-cell address and lease another cell.
+      {{.Name}}_net:
+        ipv4_address: {{netAddress "ssh-proxy" 10}}
+      {{- range $b := sshProxyBackends .Config}}
+      {{$b.Network}}: {}
+      {{- end}}
+    {{- else}}
+      - {{.Name}}_net
     {{- if eq .Name "tanner"}}
       # The tanner server talks to its api/phpox/redis companions only there.
       - tanner_backend
+    {{- end}}
     {{- end}}
     labels:
       # Host-side identification for QPot's tooling and the docker log driver.
@@ -873,8 +1014,17 @@ services:
       # HiFi broker: the operator-fixed backend pool (never attacker-derived, so
       # no SSRF) and the logical name used in the broker's session events.
       - QPOT_SSHPROXY_NAME=ssh-proxy
+      - QPOT_SSHPROXY_LISTEN={{netAddress "ssh-proxy" 10}}:2222
+      - QPOT_SSHPROXY_CONTEXT_DIR=/run/audit-contexts
+      - QPOT_SSHPROXY_CONTEXT_NAMESPACE={{sshStoreNamespace $.Config}}
+      {{- if sshBrokerHostReadable $.Config}}
+      - QPOT_SSHPROXY_HOST_READABLE_LOG=1
+      {{- end}}
       - QPOT_SSHPROXY_BACKENDS={{sshBackendCSV $.Config}}
       - QPOT_SSHPROXY_GENERATIONS={{sshProxyGenerationsPath}}
+      {{- range $key := runtimeProxyKeys}}
+      - {{$key}}=
+      {{- end}}
       {{- end}}
       {{- range $k, $v := $d.Env}}
       - {{$k}}={{$v}}
@@ -981,8 +1131,8 @@ services:
           memory: {{$memLimit}}M
           {{if $pidLimit}}pids: {{$pidLimit}}{{end}}
         reservations:
-          cpus: '0.05'
-          memory: 32M
+          cpus: '{{if and (eq .Name "ssh-proxy") (gt 5.0 $cpuLimit)}}{{divf $cpuLimit 100}}{{else}}0.05{{end}}'
+          memory: {{if and (eq .Name "ssh-proxy") (gt 32 $memLimit)}}{{$memLimit}}{{else}}32{{end}}M
       restart_policy:
         condition: on-failure
         delay: 5s
@@ -1048,10 +1198,20 @@ services:
 		}
 	}
 	subnetMap := g.buildSubnetMap()
+	for name, subnet := range subnetMap {
+		if subnet == "" {
+			if g.KeepSubnets[name] != "" {
+				return "", fmt.Errorf("current Docker network %s cannot retain its subnet %s; resolve conflicting host reservations before deploying", name, g.KeepSubnets[name])
+			}
+			return "", fmt.Errorf("no unoccupied subnet available for network %s", name)
+		}
+	}
 	dbHostPort := g.databaseHostPort()
 
 	funcMap := template.FuncMap{
 		"yamlStr":                 yamlInterpolatedStr,
+		"runtimeProxyKeys":        runtimeProxyKeys,
+		"sshHostKeySource":        func() string { return sshbackend.HostKeySourceDirectory },
 		"conpotStart":             conpotStartScript,
 		"databaseHostPort":        func() int { return dbHostPort },
 		"sshProxyGenerationsPath": func() string { return sshProxyGenerationsPath },
@@ -1098,12 +1258,26 @@ services:
 		// HiFi SSH proxy helpers (see sshproxy.go): whether the ssh-proxy honeypot
 		// is enabled, the real-OpenSSH backend companion services to render, and
 		// the broker's QPOT_SSHPROXY_BACKENDS value.
-		"sshProxyEnabled":    sshProxyEnabled,
-		"tannerEnabled":      tannerEnabled,
-		"tannerCompanions":   tannerCompanions,
-		"sshProxyBackends":   sshProxyBackends,
-		"sshBackendCSV":      sshBackendCSV,
-		"sshBackendHostname": sshBackendHostname,
+		"sshProxyEnabled":        sshProxyEnabled,
+		"sshCellBridge":          sshCellBridge,
+		"sshProxyImage":          sshProxyImage,
+		"sshBackendImage":        sshBackendImage,
+		"sshLocalImages":         sshLocalImages,
+		"sshOrgCells":            sshOrgCells,
+		"sshOrganizationEnabled": sshOrganizationEnabled,
+		"sshBackendUsersCSV":     sshBackendUsersCSV,
+		"sshBackendLogDir":       sshBackendLogDir,
+		"sshBrokerLogDir":        sshBrokerLogDir,
+		"sshBrokerHostReadable":  sshBrokerHostReadable,
+		"sshSharedKeys":          sshStoreSharedKeys,
+		"sshCellContext":         sshStoreContext,
+		"sshStoreContextRoot":    sshStoreContextRoot,
+		"sshStoreNamespace":      sshStoreNamespace,
+		"tannerEnabled":          tannerEnabled,
+		"tannerCompanions":       tannerCompanions,
+		"sshProxyBackends":       sshProxyBackends,
+		"sshBackendCSV":          sshBackendCSV,
+		"sshBackendHostname":     sshBackendHostname,
 		// Cowrie's persona and identity lifetime (see deception.go).
 		"cowriePersona":         cowriePersona,
 		"cowriePersonaRotation": cowriePersonaRotation,
@@ -1129,6 +1303,22 @@ services:
 				return s
 			}
 			return subnetForNetwork(g.Config.InstanceName, honeypot)
+		},
+		"netAddress": func(name string, offset int) (string, error) {
+			subnet, ok := subnetMap[name]
+			if !ok || offset < 2 || offset > 254 {
+				return "", fmt.Errorf("invalid private service address %q offset %d", name, offset)
+			}
+			ip, network, err := net.ParseCIDR(subnet)
+			if err != nil || ip.To4() == nil {
+				return "", fmt.Errorf("invalid private service subnet %q", subnet)
+			}
+			ip = append(net.IP(nil), ip.To4()...)
+			ip[3] = byte(offset)
+			if !network.Contains(ip) {
+				return "", fmt.Errorf("service address outside %q", subnet)
+			}
+			return ip.String(), nil
 		},
 		// mergedTmpfs combines the read-only-root scratch mounts with the
 		// per-honeypot profile's tmpfs, deduplicated by target path. A profile
@@ -1273,6 +1463,9 @@ sinks:
 
 // GenerateVectorConfig generates Vector configuration for log collection
 func (g *ComposeGenerator) GenerateVectorConfig() (string, error) {
+	if err := validateSSHStorePlan(g.Config); err != nil {
+		return "", err
+	}
 	if len(g.pipelineInputs()) == 0 {
 		return idleVectorConfig, nil
 	}
@@ -1312,6 +1505,8 @@ sources:
     # cowrie's TTY recordings are binary; never tail them as log lines.
     exclude:
       - "/data/honeypots/{{$name}}/logs/tty/**"
+{{if eq $name "ssh-proxy"}}      - "/data/honeypots/ssh-proxy/logs/cells/**"
+{{end}}
     read_from: beginning
     # The default fingerprint (the first line's checksum) names each log in
     # the checkpoints disk cleanup reads (internal/cleanup): keep it.
@@ -1321,6 +1516,14 @@ sources:
       condition_pattern: '^\{'
       timeout_ms: 1000
 {{end}}{{end}}
+{{if sshProxyEnabled .Config}}
+  ssh_backend_logs:
+    type: file
+    include:
+      - "/data/honeypots/ssh-proxy/logs/cells/*/current/**/*.json"
+      - "/data/honeypots/ssh-proxy/logs/cells/*/archive-g*/logs/**/*.json"
+    read_from: beginning
+{{end}}
 {{- if .Config.Collector.IngestSuricata}}
   # T-Pot's Suricata network IDS writes one EVE JSON object per line. Harmless
   # when Suricata is not deployed (the glob simply matches nothing).
@@ -1356,6 +1559,8 @@ transforms:
     inputs:
 {{- range $name, $hp := .Config.Honeypots}}{{if $hp.Enabled}}
       - {{logSource $name}}{{end}}{{end}}
+{{if sshProxyEnabled .Config}}      - ssh_backend_logs
+{{end}}
     source: |
       # Remember where the line came from BEFORE merging the honeypot's JSON:
       # a log object carrying its own "file" key must not be able to redirect
@@ -1384,6 +1589,54 @@ transforms:
         hp = string(m.hp) ?? "unknown"
       }
       .honeypot = hp
+
+      # Native SSH evidence belongs to the configured HiFi sensor. Cell and
+      # role come from the trusted file-source path, never from guest JSON.
+      hifi_cell = ""
+      hifi_role = ""
+      hifi_observed = ""
+      pg_session = ""
+      if hp == "ssh-proxy" && starts_with(src_file, "/data/honeypots/ssh-proxy/logs/cells/") {
+        hm, herr = parse_regex(src_file, r'^/data/honeypots/ssh-proxy/logs/cells/(?P<cell>ssh-backend-(?:[1-9]|1[0-6]))(?P<role>-db|-backup)?/(?:current/|archive-g[0-9]+-[A-Za-z0-9_-]+/logs/)')
+        if herr != null { abort }
+        hifi_cell = string(hm.cell) ?? ""
+        suffix = string(hm.role) ?? ""
+        hifi_role = if suffix == "-db" { "database" } else if suffix == "-backup" { "backup" } else { "app" }
+        hifi_observed = truncate(to_string(.timestamp) ?? "", 128)
+        hp = "ssh-proxy"
+        .honeypot = hp
+        if hifi_role == "database" {
+          # PostgreSQL's JSON log records the actual internal client and its
+          # own session. Never attach a delayed query to today's ingress lease.
+          remote = replace(to_string(.remote_host) ?? "", r'^::ffff:', "")
+          if !((ip_cidr_contains("0.0.0.0/0", remote) ?? false) || (ip_cidr_contains("::/0", remote) ?? false)) { abort }
+          if (ip_cidr_contains("127.0.0.0/8", remote) ?? false) || remote == "::1" { abort }
+          .src_ip = remote
+          .src_port = .remote_port
+          .dst_port = 5432
+          .protocol = "postgresql"
+          .username = .user
+          pg_session = truncate(to_string(.session_id) ?? "", 128)
+          del(.session_id)
+          text = to_string(.message) ?? ""
+          .payload = truncate(text, 4096)
+          if starts_with(text, "statement: ") {
+            .input = truncate(replace(text, r'^statement: ', ""), 4096)
+            .eventid = "ssh-proxy.database.statement"
+          } else {
+            .input = ""
+            .eventid = "ssh-proxy.database.event"
+          }
+        } else {
+          if .event_type == "ssh_backend_command_start" {
+            .eventid = "ssh-proxy.command.start"
+          } else if .event_type == "ssh_backend_command" {
+            .eventid = "ssh-proxy.command.finish"
+          } else { abort }
+          .protocol = "ssh"
+          .dst_port = 22
+        }
+      }
 
       # Every honeypot QPot ships writes one JSON object per line; their
       # plain-text .log files are operational chatter that duplicates the JSON
@@ -1765,6 +2018,22 @@ transforms:
         }
         md.state_scope = "simulated"
       }
+      if hifi_cell != "" {
+        md.cell = hifi_cell
+        md.role = hifi_role
+        md.state_scope = "private_cell"
+        if hifi_observed != "" { md.observed_at = hifi_observed }
+        if pg_session != "" { md.pg_session_id = pg_session }
+        if hifi_role != "database" { md.capture_id = truncate(to_string(.session) ?? "", 128) }
+        # Retain correlation and capture status, not stdout/password-bearing
+        # response previews: reading a decoy file alone is not credential reuse.
+        for_each(["generation", "uid", "phase", "exit_code", "duration_ms", "peer_ip", "peer_port", "attribution", "attribution_error", "stdout_file", "stderr_file", "input_file", "timing_file", "stdin_recorded", "pty", "truncated", "command_truncated", "capture_error"]) -> |_i, k| {
+          v = get(., [k]) ?? null
+          if is_string(v) || is_integer(v) || is_boolean(v) {
+            md = set!(md, [k], truncate(to_string(v) ?? "", 512))
+          }
+        }
+      }
       .metadata = md
 
       # Classification is the intelligence worker's job, and event_id is the
@@ -2032,11 +2301,12 @@ sinks:
 `
 
 	t := template.Must(template.New("vector").Funcs(template.FuncMap{
-		"vrlStr":    vrlStringLiteral,
-		"yamlStr":   yamlInterpolatedStr,
-		"pgDSN":     postgresDSN,
-		"conpotIDs": ConpotTemplateIDs,
-		"logSource": vectorstate.HoneypotSource,
+		"vrlStr":          vrlStringLiteral,
+		"yamlStr":         yamlInterpolatedStr,
+		"pgDSN":           postgresDSN,
+		"conpotIDs":       ConpotTemplateIDs,
+		"sshProxyEnabled": sshProxyEnabled,
+		"logSource":       vectorstate.HoneypotSource,
 	}).Parse(config))
 
 	var buf bytes.Buffer
@@ -2049,19 +2319,43 @@ sinks:
 
 // CollectorSources are the collector's file sources, as GenerateVectorConfig
 // writes them (keep the two in step): which logs each one reads.
-func CollectorSources(cfg *config.Config) []vectorstate.Source {
+func CollectorSources(cfg *config.Config) ([]vectorstate.Source, error) {
 	var out []vectorstate.Source
 	for name, hp := range cfg.SnapshotHoneypots() {
 		if !hp.Enabled {
 			continue
 		}
-		out = append(out, vectorstate.Source{Name: vectorstate.HoneypotSource(name), Dir: "honeypots/" + name + "/logs",
+		src := vectorstate.Source{Name: vectorstate.HoneypotSource(name), Dir: "honeypots/" + name + "/logs",
 			Read: func(rel string) bool {
 				if rel == "tty" || strings.HasPrefix(rel, "tty/") {
 					return false
 				}
 				return strings.HasSuffix(rel, ".log") || strings.HasSuffix(rel, ".json")
-			}})
+			}}
+		if name == sshProxyHoneypot {
+			store, err := planSSHStore(cfg)
+			if err != nil {
+				return nil, err
+			}
+			src.HostDir = filepath.Join(store.area(), "logs")
+			src.Read = func(rel string) bool {
+				return rel != "cells" && !strings.HasPrefix(rel, "cells/") &&
+					(strings.HasSuffix(rel, ".json") || strings.HasSuffix(rel, ".log"))
+			}
+			out = append(out, vectorstate.Source{Name: SSHBackendLogSource,
+				Dir: "honeypots/ssh-proxy/logs/cells", HostDir: filepath.Join(store.area(), "logs", "cells"),
+				Read: func(rel string) bool {
+					parts := strings.Split(rel, "/")
+					if len(parts) < 3 || !strings.HasSuffix(rel, ".json") {
+						return false
+					}
+					if parts[1] == "current" {
+						return true
+					}
+					return len(parts) >= 4 && strings.HasPrefix(parts[1], "archive-g") && parts[2] == "logs"
+				}})
+		}
+		out = append(out, src)
 	}
 	top := func(rel string) bool { return !strings.Contains(rel, "/") }
 	c := cfg.Collector
@@ -2078,8 +2372,12 @@ func CollectorSources(cfg *config.Config) []vectorstate.Source {
 			Read: func(rel string) bool { return rel == "fatt.log" || top(rel) && strings.HasSuffix(rel, ".json") }})
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
-	return out
+	return out, nil
 }
+
+// SSHBackendLogSource is the dedicated collector/checkpoint source for native
+// command and database evidence; the ordinary broker source excludes it.
+const SSHBackendLogSource = "ssh_backend_logs"
 
 // collectorMount is one bind mount of the collector (Vector) container.
 type collectorMount struct {
@@ -2091,12 +2389,34 @@ type collectorMount struct {
 }
 
 // collectorMounts lists the instance folders the collector reads, read-only,
-// and its writable backup folder. It never mounts the whole instance folder,
+// plus its writable backup and checkpoint folders. It never mounts the whole instance folder,
 // which also holds the database password, canary tokens and keys: Vector
 // parses attacker-written logs and follows the symlinks that a compromised
 // honeypot can plant in its own logs folder.
-func collectorMounts(cfg *config.Config) []collectorMount {
-	mounts := []collectorMount{{Host: cfg.DataPath + "/honeypots", Container: "/data/honeypots", ReadOnly: true, Dir: true}}
+func collectorMounts(cfg *config.Config) ([]collectorMount, error) {
+	mounts := []collectorMount{
+		{Host: cfg.DataPath + "/honeypots", Container: "/data/honeypots", ReadOnly: true, Dir: true},
+	}
+	store, err := sshStoreAt(cfg.DataPath)
+	if err != nil {
+		return nil, err
+	}
+	if sshProxyEnabled(cfg) {
+		store, err = planSSHStore(cfg)
+		if err != nil {
+			return nil, err
+		}
+	}
+	if !store.legacy {
+		// Only records enter the collector. Key/context parents are never
+		// mounted, and logical service paths retain the existing Vector schema.
+		mounts = append(mounts, collectorMount{Host: filepath.Join(store.area(), "logs", "broker"),
+			Container: "/data/honeypots/ssh-proxy/logs/broker", ReadOnly: true, Dir: true})
+		for _, service := range SSHCellLogServices() {
+			mounts = append(mounts, collectorMount{Host: filepath.Dir(store.current(service)),
+				Container: "/data/honeypots/ssh-proxy/logs/cells/" + service, ReadOnly: true, Dir: true})
+		}
+	}
 	covered := []string{"honeypots", "backup"}
 	c := cfg.Collector
 	for _, s := range []struct {
@@ -2131,7 +2451,7 @@ func collectorMounts(cfg *config.Config) []collectorMount {
 	// reads before it empties a log.
 	return append(mounts,
 		collectorMount{Host: cfg.DataPath + "/backup", Container: "/data/backup", Dir: true},
-		collectorMount{Host: cfg.DataPath + "/" + vectorstate.Dir, Container: "/var/lib/vector", Dir: true})
+		collectorMount{Host: cfg.DataPath + "/" + vectorstate.Dir, Container: "/var/lib/vector", Dir: true}), nil
 }
 
 // The images of the instance's own services, pinned like the honeypot images.
@@ -2156,6 +2476,10 @@ const TPotVersion = "24.04.2"
 const (
 	conpotImageVersion = "24.04.2"
 	conpotImageDigest  = "sha256:be17a238709c78909c7d2e0da55bc3ea66dc3aa46618f0d89b7080f3e7dda3e8"
+	// The state adapters replace pinned Cowrie internals, including its
+	// per-channel process view. Keep both supported architectures on the exact
+	// reviewed image index rather than a mutable release tag.
+	cowrieImageDigest = "sha256:65ef2aa192779c96f69d504aa1ece20d5150fab2dddfc8cf47e2efefb4e2574a"
 )
 
 // tpotPinned lists honeypots whose image T-Pot did not rebuild for
@@ -2171,6 +2495,9 @@ var tpotPinned = map[string]string{
 func tpotImage(name string) string {
 	if name == "conpot" {
 		return "ghcr.io/telekom-security/conpot:" + conpotImageVersion + "@" + conpotImageDigest
+	}
+	if name == "cowrie" {
+		return "ghcr.io/telekom-security/cowrie:" + cowriePatchVersion + "@" + cowrieImageDigest
 	}
 	tag := TPotVersion
 	if v, ok := tpotPinned[name]; ok {

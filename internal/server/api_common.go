@@ -21,6 +21,7 @@ import (
 
 	"github.com/qpot/qpot/internal/cluster"
 	"github.com/qpot/qpot/internal/config"
+	"github.com/qpot/qpot/internal/hostsetup"
 	"github.com/qpot/qpot/internal/instance"
 )
 
@@ -76,6 +77,23 @@ type apiError struct {
 // QPot error code that explains it (GET /api/doctor/explain?code=).
 func (s *Server) sendAPIError(w http.ResponseWriter, status int, code, msg string) {
 	writeJSON(w, status, apiError{Error: msg, Code: code})
+}
+
+// hiFiPreflightAPIError exposes only fixed catalog guidance for host-side
+// preflights. No container log exists when these checks refuse startup, and
+// wrapped errors can contain private paths or Docker output.
+func hiFiPreflightAPIError(err error, saved bool) (apiError, bool) {
+	var setup *hostsetup.Error
+	if !errors.As(err, &setup) || setup == nil {
+		return apiError{}, false
+	}
+	switch setup.Code {
+	case "QP-RES-005", "QP-INST-011", "QP-INST-012", "QP-INST-013", "QP-INST-014":
+		entry := setup.Entry()
+		return apiError{Error: entry.Title + " " + entry.Fix, Code: entry.ID, Saved: saved}, true
+	default:
+		return apiError{}, false
+	}
 }
 
 // writeJSON answers with v as JSON.

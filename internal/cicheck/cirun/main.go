@@ -5,6 +5,7 @@
 //	                  needs Docker (service containers)
 //	cirun check       fails when a job uses something cirun cannot run
 //	cirun run <job>   runs one job (every matrix entry)
+//	cirun check-codeql <dir> validates CodeQL SARIF before publication
 package main
 
 import (
@@ -23,11 +24,45 @@ func main() {
 	root := flag.String("root", ".", "the repository root")
 	workflow := flag.String("workflow", ".github/workflows/ci.yml", "the workflow, relative to -root")
 	tools := flag.String("tools", ".github/ci-tools.env", "the shared tool versions, relative to -root")
-	gitleaksRange := flag.String("gitleaks-range", "", "git log range for the gitleaks job (default: commits not on the upstream branch)")
+	gitleaksRange := flag.String("gitleaks-range", "", "override a legacy gitleaks-action log range; current CI always scans full history")
 	flag.Parse()
 	abs, err := filepath.Abs(*root)
 	if err != nil {
 		fail(err)
+	}
+	if cmd := flag.Arg(0); cmd == "secrets-source" || cmd == "secrets-artifacts" {
+		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
+		defer stop()
+		if err := cicheck.RunSecretGateCommand(ctx, abs, cmd, flag.Args()[1:], os.Stdout); err != nil {
+			fail(err)
+		}
+		return
+	}
+	if flag.Arg(0) == "check-codeql" {
+		if flag.NArg() != 2 && flag.NArg() != 3 {
+			fail(fmt.Errorf("usage: cirun check-codeql <SARIF output directory> [review manifest]"))
+		}
+		var summary cicheck.CodeQLSummary
+		if flag.NArg() == 3 {
+			summary, err = cicheck.CheckReviewedCodeQLReports(abs, flag.Arg(1), flag.Arg(2))
+		} else {
+			summary, err = cicheck.CheckCodeQLReports(flag.Arg(1))
+		}
+		if err != nil {
+			fail(err)
+		}
+		fmt.Printf("CodeQL release gate passed: %d reports, %d rules, %d reviewed findings, %d non-security results\n", summary.Reports, summary.Rules, summary.Reviewed, summary.Results-summary.Reviewed)
+		return
+	}
+	if flag.Arg(0) == "check-image-index" {
+		if flag.NArg() != 2 {
+			fail(fmt.Errorf("usage: cirun check-image-index <published image index JSON>"))
+		}
+		if err := cicheck.CheckImageIndex(flag.Arg(1)); err != nil {
+			fail(err)
+		}
+		fmt.Println("Published image index includes both tested Linux architectures")
+		return
 	}
 	data, err := os.ReadFile(filepath.Join(abs, *workflow)) // #nosec G304 -- the repository's own workflow
 	if err != nil {
@@ -79,7 +114,7 @@ func main() {
 			os.Exit(1)
 		}
 	default:
-		fmt.Fprintln(os.Stderr, "usage: cirun [flags] list | check | run <job>")
+		fmt.Fprintln(os.Stderr, "usage: cirun [flags] list | check | run <job> | check-codeql <dir> | secrets-source [flags] | secrets-artifacts [flags]")
 		os.Exit(2)
 	}
 }

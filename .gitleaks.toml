@@ -25,3 +25,10 @@ regexes = [
   '''sk-proj-123456''',
   '''sk-X{4,}''',
 ]
+# Gitleaks8.24.3 extends default paths/regexes, but does not merge its global
+# StopWords. Preserve the two upstream defaults so public character alphabets
+# are not mistaken for credentials. The raw release gates use upstream rules.
+stopwords = [
+  "abcdefghijklmnopqrstuvwxyz",
+  "014df517-39d1-4453-b7b3-9930c563627c",
+]

@@ -63,3 +63,19 @@ func TestNopSinkSafe(t *testing.T) {
 	var s EventSink = nopSink{}
 	s.Emit(Event{EventType: EventSession})
 }
+
+func TestEventGenerationDistinguishesZeroAndLegacy(t *testing.T) {
+	zero := uint64(0)
+	for _, generation := range []*uint64{nil, &zero} {
+		var buf bytes.Buffer
+		NewJSONSink(&buf).Emit(Event{EventType: EventBackendError, Generation: generation})
+		var fields map[string]json.RawMessage
+		if err := json.Unmarshal(buf.Bytes(), &fields); err != nil {
+			t.Fatal(err)
+		}
+		value, exists := fields["generation"]
+		if exists != (generation != nil) || exists && string(value) != "0" {
+			t.Fatalf("generation%v encoded as%s", generation, buf.Bytes())
+		}
+	}
+}

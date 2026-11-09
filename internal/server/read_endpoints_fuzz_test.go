@@ -2,15 +2,86 @@ package server
 
 import (
 	"context"
+	"encoding/json"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"runtime"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/qpot/qpot/internal/config"
 	"github.com/qpot/qpot/internal/database"
+	"github.com/qpot/qpot/internal/instance"
 )
+
+// Many individually bounded attacker log lines must not accumulate an
+// unbounded dashboard response. Exercise the actual handler and process reader,
+// using a finite synthetic producer in place of Docker; no daemon is involved.
+func TestLogRepliesHaveByteAndLineBudgets(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("the finite subprocess fixture uses a Unix shell")
+	}
+	if _, err := exec.LookPath("awk"); err != nil {
+		t.Skip("awk unavailable for the finite log fixture")
+	}
+	for _, tc := range []struct {
+		name      string
+		program   string
+		wantLines int
+		truncated bool
+	}{
+		{"ordinary", `printf 'first\nsecond\n'`, 2, false},
+		{"many large lines", `exec awk 'BEGIN { row="x"; for(i=0;i<15;i++) row=row row; for(i=0;i<256;i++) print row }'`, 128, true},
+		{"many empty lines", `exec awk 'BEGIN { for(i=0;i<20050;i++) print "" }'`, 10000, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			bin := t.TempDir()
+			if err := os.WriteFile(filepath.Join(bin, "docker"), []byte("#!/bin/sh\n"+tc.program+"\n"), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+			cfg := config.Default("logs-budget")
+			cfg.DataPath = t.TempDir()
+			cfg.Security.SandboxMode = "none"
+			manager, err := instance.NewManager(cfg)
+			if err != nil {
+				t.Fatal(err)
+			}
+			s := &Server{config: cfg, manager: manager}
+			request := httptest.NewRequest(http.MethodGet, "/api/logs?tail=5000", nil)
+			response := httptest.NewRecorder()
+			s.handleLogs(response, request)
+			if response.Code != http.StatusOK {
+				t.Fatalf("status %d: %s", response.Code, response.Body)
+			}
+			var lines []string
+			if err := json.Unmarshal(response.Body.Bytes(), &lines); err != nil {
+				t.Fatal(err)
+			}
+			bytes := 0
+			for _, line := range lines {
+				bytes += len(line)
+			}
+			if bytes > 4<<20 || len(lines) > 10000 {
+				t.Fatalf("unbounded log response: %d raw bytes in %d lines", bytes, len(lines))
+			}
+			if len(lines) != tc.wantLines {
+				t.Fatalf("got %d lines, want %d", len(lines), tc.wantLines)
+			}
+			if got := response.Header().Get("X-QPot-Logs-Truncated") == "true"; got != tc.truncated {
+				t.Fatalf("truncation notice %v, want %v", got, tc.truncated)
+			}
+			if !tc.truncated && strings.Join(lines, "\n") != "first\nsecond" {
+				t.Fatalf("ordinary logs changed: %q", lines)
+			}
+		})
+	}
+}
 
 // stubDB is a benign database.Database that returns empty results for every
 // read, so the server's read handlers run their query-parameter parsing and

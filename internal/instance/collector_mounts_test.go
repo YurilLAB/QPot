@@ -137,7 +137,7 @@ func TestCollectorMountFoldersAreCreated(t *testing.T) {
 	cfg := collectorTestConfig(func(c *config.Config) { c.Collector.GeoIPDBPath = "/data/city.mmdb" })
 	cfg.DataPath = filepath.ToSlash(t.TempDir())
 	var dirs, files int
-	for _, cm := range collectorMounts(cfg) {
+	for _, cm := range requireCollectorMounts(t, cfg) {
 		if cm.Dir {
 			dirs++
 		} else if !cm.ReadOnly {

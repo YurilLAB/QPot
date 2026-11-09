@@ -130,6 +130,14 @@ func runPack(args []string) error {
 		}
 		*commit = c
 	}
+	// Resolve abbreviated refs before embedding image references. The CLI's
+	// display commit may be shortened, but registry tags must name the complete
+	// revision whose images passed the publication gates.
+	resolved, err := gitOut(ctx, "rev-parse", "--verify", "--end-of-options", *commit+"^{commit}")
+	if err != nil {
+		return err
+	}
+	*commit = resolved
 	// The commit's time stamps everything, so a rebuild of the same commit
 	// gives the same bytes.
 	epoch, err := gitOut(ctx, "log", "-1", "--format=%ct", *commit)
@@ -169,8 +177,8 @@ func runPack(args []string) error {
 		if len(short) > 12 {
 			short = short[:12]
 		}
-		ldflags := fmt.Sprintf("-s -w -X main.version=%s -X main.commit=%s -X main.buildDate=%s",
-			v, short, mtime.Format(time.RFC3339))
+		ldflags := fmt.Sprintf("-s -w -X main.version=%s -X main.commit=%s -X main.buildDate=%s -X github.com/qpot/qpot/internal/instance.HiFiImageRevision=%s",
+			v, short, mtime.Format(time.RFC3339), *commit)
 		cmd := exec.CommandContext(ctx, "go", "build", "-trimpath", "-ldflags", ldflags, "-o", bin, "./cmd/qpot")
 		cmd.Env = append(os.Environ(), "GOOS="+goos, "GOARCH="+goarch, "CGO_ENABLED=0")
 		cmd.Stdout, cmd.Stderr = os.Stderr, os.Stderr

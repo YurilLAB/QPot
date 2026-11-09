@@ -339,13 +339,27 @@ start without a provider, so `enable` asks for these first:
 | `galah` | `llm_provider`, `llm_server_url`, `llm_model`, `llm_temperature`, `llm_api_key`, `llm_cloud_location`, `llm_cloud_project` | `llm_provider`, `llm_model` |
 | `cowrie` | `persona` (one of the image's persona IDs), `persona_rotation` (days, 0-365), `bait` (`on`/`off`), `bait_profile` (`ops`/`industrial`), `bait_target` (`conpot`/`refrigeration`) | – |
 | `conpot` | `template` (one of the image's deployed device templates) | – |
-| `ssh-proxy` | `backends` | – |
+| `ssh-proxy` | `backends` (1-16, default 2), `environment` (`standalone`/`organization`), `image_source` (`published`/`local`) | – |
 | `refrigeration` | `site_profile` (`retail`/`plasma`; empty restores retail) | – |
 
 ```bash
 qpot honeypot set beelzebub llm_provider=ollama llm_model=llama3.1 llm_host=http://10.0.0.5:11434/api/chat
 qpot honeypot enable beelzebub
 ```
+
+HiFi defaults to a standalone Debian 12 server and published images. The
+connected organization adds a real PostgreSQL database and SSH backup per slot;
+all three reset after the ingress SSH connection ends. For this development
+feature, build both current HiFi images first, then select the fixed local tags:
+
+```bash
+qpot honeypot set ssh-proxy environment=organization image_source=local backends=2
+```
+
+Saving while HiFi is off does not enable it. Empty `environment=` restores
+standalone and empty `image_source=` restores published images. See
+[HiFi deployment](ssh-hifi-proxy.md#5-deployment) for build commands, per-container
+resource cost and isolation/storage limits. No image is published by `set`.
 
 Cowrie presents one persona of its image: `ubuntu-noble`, `ubuntu-jammy`,
 `debian-trixie`, `debian-bookworm`, `rhel-9`, `centos-7`, `raspios`,

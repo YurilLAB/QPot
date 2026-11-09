@@ -147,26 +147,28 @@ func publishedHostPort(spec string) int {
 	return n
 }
 
-// hostDockerSubnets returns the subnets of the docker networks on this host
-// that do not belong to the given compose project (whose own networks are
-// re-rendered with the same subnets). Errors (no docker) yield nothing.
-func hostDockerSubnets(ctx context.Context, project string) []*net.IPNet {
+// hostDockerSubnets reserves all host networks except current project networks
+// whose actual assignments can be kept. Retired same-project networks still
+// exist after compose rm and must block allocation. Errors (no docker) yield
+// no inventory, preserving offline config generation.
+func hostDockerSubnets(ctx context.Context, project string, current map[string]string) ([]*net.IPNet, map[string]string) {
 	ctx, cancel := context.WithTimeout(ctx, 15*time.Second)
 	defer cancel()
 	ids, err := exec.CommandContext(ctx, "docker", "network", "ls", "-q").Output()
 	if err != nil || len(strings.Fields(string(ids))) == 0 {
-		return nil
+		return nil, nil
 	}
 	out, err := exec.CommandContext(ctx, "docker", append([]string{"network", "inspect"}, strings.Fields(string(ids))...)...).Output()
 	if err != nil {
-		return nil
+		return nil, nil
 	}
-	return parseNetworkInspect(out, project)
+	return parseNetworkInspect(out, project, current)
 }
 
 // parseNetworkInspect extracts the IPv4/IPv6 subnets from `docker network
-// inspect` JSON, skipping networks of the given compose project.
-func parseNetworkInspect(data []byte, project string) []*net.IPNet {
+// inspect` JSON. Only a uniquely identified current logical project network
+// with a single IPv4 /24 can be reused; every other prefix stays reserved.
+func parseNetworkInspect(data []byte, project string, current map[string]string) ([]*net.IPNet, map[string]string) {
 	var nets []struct {
 		Labels map[string]string `json:"Labels"`
 		IPAM   struct {
@@ -176,18 +178,36 @@ func parseNetworkInspect(data []byte, project string) []*net.IPNet {
 		} `json:"IPAM"`
 	}
 	if json.Unmarshal(data, &nets) != nil {
-		return nil
+		return nil, nil
 	}
 	var out []*net.IPNet
+	keep := map[string]string{}
+	counts := map[string]int{}
 	for _, n := range nets {
 		if project != "" && n.Labels["com.docker.compose.project"] == project {
-			continue
+			counts[n.Labels["com.docker.compose.network"]]++
+		}
+	}
+	for _, n := range nets {
+		logical := n.Labels["com.docker.compose.network"]
+		allocation := current[logical]
+		ipv4 := 0
+		for _, c := range n.IPAM.Config {
+			if ip, _, err := net.ParseCIDR(c.Subnet); err == nil && ip.To4() != nil {
+				ipv4++
+			}
 		}
 		for _, c := range n.IPAM.Config {
 			if _, ipn, err := net.ParseCIDR(c.Subnet); err == nil {
+				if project != "" && n.Labels["com.docker.compose.project"] == project && allocation != "" && counts[logical] == 1 && ipv4 == 1 {
+					if ones, bits := ipn.Mask.Size(); ones == 24 && bits == 32 {
+						keep[allocation] = ipn.String()
+						continue
+					}
+				}
 				out = append(out, ipn)
 			}
 		}
 	}
-	return out
+	return out, keep
 }

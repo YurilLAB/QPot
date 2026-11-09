@@ -201,12 +201,12 @@ func (s *Store) SyncPlanted(planned []*Canary) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	want := make(map[string]*Canary, len(planned))
-	for _, p := range planned {
+	for i, p := range planned {
 		if p == nil || !p.Planted || !strings.HasPrefix(p.ID, "cnry_") || !p.Kind.Valid() {
-			return fmt.Errorf("not a planted canary: %+v", p)
+			return fmt.Errorf("not a planted canary at index %d", i)
 		}
 		if _, dup := want[p.ID]; dup {
-			return fmt.Errorf("planted canary %s listed twice", p.ID)
+			return fmt.Errorf("planted canary at index %d is listed twice", i)
 		}
 		want[p.ID] = p
 	}

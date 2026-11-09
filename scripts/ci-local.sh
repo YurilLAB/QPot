@@ -31,7 +31,7 @@ while [ $# -gt 0 ]; do
     --list) list=1 ;;
     --only) only=",${2:?--only needs job names},"; shift ;;
     --skip) skip="${skip},${2:?--skip needs job names},"; shift ;;
-    --no-docker) skip="${skip},clickhouse-integration,conpot-integration,refrigeration-integration,distro-runtime," ;;
+    --no-docker) skip="${skip},clickhouse-integration,conpot-integration,refrigeration-integration,cowrie-stateful-integration,vector-integration,hifi-organization-integration,distro-runtime," ;;
     -h|--help) sed -n '2,22p' "$0"; exit 0 ;;
     *) echo "ci-local: unknown option $1 (see --help)" >&2; exit 2 ;;
   esac
@@ -62,7 +62,7 @@ fi
 "$cirun" -root "$repo" check || { echo "ci-local: the workflow uses something ci-local cannot run; update internal/cicheck" >&2; exit 2; }
 
 # Jobs that need Docker: service containers, or the distro smoke script.
-needs_docker() { [ "$2" = docker ] || [ "$1" = distro-runtime ] || [ "$1" = conpot-integration ] || [ "$1" = refrigeration-integration ]; }
+needs_docker() { [ "$2" = docker ] || [ "$1" = distro-runtime ] || [ "$1" = conpot-integration ] || [ "$1" = refrigeration-integration ] || [ "$1" = cowrie-stateful-integration ] || [ "$1" = vector-integration ] || [ "$1" = hifi-organization-integration ]; }
 
 # Programs a job's scripts use that CI's ubuntu runner has preinstalled
 # (Go, Docker and Python 3.11 are checked where the job sets them up).
@@ -73,6 +73,7 @@ job_tools() {
     # -race needs a C compiler: $CC (its first word) or cc.
     build-test) cc=${CC:-cc}; echo "python3 make curl git setsid timeout tar gzip ${cc%% *}" ;;
     build-run) echo "python3:yaml timeout" ;;
+    netguard-integration) cc=${CC:-cc}; echo "ip unshare ${cc%% *}" ;;
     gitleaks|mod-hygiene) echo "git" ;;
     shellcheck|actionlint) echo "curl tar xz sha256sum" ;;
     coverage) echo "awk" ;;

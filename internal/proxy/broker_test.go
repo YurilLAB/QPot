@@ -230,6 +230,69 @@ func TestBackendDialErrorEmitsEvent(t *testing.T) {
 	}
 }
 
+// Even if the host counter changes while a connection is active, its end/error
+// event belongs to the original lease. Reading the current disk counter at
+// emission would let a replayed event recreate a newer active backend.
+func TestBrokerEventsKeepLeaseGeneration(t *testing.T) {
+	for _, dialFailure := range []bool{false, true} {
+		t.Run(map[bool]string{false: "session", true: "dial_error"}[dialFailure], func(t *testing.T) {
+			dir := t.TempDir()
+			writeGen(t, dir, "b", 7)
+			gate := NewGenerationGate(dir)
+			backend, stopBackend := echoBackend(t)
+			defer stopBackend()
+			pool := NewPool([]Backend{{ID: "b", Addr: backend}}, nil)
+			pool.SetLeaseHook(gate.OnLease)
+			sink := &capSink{}
+			entered, allow := make(chan struct{}), make(chan struct{})
+			dial := func(ctx context.Context, network, address string) (net.Conn, error) {
+				close(entered)
+				select {
+				case <-allow:
+				case <-ctx.Done():
+					return nil, ctx.Err()
+				}
+				if dialFailure {
+					return nil, net.ErrClosed
+				}
+				return (&net.Dialer{}).DialContext(ctx, network, address)
+			}
+			addr, stop := startBroker(t, Config{Sink: sink, Gate: gate, Dial: dial, DialTimeout: 2 * time.Second}, pool)
+			defer stop()
+			client, err := net.Dial("tcp", addr)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer client.Close()
+			select {
+			case <-entered:
+			case <-time.After(time.Second):
+				t.Fatal("broker did not lease the backend")
+			}
+			writeGen(t, dir, "b", 99)
+			close(allow)
+			if !dialFailure {
+				_ = client.SetDeadline(time.Now().Add(2 * time.Second))
+				if _, err := client.Write([]byte("x")); err != nil {
+					t.Fatal(err)
+				}
+				if _, err := io.ReadFull(client, make([]byte, 1)); err != nil {
+					t.Fatal(err)
+				}
+				_ = client.Close()
+			}
+			typ := EventSession
+			if dialFailure {
+				typ = EventBackendError
+			}
+			event := sink.wait(t, typ, 2*time.Second)
+			if event.Generation == nil || *event.Generation != 7 {
+				t.Fatalf("event generation %+v want original lease7, current disk99", event)
+			}
+		})
+	}
+}
+
 // TestIdleTimeoutTearsDown verifies an idle session is reclaimed and labelled as
 // an idle timeout (so the backend is freed for reset/reuse).
 func TestIdleTimeoutTearsDown(t *testing.T) {

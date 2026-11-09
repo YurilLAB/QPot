@@ -260,7 +260,11 @@ func TestCollectorAndCleanupWithRealDocker(t *testing.T) {
 		t.Fatal(err)
 	}
 	seeded := false
-	for _, src := range instance.CollectorSources(a.cfg) {
+	sources, err := instance.CollectorSources(a.cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, src := range sources {
 		if src.Name == source {
 			n, err := vectorstate.Seed(data, src, time.Now())
 			if err != nil || n != 1 {

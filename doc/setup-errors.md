@@ -602,6 +602,13 @@ Exit status 0 means success; 1 is a usage error (an unknown flag).
 - Why: The package manager ran out of space part of the way through.
 - Fix: Free some disk space (for example: sudo apt-get clean), then run qpot setup again.
 
+### QP-RES-005
+
+**HiFi resource limits could not be enforced.**
+
+- Why: Docker has not confirmed active CPU, memory and PID cgroup controls. Rootless Docker without systemd delegation can accept settings without enforcing them.
+- Fix: Use an isolated Docker host with working cgroup controllers, or configure systemd cgroup delegation for rootless Docker. Verify CPU, memory and PID limits on that host before starting HiFi again.
+
 ## Services and systemd (`SVC`, exit 19)
 
 ### QP-SVC-001
@@ -733,6 +740,34 @@ Exit status 0 means success; 1 is a usage error (an unknown flag).
 
 - Why: The requested restart needs an enabled honeypot, but its saved configuration has it disabled.
 - Fix: Choose the honeypot in the web UI and turn it on, or run qpot honeypot enable <name> -i <instance>. Then check its status before restarting it.
+
+### QP-INST-011
+
+**The private SSH runtime store could not be prepared.**
+
+- Why: Its location or ownership record is invalid, migration has not finished, or legacy data cannot be moved safely.
+- Fix: Stop the instance and inspect the paths in the details. Keep both the instance directory and its recorded runtime store in backups. Do not delete keys or merge conflicting evidence. A move between filesystems must be completed offline while preserving ownership and permissions; then retry qpot up.
+
+### QP-INST-012
+
+**Collector checkpoint migration could not be completed.**
+
+- Why: Legacy and canonical collector state conflict, a state path is not an ordinary directory, or its atomic rename or directory sync failed.
+- Fix: Stop the collector and inspect both collector-state and collector inside the instance directory. Preserve cursor files and any completed canonical migration. Resolve conflicts offline without merging, deleting or reseeding acknowledged state; then retry qpot up.
+
+### QP-INST-013
+
+**The HiFi runtime images do not match this QPot build.**
+
+- Why: An unlinked source build selects the preserved legacy latest images, or an existing broker and its application or backup images do not use the same supported source.
+- Fix: Use an official release with its matching source-commit images, or build both docker/ssh-proxy/Dockerfile and docker/ssh-backend/Dockerfile from this checkout, set ssh-proxy image_source=local, then recreate the HiFi deployment with qpot up -d. Stop and remove remain available; offline rendering does not prove runtime compatibility.
+
+### QP-INST-014
+
+**The SSH recycler cannot read broker metadata.**
+
+- Why: The broker session log is unreadable or is not an ordinary stable file, so the host cannot safely process reset requests.
+- Fix: Keep the broker log and generation counters. Use matching updated HiFi images and regenerate/recreate the deployment so its verified private runtime store enables host-readable broker metadata. Check the operating account and private store permissions; custom broker deployments must grant the trusted recycler read access. Do not delete, truncate or fake reset records.
 
 ## Intelligence recovery and ownership (`INTEL`, exit 22)
 

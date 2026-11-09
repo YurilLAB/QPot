@@ -176,6 +176,10 @@ func (s *Server) putHoneypotSettings(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		if res != nil && res.Saved {
 			slog.Error("honeypot settings saved, but the honeypot was not recreated", "honeypot", req.Name, "error", err)
+			if response, ok := hiFiPreflightAPIError(err, true); ok {
+				writeJSON(w, http.StatusBadGateway, response)
+				return
+			}
 			message := fmt.Sprintf("Settings saved, but %s did not restart with them. Its log (GET /api/logs?honeypot=%s) shows why.", req.Name, req.Name)
 			if req.Name == "refrigeration" {
 				message = "Settings saved, but refrigeration did not restart with them. Check QPot service output for local image-build or startup errors, and refrigeration logs if a container was created. The saved scenario may not be live."

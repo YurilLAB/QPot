@@ -9,6 +9,7 @@ import (
 
 	"github.com/qpot/qpot/internal/config"
 	"golang.org/x/crypto/ssh"
+	"gopkg.in/yaml.v3"
 )
 
 func TestEnsureSSHHostKeys(t *testing.T) {
@@ -61,8 +62,23 @@ func TestComposeHostKeysReadOnly(t *testing.T) {
 	hp := cfg.Honeypots[sshProxyHoneypot]
 	hp.Enabled = true
 	cfg.Honeypots[sshProxyHoneypot] = hp
-	blk := serviceBlock(renderComposeCfg(t, cfg), "ssh-backend-1")
-	if !strings.Contains(blk, "/shared-hostkeys:/etc/ssh/keys:ro\n") {
-		t.Fatalf("shared host keys not mounted read-only:\n%s", blk)
+	var doc struct {
+		Services map[string]struct {
+			Volumes []string `yaml:"volumes"`
+		} `yaml:"services"`
+	}
+	if err := yaml.Unmarshal([]byte(renderComposeCfg(t, cfg)), &doc); err != nil {
+		t.Fatal(err)
+	}
+	for _, backend := range sshBackendServiceNames(cfg) {
+		found := false
+		for _, mount := range doc.Services[backend].Volumes {
+			if strings.HasSuffix(mount, "/shared-hostkeys:/run/sshd/bootstrap/keys:ro") {
+				found = true
+			}
+		}
+		if !found {
+			t.Fatalf("shared host keys not mounted read-only for %s", backend)
+		}
 	}
 }

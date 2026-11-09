@@ -1,6 +1,7 @@
 package instance
 
 import (
+	"encoding/json"
 	"fmt"
 	"net"
 	"os"
@@ -88,15 +89,113 @@ func TestParseNetworkInspect(t *testing.T) {
 	data := []byte(`[
 	 {"Name":"bridge","Labels":{},"IPAM":{"Config":[{"Subnet":"172.17.0.0/16"}]}},
 	 {"Name":"other_net","Labels":{"com.docker.compose.project":"other"},"IPAM":{"Config":[{"Subnet":"172.22.0.0/16"},{"Subnet":"fd00::/64"}]}},
-	 {"Name":"mine_qpot_internal","Labels":{"com.docker.compose.project":"mine"},"IPAM":{"Config":[{"Subnet":"172.23.0.0/16"}]}},
+	 {"Name":"mine_qpot_internal","Labels":{"com.docker.compose.project":"mine","com.docker.compose.network":"qpot_internal"},"IPAM":{"Config":[{"Subnet":"172.23.0.0/24"}]}},
+	 {"Name":"mine_retired","Labels":{"com.docker.compose.project":"mine","com.docker.compose.network":"ssh-backend-16_net"},"IPAM":{"Config":[{"Subnet":"172.24.0.0/24"}]}},
 	 {"Name":"host","Labels":{},"IPAM":{"Config":[]}}]`)
-	got := parseNetworkInspect(data, "mine")
+	got, keep := parseNetworkInspect(data, "mine", map[string]string{"qpot_internal": "qpot_internal"})
 	var s []string
 	for _, n := range got {
 		s = append(s, n.String())
 	}
-	if strings.Join(s, ",") != "172.17.0.0/16,172.22.0.0/16,fd00::/64" {
+	if strings.Join(s, ",") != "172.17.0.0/16,172.22.0.0/16,fd00::/64,172.24.0.0/24" || keep["qpot_internal"] != "172.23.0.0/24" {
 		t.Fatalf("got %v", s)
+	}
+}
+
+func TestRetiredCellsReserveSubnetsAndCurrentNetworksKeepAssignments(t *testing.T) {
+	cfg := config.Default("retired-cell-50")
+	enableOnly(cfg, sshProxyHoneypot)
+	hp := cfg.Honeypots[sshProxyHoneypot]
+	hp.CustomConfig = map[string]string{"backends": "16", "environment": "organization"}
+	cfg.Honeypots[sshProxyHoneypot] = hp
+	previous := &ComposeGenerator{Config: cfg}
+	old := previous.buildSubnetMap()
+	var networks []map[string]any
+	for logical, allocation := range previous.currentNetworkNames() {
+		networks = append(networks, map[string]any{
+			"Labels": map[string]string{"com.docker.compose.project": composeProjectName(cfg), "com.docker.compose.network": logical},
+			"IPAM":   map[string]any{"Config": []map[string]string{{"Subnet": old[allocation]}}},
+		})
+	}
+	data, err := json.Marshal(networks)
+	if err != nil {
+		t.Fatal(err)
+	}
+	hp.CustomConfig["backends"] = "1"
+	cfg.Honeypots[sshProxyHoneypot] = hp
+	adb := cfg.Honeypots["adbhoney"]
+	adb.Enabled = true
+	cfg.Honeypots["adbhoney"] = adb
+	candidate := &ComposeGenerator{Config: cfg}
+	candidate.ReservedNets, candidate.KeepSubnets = parseNetworkInspect(data, composeProjectName(cfg), candidate.currentNetworkNames())
+	next := candidate.buildSubnetMap()
+	retired := old[sshBackendNetwork("ssh-backend-4")]
+	if retired != "172.21.85.0/24" {
+		t.Fatalf("independent collision fixture changed: %s", retired)
+	}
+	if next["adbhoney"] == retired {
+		t.Fatal("new honeypot reused a retired Docker network's subnet")
+	}
+	for name, subnet := range candidate.KeepSubnets {
+		if next[name] != subnet || subnet != old[name] {
+			t.Fatalf("existing network %s moved from its actual Docker assignment", name)
+		}
+	}
+	for slot := 2; slot <= 16; slot++ {
+		retired := old[sshBackendNetwork(fmt.Sprintf("ssh-backend-%d", slot))]
+		for name, subnet := range next {
+			if subnet == retired {
+				t.Fatalf("candidate network %s overlaps retired slot %d", name, slot)
+			}
+		}
+	}
+}
+
+func TestExistingSubnetsAreReservedBeforeNewNetworkAllocation(t *testing.T) {
+	cfg := config.Default("existing-network")
+	enableOnly(cfg, "adbhoney")
+	// The actual infra /24 happens to be the hash selected for a newly enabled
+	// honeypot. Existing assignments must win regardless of allocation order.
+	actual := subnetForNetwork(cfg.InstanceName, "adbhoney")
+	g := &ComposeGenerator{Config: cfg, KeepSubnets: map[string]string{"qpot_internal": actual}}
+	subnets := g.buildSubnetMap()
+	if subnets["qpot_internal"] != actual || subnets["adbhoney"] == actual {
+		t.Fatal("new network displaced an existing network's actual subnet")
+	}
+}
+
+func TestNetworkInventoryReservesAmbiguousOrUnlabelledProjectNetworks(t *testing.T) {
+	for _, inspect := range []string{
+		`[{"Labels":{"com.docker.compose.project":"mine"},"IPAM":{"Config":[{"Subnet":"172.23.0.0/24"}]}}]`,
+		`[{"Labels":{"com.docker.compose.project":"mine","com.docker.compose.network":"qpot_internal"},"IPAM":{"Config":[{"Subnet":"172.23.0.0/16"}]}}]`,
+		`[{"Labels":{"com.docker.compose.project":"mine","com.docker.compose.network":"qpot_internal"},"IPAM":{"Config":[{"Subnet":"172.23.0.0/24"},{"Subnet":"172.24.0.0/24"}]}}]`,
+		`[{"Labels":{"com.docker.compose.project":"mine","com.docker.compose.network":"qpot_internal"},"IPAM":{"Config":[{"Subnet":"172.23.0.0/24"}]}},{"Labels":{"com.docker.compose.project":"mine","com.docker.compose.network":"qpot_internal"},"IPAM":{"Config":[{"Subnet":"172.24.0.0/24"}]}}]`,
+	} {
+		reserved, keep := parseNetworkInspect([]byte(inspect), "mine", map[string]string{"qpot_internal": "qpot_internal"})
+		if len(reserved) == 0 || len(keep) != 0 {
+			t.Fatalf("ambiguous project network was freed for allocation: %s", inspect)
+		}
+	}
+}
+
+func TestSubnetExhaustionFailsBeforePublishing(t *testing.T) {
+	cfg := config.Default("exhausted-subnets")
+	enableOnly(cfg, "cowrie")
+	_, occupied, _ := net.ParseCIDR("172.16.0.0/12")
+	g := &ComposeGenerator{Config: cfg, Sandbox: mustSandbox(t, cfg), ReservedNets: []*net.IPNet{occupied}}
+	if _, err := g.Generate(); err == nil || !strings.Contains(err.Error(), "no unoccupied subnet") {
+		t.Fatalf("exhausted allocator did not reject an overlapping layout: %v", err)
+	}
+}
+
+func TestConflictingActualNetworkFailsInsteadOfMovingIt(t *testing.T) {
+	cfg := config.Default("conflicting-current-subnet")
+	enableOnly(cfg, "cowrie")
+	actual := "172.23.45.0/24"
+	g := &ComposeGenerator{Config: cfg, Sandbox: mustSandbox(t, cfg),
+		KeepSubnets: map[string]string{"cowrie": actual}, ReservedSubnets: map[string]bool{actual: true}}
+	if _, err := g.Generate(); err == nil || !strings.Contains(err.Error(), "cannot retain its subnet") {
+		t.Fatalf("conflicting current network was silently moved: %v", err)
 	}
 }
 
@@ -117,7 +216,7 @@ func TestSubnetsAvoidHostNetworks(t *testing.T) {
 	}
 	g := &ComposeGenerator{Config: cfg, ReservedNets: reserved}
 	m := g.buildSubnetMap()
-	for _, want := range []string{"qpot_internal", "qpot_dbhost", "ssh-proxy_backend", "cowrie"} {
+	for _, want := range []string{"qpot_internal", "qpot_dbhost", "ssh-backend-1_net", "ssh-backend-2_net", "cowrie"} {
 		if m[want] == "" {
 			t.Errorf("no subnet allocated for %s", want)
 		}
@@ -144,7 +243,7 @@ func TestSubnetsAvoidHostNetworks(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, name := range []string{"qpot_internal", "qpot_dbhost", "ssh-proxy_backend", "cowrie"} {
+	for _, name := range []string{"qpot_internal", "qpot_dbhost", "ssh-backend-1_net", "ssh-backend-2_net", "cowrie"} {
 		if !strings.Contains(out, "- subnet: "+m[name]) {
 			t.Errorf("compose does not render the subnet for %s", name)
 		}

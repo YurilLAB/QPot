@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"sync"
 	"testing"
 	"time"
 )
@@ -189,5 +190,133 @@ func TestPoolLeaseHook(t *testing.T) {
 	}
 	if len(got) != 1 || got[0] != b.ID {
 		t.Fatalf("lease hook calls = %v", got)
+	}
+}
+
+// A broker process restart does not clean its backend. Even a reachable sshd
+// and an already-existing counter must stay quarantined until a newer trusted
+// recreation; then exactly one first lease becomes possible.
+func TestStartupQuarantineRequiresFreshGeneration(t *testing.T) {
+	dir := t.TempDir()
+	writeGen(t, dir, "b", 7)
+	g := NewGenerationGate(dir)
+	f := newFakeBackend(t, "SSH-2.0-OpenSSH_9.2p1\r\n")
+	b := Backend{ID: "b", Addr: f.addr}
+	g.OnLease(b)
+	reset := RecycleReset(RecycleOptions{DownWithin: 30 * time.Millisecond, UpWithin: time.Second,
+		Poll: 5 * time.Millisecond, Gate: g})
+	p := NewPool([]Backend{b}, reset, PoolOptions{StartQuarantined: true})
+	p.SetLeaseHook(g.OnLease)
+	if _, err := p.Lease(); err != ErrNoBackend {
+		t.Fatalf("first lease before startup reset: %v", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go p.WatchQuarantined(ctx, 5*time.Millisecond)
+	time.Sleep(80 * time.Millisecond)
+	if _, err := p.Lease(); err != ErrNoBackend {
+		t.Fatalf("reachable backend with old counter became available: %v", err)
+	}
+	writeGen(t, dir, "b", 8)
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		leased, err := p.Lease()
+		if err == nil {
+			if leased.ID != "b" {
+				t.Fatalf("leased %+v", leased)
+			}
+			if baseline, ok := g.BaseGeneration("b"); !ok || baseline != 8 {
+				t.Fatalf("first session baseline=%d present=%v", baseline, ok)
+			}
+			if g.Advanced(leased) {
+				t.Fatal("startup recreation also counted as a later session reset")
+			}
+			if _, err := p.Lease(); err != ErrNoBackend {
+				t.Fatalf("same backend leased twice: %v", err)
+			}
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("new trusted recreation never released startup quarantine")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+}
+
+func TestStartupQuarantineDoesNotTrustPriorRecreation(t *testing.T) {
+	dir := t.TempDir()
+	writeGen(t, dir, "b", 1)
+	g := NewGenerationGate(dir)
+	writeGen(t, dir, "b", 2) // host startup pass completed before this broker started
+	b := Backend{ID: "b", Addr: "127.0.0.1:22"}
+	g.OnLease(b)
+	p := NewPool([]Backend{b}, nil, PoolOptions{StartQuarantined: true})
+	if _, err := p.Lease(); err != ErrNoBackend || g.Advanced(b) {
+		t.Fatal("a pre-startup recreation opened a new broker's first lease")
+	}
+	if baseline, ok := g.BaseGeneration("b"); !ok || baseline != 2 {
+		t.Fatalf("baseline=%d present=%v", baseline, ok)
+	}
+	if _, ok := g.BaseGeneration("unknown"); ok {
+		t.Fatal("unknown backend has a generation baseline")
+	}
+}
+
+func TestStartupQuarantineDoesNotRunDuplicateConcurrentResets(t *testing.T) {
+	const count = 4
+	var backends []Backend
+	for _, id := range []string{"a", "b", "c", "d"} {
+		backends = append(backends, Backend{ID: id, Addr: "127.0.0.1:22"})
+	}
+	var mu sync.Mutex
+	calls := map[string]int{}
+	started := make(chan struct{}, count)
+	unblock := make(chan struct{})
+	reset := func(b Backend) error {
+		mu.Lock()
+		calls[b.ID]++
+		mu.Unlock()
+		started <- struct{}{}
+		<-unblock
+		return nil
+	}
+	p := NewPool(backends, reset, PoolOptions{StartQuarantined: true})
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go p.WatchQuarantined(ctx, time.Millisecond)
+	for range count {
+		select {
+		case <-started:
+		case <-time.After(time.Second):
+			close(unblock)
+			t.Fatal("startup reset was not scheduled")
+		}
+	}
+	time.Sleep(20 * time.Millisecond) // several watcher ticks while every reset is still active
+	mu.Lock()
+	for id, n := range calls {
+		if n != 1 {
+			t.Errorf("concurrent resets for %s: %d", id, n)
+		}
+	}
+	mu.Unlock()
+	close(unblock)
+	deadline := time.Now().Add(time.Second)
+	for {
+		if available, leased, quarantined := p.Stats(); available == count && leased == 0 && quarantined == 0 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("completed startup resets did not rejoin the pool")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	seen := map[string]bool{}
+	for range count {
+		b, err := p.Lease()
+		if err != nil || seen[b.ID] {
+			t.Fatalf("startup admission returned duplicate or missing backend: %+v %v", b, err)
+		}
+		seen[b.ID] = true
 	}
 }

@@ -14,3 +14,10 @@ __pycache__/
 /qpot-sshproxy
 /qpot.exe
 /qpot-sshproxy.exe
+
+# Local CI coverage artifacts
+/coverage.out
+/coverage.txt
+
+# Local security scanner output
+/gosec.sarif

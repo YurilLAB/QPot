@@ -14,18 +14,102 @@ package instance
 // doc/ssh-hifi-proxy.md for the architecture and security model.
 
 import (
+	"context"
+	"encoding/json"
 	"fmt"
+	"io"
+	"os/exec"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/qpot/qpot/internal/config"
+	"github.com/qpot/qpot/internal/hostsetup"
 )
+
+const sshResourceInfoFormat = `{"CgroupDriver":{{json .CgroupDriver}},"MemoryLimit":{{json .MemoryLimit}},"PidsLimit":{{json .PidsLimit}},"CPUCfsQuota":{{json .CPUCfsQuota}}}`
+
+type sshResourceInfoBuffer struct {
+	data     []byte
+	overflow bool
+}
+
+func (b *sshResourceInfoBuffer) Write(p []byte) (int, error) {
+	const limit = 16 << 10
+	room := limit - len(b.data)
+	if len(p) > room {
+		b.overflow = true
+	}
+	b.data = append(b.data, p[:min(len(p), room)]...)
+	return len(p), nil
+}
+
+// validateSSHRuntimeResources checks the same selected daemon used by Compose.
+// Accepted HostConfig fields alone do not establish enforcement: rootless Docker
+// without delegated cgroups can retain limits while the guest remains unbounded.
+func validateSSHRuntimeResources(ctx context.Context) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	var output sshResourceInfoBuffer
+	cmd := exec.CommandContext(ctx, "docker", "info", "--format", sshResourceInfoFormat)
+	cmd.Stdout = &output
+	cmd.Stderr = io.Discard
+	cmd.WaitDelay = time.Second
+	if err := cmd.Run(); err != nil {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		return hostsetup.E("QP-RES-005").WithWhy("Docker could not report its CPU, memory and PID cgroup capabilities.").Wrap(err)
+	}
+	if output.overflow {
+		return hostsetup.E("QP-RES-005").WithWhy("Docker's resource capability response exceeded the size limit.")
+	}
+	return validateSSHResourceInfo(output.data)
+}
+
+func validateSSHResourceInfo(data []byte) error {
+	var info struct {
+		CgroupDriver string
+		MemoryLimit  *bool
+		PidsLimit    *bool
+		CPUCfsQuota  *bool
+	}
+	if len(data) > 16<<10 {
+		return hostsetup.E("QP-RES-005").WithWhy("Docker's resource capability response exceeded the size limit.")
+	}
+	if err := json.Unmarshal(data, &info); err != nil {
+		return hostsetup.E("QP-RES-005").WithWhy("Docker's resource capability response was not valid typed JSON.").Wrap(err)
+	}
+	var missing []string
+	if info.CgroupDriver != "systemd" && info.CgroupDriver != "cgroupfs" {
+		missing = append(missing, "a supported cgroup driver")
+	}
+	for _, capability := range []struct {
+		name  string
+		value *bool
+	}{
+		{"memory limits", info.MemoryLimit},
+		{"PID limits", info.PidsLimit},
+		{"CPU CFS quotas", info.CPUCfsQuota},
+	} {
+		if capability.value == nil || !*capability.value {
+			missing = append(missing, capability.name)
+		}
+	}
+	if len(missing) != 0 {
+		return hostsetup.E("QP-RES-005").WithWhy("Docker did not confirm %s.", strings.Join(missing, ", "))
+	}
+	return nil
+}
 
 const (
 	// sshProxyHoneypot is the honeypot name operators enable.
 	sshProxyHoneypot = "ssh-proxy"
-	// sshBackendDataDir is the honeypots/ subdir under which each backend's
-	// persisted host keys and logs live (honeypots/ssh-backend/<service>/...).
+	// sshBackendDataDir identifies the legacy honeypots/ directory migrated
+	// into the persistent neutral store before an upgraded cell starts.
 	sshBackendDataDir = "ssh-backend"
 
 	defaultSSHBackends = 2  // backends per ssh-proxy when unspecified
@@ -33,11 +117,72 @@ const (
 	sshBackendPort     = 22 // the port real sshd listens on inside each backend
 )
 
+// HiFiImageRevision is set to the full source commit by the release builder.
+// Release binaries use matching source-commit image tags; ordinary development
+// builds retain legacy references for offline rendering when it is empty;
+// starting this newer HiFi wiring then requires explicitly built local images.
+var HiFiImageRevision string
+
+// validHiFiImageRevision accepts only the canonical full source revision used
+// by the release image publisher. Offline rendering retains legacy references;
+// runtime entry points must not start them with this newer wiring.
+func validHiFiImageRevision(revision string) bool {
+	if len(revision) != 40 {
+		return false
+	}
+	for _, r := range revision {
+		if !(r >= '0' && r <= '9' || r >= 'a' && r <= 'f') {
+			return false
+		}
+	}
+	return true
+}
+
+func validateSSHRuntimeImages(cfg *config.Config, revision string) error {
+	if sshLocalImages(cfg) || validHiFiImageRevision(revision) {
+		return nil
+	}
+	return hostsetup.E("QP-INST-013").WithWhy("This source-built QPot has no valid full release image revision, and its HiFi configuration selects the preserved legacy published images.")
+}
+
+// Restart and recycling reuse an existing Compose document. Its actual owned
+// broker/app/backup images must agree; a newly saved config alone cannot prove
+// that the running document implements the new context and scene contracts.
+func validateSSHLayoutImages(layout sshLayout, revision string) error {
+	if !layout.Broker || len(layout.Groups) == 0 {
+		return hostsetup.E("QP-INST-013").WithWhy("The existing Compose document has no complete owned HiFi broker/cell layout.")
+	}
+	broker := layout.Images[sshProxyHoneypot]
+	backend := "qpot-local/ssh-backend:development"
+	if broker != "qpot-local/ssh-proxy:development" {
+		if !validHiFiImageRevision(revision) || broker != sshPublishedImage(sshProxyHoneypot, revision) {
+			return hostsetup.E("QP-INST-013").WithWhy("The existing HiFi broker image is not a compatible local image or this release's source-commit image.")
+		}
+		backend = sshPublishedImage("ssh-backend", revision)
+	}
+	for app, members := range layout.Groups {
+		if !containsSSHService(members, app) {
+			return hostsetup.E("QP-INST-013").WithWhy("The existing HiFi cell %s has no owned application service.", app)
+		}
+		for _, service := range members {
+			if strings.HasSuffix(service, "-db") {
+				continue
+			}
+			if layout.Images[service] != backend {
+				return hostsetup.E("QP-INST-013").WithWhy("The existing HiFi image for %s does not match its broker's compatible image source.", service)
+			}
+		}
+	}
+	return nil
+}
+
 // sshBackend describes one HiFi backend companion service for rendering.
 type sshBackend struct {
 	// Service is the compose service name AND its network alias, e.g.
 	// "ssh-backend-1". The broker dials this name on the internal network.
 	Service string
+	// Network belongs to this lease alone. Pool slots never share a bridge.
+	Network string
 	// UsersCSV is the BACKEND_USERS env value (user:pass,user:pass,…).
 	UsersCSV string
 }
@@ -88,9 +233,52 @@ func sshProxyBackends(cfg *config.Config) []sshBackend {
 	names := sshBackendServiceNames(cfg)
 	out := make([]sshBackend, 0, len(names))
 	for _, name := range names {
-		out = append(out, sshBackend{Service: name, UsersCSV: users})
+		out = append(out, sshBackend{Service: name, Network: sshBackendNetwork(name), UsersCSV: users})
 	}
 	return out
+}
+
+// sshBackendNetwork names a slot's private network. Its only trusted member is
+// the broker; optional organization companions belong to the same slot.
+func sshBackendNetwork(service string) string { return service + "_net" }
+
+// Keep the slot number in the readable bridge prefix. Passing ssh-backend-N
+// directly would truncate all slot prefixes to the same eight characters.
+func sshCellBridge(instance, service string) string {
+	return bridgeName(instance, "hifi-"+strings.TrimPrefix(service, "ssh-backend-"))
+}
+
+func sshProxyImage(cfg *config.Config) string {
+	if config.SSHImageSource(cfg) == config.SSHImageSourceLocal {
+		return "qpot-local/ssh-proxy:development"
+	}
+	return sshPublishedImage(sshProxyHoneypot, HiFiImageRevision)
+}
+
+func sshBackendImage(cfg *config.Config) string {
+	if config.SSHImageSource(cfg) == config.SSHImageSourceLocal {
+		return "qpot-local/ssh-backend:development"
+	}
+	return sshPublishedImage("ssh-backend", HiFiImageRevision)
+}
+
+func sshPublishedImage(name, revision string) string {
+	image := GetHoneypotImage(name)
+	if revision == "" {
+		return image
+	}
+	return strings.TrimSuffix(image, ":latest") + ":" + revision
+}
+
+func sshLocalImages(cfg *config.Config) bool {
+	return config.SSHImageSource(cfg) == config.SSHImageSourceLocal
+}
+
+// Runtime decoys must not inherit the Docker client's proxy endpoints or
+// credentials. Build-time proxy/CA configuration remains independent.
+func runtimeProxyKeys() []string {
+	return []string{"HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "FTP_PROXY", "NO_PROXY",
+		"http_proxy", "https_proxy", "all_proxy", "ftp_proxy", "no_proxy"}
 }
 
 // sshBackendHostname returns the single hostname EVERY backend in the pool

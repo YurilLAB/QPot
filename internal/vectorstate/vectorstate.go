@@ -43,12 +43,16 @@ const (
 )
 
 // A Source is one of the collector's file sources: its name, the instance
-// folder it reads in, and which files there it reads (Read takes a slash
-// path relative to Dir).
+// logical folder it reads in, and which files there it reads (Read takes a
+// slash path relative to the source directory).
 type Source struct {
 	Name string
 	Dir  string
-	Read func(rel string) bool
+	// HostDir optionally supplies a trusted canonical source outside DataPath.
+	// Checkpoint identity and storage remain under DataPath/collector, independently
+	// of the source's physical location. This never comes from captured input.
+	HostDir string
+	Read    func(rel string) bool
 }
 
 // Delivered maps a log's fingerprint to how far the collector has delivered
@@ -151,7 +155,14 @@ func Seed(dataPath string, src Source, now time.Time) (int, error) {
 		return 0, err
 	}
 	sizes, logs := map[uint64]int64{}, map[uint64]int{}
-	if root, err := os.OpenRoot(filepath.Join(dataPath, filepath.FromSlash(src.Dir))); err == nil {
+	sourceDir := filepath.Join(dataPath, filepath.FromSlash(src.Dir))
+	if src.HostDir != "" {
+		if !filepath.IsAbs(src.HostDir) || filepath.Clean(src.HostDir) != src.HostDir {
+			return 0, errors.New("collector source host directory must be an absolute clean path")
+		}
+		sourceDir = src.HostDir
+	}
+	if root, err := os.OpenRoot(sourceDir); err == nil {
 		walk(root, ".", 0, src.Read, func(size int64, fp uint64) {
 			sizes[fp] = size
 			logs[fp]++

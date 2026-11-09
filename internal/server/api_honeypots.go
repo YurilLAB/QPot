@@ -81,6 +81,10 @@ func (s *Server) handleHoneypotToggle(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case res != nil:
 			slog.Error("honeypot toggle saved, but the container did not follow", "honeypot", req.Name, "on", on, "error", err)
+			if response, ok := hiFiPreflightAPIError(err, true); ok {
+				writeJSON(w, http.StatusBadGateway, response)
+				return
+			}
 			verb := "start"
 			if !on {
 				verb = "stop"

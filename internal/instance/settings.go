@@ -136,6 +136,11 @@ func ValidateSettings(cfg *config.Config, name string, changes []SettingChange) 
 			custom[c.Key] = c.Value
 		}
 	}
+	if name == "ssh-proxy" {
+		if err := config.ValidateSSHEnvironmentSettings(custom); err != nil {
+			return nil, &SettingsError{Kind: ErrInvalidSetting, Msg: err.Error()}
+		}
+	}
 	return custom, nil
 }
 
@@ -218,6 +223,8 @@ var settingHelp = map[string]string{
 	"bait_target":  "Asset referenced by industrial support files: the selected Conpot device or the refrigeration controller. This does not enable the referenced service. Used with bait_profile=industrial. Empty: conpot.",
 	"template":     "The industrial device Conpot emulates; only its ports are published. Empty: the saved automatic device, kept across restarts and upgrades.",
 	"site_profile": "Refrigeration site: retail food cabinets or plasma cold storage. Each site keeps its own temperatures, settings and history across restarts and profile switches. Empty: retail.",
+	"environment":  "HiFi SSH environment. Standalone is one real Debian 12 server per SSH connection. Organization adds a PostgreSQL database and an SSH backup host, using three decoy containers per slot. State lasts for that SSH connection and resets before reuse. These real shells have writable container filesystems. Official releases select matching published images; development checkouts should build both current images and choose image_source=local. Empty: standalone.",
+	"image_source": "Published uses QPot's registry images. Local uses qpot-local/ssh-proxy:development and qpot-local/ssh-backend:development, built from your checkout; build both before starting. Local tags are not pulled from a registry. This also selects the HiFi egress-guard helper image, so use only images you trust. Empty: published.",
 }
 
 var (
@@ -336,7 +343,7 @@ func DescribeSettings(cfg *config.Config, name string) []SettingInfo {
 	for _, key := range SettingKeys(name) {
 		v := hp.CustomConfig[key]
 		switch name + "/" + key {
-		case "conpot/template", "refrigeration/site_profile", "cowrie/bait", "cowrie/persona", "cowrie/bait_profile", "cowrie/bait_target":
+		case "conpot/template", "refrigeration/site_profile", "cowrie/bait", "cowrie/persona", "cowrie/bait_profile", "cowrie/bait_target", "ssh-proxy/environment", "ssh-proxy/image_source":
 			// Direct YAML accepts the same surrounding whitespace that runtime
 			// selection trims. A dropdown needs the canonical ID; an unmatched
 			// raw value would become empty and clear a valid choice on save.
@@ -347,6 +354,14 @@ func DescribeSettings(cfg *config.Config, name string) []SettingInfo {
 			// presenting an invalid manual value as the default.
 			if days, ok := parsePersonaRotation(v); ok {
 				v = strconv.Itoa(days)
+			} else if strings.TrimSpace(v) == "" {
+				v = ""
+			}
+		case "ssh-proxy/backends":
+			// Preserve a valid hand-written pool size when a different field is
+			// saved from the form: number inputs discard surrounding whitespace.
+			if n, err := strconv.Atoi(strings.TrimSpace(v)); err == nil && n >= 1 && n <= maxSSHBackends {
+				v = strconv.Itoa(n)
 			} else if strings.TrimSpace(v) == "" {
 				v = ""
 			}
@@ -403,6 +418,10 @@ func effectiveSetting(cfg *config.Config, name, key string) string {
 		return refrigerationSiteProfile(cfg)
 	case "ssh-proxy/backends":
 		return strconv.Itoa(sshBackendCount(cfg))
+	case "ssh-proxy/environment":
+		return config.SSHEnvironment(cfg)
+	case "ssh-proxy/image_source":
+		return config.SSHImageSource(cfg)
 	}
 	return ""
 }

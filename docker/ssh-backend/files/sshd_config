@@ -9,7 +9,8 @@ Port 22
 AddressFamily any
 ListenAddress 0.0.0.0
 
-# Host keys live in /etc/ssh/keys, a SHARED volume mounted identically into every
+# Host keys live below /run/sshd/bootstrap, a private parent of the read-only
+# SHARED volume mounted identically into every
 # backend in the pool, so all backends present the SAME host-key fingerprint. A
 # pool of backends behind one broker that each had their own keys would make a
 # returning attacker's SSH client warn "REMOTE HOST IDENTIFICATION HAS CHANGED" —
@@ -17,12 +18,13 @@ ListenAddress 0.0.0.0
 # shared mount never shadows this hardened sshd_config. sshd reads the copies the
 # entrypoint makes, root's alone: it refuses a host key others may read, and a
 # mounted file keeps the host's mode (Docker Desktop shows Windows files as 0777).
-HostKey /run/qpot-hostkeys/ssh_host_ed25519_key
-HostKey /run/qpot-hostkeys/ssh_host_rsa_key
-HostKey /run/qpot-hostkeys/ssh_host_ecdsa_key
+# The private bootstrap parent also prevents reading those original files.
+HostKey /run/sshd/hostkeys/ssh_host_ed25519_key
+HostKey /run/sshd/hostkeys/ssh_host_rsa_key
+HostKey /run/sshd/hostkeys/ssh_host_ecdsa_key
 
-# VERBOSE logs every authentication attempt and the offered key fingerprints —
-# the structured capture the collector ingests, in addition to the recorded PTY.
+# VERBOSE retains authentication metadata and offered key fingerprints in the
+# private daemon log. Command/PTY evidence is separately encoded as JSONL.
 LogLevel VERBOSE
 SyslogFacility AUTH
 
@@ -42,8 +44,9 @@ MaxSessions 10
 
 # Defense-in-depth: even though the backend sits on an egress-locked internal
 # network, explicitly refuse every forwarding/tunnelling primitive so a real
-# shell here can NEVER be used to reach another host, open a reverse tunnel, or
-# pivot — belt-and-braces against an egress misconfiguration.
+# shell cannot use SSH forwarding primitives. The private cell may deliberately
+# allow ordinary SSH/SQL clients to reach its own decoy peers; the network guard
+# must enforce isolation from every other cell, the host and real infrastructure.
 AllowTcpForwarding no
 AllowAgentForwarding no
 AllowStreamLocalForwarding no
@@ -55,4 +58,6 @@ PermitUserRC no
 PrintMotd no
 PrintLastLog yes
 AcceptEnv LANG LC_*
-Subsystem sftp internal-sftp
+Subsystem sftp /usr/lib/openssh/sftp-server
+# The account's login shell is rec-shell. Running the recorder directly avoids
+# user-writable Bash startup files before admission and preserves key commands.

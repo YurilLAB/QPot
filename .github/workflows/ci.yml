@@ -10,6 +10,7 @@ name: CI
 #                  the full race-enabled test suite is green.
 #   conpot-integration - real PLC/RTU protocols and persistent identities in isolated containers.
 #   refrigeration-integration - built native supervisor, XML controls, exports and persistent state.
+#   netguard-integration - actual IPv4/IPv6 packet containment in owned namespaces.
 #   build-run    - the binary actually runs (CLI smoke) and renders a valid,
 #                  non-self-identifying docker-compose.
 #   govulncheck  - known CVEs reachable from our code (stdlib + deps), incl. a
@@ -48,13 +49,14 @@ on:
   pull_request:
     branches: [main]
   workflow_dispatch:
+  workflow_call:
 
 # Least privilege by default; jobs opt into more only where needed.
 permissions:
   contents: read
 
 concurrency:
-  group: ci-${{ github.ref }}
+  group: ci-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
@@ -199,6 +201,94 @@ jobs:
         # its isolated network namespace; no production guard is bypassed.
         run: go test -race -count=1 -timeout 12m ./internal/instance -run '^TestRefrigerationLive'
 
+  netguard-integration:
+    name: Isolated kernel IPv4 and IPv6 cell containment
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    env:
+      QPOT_TEST_NETGUARD: "1"
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Ensure namespace networking tools
+        run: |
+          if ! command -v ip >/dev/null || ! command -v unshare >/dev/null; then
+            sudo apt-get update
+            sudo apt-get install -y iproute2 util-linux
+          fi
+      - name: Exercise real kernel cell rules
+        # All bridges, endpoints, forwarding settings and nftables live in a
+        # fresh network namespace. Runner policy is never disabled. If Ubuntu
+        # restricts unprivileged user namespaces, sudo starts only the same
+        # prebuilt test in an owned network namespace; a denial still fails.
+        run: |
+          set -euo pipefail
+          test_dir=$(mktemp -d)
+          trap 'rm -rf "$test_dir"' EXIT
+          go test -race -c -o "$test_dir/netguard.test" ./internal/netguard
+          if unshare --user --map-root-user --net true; then
+            "$test_dir/netguard.test" -test.run '^TestNetguardKernelIsolation$' -test.v -test.timeout 90s
+          else
+            sudo env QPOT_TEST_NETGUARD=1 QPOT_NETGUARD_ROOT_NAMESPACE=1 \
+              "$test_dir/netguard.test" -test.run '^TestNetguardKernelIsolation$' -test.v -test.timeout 90s
+          fi
+
+  cowrie-stateful-integration:
+    name: Real Cowrie SSH and SFTP state consequences
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    env:
+      QPOT_TEST_COWRIE_STATEFUL: "1"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Pull the reviewed multi-architecture Cowrie image
+        run: docker pull ghcr.io/telekom-security/cowrie:24.04.2@sha256:65ef2aa192779c96f69d504aa1ece20d5150fab2dddfc8cf47e2efefb4e2574a
+      - name: Exercise four profiles and real SSH and SFTP channels
+        run: go test -race -count=1 -timeout 5m ./internal/instance -run '^TestCowrieStateful(Image|SSH)$'
+
+  vector-integration:
+    name: Real Vector normalization and delayed HiFi evidence
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Pull the production collector
+        run: docker pull timberio/vector:0.61.0-alpine@sha256:3bb7ed5152910ed51729e256937b1d8a4bf67ff624e9d565e8e5877bffd015c7
+      - name: Exercise generated configuration and native evidence
+        run: go test -race -count=1 -timeout 3m ./internal/instance -run 'TestHiFiVectorEvidenceLive|TestVector.*Live'
+
+  hifi-organization-integration:
+    name: Real private organization cells and whole-cell reset
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      QPOT_TEST_HIFI_LIVE: "1"
+      QPOT_TEST_SSH_COLLECTOR: "1"
+      QPOT_TEST_HIFI_DATABASE: "1"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Build and exercise source images, containment, recording and reset
+        # The production mandatory guard must become healthy. This test fails
+        # on a host without the required kernel capability; it never bypasses it.
+        run: bash scripts/test-hifi.sh
+
+
   docker-integration:
     name: Collector delivery and disk cleanup in real containers
     runs-on: ubuntu-latest
@@ -224,10 +314,19 @@ jobs:
         # The runner's ordinary user is in the docker group, as QPot runs:
         # logs other users own go through the helper container. The tests
         # stop and recreate their own containers only.
-        run: >-
-          go test -race -count=1 -timeout 15m
-          ./internal/server ./internal/cleanup ./internal/instance
-          -run '^(TestCollectorAndCleanupWithRealDocker|TestDockerHelperForReal|TestVector[A-Za-z]*Live)$'
+        run: |
+          set -euo pipefail
+          test_pattern='^(TestCollectorAndCleanupWithRealDocker|TestDockerHelperForReal|TestDockerSSHInventoryPrivateEvidenceAndUnsupportedObjects|TestVector[A-Za-z]*Live)$'
+          test_packages=(./internal/server ./internal/cleanup ./internal/instance)
+          listed=$(go test "${test_packages[@]}" -list "$test_pattern")
+          for required in TestCollectorAndCleanupWithRealDocker TestDockerHelperForReal TestDockerSSHInventoryPrivateEvidenceAndUnsupportedObjects TestVectorRemapLive TestVectorConfigValidatesLive TestVectorEdgeConfigsValidateLive; do
+            if ! printf '%s\n' "$listed" | grep -Fxq "$required"; then
+              echo "required Docker integration test is missing: $required" >&2
+              exit 1
+            fi
+          done
+          go test -race -count=1 -timeout 15m "${test_packages[@]}" -run "$test_pattern"
+
 
   build-run:
     name: Build binary & CLI smoke run
@@ -357,23 +456,42 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0   # full history so committed-then-removed secrets are caught
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
       - name: Load the pinned tool versions
         # Pinned so a tool-side change cannot silently alter results;
         # scripts/ci-local.sh reads the same file.
         run: grep -E '^[A-Z][A-Z0-9_]*=' .github/ci-tools.env >> "$GITHUB_ENV"
-      - name: Run gitleaks
-        uses: gitleaks/gitleaks-action@v2
-        env:
-          GITLEAKS_VERSION: ${{ env.GITLEAKS_VERSION }}
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          GITLEAKS_ENABLE_COMMENTS: "false"
-          GITLEAKS_ENABLE_UPLOAD_ARTIFACT: "false"
-          # GITLEAKS_LICENSE is only needed for org accounts; personal/public repos run free.
+      - name: Install the pinned scanner and verify its upstream default rules
+        run: |
+          set -euo pipefail
+          go install "github.com/zricethezav/gitleaks/v8@v${GITLEAKS_VERSION}"
+          default_rules="$(go env GOMODCACHE)/github.com/zricethezav/gitleaks/v8@v${GITLEAKS_VERSION}/config/gitleaks.toml"
+          printf '%s  %s\n' "$GITLEAKS_CONFIG_SHA256" "$default_rules" | sha256sum -c -
+      - name: Scan the complete configured history and current tree
+        # Exact acknowledged historical exposures remain documented separately.
+        # This is an actual full-history scan, not an action-selected push range.
+        run: |
+          set -euo pipefail
+          scanner="$(go env GOPATH)/bin/gitleaks"
+          "$scanner" git --redact=100 --no-banner .
+          "$scanner" dir --redact=100 --no-banner .
+      - name: Reject new source leaks outside decoy allowlists
+        run: |
+          set -euo pipefail
+          scanner="$(go env GOPATH)/bin/gitleaks"
+          default_rules="$(go env GOMODCACHE)/github.com/zricethezav/gitleaks/v8@v${GITLEAKS_VERSION}/config/gitleaks.toml"
+          go run ./internal/cicheck/cirun -root . secrets-source -gitleaks "$scanner" -config "$default_rules"
+          QPOT_TEST_SECRET_GATE=1 QPOT_GITLEAKS_BINARY="$scanner" QPOT_GITLEAKS_DEFAULT_CONFIG="$default_rules" \
+            go test -race -count=1 -timeout 3m ./internal/cicheck -run '^TestSecretGateLive$'
 
   fuzz-smoke:
     name: Fuzz smoke (10s per target)
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
       - name: Set up Go
@@ -488,7 +606,7 @@ jobs:
           shellcheck -S error \
             install.sh deploy.sh update.sh uninstall.sh genuser.sh \
             scripts/install.sh scripts/distro-smoke.sh scripts/test-makefile.sh scripts/test-install.sh \
-            scripts/ci-local.sh \
+            scripts/ci-local.sh scripts/test-hifi.sh \
             docker/ssh-backend/files/entrypoint.sh \
             docker/ssh-backend/files/rec-shell.sh
           echo "shellcheck (error level) clean"
@@ -579,7 +697,7 @@ jobs:
         with:
           go-version-file: go.mod
           cache: true
-      - name: Build both binaries for the target platform
+      - name: Build the CLI and service binaries for the target platform
         # QPot installs across many distros and architectures (the installer
         # supports amd64/arm64/arm). A platform-specific break - a build tag, a
         # syscall, an import that is not portable - would otherwise only surface
@@ -594,7 +712,9 @@ jobs:
           go build -o /dev/null ./cmd/qpot
           go build -o /dev/null ./cmd/qpot-sshproxy
           go build -o /dev/null ./cmd/qpot-refrigeration
-          echo "built qpot + qpot-sshproxy + qpot-refrigeration for ${GOOS}/${GOARCH}"
+          go build -o /dev/null ./cmd/qpot-sshbackend
+          go build -o /dev/null ./cmd/qpot-netguard
+          echo "built CLI and service binaries for ${GOOS}/${GOARCH}"
 
   distro-runtime:
     name: Run binary on a Linux distro matrix
@@ -699,3 +819,115 @@ jobs:
         # the Linux jobs never compile them.
         shell: pwsh
         run: go test -count=1 ./internal/hostsetup/
+      - name: Windows SSH lifecycle lock
+        shell: pwsh
+        run: |
+          $test = 'TestSSHCellLifecycleLockCancellationAndRelease'
+          $pattern = '^' + $test + '$'
+          $listed = @(& go test ./internal/instance -list $pattern)
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          if ($listed -notcontains $test) { throw "Required Windows lock test is missing: $test" }
+          go test -count=1 -timeout 2m ./internal/instance -run $pattern
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Windows SSH settings and resource limits
+        shell: pwsh
+        run: |
+          $tests = @(
+            'TestSSHResourceCapsRejectInvalidOverridesAtomically',
+            'TestSSHResourceCapsResolveLegacyDefaultsAndZeroInheritance',
+            'TestSSHEnvironmentConfigRoundTrip',
+            'TestSSHImageSourceConfigRoundTrip',
+            'TestSSHEnvironmentInvalidConfigNeverReplacesSavedFile',
+            'TestSaveWaitsForABriefHolder',
+            'TestReadWaitsForABriefHolder',
+            'TestReadFileLimitAndMissing'
+          )
+          $pattern = '^(' + ($tests -join '|') + ')$'
+          $listed = @(& go test ./internal/config -list $pattern)
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          foreach ($test in $tests) {
+            if ($listed -notcontains $test) { throw "Required Windows settings test is missing: $test" }
+          }
+          go test -count=1 -timeout 3m ./internal/config -run $pattern
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Windows SSH storage metadata and migration
+        shell: pwsh
+        run: |
+          $tests = @(
+            'TestSSHStorePlanningIsPureAndReservationIsPinned',
+            'TestSSHStoreMigrationPreservesKeysRecordsContextsAndInodes',
+            'TestSSHStoreInterruptedMigrationResumesAndConflictFailsClosed',
+            'TestSSHStoreRejectsSymlinksMalformedAndForeignOwnership',
+            'TestSSHStoreEmptyIDReservationRerendersAndRemovalChecksOwnership',
+            'TestSSHStoreMissingPriorLayoutCannotMoveExistingBindSources',
+            'TestSSHStoreCollectorMountsExposeOnlyReadOnlyRecordsAndNeverSeedNativeEvidence',
+            'TestSSHRuntimeMarkerStateOrderAndPrivateNamespace',
+            'TestSSHRuntimeImageCompatibility',
+            'TestSSHLayoutImageCompatibility',
+            'TestSSHPublishedBuildRevision',
+            'TestSSHBrokerHostReadableOnlyForVerifiedReadyPrivateStore',
+            'TestRecyclerMetadataReadFailureReportsOnceAndRecoversWithoutLostAuthority',
+            'TestReadNewLinesDetailedPreservesCursorOnErrors',
+            'TestBrokerMetadataRotationUsesOpenedIdentityAndRetainsItOnError'
+          )
+          $pattern = '^(' + ($tests -join '|') + ')$'
+          $listed = @(& go test ./internal/instance -list $pattern)
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          foreach ($test in $tests) {
+            if ($listed -notcontains $test) { throw "Required Windows migration test is missing: $test" }
+          }
+          go test -count=1 -timeout 3m ./internal/instance -run $pattern
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Windows collector checkpoint migration
+        shell: pwsh
+        run: |
+          $tests = @(
+            'TestMigrateLegacyPreservesCursorsAndInodes',
+            'TestMigrateLegacyNoStateDoesNotCreateDirectories',
+            'TestMigrateLegacyRefusesConflictingStates',
+            'TestMigrateLegacyRefusesFilesAndSymlinks',
+            'TestMigrateLegacyRefusesNonordinaryContents',
+            'TestMigrateLegacyBoundsDirectoryTraversal',
+            'TestMigrateLegacyRenameFailureRetainsOriginal',
+            'TestMigrateLegacySyncFailureDoesNotClaimRollback'
+          )
+          $pattern = '^(' + ($tests -join '|') + ')$'
+          $listed = @(& go test ./internal/vectorstate -list $pattern)
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          foreach ($test in $tests) {
+            if ($listed -notcontains $test) { throw "Required Windows migration test is missing: $test" }
+          }
+          go test -count=1 -timeout 3m ./internal/vectorstate -run $pattern
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Windows broker log compatibility
+        shell: pwsh
+        run: |
+          $tests = @(
+            'TestHostReadableSessionLogBooleanIsStrictBeforeEffects',
+            'TestSessionLogDefaultPreservesExistingModeBytesAndInode',
+            'TestSessionLogDefaultKeepsTrustedSymlinkPath',
+            'TestHostReadableSessionLogUnsupportedPlatformHasNoEffects'
+          )
+          $pattern = '^(' + ($tests -join '|') + ')$'
+          $listed = @(& go test ./cmd/qpot-sshproxy -list $pattern)
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          foreach ($test in $tests) {
+            if ($listed -notcontains $test) { throw "Required Windows broker log test is missing: $test" }
+          }
+          go test -count=1 -timeout 3m ./cmd/qpot-sshproxy -run $pattern
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Windows archive selection and handle release
+        shell: pwsh
+        run: |
+          $tests = @(
+            'TestSSHArchiveSelectionReusesBudgetAndClosesCellHandles',
+            'TestSSHArchiveSelectionCancellationClosesCellHandles'
+          )
+          $pattern = '^(' + ($tests -join '|') + ')$'
+          $listed = @(& go test ./internal/cleanup -list $pattern)
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          foreach ($test in $tests) {
+            if ($listed -notcontains $test) { throw "Required Windows archive selection test is missing: $test" }
+          }
+          go test -count=1 -timeout 3m ./internal/cleanup -run $pattern
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }

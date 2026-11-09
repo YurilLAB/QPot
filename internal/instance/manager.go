@@ -153,6 +153,18 @@ func (m *Manager) db() (database.Database, error) {
 
 // Initialize sets up a new instance
 func (m *Manager) Initialize(ctx context.Context) error {
+	if err := os.MkdirAll(m.config.DataPath, 0o750); err != nil {
+		return err
+	}
+	cellLock, err := lockSSHCells(ctx, m.config.DataPath)
+	if err != nil {
+		return fmt.Errorf("lock SSH cell layout: %w", err)
+	}
+	defer cellLock.Close()
+	return m.initializeLocked(ctx)
+}
+
+func (m *Manager) initializeLocked(ctx context.Context) error {
 	slog.Info("Initializing QPot instance", "name", m.config.InstanceName)
 
 	// Create data directories
@@ -169,7 +181,6 @@ func (m *Manager) Initialize(ctx context.Context) error {
 			return fmt.Errorf("failed to create directory %s: %w", dir, err)
 		}
 	}
-
 	// Create honeypot-specific directories
 	for name, hp := range m.config.Honeypots {
 		if hp.Enabled {
@@ -193,9 +204,20 @@ func (m *Manager) Initialize(ctx context.Context) error {
 		return fmt.Errorf("failed to save config: %w", err)
 	}
 
-	// Generate docker-compose.yml
-	if err := m.generateDockerCompose(); err != nil {
+	// Validate the candidate before touching any live cell. Auxiliary files
+	// must also be ready before obsolete services are retired or the new
+	// Compose layout becomes visible to the recycler.
+	if _, err := m.renderDockerCompose(); err != nil {
 		return fmt.Errorf("failed to generate docker-compose: %w", err)
+	}
+	if err := prepareSSHRuntimeLayout(ctx, m.config); err != nil {
+		return err
+	}
+	// Empty-ID legacy library callers reserve randomness only after validation;
+	// all callers now render the same pinned location used by the live guest.
+	compose, err := m.renderDockerCompose()
+	if err != nil {
+		return fmt.Errorf("failed to generate pinned docker-compose: %w", err)
 	}
 
 	// Generate the auxiliary config files the compose file mounts into the
@@ -205,6 +227,9 @@ func (m *Manager) Initialize(ctx context.Context) error {
 	if err := m.generateServiceConfigs(); err != nil {
 		return fmt.Errorf("failed to generate service configs: %w", err)
 	}
+	if err := m.publishDockerCompose(ctx, compose); err != nil {
+		return fmt.Errorf("failed to publish docker-compose: %w", err)
+	}
 
 	slog.Info("Instance initialized successfully", "name", m.config.InstanceName)
 	return nil
@@ -213,30 +238,36 @@ func (m *Manager) Initialize(ctx context.Context) error {
 // Start starts the QPot instance
 func (m *Manager) Start(ctx context.Context, detach bool) error {
 	slog.Info("Starting QPot instance", "name", m.config.InstanceName)
-
-	// Refuse only when everything is up already: when only some containers
-	// run (docker restarted those whose policy says so after an unclean
-	// stop), `compose up -d` below starts the others and leaves those alone.
+	if sshProxyEnabled(m.config) {
+		if err := config.ValidateSSHEnvironment(m.config); err != nil {
+			return err
+		}
+		if err := validateSSHRuntimeImages(m.config, HiFiImageRevision); err != nil {
+			return err
+		}
+	}
 	if m.AllRunning(ctx) {
 		return fmt.Errorf("instance is already running")
 	}
-
-	// Regenerate the compose file and service configs from the current
-	// configuration before starting. The compose file is otherwise only written
-	// at instance-create time, so honeypots enabled/disabled afterwards (via
-	// `qpot honeypot enable/disable`) would never be reflected when `qpot up`
-	// runs. Re-running Initialize is idempotent (mkdir -p, save config, render
-	// templates) and keeps the running stack in sync with config.yaml.
-	if err := m.Initialize(ctx); err != nil {
+	if err := os.MkdirAll(m.config.DataPath, 0o750); err != nil {
+		return err
+	}
+	cellLock, err := lockSSHCells(ctx, m.config.DataPath)
+	if err != nil {
+		return fmt.Errorf("lock instance deployment: %w", err)
+	}
+	defer cellLock.Close()
+	if sshProxyEnabled(m.config) {
+		if err := validateSSHRuntimeResources(ctx); err != nil {
+			return err
+		}
+	}
+	if err := m.initializeLocked(ctx); err != nil {
 		return fmt.Errorf("failed to prepare instance for start: %w", err)
 	}
-
-	// Eagerly initialize the database connection when starting.
 	if _, err := m.db(); err != nil {
 		slog.Warn("Database connection could not be established at start", "error", err)
 	}
-
-	// Pull images first
 	if err := m.pullImages(ctx); err != nil {
 		slog.Warn("Failed to pull some images", "error", err)
 	}
@@ -245,58 +276,54 @@ func (m *Manager) Start(ctx context.Context, detach bool) error {
 			slog.Warn("Could not hand data dirs to the honeypot's user; it may fail to write its logs", "honeypot", name, "error", err)
 		}
 	}
-
-	// Start services
-	composeFile := m.config.GetDockerComposePath()
-	cmd := exec.CommandContext(ctx, "docker", "compose", "-f", composeFile, "up")
-	if detach {
-		cmd.Args = append(cmd.Args, "-d")
+	if err := m.prepareSSHDeployment(ctx); err != nil {
+		return fmt.Errorf("prepare fresh SSH cell recordings: %w", err)
 	}
+	// Creation must finish under the same lock as layout publication. Starting
+	// a foreground compose process and immediately unlocking would still let a
+	// recycler race its asynchronous container creation.
+	composeFile := m.config.GetDockerComposePath()
+	cmd := exec.CommandContext(ctx, "docker", "compose", "-f", composeFile, "up", "-d")
 	cmd.Dir = m.config.DataPath
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
-
+	cmd.Stdout, cmd.Stderr = os.Stdout, os.Stderr
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("docker compose up failed (see the output above): %w", err)
+	}
+	_ = cellLock.Close()
+	// Health settling can require the recycler to finish a broker startup
+	// request, so it must not hold the deployment lock.
+	m.verifyStartup(ctx, 90*time.Second)
 	if detach {
-		// `compose up -d` returns once the containers are created and started.
-		// Its exit status matters: a port already allocated, a missing image or
-		// an invalid compose file used to be ignored and reported as success.
-		if err := cmd.Run(); err != nil {
-			return fmt.Errorf("docker compose up failed (see the output above): %w", err)
-		}
-		// Watch the honeypots settle and log which started / which failed (and
-		// why). Non-fatal: a single honeypot failing must not abort the instance.
-		m.verifyStartup(ctx, 90*time.Second)
 		return nil
 	}
-
-	if err := cmd.Start(); err != nil {
-		return fmt.Errorf("failed to start docker compose: %w", err)
+	// The public CLI always uses detached creation then runs the control plane.
+	// An internal foreground caller gets logs without a second mutating up.
+	follow := exec.CommandContext(ctx, "docker", "compose", "-f", composeFile, "logs", "--follow", "--no-color")
+	follow.Dir = m.config.DataPath
+	follow.Stdout, follow.Stderr = os.Stdout, os.Stderr
+	err = follow.Run()
+	if ctx.Err() != nil {
+		stopCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		return m.Stop(stopCtx)
 	}
-
-	// When not detached, wait for the process in a goroutine so we can also
-	// poll for health. The process ends when docker compose exits.
-	waitDone := make(chan error, 1)
-	go func() { waitDone <- cmd.Wait() }()
-
-	// Wait for the honeypots to settle and report per-honeypot startup status.
-	// Failures are logged (with the reason) rather than aborting: the collector,
-	// database, web UI and the honeypots that did come up keep running.
-	m.verifyStartup(ctx, 2*time.Minute)
-
-	// Block until the compose process exits or context is cancelled.
-	select {
-	case <-ctx.Done():
-	case <-waitDone:
-	}
-
-	slog.Info("QPot instance started successfully")
-	return nil
+	return err
 }
 
 // Stop stops the QPot instance
 func (m *Manager) Stop(ctx context.Context) error {
 	slog.Info("Stopping QPot instance", "name", m.config.InstanceName)
+	cellLock, err := lockSSHCells(ctx, m.config.DataPath)
+	if err != nil {
+		return fmt.Errorf("lock instance stop: %w", err)
+	}
+	defer cellLock.Close()
+	return m.stopLocked(ctx)
+}
 
+// stopLocked holds the same lifecycle exclusion as startup and runtime-store
+// deletion. A false/unknown status probe never authorizes deleting a live bind.
+func (m *Manager) stopLocked(ctx context.Context) error {
 	composeFile := m.config.GetDockerComposePath()
 	cmd := exec.CommandContext(ctx, "docker", "compose", "-f", composeFile, "down", "--remove-orphans")
 	cmd.Dir = m.config.DataPath
@@ -470,17 +497,46 @@ func (m *Manager) startHoneypot(ctx context.Context, name string, recreate bool)
 	if !m.isConfiguredHoneypot(name) {
 		return fmt.Errorf("unknown honeypot: %q", name)
 	}
+	if name == sshProxyHoneypot {
+		if err := config.ValidateSSHEnvironment(m.config); err != nil {
+			return err
+		}
+		if err := validateSSHRuntimeImages(m.config, HiFiImageRevision); err != nil {
+			return err
+		}
+	}
 	slog.Info("Starting honeypot", "name", name, "instance", m.config.InstanceName)
+	if err := os.MkdirAll(m.config.DataPath, 0o750); err != nil {
+		return err
+	}
+	cellLock, err := lockSSHCells(ctx, m.config.DataPath)
+	if err != nil {
+		return fmt.Errorf("lock honeypot deployment: %w", err)
+	}
+	defer cellLock.Close()
+	if name == sshProxyHoneypot {
+		if err := config.ValidateSSHEnvironment(m.config); err != nil {
+			return err
+		}
+		if err := validateSSHRuntimeResources(ctx); err != nil {
+			return err
+		}
+	}
 
 	// Regenerate the compose file and collector config first: a honeypot
 	// enabled on a running instance is not in the existing compose file
 	// (`compose up -d <name>` failed with "no such service") and the
 	// collector would not tail its logs.
-	if err := m.Initialize(ctx); err != nil {
+	if err := m.initializeLocked(ctx); err != nil {
 		return fmt.Errorf("failed to regenerate the instance config: %w", err)
 	}
 	if err := m.prepareOwnership(ctx, name); err != nil {
 		slog.Warn("Could not hand data dirs to the honeypot's user", "honeypot", name, "error", err)
+	}
+	if name == sshProxyHoneypot {
+		if err := m.prepareSSHDeployment(ctx); err != nil {
+			return fmt.Errorf("prepare fresh SSH cell recordings: %w", err)
+		}
 	}
 
 	composeFile := m.config.GetDockerComposePath()
@@ -501,6 +557,7 @@ func (m *Manager) startHoneypot(ctx context.Context, name string, recreate bool)
 	if err != nil {
 		return fmt.Errorf("failed to start honeypot: %w\nOutput: %s", err, output)
 	}
+	_ = cellLock.Close()
 
 	// Pick up the regenerated collector config (it now reads this honeypot's
 	// logs); Vector reads its config only at start.
@@ -521,7 +578,7 @@ func (m *Manager) companionServices(name string) []string {
 	// before stopping, and the companions must be stopped with it.
 	switch name {
 	case sshProxyHoneypot:
-		return sshBackendServiceNames(m.config)
+		return allSSHCellServiceNames(m.config)
 	case "tanner":
 		return tannerCompanionServices()
 	}
@@ -534,10 +591,29 @@ func (m *Manager) StopHoneypot(ctx context.Context, name string) error {
 		return fmt.Errorf("unknown honeypot: %q", name)
 	}
 	slog.Info("Stopping honeypot", "name", name, "instance", m.config.InstanceName)
+	cellLock, err := lockSSHCells(ctx, m.config.DataPath)
+	if err != nil {
+		return fmt.Errorf("lock honeypot stop: %w", err)
+	}
+	defer cellLock.Close()
 
 	composeFile := m.config.GetDockerComposePath()
 	// Stop the HiFi backends alongside the broker (see companionServices).
-	args := append([]string{"compose", "-f", composeFile, "stop", name}, m.companionServices(name)...)
+	companions := m.companionServices(name)
+	if name == sshProxyHoneypot {
+		layout, err := readSSHLayout(composeFile, m.config.InstanceName)
+		if err != nil {
+			return fmt.Errorf("read deployed SSH cells before stopping: %w", err)
+		}
+		if len(layout.Groups) > 0 {
+			companions = nil
+			for _, members := range layout.Groups {
+				companions = append(companions, members...)
+			}
+			sort.Strings(companions)
+		}
+	}
+	args := append([]string{"compose", "-f", composeFile, "stop", name}, companions...)
 	cmd := exec.CommandContext(ctx, "docker", args...)
 	cmd.Dir = m.config.DataPath
 
@@ -656,23 +732,60 @@ func (m *Manager) pullImages(ctx context.Context) error {
 
 // generateDockerCompose generates the docker-compose.yml file
 func (m *Manager) generateDockerCompose() error {
+	compose, err := m.renderDockerCompose()
+	if err != nil {
+		return err
+	}
+	return m.publishDockerCompose(context.Background(), compose)
+}
+
+func (m *Manager) renderDockerCompose() (string, error) {
 	ports, subnets := siblingReservations(m.config.DataPath)
 	generator := &ComposeGenerator{
 		Config:          m.config,
 		Sandbox:         m.sandbox,
 		ReservedPorts:   ports,
 		ReservedSubnets: subnets,
-		ReservedNets:    hostDockerSubnets(context.Background(), composeProjectName(m.config)),
 		KeepPorts:       ownHostPorts(m.config.GetDockerComposePath()),
 	}
+	generator.ReservedNets, generator.KeepSubnets = hostDockerSubnets(context.Background(), composeProjectName(m.config), generator.currentNetworkNames())
 
 	compose, err := generator.Generate()
 	if err != nil {
-		return fmt.Errorf("failed to generate compose: %w", err)
+		return "", fmt.Errorf("failed to generate compose: %w", err)
 	}
+	return compose, nil
+}
 
+func (m *Manager) publishDockerCompose(ctx context.Context, compose string) error {
 	composePath := m.config.GetDockerComposePath()
-	if err := writeSecretFile(composePath, []byte(compose)); err != nil {
+	oldCompose, err := os.ReadFile(composePath)
+	if err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("read previous docker-compose: %w", err)
+	}
+	// Stage and sync first. A generation/disk error must leave the previous
+	// layout and services intact, rather than removing the working graph.
+	f, err := os.CreateTemp(m.config.DataPath, ".compose-candidate-*.yaml")
+	if err != nil {
+		return err
+	}
+	staged := f.Name()
+	defer os.Remove(staged)
+	if _, err := f.WriteString(compose); err != nil {
+		_ = f.Close()
+		return err
+	}
+	if err := f.Sync(); err != nil {
+		_ = f.Close()
+		return err
+	}
+	if err := f.Close(); err != nil {
+		return err
+	}
+	if err := retireSSHCells(ctx, m.config, oldCompose); err != nil {
+		return err
+	}
+	if err := os.Rename(staged, composePath); err != nil {
 		return fmt.Errorf("failed to write docker-compose.yml: %w", err)
 	}
 
@@ -694,13 +807,26 @@ func (m *Manager) generateServiceConfigs() error {
 	// log it has none for from its start. When it has kept none yet (a new
 	// instance, or one an older QPot ran, which kept none), what the logs
 	// hold now counts as delivered, so it is not sent again.
+	if err := vectorstate.MigrateLegacy(m.config.DataPath); err != nil {
+		return err
+	}
 	_, statErr := os.Lstat(filepath.Join(m.config.DataPath, vectorstate.Dir))
 	firstState := errors.Is(statErr, fs.ErrNotExist)
 
 	// The collector's folders must exist before it starts: Docker would create
 	// a missing one owned by root.
-	for _, cm := range collectorMounts(m.config) {
+	mounts, err := collectorMounts(m.config)
+	if err != nil {
+		return err
+	}
+	for _, cm := range mounts {
 		if !cm.Dir {
+			continue
+		}
+		if cm.Container == "/var/lib/vector" {
+			if err := ensureContainerDir(cm.Host, 0o750); err != nil {
+				return fmt.Errorf("failed to prepare private collector checkpoints: %w", err)
+			}
 			continue
 		}
 		if err := os.MkdirAll(filepath.FromSlash(cm.Host), 0750); err != nil {
@@ -708,7 +834,17 @@ func (m *Manager) generateServiceConfigs() error {
 		}
 	}
 	if firstState {
-		for _, src := range CollectorSources(m.config) {
+		sources, err := CollectorSources(m.config)
+		if err != nil {
+			return err
+		}
+		for _, src := range sources {
+			// Native recordings must replay from the beginning unless an
+			// authoritative retained checkpoint already acknowledges them.
+			// Adopting a distinct source never proves old evidence delivered.
+			if src.Name == SSHBackendLogSource {
+				continue
+			}
 			n, err := vectorstate.Seed(m.config.DataPath, src, time.Now())
 			if err != nil {
 				return fmt.Errorf("failed to seed the collector's state: %w", err)
@@ -821,33 +957,53 @@ func (m *Manager) generateServiceConfigs() error {
 		// HiFi ssh-proxy: pre-create each real-OpenSSH backend's persisted
 		// host-key dir and log dir, so the bind mounts resolve to real
 		// directories owned by us (rather than docker creating them as root). The
-		// backend sshd writes host keys to /etc/ssh and recordings to
-		// /var/log/ssh-backend; both must be writable by the in-container user.
+		// backend reads protected host keys through its read-only leaf mount;
+		// only its current recording directory is writable by guest accounts.
 		if name == sshProxyHoneypot {
-			mkBackendDir := func(rel string) error {
-				dir := filepath.Join(m.config.DataPath, "honeypots", sshBackendDataDir, rel)
-				if err := os.MkdirAll(dir, 0750); err != nil {
-					return fmt.Errorf("failed to create ssh-backend dir %q: %w", rel, err)
+			if err := prepareSSHOrganization(m.config); err != nil {
+				return err
+			}
+			contextRoot, err := sshStoreContextRoot(m.config)
+			if err != nil {
+				return err
+			}
+			if err := os.MkdirAll(contextRoot, 0o755); err != nil {
+				return fmt.Errorf("prepare SSH audit context directory: %w", err)
+			}
+			for _, app := range sshBackendServiceNames(m.config) {
+				contextDir, err := sshStoreContext(m.config, app)
+				if err != nil {
+					return err
 				}
-				// 0777 so the in-container sshd uid (not the host user that creates
-				// these) can write host keys / recordings.
-				if err := os.Chmod(dir, 0777); err != nil {
-					return fmt.Errorf("failed to chmod ssh-backend dir %q: %w", rel, err)
+				if err := ensureContainerDir(contextDir, 0o777); err != nil {
+					return fmt.Errorf("prepare SSH audit context slot: %w", err)
 				}
-				return nil
+			}
+			brokerLogs, err := sshBrokerLogDir(m.config)
+			if err != nil {
+				return err
+			}
+			if err := os.MkdirAll(brokerLogs, 0o750); err != nil {
+				return err
+			}
+			if err := ensureContainerDir(brokerLogs, 0o777); err != nil {
+				return err
 			}
 			// One SHARED host-key dir for the whole pool (so all backends present
 			// the same fingerprint), plus a per-backend log dir. The keys are
 			// generated here and the dir is mounted read-only into the backends.
-			keyDir := filepath.Join(m.config.DataPath, "honeypots", sshBackendDataDir, "shared-hostkeys")
+			keyDir, err := sshStoreSharedKeys(m.config)
+			if err != nil {
+				return err
+			}
 			if err := os.MkdirAll(keyDir, 0o755); err != nil {
 				return fmt.Errorf("failed to create ssh-backend host-key dir: %w", err)
 			}
 			if err := ensureSSHHostKeys(keyDir); err != nil {
 				return fmt.Errorf("failed to create ssh-backend host keys: %w", err)
 			}
-			for _, svc := range sshBackendServiceNames(m.config) {
-				if err := mkBackendDir(filepath.Join(svc, "logs")); err != nil {
+			for _, svc := range allSSHCellServiceNames(m.config) {
+				if err := prepareSSHLogDir(m.config.DataPath, svc); err != nil {
 					return err
 				}
 			}
@@ -923,8 +1079,17 @@ func Remove(ctx context.Context, name string) error {
 	// `remove <typo>` would create-then-delete an empty instance and report
 	// success, masking the typo.
 	dir := config.Default(name).DataPath
-	if _, err := os.Stat(dir); os.IsNotExist(err) {
+	info, err := os.Lstat(dir)
+	if os.IsNotExist(err) {
 		return fmt.Errorf("instance %q does not exist", name)
+	}
+	if err != nil {
+		return fmt.Errorf("inspect instance directory: %w", err)
+	}
+	// A restored/hand-edited default-path symlink may load another instance's
+	// location metadata. Refuse before stopping or deleting any owned store.
+	if !info.IsDir() {
+		return sshStorageError(errors.New("the default instance directory is not an ordinary directory; inspect the link without following it before removing this instance"))
 	}
 
 	cfg, err := config.Load(name)
@@ -937,9 +1102,27 @@ func Remove(ctx context.Context, name string) error {
 		return fmt.Errorf("failed to create manager: %w", err)
 	}
 
-	// Stop if running
-	if mgr.IsRunning(ctx) {
-		if err := mgr.Stop(ctx); err != nil {
+	cellLock, err := lockSSHCells(ctx, cfg.DataPath)
+	if err != nil {
+		return err
+	}
+	defer cellLock.Close()
+	store, err := sshStoreAt(cfg.DataPath)
+	if err != nil {
+		return err
+	}
+	ownedData := samePath(cfg.DataPath, dir)
+	// A persisted external store must have an authoritative successful stop,
+	// even when Docker's status query would report no running containers.
+	if ownedData && !store.legacy {
+		if err := mgr.stopLocked(ctx); err != nil {
+			return sshStorageError(err)
+		}
+		if err := removeSSHStore(ctx, cfg.DataPath); err != nil {
+			return err
+		}
+	} else if mgr.IsRunning(ctx) {
+		if err := mgr.stopLocked(ctx); err != nil {
 			return fmt.Errorf("failed to stop instance: %w", err)
 		}
 	}

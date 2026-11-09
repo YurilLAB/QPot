@@ -18,3 +18,6 @@ func chmodDirNoFollow(path string, mode fs.FileMode) error {
 	defer f.Close()
 	return f.Chmod(mode)
 }
+
+// Avoid blocking on a replaced FIFO or following a substituted log symlink.
+const brokerLogReadFlags = syscall.O_NOFOLLOW | syscall.O_NONBLOCK

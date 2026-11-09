@@ -58,7 +58,7 @@ func TestCollectorSourcesMatchTheConfig(t *testing.T) {
 	if err := yaml.Unmarshal([]byte(vc), &doc); err != nil {
 		t.Fatal(err)
 	}
-	srcs := CollectorSources(cfg)
+	srcs := requireCollectorSources(t, cfg)
 	files := 0
 	for _, s := range doc.Sources {
 		if s.Type == "file" {

@@ -269,6 +269,30 @@ func TestSyncPlantedRefusesOthers(t *testing.T) {
 	}
 }
 
+func TestSyncPlantedValidationErrorsDoNotExposeValues(t *testing.T) {
+	s, err := NewStore(t.TempDir(), 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	const marker = "private-validation-marker"
+	for _, planned := range [][]*Canary{
+		{{ID: "cnry_invalid", Kind: KindCredential, Values: []string{marker}, Token: marker, SecretAccessKey: marker, Name: marker, Memo: marker}},
+		{{ID: "invalid-" + marker, Kind: KindCredential, Planted: true}},
+		{{ID: "cnry_" + marker, Kind: KindWeb, Planted: true}, {ID: "cnry_" + marker, Kind: KindWeb, Planted: true}},
+	} {
+		err := s.SyncPlanted(planned)
+		if err == nil {
+			t.Fatal("invalid planted plan was accepted")
+		}
+		if strings.Contains(err.Error(), marker) {
+			t.Fatal("validation error exposed canary data")
+		}
+	}
+	if len(s.List()) != 0 {
+		t.Fatal("validation failure mutated registry")
+	}
+}
+
 // TestPlantedNotDeletable: QPot plants them again on the next start, so the
 // store refuses to delete one; disabling works.
 func TestPlantedNotDeletable(t *testing.T) {

@@ -20,3 +20,6 @@ func chmodDirNoFollow(path string, mode fs.FileMode) error {
 	}
 	return os.Chmod(path, mode)
 }
+
+// Portable hosts still verify ordinary type and identity before reading.
+const brokerLogReadFlags = 0

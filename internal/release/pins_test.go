@@ -104,8 +104,8 @@ func TestPinDriftCatchesBadPins(t *testing.T) {
 }
 
 // TestReleaseWorkflowPinsActions: the release job can write releases and
-// sign provenance, so every action it runs is pinned to a commit (a tag
-// can be moved to other code).
+// sign provenance, so remote actions are pinned to a commit (a tag can be
+// moved). Explicit local validation workflows use the caller's exact commit.
 func TestReleaseWorkflowPinsActions(t *testing.T) {
 	wf := readRepoFile(t, ".github/workflows/release.yml")
 	uses := usesRe.FindAllStringSubmatch(wf, -1)
@@ -113,8 +113,9 @@ func TestReleaseWorkflowPinsActions(t *testing.T) {
 		t.Fatal("release.yml uses no actions")
 	}
 	for _, m := range uses {
-		if !pinnedRe.MatchString(m[1]) {
-			t.Errorf("release.yml: %s is not pinned to a full commit hash", m[1])
+		sameCommit := m[1] == "./.github/workflows/ci.yml" || m[1] == "./.github/workflows/codeql.yml"
+		if !sameCommit && !pinnedRe.MatchString(m[1]) {
+			t.Errorf("release.yml: %s is not a same-commit validation workflow or full commit-pinned action", m[1])
 		}
 	}
 	for _, mutant := range []string{"actions/checkout@v4", "actions/checkout@" + strings.Repeat("a", 39), "actions/checkout@main"} {

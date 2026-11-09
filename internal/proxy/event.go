@@ -42,16 +42,21 @@ import (
 // byte counters) — never from attacker-supplied stream content — so there is no
 // log-injection surface, and the bytes themselves are never logged.
 type Event struct {
-	Timestamp  string `json:"timestamp"`             // RFC3339Nano, UTC
-	EventType  string `json:"event_type"`            // see Event* constants
-	Honeypot   string `json:"honeypot"`              // logical honeypot name (e.g. "ssh-proxy")
-	SrcIP      string `json:"src_ip"`                // attacker IP (from RemoteAddr)
-	SrcPort    int    `json:"src_port"`              // attacker source port
-	Backend    string `json:"backend,omitempty"`     // backend id the session was spliced to
-	BytesIn    int64  `json:"bytes_in,omitempty"`    // attacker -> backend bytes
-	BytesOut   int64  `json:"bytes_out,omitempty"`   // backend -> attacker bytes
-	DurationMs int64  `json:"duration_ms,omitempty"` // wall-clock session length
-	Reason     string `json:"reason,omitempty"`      // why a connection was rejected/closed
+	Timestamp string `json:"timestamp"`            // RFC3339Nano, UTC
+	EventType string `json:"event_type"`           // see Event* constants
+	Honeypot  string `json:"honeypot"`             // logical honeypot name (e.g. "ssh-proxy")
+	SrcIP     string `json:"src_ip"`               // attacker IP (from RemoteAddr)
+	SrcPort   int    `json:"src_port"`             // attacker source port
+	Backend   string `json:"backend,omitempty"`    // backend id the session was spliced to
+	SessionID string `json:"session_id,omitempty"` // connection correlation shared with the own-cell recorder
+	// Generation is the trusted counter snapshot from this lease or startup
+	// quarantine request. A pointer keeps generation zero distinct from legacy
+	// events that carry no generation at all.
+	Generation *uint64 `json:"generation,omitempty"`
+	BytesIn    int64   `json:"bytes_in,omitempty"`    // attacker -> backend bytes
+	BytesOut   int64   `json:"bytes_out,omitempty"`   // backend -> attacker bytes
+	DurationMs int64   `json:"duration_ms,omitempty"` // wall-clock session length
+	Reason     string  `json:"reason,omitempty"`      // why a connection was rejected/closed
 	// Suppressed counts the rejections not logged (thinned) since the previous
 	// rejection line, so a flood that exhausts the log budget is still recorded.
 	Suppressed int64 `json:"suppressed,omitempty"`
@@ -80,6 +85,8 @@ const (
 	ReasonPerIPCap             = "max_concurrent_per_ip_reached"
 	ReasonPoolExhausted        = "no_backend_available"
 	ReasonBackendDialError     = "backend_dial_failed"
+	ReasonBackendContextError  = "backend_context_failed"
+	ReasonStartupReset         = "startup_reset"
 	ReasonIdleTimeout          = "idle_timeout"
 	ReasonSessionTimeout       = "max_session_reached"
 	ReasonClosed               = "closed"

@@ -15,7 +15,7 @@ func argsDocker(t *testing.T) string {
 	t.Helper()
 	bin := t.TempDir()
 	log := filepath.Join(bin, "calls.log")
-	script := "#!/bin/sh\necho \"$*\" >> " + log + "\nexit 0\n"
+	script := "#!/bin/sh\necho \"$*\" >> " + log + "\nif [ \"$1\" = info ]; then printf '%s\\n' '" + sshSupportedResourceInfo + "'; fi\nexit 0\n"
 	if err := os.WriteFile(filepath.Join(bin, "docker"), []byte(script), 0o755); err != nil { // #nosec G306 -- test stand-in must be executable
 		t.Fatal(err)
 	}

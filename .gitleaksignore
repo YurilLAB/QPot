@@ -1,5 +1,6 @@
-# Reviewed false positives (gitleaks fingerprints). Each entry is a single
-# finding in one historical commit; nothing here is a real secret.
+# Reviewed scanner dispositions (exact commit/path/rule/line fingerprints).
+# The initial entries below are false positives. The final section explicitly
+# acknowledges real, already-public historical keys; it is not a revocation.
 #
 # generic-api-key matched a collector comment about honeypot login fields;
 # the comment has since been reworded.
@@ -28,3 +29,12 @@ a61bcc50343c2198a8ba8d35c121218877c6e94a:internal/instance/compose.go:generic-ap
 # canary AWS key IDs and secrets; these constants are not credentials.
 121ff173fa9fa5350c6186fd492f3368499cf36c:internal/canary/canary.go:generic-api-key:135
 121ff173fa9fa5350c6186fd492f3368499cf36c:internal/canary/canary.go:generic-api-key:136
+
+# Acknowledged historical exposure, NOT false positives: real private keys in
+# upstream T-Pot's public2016 nginx configuration, removed before current HEAD.
+# They match the bundled self-signed certificates (expired2026-07-27). Public
+# history cannot establish whether anyone reused these keys or rotated a copy.
+# Never deploy/reuse them. See doc/security.md for the disposition and gates.
+# Exact commit fingerprints do not exempt a new key/version or a new commit.
+12842527bbd1d56554a877af83e69fbaf5997fd5:installer/etc/nginx/ssl/nginx.key:private-key:1
+12842527bbd1d56554a877af83e69fbaf5997fd5:installer/etc/nginx/ssl/test/nginx.key:private-key:1

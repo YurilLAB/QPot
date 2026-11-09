@@ -43,7 +43,10 @@ type Spec struct {
 	Table string
 	// Ifaces are the host-side bridge interfaces of the honeypot networks.
 	Ifaces []string
-	Mode   Mode
+	// Cells are private HiFi bridges included in Ifaces. Only traffic within
+	// that same bridge may start a connection; host and off-cell access is denied.
+	Cells []string
+	Mode  Mode
 	// DNS are the resolvers honeypot containers may reach on port 53.
 	DNS []netip.Addr
 }
@@ -76,6 +79,13 @@ func (s Spec) Validate() error {
 			return fmt.Errorf("netguard: interface %q listed twice", i)
 		}
 		seen[i] = true
+	}
+	cells := map[string]bool{}
+	for _, i := range s.Cells {
+		if !seen[i] || cells[i] {
+			return fmt.Errorf("netguard: private cell %q must name a distinct guarded interface", i)
+		}
+		cells[i] = true
 	}
 	for _, a := range s.DNS {
 		if !a.IsValid() || a.Zone() != "" || a.Is4In6() {

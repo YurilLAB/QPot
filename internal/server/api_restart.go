@@ -74,6 +74,10 @@ func (s *Server) handleHoneypotRestart(w http.ResponseWriter, r *http.Request) {
 	}
 	if err := runner.RestartHoneypot(ctx, req.Name); err != nil {
 		slog.Error("honeypot restart failed", "honeypot", req.Name, "error", err)
+		if response, ok := hiFiPreflightAPIError(err, false); ok {
+			writeJSON(w, http.StatusBadGateway, response)
+			return
+		}
 		s.sendAPIError(w, http.StatusBadGateway, "QP-INST-008",
 			fmt.Sprintf("%s did not restart. Its log (GET /api/logs?honeypot=%s) shows why.", req.Name, req.Name))
 		return

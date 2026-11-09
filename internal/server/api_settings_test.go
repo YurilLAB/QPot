@@ -17,6 +17,7 @@ import (
 
 	"github.com/qpot/qpot/internal/canary"
 	"github.com/qpot/qpot/internal/config"
+	"github.com/qpot/qpot/internal/hostsetup"
 	"github.com/qpot/qpot/internal/instance"
 	"gopkg.in/yaml.v3"
 )
@@ -235,6 +236,38 @@ func TestSettingsPutNeedsJSON(t *testing.T) {
 	}
 	if rec := a.do(http.MethodPost, "/api/honeypots/settings", `{"name":"cowrie","settings":{"bait":"off"}}`); rec.Code != http.StatusMethodNotAllowed {
 		t.Fatalf("POST: %d, want 405", rec.Code)
+	}
+}
+
+func TestSettingsPutHiFiKeepsInvalidInputAtomic(t *testing.T) {
+	a := newAPITestServer(t, "api-hifi-caps", func(c *config.Config) {
+		for name := range c.Honeypots {
+			c.DisableHoneypot(name)
+		}
+		c.EnableHoneypot("ssh-proxy")
+		hp, _ := c.GetHoneypotConfig("ssh-proxy")
+		hp.Resources = config.HoneypotResources{UseCustomLimits: true, MaxPids: 17}
+		hp.CustomConfig = map[string]string{"environment": "standalone", "image_source": "local"}
+		c.Honeypots["ssh-proxy"] = hp
+	})
+	a.runner.running = true
+	before := a.configFile(t)
+	for _, body := range []string{
+		`{"name":"ssh-proxy","settings":{"environment":"Organization"}}`,
+		`{"name":"ssh-proxy","settings":{"environment":"organization","max_pids":"-1"}}`,
+		`{"name":"ssh-proxy","settings":{"environment":"organization","image_source":"Local"}}`,
+	} {
+		rec := a.do(http.MethodPut, "/api/honeypots/settings", body)
+		if e := decodeAPIError(t, rec); rec.Code != http.StatusBadRequest || e.Code != "QP-INPUT-012" || e.Saved {
+			t.Fatalf("invalid HiFi setting lost its error contract: %d %s", rec.Code, rec.Body.String())
+		}
+		if !bytes.Equal(before, a.configFile(t)) || len(a.runner.cfgs) != 0 || len(a.runner.recreated) != 0 {
+			t.Fatal("invalid HiFi input changed saved state or reached the container runner")
+		}
+	}
+	rec := a.do(http.MethodPut, "/api/honeypots/settings", `{"name":"ssh-proxy","settings":{"environment":"organization"}}`)
+	if rec.Code != http.StatusOK || !slices.Equal(a.runner.recreated, []string{"ssh-proxy"}) {
+		t.Fatalf("valid mode with inherited CPU/memory failed: %d %s", rec.Code, rec.Body.String())
 	}
 }
 
@@ -913,5 +946,56 @@ func TestSettingsRefrigerationLegacyBackfillStaysOff(t *testing.T) {
 	}
 	if hp, ok := fileConfig(t, a).GetHoneypotConfig("refrigeration"); !ok || hp.Enabled || hp.CustomConfig["site_profile"] != "plasma" {
 		t.Fatalf("legacy backfill settings not retained safely: %+v", hp)
+	}
+}
+
+func TestHiFiPreflightErrorsExplainRecoveryWithoutLeakingDiagnostics(t *testing.T) {
+	for _, code := range []string{"QP-RES-005", "QP-INST-011", "QP-INST-012", "QP-INST-013", "QP-INST-014"} {
+		for _, operation := range []struct {
+			name, method, path, body string
+			enabled, saved           bool
+		}{
+			{"enable", http.MethodPost, "/api/honeypots", `{"name":"ssh-proxy","enabled":true}`, false, true},
+			{"settings", http.MethodPut, "/api/honeypots/settings", `{"name":"ssh-proxy","settings":{"backends":"3"}}`, true, true},
+			{"restart", http.MethodPost, "/api/honeypots/restart", `{"name":"ssh-proxy"}`, true, false},
+		} {
+			t.Run(code+"/"+operation.name, func(t *testing.T) {
+				a := newAPITestServer(t, "api-hifi-preflight", func(c *config.Config) {
+					for name := range c.Honeypots {
+						c.DisableHoneypot(name)
+					}
+					c.SetHoneypotCustomConfig("ssh-proxy", map[string]string{"image_source": "local"})
+					if operation.enabled {
+						c.EnableHoneypot("ssh-proxy")
+					}
+				})
+				a.runner.running = true
+				a.runner.startErr = errors.Join(errors.New("PRIVATE Docker output"),
+					hostsetup.E(code).WithWhy("PRIVATE host path").WithFix("PRIVATE custom remedy"))
+				before := a.configFile(t)
+				rec := a.do(operation.method, operation.path, operation.body)
+				response := decodeAPIError(t, rec)
+				entry, ok := hostsetup.Lookup(code)
+				if !ok || rec.Code != http.StatusBadGateway || response.Code != code || response.Saved != operation.saved ||
+					!strings.Contains(response.Error, entry.Fix) || strings.Contains(rec.Body.String(), "PRIVATE") {
+					t.Fatalf("preflight response: %d %s", rec.Code, rec.Body.String())
+				}
+				if len(a.runner.started)+len(a.runner.recreated)+len(a.runner.restarted) != 1 {
+					t.Fatal("request did not reach the failing runtime operation exactly once")
+				}
+				if operation.name == "restart" && !bytes.Equal(before, a.configFile(t)) {
+					t.Fatal("failed restart changed saved settings")
+				}
+				hp, _ := fileConfig(t, a).GetHoneypotConfig("ssh-proxy")
+				if operation.name == "settings" && hp.CustomConfig["backends"] != "3" {
+					t.Fatal("saved settings were rolled back after a preflight refusal")
+				}
+				if operation.name == "enable" {
+					if !hp.Enabled {
+						t.Fatal("saved enable preference was rolled back after a preflight refusal")
+					}
+				}
+			})
+		}
 	}
 }

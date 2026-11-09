@@ -190,3 +190,39 @@ chmod 0640 "$h/logs/cowrie.json"
 		t.Error("control: through the instance folder the link should have reached the file")
 	}
 }
+
+func TestDockerSSHInventoryPrivateEvidenceAndUnsupportedObjects(t *testing.T) {
+	dockerTest(t)
+	data := t.TempDir()
+	root := filepath.Join(data, "logs", "cells")
+	archive := filepath.Join(root, "opaque-cell", "archive-g1-123", "logs", "uid-1001")
+	if err := os.MkdirAll(archive, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	name := "strange\nfilename.json"
+	content := []byte("{\"event\":\"closed-private-capture\"}\nsecond line\n")
+	if err := os.WriteFile(filepath.Join(archive, name), content, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { asContainerRoot(t, data, fmt.Sprintf("chown -R %d:%d /w", os.Getuid(), os.Getgid())) })
+	asContainerRoot(t, data, `chown -R 2000:2000 /w/logs/cells/opaque-cell/archive-g1-123/logs
+chmod 0700 /w/logs/cells/opaque-cell/archive-g1-123/logs/uid-1001`)
+	helper := &DockerHelper{Image: instance.CollectorImage}
+	files, err := helper.SSHInventory(context.Background(), root)
+	if err != nil || len(files) != 1 {
+		t.Fatalf("private evidence inventory failed: %v %+v", err, files)
+	}
+	want, _ := vectorstate.Fingerprint(strings.NewReader(string(content)))
+	if files[0].rel != "logs/cells/opaque-cell/archive-g1-123/logs/uid-1001/"+name || !files[0].hasFP || files[0].fp != want || files[0].size != int64(len(content)) {
+		t.Fatalf("NUL/hex framing changed evidence: %+v", files)
+	}
+	asContainerRoot(t, data, `mkfifo /w/logs/cells/opaque-cell/archive-g1-123/logs/unsupported`)
+	if _, err := helper.SSHInventory(context.Background(), root); err == nil {
+		t.Fatal("FIFO inventory was marked complete")
+	}
+	asContainerRoot(t, data, `rm /w/logs/cells/opaque-cell/archive-g1-123/logs/unsupported
+ln /w/logs/cells/opaque-cell/archive-g1-123/logs/uid-1001/* /w/logs/cells/opaque-cell/archive-g1-123/logs/hard-link`)
+	if _, err := helper.SSHInventory(context.Background(), root); err == nil {
+		t.Fatal("multiply linked evidence inventory was marked complete")
+	}
+}

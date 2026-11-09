@@ -46,6 +46,14 @@ type Pool struct {
 	onLease     func(Backend)
 }
 
+// PoolOptions controls the initial state of a newly constructed pool.
+type PoolOptions struct {
+	// StartQuarantined requires a successful trusted reset before even the first
+	// lease. A restarted broker must not hand out a previous session's dirty
+	// backend merely because it has forgotten its in-memory pool state.
+	StartQuarantined bool
+}
+
 // SetLeaseHook installs a function called (under the pool lock, so it must be
 // quick) each time a backend is leased to a session.
 func (p *Pool) SetLeaseHook(h func(Backend)) {
@@ -80,6 +88,9 @@ func ParseBackends(s string) ([]Backend, error) {
 		if id == "" {
 			id = fmt.Sprintf("be%d", i+1)
 		}
+		if !validBackendID(id) {
+			return nil, fmt.Errorf("proxy: invalid backend id %q", id)
+		}
 		host, port, err := net.SplitHostPort(addr)
 		if err != nil || host == "" || port == "" {
 			return nil, fmt.Errorf("proxy: invalid backend address %q", addr)
@@ -87,16 +98,37 @@ func ParseBackends(s string) ([]Backend, error) {
 		if !validPort(port) {
 			return nil, fmt.Errorf("proxy: invalid backend port in %q", addr)
 		}
-		if seen[id] {
+		if seen[strings.ToLower(id)] {
 			return nil, fmt.Errorf("proxy: duplicate backend id %q", id)
 		}
-		seen[id] = true
+		seen[strings.ToLower(id)] = true
 		out = append(out, Backend{ID: id, Addr: addr})
 	}
 	if len(out) == 0 {
 		return nil, errors.New("proxy: no backends configured")
 	}
 	return out, nil
+}
+
+// IDs also name trusted generation/context entries. Keep them portable,
+// non-nested and unambiguous on case-insensitive and Windows filesystems.
+func validBackendID(id string) bool {
+	if len(id) == 0 || len(id) > 64 {
+		return false
+	}
+	for index, ch := range id {
+		letter := ch >= 'a' && ch <= 'z' || ch >= 'A' && ch <= 'Z'
+		digit := ch >= '0' && ch <= '9'
+		if !(letter || digit || index > 0 && (ch == '-' || ch == '_')) {
+			return false
+		}
+	}
+	upper := strings.ToUpper(id)
+	if upper == "CON" || upper == "PRN" || upper == "AUX" || upper == "NUL" ||
+		len(upper) == 4 && (upper[:3] == "COM" || upper[:3] == "LPT") && upper[3] >= '0' && upper[3] <= '9' {
+		return false
+	}
+	return true
 }
 
 // validPort reports whether s is a plain decimal port in 1..65535. Sscanf
@@ -115,13 +147,19 @@ func validPort(s string) bool {
 	return n >= 1 && n <= 65535
 }
 
-// NewPool builds a Pool over a fixed backend set. reset may be nil.
-func NewPool(backends []Backend, reset ResetFunc) *Pool {
+// NewPool builds a Pool over a fixed backend set. reset may be nil. By default
+// backends are initially available; production generation-gated pools explicitly
+// start quarantined and arrange a trusted host reset before entering rotation.
+func NewPool(backends []Backend, reset ResetFunc, options ...PoolOptions) *Pool {
 	p := &Pool{
 		available:   make([]Backend, 0, len(backends)),
 		leased:      make(map[string]Backend),
 		quarantined: make(map[string]Backend),
 		reset:       reset,
+	}
+	startQuarantined := false
+	for _, option := range options {
+		startQuarantined = startQuarantined || option.StartQuarantined
 	}
 	seen := map[string]bool{}
 	for _, b := range backends {
@@ -129,7 +167,11 @@ func NewPool(backends []Backend, reset ResetFunc) *Pool {
 			continue // ignore malformed/duplicate entries defensively
 		}
 		seen[b.ID] = true
-		p.available = append(p.available, b)
+		if startQuarantined {
+			p.quarantined[b.ID] = b
+		} else {
+			p.available = append(p.available, b)
+		}
 	}
 	return p
 }
@@ -178,6 +220,17 @@ func (p *Pool) Release(b Backend) {
 	p.mu.Lock()
 	p.available = append(p.available, b)
 	p.mu.Unlock()
+}
+
+// Quarantine ends a lease without making it available or trusting a failed
+// capture setup. Only the existing reset watcher can restore it to rotation.
+func (p *Pool) Quarantine(b Backend) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if current, ok := p.leased[b.ID]; ok {
+		delete(p.leased, b.ID)
+		p.quarantined[b.ID] = current
+	}
 }
 
 // WatchQuarantined keeps re-running the reset hook for quarantined backends

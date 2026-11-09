@@ -73,11 +73,19 @@ func (g *GenerationGate) OnLease(b Backend) {
 	g.mu.Unlock()
 }
 
+// BaseGeneration returns the immutable generation snapshot captured for id by
+// OnLease. Events must carry this value, rather than a later read of the counter,
+// so a delayed or replayed reset request cannot reset a newer active session.
+func (g *GenerationGate) BaseGeneration(id string) (uint64, bool) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	n, ok := g.base[id]
+	return n, ok
+}
+
 // Advanced reports whether the backend has been recreated by the host since
 // it was last leased.
 func (g *GenerationGate) Advanced(b Backend) bool {
-	g.mu.Lock()
-	base, ok := g.base[b.ID]
-	g.mu.Unlock()
+	base, ok := g.BaseGeneration(b.ID)
 	return ok && g.Generation(b.ID) > base
 }

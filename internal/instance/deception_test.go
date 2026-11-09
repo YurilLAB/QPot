@@ -120,6 +120,9 @@ func TestCowrieRunsImagePersonaLauncher(t *testing.T) {
 		patch[v.ContainerPath] = true
 	}
 	for _, v := range d.Volumes {
+		if v.ContainerPath == "" {
+			continue // operator-only license/source assets are not mounts
+		}
 		if v.File && patch[v.ContainerPath] && strings.HasPrefix(v.ContainerPath, cowrieSource+"/") {
 			continue
 		}

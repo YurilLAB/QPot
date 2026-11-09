@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net"
 	"sync"
 	"sync/atomic"
@@ -40,6 +41,16 @@ type Config struct {
 
 	// Sink receives connection events; nil discards them.
 	Sink EventSink
+	// Gate supplies the counter snapshot recorded by the pool's lease hook.
+	// It never grants the broker authority to recreate containers itself.
+	Gate *GenerationGate
+	// ContextDir, when configured, is a trusted writable root containing one
+	// own-cell attribution slot per backend. Capture setup must succeed before
+	// any bytes are forwarded; guests receive only their own read-only slot.
+	ContextDir string
+	// ContextNamespace selects opaque host directory names for this instance.
+	// Empty retains the older directory layout for standalone broker users.
+	ContextNamespace string
 	// Dial overrides the backend dialer; nil uses a net.Dialer with DialTimeout.
 	Dial DialFunc
 }
@@ -107,6 +118,10 @@ func NewBroker(cfg Config, pool *Pool) *Broker {
 // Serve accepts connections on ln until ctx is cancelled or ln is closed, then
 // waits for in-flight sessions to drain. It always closes ln before returning.
 func (b *Broker) Serve(ctx context.Context, ln net.Listener) error {
+	if err := ValidateContextNamespace(b.cfg.ContextNamespace); err != nil {
+		_ = ln.Close()
+		return err
+	}
 	// A background sweeper bounds the limiter's per-IP map under source churn.
 	sweepCtx, stopSweep := context.WithCancel(ctx)
 	defer stopSweep()
@@ -201,6 +216,13 @@ func (b *Broker) handle(ctx context.Context, client net.Conn) {
 		reject(ReasonPoolExhausted)
 		return
 	}
+	var generation *uint64
+	if b.cfg.Gate != nil {
+		if baseline, ok := b.cfg.Gate.BaseGeneration(backend.ID); ok {
+			generation = &baseline
+		}
+	}
+	releaseBackend := true
 	// Release runs the backend reset, which can take minutes. The attacker's
 	// connection is closed first: a failed dial otherwise left an accepted,
 	// silent connection open for the whole reset. Its limiter slot stays
@@ -209,8 +231,28 @@ func (b *Broker) handle(ctx context.Context, client net.Conn) {
 	// it may hold and drain the pool by connecting and dropping.
 	defer func() {
 		_ = client.Close()
-		b.pool.Release(backend)
+		if releaseBackend {
+			b.pool.Release(backend)
+		} else {
+			b.pool.Quarantine(backend)
+		}
 	}()
+	startedAt := time.Now().UTC()
+	sessionID, captureErr := newSessionID()
+	if captureErr == nil && b.cfg.ContextDir != "" {
+		captureErr = writeConnectionContext(b.cfg.ContextDir, backend.ID, ConnectionContext{
+			SessionID: sessionID, SrcIP: ip, SrcPort: port,
+			StartedAt: startedAt.Format(time.RFC3339Nano), Generation: generation,
+		}, b.cfg.ContextNamespace)
+	}
+	if captureErr != nil {
+		releaseBackend = false
+		log.Printf("backend %q connection context unavailable: %v", backend.ID, captureErr)
+		b.cfg.Sink.Emit(Event{EventType: EventBackendError, Honeypot: b.cfg.Honeypot,
+			SrcIP: ip, SrcPort: port, Backend: backend.ID, Generation: generation,
+			SessionID: sessionID, Reason: ReasonBackendContextError})
+		return
+	}
 
 	// 3) Dial the backend.
 	dialCtx, cancelDial := context.WithTimeout(ctx, b.cfg.DialTimeout)
@@ -219,7 +261,8 @@ func (b *Broker) handle(ctx context.Context, client net.Conn) {
 	if err != nil {
 		b.cfg.Sink.Emit(Event{
 			EventType: EventBackendError, Honeypot: b.cfg.Honeypot,
-			SrcIP: ip, SrcPort: port, Backend: backend.ID, Reason: ReasonBackendDialError,
+			SrcIP: ip, SrcPort: port, Backend: backend.ID, Generation: generation,
+			SessionID: sessionID, Reason: ReasonBackendDialError,
 		})
 		return
 	}
@@ -233,8 +276,9 @@ func (b *Broker) handle(ctx context.Context, client net.Conn) {
 
 	b.cfg.Sink.Emit(Event{
 		EventType: EventSession, Honeypot: b.cfg.Honeypot,
-		SrcIP: ip, SrcPort: port, Backend: backend.ID,
-		BytesIn: in, BytesOut: out,
+		SrcIP: ip, SrcPort: port, Backend: backend.ID, Generation: generation,
+		SessionID: sessionID,
+		BytesIn:   in, BytesOut: out,
 		DurationMs: time.Since(start).Milliseconds(),
 		Reason:     reason,
 	})
@@ -396,6 +440,14 @@ func halfCloseWrite(c net.Conn) {
 func splitHostPort(a net.Addr) (string, int) {
 	if a == nil {
 		return "", 0
+	}
+	if tcp, ok := a.(*net.TCPAddr); ok {
+		// TCPAddr.IP excludes the IPv6 zone suffix and is kernel-derived. A
+		// payload/header never participates in the authoritative source address.
+		if tcp == nil || tcp.IP == nil || tcp.Port < 0 || tcp.Port > 65535 {
+			return "", 0
+		}
+		return tcp.IP.String(), tcp.Port
 	}
 	host, portStr, err := net.SplitHostPort(a.String())
 	if err != nil {

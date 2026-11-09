@@ -14,7 +14,6 @@ import time
 from cowrie.core.config import CowrieConfig
 from cowrie.shell import fs
 from cowrie.shell.command import HoneyPotCommand
-from cowrie.shell.pwd import Group, Passwd
 
 commands = {}
 
@@ -215,22 +214,22 @@ QPOT_LS_LONG = {"--all": "-a", "--almost-all": "-A", "--directory": "-d", "--hum
 
 class Command_ls(HoneyPotCommand):
     def uid2name(self, uid: int) -> str:
-        try:
-            name: str = Passwd().getpwuid(uid)["pw_name"]
-        except Exception:
-            return str(uid)
-        else:
-            return name
+        from cowrie.commands.coreutils import qpot_id_names
+
+        names = getattr(self, "qpot_users", None)
+        return (names if names is not None else qpot_id_names(self.fs, "/etc/passwd")).get(uid, str(uid))
 
     def gid2name(self, gid: int) -> str:
-        try:
-            group: str = Group().getgrgid(gid)["gr_name"]
-        except Exception:
-            return str(gid)
-        else:
-            return group
+        from cowrie.commands.coreutils import qpot_id_names
+
+        names = getattr(self, "qpot_groups", None)
+        return (names if names is not None else qpot_id_names(self.fs, "/etc/group")).get(gid, str(gid))
 
     def call(self) -> None:
+        from cowrie.commands.coreutils import qpot_id_names
+
+        self.qpot_users = qpot_id_names(self.fs, "/etc/passwd")
+        self.qpot_groups = qpot_id_names(self.fs, "/etc/group")
         path = self.cwd
         paths = []
         self.showHidden = False

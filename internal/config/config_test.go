@@ -172,6 +172,62 @@ func TestGetEffectiveResourceLimitsPerHoneypot(t *testing.T) {
 	}
 }
 
+func TestGetEffectiveResourceLimitsPartialCustom(t *testing.T) {
+	global := ResourceLimits{MaxCPUPercent: 45, MaxMemoryMB: 384, MaxStorageGB: 9, MaxPids: 113, RestartAttempts: 5}
+	for _, tc := range []struct {
+		name   string
+		custom HoneypotResources
+		want   ResourceLimits
+	}{
+		{"custom disabled", HoneypotResources{MaxCPUPercent: 7.5, MaxMemoryMB: 96, MaxStorageGB: 1, MaxPids: 17}, global},
+		{"all unset", HoneypotResources{UseCustomLimits: true}, global},
+		{"CPU only", HoneypotResources{UseCustomLimits: true, MaxCPUPercent: 7.5}, ResourceLimits{7.5, 384, 9, 113, 5}},
+		{"memory only", HoneypotResources{UseCustomLimits: true, MaxMemoryMB: 96}, ResourceLimits{45, 96, 9, 113, 5}},
+		{"storage only", HoneypotResources{UseCustomLimits: true, MaxStorageGB: 1}, ResourceLimits{45, 384, 1, 113, 5}},
+		{"PIDs only", HoneypotResources{UseCustomLimits: true, MaxPids: 17}, ResourceLimits{45, 384, 9, 17, 5}},
+		{"all explicit", HoneypotResources{UseCustomLimits: true, MaxCPUPercent: 7.5, MaxMemoryMB: 96, MaxStorageGB: 1, MaxPids: 17}, ResourceLimits{7.5, 96, 1, 17, 5}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := Default("partial-limits")
+			cfg.Security.ResourceLimits = global
+			hp := cfg.Honeypots["cowrie"]
+			hp.Resources = tc.custom
+			cfg.Honeypots["cowrie"] = hp
+			if got := cfg.GetEffectiveResourceLimits("cowrie"); got != tc.want {
+				t.Fatalf("effective limits = %+v, want %+v", got, tc.want)
+			}
+			if got := cfg.GetEffectiveResourceLimits("unknown"); got != global {
+				t.Fatalf("unknown honeypot limits = %+v, want global %+v", got, global)
+			}
+			if cfg.Security.ResourceLimits != global || cfg.Honeypots["cowrie"].Resources != tc.custom {
+				t.Fatal("reading effective limits modified the saved settings")
+			}
+		})
+	}
+}
+
+func TestGetEffectiveResourceLimitsConcurrentHoneypotChanges(t *testing.T) {
+	cfg := Default("concurrent-resource-limits")
+	want := cfg.GetEffectiveResourceLimits("ssh-proxy")
+	var tasks sync.WaitGroup
+	tasks.Add(2)
+	go func() {
+		defer tasks.Done()
+		for range 200 {
+			cfg.SetHoneypotCustomConfig("ssh-proxy", map[string]string{"environment": "organization"})
+		}
+	}()
+	go func() {
+		defer tasks.Done()
+		for range 200 {
+			if got := cfg.GetEffectiveResourceLimits("ssh-proxy"); got != want {
+				t.Errorf("concurrent settings changed resource caps: got %+v, want %+v", got, want)
+			}
+		}
+	}()
+	tasks.Wait()
+}
+
 func TestSaveAndLoad(t *testing.T) {
 	dir := t.TempDir()
 	cfg := Default("savetest")

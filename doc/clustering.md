@@ -37,6 +37,10 @@ on by default).
   only its signed certificate and a member key, never the cluster's CA key.
 - A full cluster refuses new members.
 
+Encrypted cluster API connections go directly to the configured peer addresses.
+`HTTP_PROXY` and `HTTPS_PROXY` do not redirect cluster traffic; peers need a
+directly reachable address.
+
 ## Trust and certificates
 
 Traffic between nodes is TLS-encrypted automatically, with no certificates to

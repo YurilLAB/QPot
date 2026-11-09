@@ -74,6 +74,12 @@ Errors are JSON:
 - Some errors add fields: `"saved": true` (the change was saved, a later step
   failed) and `"needs": [...]` (settings the request must also send).
 
+HiFi enable, settings and restart requests can return `502` with
+`QP-RES-005` or `QP-INST-011` through `QP-INST-014` when a host preflight refuses
+startup. These answers contain fixed error-catalog recovery guidance rather than
+private host paths or Docker output. Enable/settings failures retain
+`"saved": true`; a failed restart does not change the saved configuration.
+
 ## What the API never returns
 
 No answer carries the QPot ID (the caller has it), the database password, the
@@ -179,7 +185,7 @@ effect when it starts.
 
 `?name=cowrie` for one honeypot; without it,
 `{"honeypots": [<view>, ...]}` for every honeypot that has settings (today
-beelzebub, conpot, cowrie, galah and ssh-proxy), sorted by name.
+beelzebub, conpot, cowrie, galah, refrigeration and ssh-proxy), sorted by name.
 
 ```json
 {
@@ -202,6 +208,13 @@ beelzebub, conpot, cowrie, galah and ssh-proxy), sorted by name.
   when the setting is unset.
 - A secret's `value` is always `""`; `set` says whether one is stored.
 - `missing` lists required settings that are still unset.
+- `ssh-proxy` provides `backends` (1-16, default 2), `environment`
+  (`standalone`/`organization`, default standalone), and `image_source`
+  (`published`/`local`, default published). Organization uses app, PostgreSQL and
+  SSH backup containers for each slot, reset together after one ingress SSH
+  connection. Local selects fixed development tags built from the same checkout;
+  it does not accept arbitrary image URLs or pull over a local build. Saving a
+  disabled honeypot's settings does not enable it. See [HiFi deployment](ssh-hifi-proxy.md#5-deployment).
 - `400 QP-INPUT-003` for an unknown name, `500 QP-INST-002` when the
   configuration file cannot be read.
 
@@ -283,7 +296,9 @@ and its companions (ssh-proxy's backends, tanner's).
 
 `?honeypot=cowrie&tail=100`: the honeypot's container log, newest last, as
 `["line", ...]`. `tail` defaults to 100; more than 5000 gives 5000. At most
-10000 lines come back. Without `honeypot`, every container's log. `400` for an
+10000 lines and 4 MiB of raw line text come back. If either response budget is
+reached, `X-QPot-Logs-Truncated: true` marks the partial result. The JSON array
+shape is unchanged. Without `honeypot`, every container's log. `400` for an
 unknown honeypot.
 
 ### GET /api/overview

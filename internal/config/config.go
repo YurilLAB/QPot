@@ -899,6 +899,11 @@ func Parse(data []byte, configPath string) (*Config, error) {
 	if cfg.Security.SandboxMode == "" {
 		cfg.Security.SandboxMode = "gvisor"
 	}
+	// Resolve omitted legacy global limits before checking the finite caps of
+	// an enabled HiFi cell. Explicit invalid custom overrides remain errors.
+	if err := ValidateSSHEnvironment(&cfg); err != nil {
+		return nil, fmt.Errorf("invalid config file %s: %w", configPath, err)
+	}
 
 	if err := cfg.resolveDeviceProfiles(false); err != nil {
 		return nil, fmt.Errorf("invalid config file %s: %w", configPath, err)
@@ -1020,6 +1025,9 @@ func Save(cfg *Config) error {
 	var pending Config
 	if err := yaml.Unmarshal(data, &pending); err != nil {
 		return fmt.Errorf("failed to copy config for save: %w", err)
+	}
+	if err := ValidateSSHEnvironment(&pending); err != nil {
+		return fmt.Errorf("invalid SSH environment: %w", err)
 	}
 	if err := pending.resolveDeviceProfiles(true); err != nil {
 		return fmt.Errorf("invalid device profile: %w", err)
@@ -1275,23 +1283,31 @@ func (c *Config) GetHoneypotLogPath(honeypot string) string {
 	return filepath.Join(c.DataPath, "logs", honeypot)
 }
 
-// GetEffectiveResourceLimits returns effective resource limits for a honeypot
-// Uses per-honeypot limits if configured, otherwise falls back to global limits
+// GetEffectiveResourceLimits returns effective resource limits for a honeypot.
+// Nonzero per-honeypot limits override the global values when custom limits are
+// enabled. Unset fields and restart attempts retain the global values.
 func (c *Config) GetEffectiveResourceLimits(honeypot string) ResourceLimits {
-	hp, ok := c.Honeypots[honeypot]
+	limits := c.Security.ResourceLimits
+	hp, ok := c.GetHoneypotConfig(honeypot)
 	if !ok {
-		return c.Security.ResourceLimits
+		return limits
 	}
 
 	if !hp.Resources.UseCustomLimits {
-		return c.Security.ResourceLimits
+		return limits
 	}
 
-	return ResourceLimits{
-		MaxCPUPercent:   hp.Resources.MaxCPUPercent,
-		MaxMemoryMB:     hp.Resources.MaxMemoryMB,
-		MaxStorageGB:    hp.Resources.MaxStorageGB,
-		MaxPids:         hp.Resources.MaxPids,
-		RestartAttempts: c.Security.ResourceLimits.RestartAttempts,
+	if hp.Resources.MaxCPUPercent != 0 {
+		limits.MaxCPUPercent = hp.Resources.MaxCPUPercent
 	}
+	if hp.Resources.MaxMemoryMB != 0 {
+		limits.MaxMemoryMB = hp.Resources.MaxMemoryMB
+	}
+	if hp.Resources.MaxStorageGB != 0 {
+		limits.MaxStorageGB = hp.Resources.MaxStorageGB
+	}
+	if hp.Resources.MaxPids != 0 {
+		limits.MaxPids = hp.Resources.MaxPids
+	}
+	return limits
 }

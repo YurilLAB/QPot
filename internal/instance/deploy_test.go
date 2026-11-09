@@ -226,7 +226,7 @@ func TestAllHoneypotsHaveProfiles(t *testing.T) {
 		}
 		var hasLogs bool
 		for _, v := range d.Volumes {
-			if v.HostSubdir == "logs" {
+			if v.HostSubdir == "logs" || strings.HasPrefix(v.HostSubdir, "logs/") {
 				hasLogs = true
 			}
 		}
@@ -325,7 +325,7 @@ func TestEverySupportedHoneypotIsFullyWired(t *testing.T) {
 		}
 		var hasLogs bool
 		for _, v := range d.Volumes {
-			if v.HostSubdir == "logs" {
+			if v.HostSubdir == "logs" || strings.HasPrefix(v.HostSubdir, "logs/") {
 				hasLogs = true
 			}
 		}
@@ -349,7 +349,7 @@ func TestEveryHoneypotCollectsLogs(t *testing.T) {
 		d := deployProfileFor(name)
 		hasLogs := false
 		for _, v := range d.Volumes {
-			if v.HostSubdir == "logs" {
+			if v.HostSubdir == "logs" || strings.HasPrefix(v.HostSubdir, "logs/") {
 				hasLogs = true
 				if v.ContainerPath == "" {
 					t.Errorf("honeypot %q: logs volume has empty ContainerPath", name)
@@ -619,10 +619,7 @@ func TestConpotImageIsReviewedMultiarchIndex(t *testing.T) {
 	if got := GetHoneypotImage("conpot"); got != want {
 		t.Fatalf("production Conpot image = %q, want immutable %q", got, want)
 	}
-	// Other honeypots keep their existing release policy.
-	if got := tpotImage("cowrie"); got != "ghcr.io/telekom-security/cowrie:"+TPotVersion {
-		t.Fatalf("Conpot pin changed another honeypot's image: %s", got)
-	}
+	// Honeypots without mounted protocol adapters retain their release policy.
 	if got := tpotImage("tanner"); got != "ghcr.io/telekom-security/tanner:24.04.1" {
 		t.Fatalf("Conpot pin changed a legacy image pin: %s", got)
 	}

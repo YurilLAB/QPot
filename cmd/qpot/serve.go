@@ -121,7 +121,11 @@ func runControlPlane(ctx context.Context, cfg *config.Config, mgr *instance.Mana
 	}
 
 	// HiFi: recreate each real-OpenSSH backend after every session.
-	if rec := instance.NewBackendRecycler(cfg); rec != nil {
+	rec, err := instance.NewBackendRecycler(cfg)
+	if err != nil {
+		return err
+	}
+	if rec != nil {
 		go rec.Run(ctx)
 		slog.Info("HiFi backend recycler started")
 	}

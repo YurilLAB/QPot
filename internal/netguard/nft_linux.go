@@ -3,8 +3,10 @@
 package netguard
 
 import (
+	"bytes"
 	"fmt"
 	"net/netip"
+	"slices"
 	"strings"
 
 	"github.com/google/nftables"
@@ -33,6 +35,7 @@ const (
 	chainInput        = "input"
 	chainGuardForward = "guard_forward"
 	chainGuardInput   = "guard_input"
+	chainGuardCell    = "guard_cell"
 	basePriority      = -10
 )
 
@@ -70,11 +73,25 @@ func Apply(s Spec) error {
 		Hooknum: nftables.ChainHookInput, Priority: prio, Policy: &accept})
 	gFwd := c.AddChain(&nftables.Chain{Name: chainGuardForward, Table: t})
 	gIn := c.AddChain(&nftables.Chain{Name: chainGuardInput, Table: t})
+	var gCell *nftables.Chain
+	if len(s.Cells) != 0 {
+		gCell = c.AddChain(&nftables.Chain{Name: chainGuardCell, Table: t})
+		c.AddRule(&nftables.Rule{Table: t, Chain: gCell, Exprs: ctEstablishedAccept()})
+		c.AddRule(&nftables.Rule{Table: t, Chain: gCell, Exprs: []expr.Any{&expr.Counter{}, &expr.Verdict{Kind: expr.VerdictDrop}}})
+	}
 
 	// One rule per bridge rather than an ifname set: nft lists ifname set
 	// elements written over netlink byte-reversed (as ""), which would make
 	// the table unreadable to anyone checking it.
 	for _, i := range s.Ifaces {
+		if slices.Contains(s.Cells, i) {
+			// A cell may talk only to its own declared peers. This exception
+			// applies to forwarded traffic, never to the Docker host's input.
+			c.AddRule(&nftables.Rule{Table: t, Chain: fwd, Exprs: cellAccept(i)})
+			c.AddRule(&nftables.Rule{Table: t, Chain: fwd, Exprs: jumpIfIface(i, chainGuardCell)})
+			c.AddRule(&nftables.Rule{Table: t, Chain: in, Exprs: jumpIfIface(i, chainGuardCell)})
+			continue
+		}
 		c.AddRule(&nftables.Rule{Table: t, Chain: fwd, Exprs: jumpIfIface(i, chainGuardForward)})
 		c.AddRule(&nftables.Rule{Table: t, Chain: in, Exprs: jumpIfIface(i, chainGuardInput)})
 	}
@@ -104,10 +121,13 @@ func Check(s Spec) error {
 		return fmt.Errorf("netguard: table %s missing: %w", s.Table, err)
 	}
 	want := map[string]int{
-		chainForward:      len(s.Ifaces),
+		chainForward:      len(s.Ifaces) + len(s.Cells),
 		chainInput:        len(s.Ifaces),
 		chainGuardForward: len(guardRules(s, true, nil, nil)),
 		chainGuardInput:   len(guardRules(s, false, nil, nil)),
+	}
+	if len(s.Cells) != 0 {
+		want[chainGuardCell] = 2
 	}
 	for name, n := range want {
 		ch, err := c.ListChain(t, name)
@@ -122,6 +142,9 @@ func Check(s Spec) error {
 			return fmt.Errorf("netguard: chain %s has %d rules, want %d", name, len(rules), n)
 		}
 		if name != chainForward && name != chainInput {
+			if name == chainGuardCell && !validCellGuard(rules) {
+				return fmt.Errorf("netguard: private cell drop policy is missing")
+			}
 			continue
 		}
 		if ch.Hooknum == nil || ch.Priority == nil || *ch.Priority != basePriority {
@@ -138,8 +161,78 @@ func Check(s Spec) error {
 				return fmt.Errorf("netguard: chain %s does not guard %s", ch.Name, i)
 			}
 		}
+		for _, i := range s.Cells {
+			if !validCellBaseRules(rules, i, name == chainForward) {
+				return fmt.Errorf("netguard: chain %s has no private-cell policy for %s", name, i)
+			}
+		}
 	}
 	return nil
+}
+
+// cellAccept permits a new flow only when both interfaces are this same cell.
+func cellAccept(iface string) []expr.Any {
+	return []expr.Any{
+		&expr.Meta{Key: expr.MetaKeyIIFNAME, Register: 1},
+		&expr.Cmp{Op: expr.CmpOpEq, Register: 1, Data: ifnameKey(iface)},
+		&expr.Meta{Key: expr.MetaKeyOIFNAME, Register: 1},
+		&expr.Cmp{Op: expr.CmpOpEq, Register: 1, Data: ifnameKey(iface)},
+		&expr.Verdict{Kind: expr.VerdictAccept},
+	}
+}
+
+func matchesIface(es []expr.Any, key expr.MetaKey, iface string) bool {
+	if len(es) < 2 {
+		return false
+	}
+	m, mok := es[0].(*expr.Meta)
+	c, cok := es[1].(*expr.Cmp)
+	return mok && cok && m.Key == key && m.Register == 1 && !m.SourceRegister &&
+		c.Op == expr.CmpOpEq && c.Register == 1 && bytes.Equal(c.Data, ifnameKey(iface))
+}
+
+func validCellBaseRules(rules []*nftables.Rule, iface string, forward bool) bool {
+	allow := !forward
+	for _, r := range rules {
+		es := r.Exprs
+		if !matchesIface(es, expr.MetaKeyIIFNAME, iface) {
+			continue
+		}
+		if forward && len(es) == 5 && matchesIface(es[2:], expr.MetaKeyOIFNAME, iface) {
+			v, ok := es[4].(*expr.Verdict)
+			if ok && v.Kind == expr.VerdictAccept {
+				allow = true
+				continue
+			}
+		}
+		if len(es) == 3 {
+			v, ok := es[2].(*expr.Verdict)
+			if ok && v.Kind == expr.VerdictJump && v.Chain == chainGuardCell {
+				return allow
+			}
+		}
+	}
+	return false
+}
+
+func validCellGuard(rules []*nftables.Rule) bool {
+	if len(rules) != 2 || len(rules[0].Exprs) != 4 || len(rules[1].Exprs) != 2 {
+		return false
+	}
+	// The only early accept is established/related, followed by an
+	// unconditional drop. DNS does not receive an exception in private cells.
+	c, ok := rules[0].Exprs[0].(*expr.Ct)
+	b, bok := rules[0].Exprs[1].(*expr.Bitwise)
+	cmp, cok := rules[0].Exprs[2].(*expr.Cmp)
+	v, vok := rules[0].Exprs[3].(*expr.Verdict)
+	_, counter := rules[1].Exprs[0].(*expr.Counter)
+	drop, dok := rules[1].Exprs[1].(*expr.Verdict)
+	mask := binaryutil.NativeEndian.PutUint32(expr.CtStateBitESTABLISHED | expr.CtStateBitRELATED)
+	zero := binaryutil.NativeEndian.PutUint32(0)
+	return ok && bok && cok && vok && counter && dok && c.Key == expr.CtKeySTATE && c.Register == 1 &&
+		b.SourceRegister == 1 && b.DestRegister == 1 && b.Len == 4 && bytes.Equal(b.Mask, mask) && bytes.Equal(b.Xor, zero) &&
+		cmp.Register == 1 && cmp.Op == expr.CmpOpNeq && bytes.Equal(cmp.Data, zero) &&
+		v.Kind == expr.VerdictAccept && drop.Kind == expr.VerdictDrop
 }
 
 // ruleIface returns the interface a base-chain rule built by jumpIfIface

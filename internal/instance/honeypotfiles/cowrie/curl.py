@@ -575,6 +575,12 @@ class Command_curl(HoneyPotCommand):
     def qpot_version(self) -> tuple:
         from cowrie.commands.coreutils import qpot_os_release
 
+        installed = (getattr(self.protocol, "tpot_installed", None) or {}).get("curl", "")
+        found = re.fullmatch(r"([0-9]{1,2})\.([0-9]{1,2})\.([0-9]{1,2})", installed)
+        if found:
+            selected = tuple(int(value) for value in found.groups())
+            if selected in QPOT_CURL_BUILDS or selected in ((7, 83, 1), (8, 6, 0)):
+                return selected
         os_id, version = qpot_os_release(self.fs)
         return QPOT_CURL_RELEASES.get((os_id, version[0] if version else 0), QPOT_CURL_RECORDED)
 
@@ -583,6 +589,14 @@ class Command_curl(HoneyPotCommand):
 
     @inlineCallbacks
     def start(self):
+        # QPot: an installed OpenWrt program still needs its shared libraries.
+        if (getattr(self.protocol, "tpot_opkg_added", None) or {}).get("curl"):
+            from cowrie.commands.opkg import curl_load_error
+            problem = curl_load_error(self.protocol, self.fs)
+            if problem:
+                self.errorWrite(problem)
+                self.exit(127)
+                return
         # QPot: curl's parser, not getopt's (see qpot_curl_args)
         version = self.qpot_version()
         try:
@@ -727,6 +741,11 @@ class Command_curl(HoneyPotCommand):
         return target is None or target[0] == "terminal"
 
     def qpot_version_text(self, version: tuple) -> str:
+        if version in ((7, 83, 1), (8, 6, 0)) and (getattr(self.protocol, "tpot_opkg_added", None) or {}).get("curl"):
+            from cowrie.commands.opkg import curl_version_text
+            text = curl_version_text(self.protocol, version)
+            if text is not None:
+                return text
         build = QPOT_CURL_BUILDS.get(version, QPOT_CURL_BUILDS[QPOT_CURL_RECORDED])
         if version not in QPOT_CURL_BUILDS:
             version = QPOT_CURL_RECORDED
