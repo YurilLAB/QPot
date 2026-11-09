@@ -468,10 +468,18 @@ disk quotas.
 The conversion is a deterministic replay of a backend's container log: a
 follower converts it live while the control plane runs and replays it from the
 first line after a restart, and every path that removes a backend container
-(reset, deployment, `qpot down`, retiring a cell) first converts what it still
-holds. Two conversions of the same container, in any order, leave the same
-files. With the control plane stopped, captured sessions wait in the container
-log until one of those paths runs.
+(reset, deployment, `qpot down`, retiring a cell) first stops it and converts
+what it still holds. If that conversion fails (Docker cannot read the log, the
+host cannot write the files), the path stops there and removes nothing: the
+stopped container keeps the log. A reset leaves the cell out of rotation and is
+retried, waiting 30 seconds and then twice as long each time up to 10 minutes;
+deployment, retirement and `qpot down` report the error and can be run again
+once its cause is fixed (removing the containers by hand with `docker`
+discards their unconverted sessions). Removing an instance deletes its
+recordings, so it does not convert first. Two conversions of the same
+container, in any order, leave the same files. With the control plane
+stopped, captured sessions wait in the container log until one of those paths
+runs.
 
 The genuine SFTP subsystem retains both protocol directions as binary streams,
 subject to the shared capture limit. These streams are evidence, rather than a

@@ -471,8 +471,12 @@ func retireSSHCells(ctx context.Context, cfg *config.Config, oldCompose []byte) 
 	if err := stopSSHServices(ctx, oldPath, remove); err != nil {
 		return fmt.Errorf("retire prior SSH cells: %w", err)
 	}
-	if brokerLog, err := sshBrokerSessionLog(cfg); err == nil {
-		drainSSHCaptures(ctx, cfg.DataPath, cfg.InstanceName, brokerLog, remove)
+	brokerLog, err := sshBrokerSessionLog(cfg)
+	if err != nil {
+		return fmt.Errorf("retire prior SSH cells: %w", err)
+	}
+	if err := drainSSHCaptures(ctx, cfg.DataPath, cfg.InstanceName, brokerLog, remove); err != nil {
+		return fmt.Errorf("retire prior SSH cells: they are stopped but kept: %w", err)
 	}
 	args := append([]string{"compose", "-f", oldPath, "rm", "--stop", "--force"}, remove...)
 	cmd := exec.CommandContext(ctx, "docker", args...)

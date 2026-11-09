@@ -174,7 +174,9 @@ func (m *Manager) prepareSSHDeployment(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	drainSSHCaptures(ctx, m.config.DataPath, m.config.InstanceName, recycler.LogPath, services)
+	if err := drainSSHCaptures(ctx, m.config.DataPath, m.config.InstanceName, recycler.LogPath, services); err != nil {
+		return fmt.Errorf("the SSH cells are stopped but kept: %w", err)
+	}
 	for _, app := range apps {
 		if err := archiveSSHCellLogs(m.config.DataPath, layout.Groups[app], recycler.generation(app)); err != nil {
 			return err

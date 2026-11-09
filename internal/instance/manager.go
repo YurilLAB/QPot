@@ -318,25 +318,32 @@ func (m *Manager) Stop(ctx context.Context) error {
 		return fmt.Errorf("lock instance stop: %w", err)
 	}
 	defer cellLock.Close()
-	return m.stopLocked(ctx)
+	return m.stopLocked(ctx, true)
 }
 
 // stopLocked holds the same lifecycle exclusion as startup and runtime-store
 // deletion. A false/unknown status probe never authorizes deleting a live bind.
-func (m *Manager) stopLocked(ctx context.Context) error {
+// With convert, the SSH cells are stopped and their sessions converted
+// first: removing a backend container loses its capture, so if conversion
+// fails nothing is removed. Without it (the store is deleted next) the
+// cells are removed with everything else.
+func (m *Manager) stopLocked(ctx context.Context, convert bool) error {
 	composeFile := m.config.GetDockerComposePath()
-	// Removing a backend container loses its session capture: stop the cells
-	// first and convert what they still hold.
-	if layout, err := readSSHLayout(composeFile, m.config.InstanceName); err == nil && len(layout.Groups) > 0 {
+	if layout, err := readSSHLayout(composeFile, m.config.InstanceName); convert && err == nil && len(layout.Groups) > 0 {
 		var services []string
 		for _, members := range layout.Groups {
 			services = append(services, members...)
 		}
 		sort.Strings(services)
 		if err := stopSSHServices(ctx, composeFile, services); err != nil {
-			slog.Warn("SSH cells did not stop before the instance; their last sessions may be unconverted", "error", err)
-		} else if brokerLog, err := sshBrokerSessionLog(m.config); err == nil {
-			drainSSHCaptures(ctx, m.config.DataPath, m.config.InstanceName, brokerLog, services)
+			return fmt.Errorf("nothing was removed: %w", err)
+		}
+		brokerLog, err := sshBrokerSessionLog(m.config)
+		if err != nil {
+			return fmt.Errorf("nothing was removed: find the SSH broker's log: %w", err)
+		}
+		if err := drainSSHCaptures(ctx, m.config.DataPath, m.config.InstanceName, brokerLog, services); err != nil {
+			return fmt.Errorf("nothing was removed: %w; stop again once the cause is fixed, or remove those containers with docker to discard the sessions", err)
 		}
 	}
 	cmd := exec.CommandContext(ctx, "docker", "compose", "-f", composeFile, "down", "--remove-orphans")
@@ -1111,14 +1118,15 @@ func Remove(ctx context.Context, name string) error {
 	// A persisted external store must have an authoritative successful stop,
 	// even when Docker's status query would report no running containers.
 	if ownedData && !store.legacy {
-		if err := mgr.stopLocked(ctx); err != nil {
+		// The store and every recording in it are deleted next.
+		if err := mgr.stopLocked(ctx, false); err != nil {
 			return sshStorageError(err)
 		}
 		if err := removeSSHStore(ctx, cfg.DataPath); err != nil {
 			return err
 		}
 	} else if mgr.IsRunning(ctx) {
-		if err := mgr.stopLocked(ctx); err != nil {
+		if err := mgr.stopLocked(ctx, true); err != nil {
 			return fmt.Errorf("failed to stop instance: %w", err)
 		}
 	}

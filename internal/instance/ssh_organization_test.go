@@ -268,6 +268,16 @@ func organizationFakeDocker(t *testing.T) string {
 printf 'CALL\n' >>"$SSH_TEST_COMMANDS"
 printf '%s\n' "$@" >>"$SSH_TEST_COMMANDS"
 case " $* " in
+ *" inspect --type container "*)
+  # Session capture: by default no backend container exists, so there is
+  # nothing to convert. SSH_TEST_CONTAINER=1 reports a stopped one.
+  if [ "${SSH_TEST_CONTAINER:-}" != 1 ]; then printf 'Error: No such container\n' >&2; exit 1; fi
+  printf '0123456789abcdef0123456789abcdef 2026-11-09T00:00:00Z false\n'
+  exit 0
+  ;;
+ *" logs -- "*)
+  exit "${SSH_TEST_LOGS_EXIT:-0}"
+  ;;
  *" info "*)
   if [ -n "${SSH_TEST_RESOURCE_FILE:-}" ]; then cat "$SSH_TEST_RESOURCE_FILE"; else
    printf '%s\n' '{"CgroupDriver":"systemd","MemoryLimit":true,"PidsLimit":true,"CPUCfsQuota":true}'

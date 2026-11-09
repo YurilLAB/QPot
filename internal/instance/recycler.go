@@ -45,7 +45,13 @@ type BackendRecycler struct {
 	// lifecycle lock. Production uses this whole-cell operation.
 	Reset             func(context.Context, string, *uint64) error
 	RequireGeneration bool
+	// RetryAfter is the first wait before a failed reset is tried again;
+	// each further failure doubles it, up to maxRecycleRetry. Zero: 30s.
+	RetryAfter time.Duration
 }
+
+// maxRecycleRetry bounds the wait between attempts at a failing reset.
+const maxRecycleRetry = 10 * time.Minute
 
 // NewBackendRecycler monitors the instance, including while HiFi is disabled.
 // A later live enable must have a host-side recycler before accepting sessions.
@@ -95,7 +101,11 @@ func (r *BackendRecycler) composeRecreateLocked(ctx context.Context, service str
 	if err := stopSSHServices(ctx, r.ComposeFile, members); err != nil {
 		return err
 	}
-	drainSSHCaptures(ctx, filepath.Dir(r.ComposeFile), r.InstanceName, r.LogPath, members)
+	// Unconverted sessions are only in the stopped containers' logs: keep
+	// the cell stopped and out of rotation until a retry converts them.
+	if err := drainSSHCaptures(ctx, filepath.Dir(r.ComposeFile), r.InstanceName, r.LogPath, members); err != nil {
+		return err
+	}
 	if err := archiveSSHCellLogs(filepath.Dir(r.ComposeFile), members, r.generation(service)); err != nil {
 		return err
 	}
@@ -210,7 +220,11 @@ func (r *BackendRecycler) run(ctx context.Context, readLog func(string, int64, [
 		busy[s] = request
 		queue <- request
 	}
-	done := make(chan string, cap(queue))
+	type finished struct {
+		request recycleRequest
+		err     error
+	}
+	done := make(chan finished, cap(queue))
 	go func() {
 		for {
 			select {
@@ -227,12 +241,7 @@ func (r *BackendRecycler) run(ctx context.Context, readLog func(string, int64, [
 						err = bumpGeneration(r.GenerationDir, s)
 					}
 				}
-				if err != nil {
-					logger.Warn("HiFi backend recycle failed; the broker keeps it out of rotation", "backend", s, "error", err)
-				} else {
-					logger.Info("HiFi cell reset request completed", "backend", s)
-				}
-				done <- s
+				done <- finished{request, err}
 			}
 		}
 	}()
@@ -248,6 +257,12 @@ func (r *BackendRecycler) run(ctx context.Context, readLog func(string, int64, [
 			enqueue(recycleRequest{Service: s})
 		}
 	}
+	// A failed reset leaves the cell stopped and out of rotation (a failed
+	// conversion keeps its containers, whose logs hold the sessions). It is
+	// tried again, with a growing wait, until it succeeds or a newer request
+	// or generation makes it stale.
+	retry := make(chan recycleRequest)
+	backoff := map[string]time.Duration{}
 	var partial []byte
 	unreadable := false
 	t := time.NewTicker(r.Poll)
@@ -256,12 +271,38 @@ func (r *BackendRecycler) run(ctx context.Context, readLog func(string, int64, [
 		select {
 		case <-ctx.Done():
 			return
-		case s := <-done:
+		case f := <-done:
+			s := f.request.Service
 			delete(busy, s)
+			if f.err == nil {
+				delete(backoff, s)
+				logger.Info("HiFi cell reset request completed", "backend", s)
+			}
 			if request, ok := pending[s]; ok {
 				delete(pending, s)
 				enqueue(request)
+			} else if f.err != nil {
+				wait := backoff[s] * 2
+				if wait == 0 {
+					wait = r.RetryAfter
+					if wait <= 0 {
+						wait = 30 * time.Second
+					}
+				}
+				wait = min(wait, maxRecycleRetry)
+				backoff[s] = wait
+				logger.Warn("HiFi cell reset failed; the broker keeps it out of rotation until a retry succeeds", "backend", s, "retry_in", wait.String(), "error", f.err)
+				request := f.request
+				time.AfterFunc(wait, func() {
+					select {
+					case retry <- request:
+					case <-ctx.Done():
+					}
+				})
 			}
+			continue
+		case request := <-retry:
+			enqueue(request)
 			continue
 		case <-t.C:
 		}

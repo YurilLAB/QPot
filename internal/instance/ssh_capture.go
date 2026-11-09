@@ -2,7 +2,8 @@ package instance
 
 import (
 	"context"
-	"log/slog"
+	"errors"
+	"fmt"
 	"path/filepath"
 	"time"
 
@@ -82,11 +83,16 @@ func (r *BackendRecycler) RunCapture(ctx context.Context) {
 
 // drainSSHCaptures converts what stopped backends still hold into their
 // current folders, before a reset archives the folders or anything removes
-// the containers. The caller holds the cells lock. A failure is logged and
-// the caller carries on: the live follower has normally converted it all.
-func drainSSHCaptures(ctx context.Context, dataPath, instanceName, brokerLog string, services []string) {
+// the containers. The caller holds the cells lock. It converts every service
+// it can; an error means some sessions are still only in a container's log,
+// so the caller must keep that container: removing it would lose them.
+func drainSSHCaptures(ctx context.Context, dataPath, instanceName, brokerLog string, services []string) error {
+	return drainSSHCapturesWith(ctx, sshcapture.DockerConverter(nil), dataPath, instanceName, brokerLog, services)
+}
+
+func drainSSHCapturesWith(ctx context.Context, converter *sshcapture.Converter, dataPath, instanceName, brokerLog string, services []string) error {
 	var index *sshcapture.BrokerIndex
-	converter := sshcapture.DockerConverter(nil)
+	var failed []error
 	for _, service := range services {
 		if !sshCaptureService(service) {
 			continue
@@ -95,7 +101,11 @@ func drainSSHCaptures(ctx context.Context, dataPath, instanceName, brokerLog str
 			index = sshcapture.NewBrokerIndex(brokerLog)
 		}
 		if err := converter.Drain(ctx, sshCaptureTarget(dataPath, instanceName, index, service)); err != nil {
-			slog.Error("SSH sessions could not be converted before their container is removed", "service", service, "error", err)
+			failed = append(failed, fmt.Errorf("%s: %w", service, err))
 		}
 	}
+	if len(failed) > 0 {
+		return fmt.Errorf("SSH sessions not yet converted stay in their stopped containers: %w", errors.Join(failed...))
+	}
+	return nil
 }

@@ -304,3 +304,46 @@ func TestBrokerMetadataRotationUsesOpenedIdentityAndRetainsItOnError(t *testing.
 		t.Fatalf("rotated metadata skipped or joined old bytes: %q %q %v", lines, held, err)
 	}
 }
+
+// A failed reset leaves its cell out of rotation and is tried again, with a
+// growing wait, until it succeeds; then it stops.
+func TestBackendRecyclerRetriesAFailedReset(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "sessions.json")
+	if err := os.WriteFile(path, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var mu sync.Mutex
+	var attempts []time.Time
+	r := &BackendRecycler{
+		LogPath:    path,
+		Services:   map[string]bool{"ssh-backend-1": true},
+		Poll:       10 * time.Millisecond,
+		RetryAfter: 40 * time.Millisecond,
+		Recreate: func(context.Context, string) error {
+			mu.Lock()
+			defer mu.Unlock()
+			attempts = append(attempts, time.Now())
+			if len(attempts) < 3 {
+				return errors.New("conversion failed")
+			}
+			return nil
+		},
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go r.Run(ctx)
+	count := func() int { mu.Lock(); defer mu.Unlock(); return len(attempts) }
+	deadline := time.Now().Add(3 * time.Second)
+	for count() < 3 && time.Now().Before(deadline) {
+		time.Sleep(5 * time.Millisecond)
+	}
+	time.Sleep(300 * time.Millisecond)
+	mu.Lock()
+	defer mu.Unlock()
+	if len(attempts) != 3 {
+		t.Fatalf("reset attempted %d times, want 2 failures and 1 success", len(attempts))
+	}
+	if first, second := attempts[1].Sub(attempts[0]), attempts[2].Sub(attempts[1]); first < 40*time.Millisecond || second < 80*time.Millisecond {
+		t.Fatalf("retries did not wait and back off: %s then %s", first, second)
+	}
+}
