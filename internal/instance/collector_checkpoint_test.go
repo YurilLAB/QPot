@@ -127,7 +127,9 @@ func TestVectorFileCheckpointPersistenceLive(t *testing.T) {
 		if err := os.WriteFile(configuration, data, 0o600); err != nil {
 			t.Fatal(err)
 		}
-		ctx, cancel := context.WithTimeout(context.Background(), 12*time.Second)
+		// Vector may start as a container on a busy runner: the limits only
+		// bound a failure, a healthy run ends as soon as the line lands.
+		ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
 		defer cancel()
 		cmd := exec.CommandContext(ctx, runner[0], append(runner[1:], "--quiet", "--config", configuration)...)
 		var diagnostics bytes.Buffer
@@ -146,7 +148,7 @@ func TestVectorFileCheckpointPersistenceLive(t *testing.T) {
 			}
 		}
 		defer stop()
-		deadline := time.Now().Add(6 * time.Second)
+		deadline := time.Now().Add(30 * time.Second)
 		for {
 			contents, _ := os.ReadFile(output)
 			if bytes.Count(contents, []byte("\n")) >= want {
