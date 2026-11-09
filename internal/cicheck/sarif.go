@@ -503,11 +503,10 @@ func (reviews *codeQLReviews) accept(run codeQLRun, id string, raw json.RawMessa
 	if err := decoder.Decode(&value); err != nil {
 		return fmt.Errorf("invalid CodeQL result: %w", err)
 	}
-	canonical, err := json.Marshal(value)
+	digest, err := codeQLResultSHA256(run, value)
 	if err != nil {
 		return fmt.Errorf("canonicalize CodeQL result: %w", err)
 	}
-	digest := sha256.Sum256(canonical)
 	locations, ok := value["locations"].([]any)
 	if !ok || len(locations) == 0 {
 		return fmt.Errorf("blocking CodeQL finding %q lacks a source location", id)
@@ -528,7 +527,7 @@ func (reviews *codeQLReviews) accept(run codeQLRun, id string, raw json.RawMessa
 	if err != nil {
 		return err
 	}
-	key := id + "\x00" + uri + "\x00" + hex.EncodeToString(digest[:])
+	key := id + "\x00" + uri + "\x00" + digest
 	i, ok := reviews.byKey[key]
 	if !ok {
 		return fmt.Errorf("blocking CodeQL finding %q at %q has no exact reviewed disposition", id, uri)
@@ -588,6 +587,50 @@ func (reviews *codeQLReviews) accept(run codeQLRun, id string, raw json.RawMessa
 	}
 	reviews.used[i] = true
 	return nil
+}
+
+// codeQLResultSHA256 digests a result with every artifact named by its path
+// alone, rewriting value in place. CodeQL lists a run's artifacts in no fixed
+// order, so an index into that list differs between two analyses of the same
+// code, while the path it names does not.
+func codeQLResultSHA256(run codeQLRun, value map[string]any) (string, error) {
+	var resolve func(any) error
+	resolve = func(node any) error {
+		switch n := node.(type) {
+		case map[string]any:
+			for key, child := range n {
+				if location, ok := child.(map[string]any); ok && key == "artifactLocation" {
+					if _, indexed := location["index"]; indexed {
+						uri, err := codeQLArtifactURI(run, location)
+						if err != nil {
+							return err
+						}
+						location["uri"] = uri
+						delete(location, "index")
+					}
+				}
+				if err := resolve(child); err != nil {
+					return err
+				}
+			}
+		case []any:
+			for _, child := range n {
+				if err := resolve(child); err != nil {
+					return err
+				}
+			}
+		}
+		return nil
+	}
+	if err := resolve(value); err != nil {
+		return "", err
+	}
+	canonical, err := json.Marshal(value)
+	if err != nil {
+		return "", err
+	}
+	sum := sha256.Sum256(canonical)
+	return hex.EncodeToString(sum[:]), nil
 }
 
 func codeQLArtifactURI(run codeQLRun, location map[string]any) (string, error) {

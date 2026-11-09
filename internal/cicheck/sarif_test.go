@@ -234,6 +234,54 @@ func TestCodeQLReviewedFindingRequiresExactEvidence(t *testing.T) {
 	}
 }
 
+// CodeQL lists a run's artifacts in no fixed order, and its locations point
+// into that list: the reviewed finding is the same whichever way round its
+// files are listed, while an index that disagrees with its path is refused.
+func TestCodeQLReviewIgnoresArtifactOrder(t *testing.T) {
+	for _, scenario := range []string{"listed in order", "listed reversed", "index disagrees"} {
+		t.Run(scenario, func(t *testing.T) {
+			root, reports, document, review := codeQLReviewFixture(t)
+			run := document["runs"].([]any)[0].(map[string]any)
+			files := []string{"internal/source.go", "internal/helper.go"}
+			if scenario == "listed reversed" {
+				files = []string{"internal/helper.go", "internal/source.go"}
+			}
+			index := map[string]int{}
+			var artifacts []any
+			for i, file := range files {
+				index[file] = i
+				artifacts = append(artifacts, map[string]any{"location": map[string]any{"uri": file, "uriBaseId": "%SRCROOT%"}})
+			}
+			if scenario == "index disagrees" {
+				index["internal/helper.go"] = index["internal/source.go"]
+			}
+			run["artifacts"] = artifacts
+			var point func(any)
+			point = func(node any) {
+				switch n := node.(type) {
+				case map[string]any:
+					for key, child := range n {
+						if location, ok := child.(map[string]any); ok && key == "artifactLocation" {
+							location["index"] = index[location["uri"].(string)]
+						}
+						point(child)
+					}
+				case []any:
+					for _, child := range n {
+						point(child)
+					}
+				}
+			}
+			point(run["results"])
+			writeCodeQLReviewFixture(t, root, reports, document, []codeQLReview{review})
+			_, err := CheckReviewedCodeQLReports(root, reports, ".github/reviews.json")
+			if accepted := err == nil; accepted != (scenario != "index disagrees") {
+				t.Fatalf("accepted %v: %v", accepted, err)
+			}
+		})
+	}
+}
+
 func TestCodeQLReviewRequiresTypedSourceBindings(t *testing.T) {
 	for _, scenario := range []string{"valid", "legacy version", "legacy string", "mixed record formats", "null record", "array record", "number record", "boolean record", "empty sources", "null sources", "duplicate source path", "missing digest", "empty digest", "short digest", "nonhex digest", "uppercase digest", "null digest", "numeric digest", "object digest", "unknown digest field", "case alias", "duplicate digest", "conflicting case alias"} {
 		t.Run(scenario, func(t *testing.T) {
