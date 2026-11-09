@@ -83,3 +83,14 @@ jobs:
         # CodeQL upload success alone does not mean no findings were reported.
         # Missing reports, failed analysis and findings must stop publication.
         run: go run ./internal/cicheck/cirun check-codeql "$RUNNER_TEMP/qpot-codeql" .github/codeql-reviews.json
+
+      - name: Keep the analysed SARIF for review renewal
+        # Review fingerprints hash the runner's own report; GitHub rewrites
+        # the uploaded copy, so renewal needs these exact bytes.
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: codeql-sarif-${{ github.sha }}
+          path: ${{ runner.temp }}/qpot-codeql
+          if-no-files-found: ignore
+          retention-days: 30
