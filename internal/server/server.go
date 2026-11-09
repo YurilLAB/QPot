@@ -41,8 +41,11 @@ var staticFS embed.FS
 type Server struct {
 	config  *config.Config
 	manager *instance.Manager
-	// database and worker are set once the database is reached, at start or
-	// later (reconnectDatabase); read them through db() and intelWorker().
+	// Start serves the web UI at once and fills these in behind it: database
+	// once it is reached (connectDatabase), classifier, ttpBuilder and
+	// attckLoader once the ATT&CK data is loaded (prepareIntelligence), and
+	// worker once both are there. Read them through db(), intelWorker(),
+	// intelClassifier() and intelState().
 	dbMu        sync.RWMutex
 	database    database.Database
 	mux         *http.ServeMux
@@ -80,17 +83,17 @@ type Server struct {
 	api apiState
 }
 
-// New creates a new web server.
-// The database connection is attempted but a failure is non-fatal; API
-// endpoints that require the database will return appropriate errors when
-// it is unavailable.
-// dbStartupWait bounds how long New waits for the database to accept
-// connections and take the schema. `qpot up` starts the database container
-// moments before the web server, and a fresh ClickHouse refuses connections and
-// then reports "Database qpot does not exist" while its entrypoint initialises;
-// a single attempt lost that race, the schema was never created and the
-// collector dropped every event.
+// dbStartupWait is how long after the server starts it tries the database
+// every startupRetry before backing off (reconnectBackoff). `qpot up` starts
+// the database container moments before the web server, and a fresh
+// ClickHouse refuses connections and then reports "Database qpot does not
+// exist" while its entrypoint initialises; a single attempt lost that race,
+// the schema was never created and the collector dropped every event.
 var dbStartupWait = 90 * time.Second
+
+// startupRetry is how often the server tries the database during
+// dbStartupWait.
+var startupRetry = 2 * time.Second
 
 // errNoDatabaseClient: the config names no database QPot can open.
 var errNoDatabaseClient = errors.New("no database client for this config")
@@ -118,32 +121,6 @@ var openDatabase = func(ctx context.Context, cfg *config.Config) (database.Datab
 	return rawDB, nil
 }
 
-// connectDatabase connects to the instance database and ensures its schema,
-// retrying until dbStartupWait elapses. It returns nil when the database was
-// not reachable by then; Start then keeps trying in the background
-// (reconnectDatabase), and the API reports it unavailable meanwhile.
-func connectDatabase(cfg *config.Config) database.Database {
-	deadline := time.Now().Add(dbStartupWait)
-	for attempt := 0; ; attempt++ {
-		db, err := openDatabase(context.Background(), cfg)
-		if err == nil {
-			return db
-		}
-		if errors.Is(err, errNoDatabaseClient) {
-			slog.Warn("Database not available at server start, some API endpoints will be unavailable", "error", err)
-			return nil
-		}
-		if time.Now().After(deadline) {
-			slog.Warn("Database not reached yet; retrying in the background, some API endpoints are unavailable until then", "error", err)
-			return nil
-		}
-		if attempt == 0 {
-			slog.Info("Waiting for the database to finish starting", "error", err)
-		}
-		time.Sleep(2 * time.Second)
-	}
-}
-
 // db is the instance database, or nil until it has been reached.
 func (s *Server) db() database.Database {
 	s.dbMu.RLock()
@@ -158,7 +135,38 @@ func (s *Server) intelWorker() *intelligence.Worker {
 	return s.worker
 }
 
+// intelClassifier is the event classifier, or nil while intelligence is off
+// or its ATT&CK data is still loading.
+func (s *Server) intelClassifier() *intelligence.Classifier {
+	s.dbMu.RLock()
+	defer s.dbMu.RUnlock()
+	return s.classifier
+}
+
+// intelState is the classifier's session builder and ATT&CK data, nil like
+// intelClassifier.
+func (s *Server) intelState() (*intelligence.TTPBuilder, *intelligence.ATTCKLoader) {
+	s.dbMu.RLock()
+	defer s.dbMu.RUnlock()
+	return s.ttpBuilder, s.attckLoader
+}
+
+// prepareIntelligence loads the ATT&CK data (MITRE's latest when it can be
+// fetched, else the cached or embedded copy) and builds the classifier from
+// it. Start runs it behind the web UI: the download takes up to 30 seconds.
+func (s *Server) prepareIntelligence(ctx context.Context) {
+	cfg := s.config.Intelligence
+	loader := intelligence.NewATTCKLoader(cfg.ATTCKDataPath)
+	loader.Load(ctx)
+	ttpBuilder := intelligence.NewTTPBuilder(cfg.InactivityWindow)
+	classifier := intelligence.NewClassifier(loader, ttpBuilder)
+	s.dbMu.Lock()
+	s.attckLoader, s.ttpBuilder, s.classifier = loader, ttpBuilder, classifier
+	s.dbMu.Unlock()
+}
+
 // newWorker builds the intelligence worker over db, when intelligence is on.
+// Callers hold dbMu.
 func (s *Server) newWorker(db database.Database) *intelligence.Worker {
 	if s.classifier == nil || db == nil {
 		return nil
@@ -174,18 +182,22 @@ func (s *Server) newWorker(db database.Database) *intelligence.Worker {
 }
 
 // reconnectBackoff bounds the wait between attempts to reach a database that
-// was not there when the server started.
+// was still not there dbStartupWait after the server started.
 var reconnectBackoff = [2]time.Duration{5 * time.Second, time.Minute}
 
-// reconnectDatabase keeps trying to reach a database that was not there when
-// the server started (a host that boots slowly, a database restarted along
-// with QPot), then starts what needs it. Until then the canary outbox, the
-// intelligence worker and the data endpoints wait; before, they stayed off
-// until the next restart of QPot. A config naming no database QPot can open
-// does not change while QPot runs, so that ends the trying.
-func (s *Server) reconnectDatabase(ctx context.Context, start func()) {
-	delay := reconnectBackoff[0]
-	for {
+// connectDatabase reaches the instance database behind the web UI, then
+// calls reached. It tries at once, every startupRetry while the database may
+// still be starting, then less and less often: a host that boots slowly or a
+// database restarted along with QPot is reached whenever it answers; before,
+// the server gave up for the rest of the run. Until then the data endpoints
+// answer 503 and the canary outbox and the intelligence worker wait. A config
+// naming no database QPot can open does not change while QPot runs, so that
+// ends the trying.
+func (s *Server) connectDatabase(ctx context.Context, reached func()) {
+	begin := time.Now()
+	var delay time.Duration
+	backingOff := false
+	for attempt := 0; ; attempt++ {
 		select {
 		case <-ctx.Done():
 			return
@@ -193,40 +205,49 @@ func (s *Server) reconnectDatabase(ctx context.Context, start func()) {
 		}
 		db, err := openDatabase(ctx, s.config)
 		if errors.Is(err, errNoDatabaseClient) {
+			slog.Warn("No database for this config; some API endpoints are unavailable", "error", err)
 			return
 		}
-		if err != nil {
+		if err == nil {
+			if ctx.Err() != nil {
+				_ = db.Close()
+				return
+			}
+			s.dbMu.Lock()
+			s.database = db
+			s.dbMu.Unlock()
+			slog.Info("Database connected; starting what needs it", "attempts", attempt+1)
+			reached()
+			return
+		}
+		switch {
+		case time.Since(begin) < dbStartupWait:
+			if attempt == 0 {
+				slog.Info("Waiting for the database to finish starting; the web UI is up meanwhile", "error", err)
+			}
+			delay = startupRetry
+		case !backingOff:
+			slog.Warn("Database not reached yet; still trying, some API endpoints are unavailable until then", "error", err)
+			backingOff, delay = true, reconnectBackoff[0]
+		default:
 			delay = min(2*delay, reconnectBackoff[1])
-			continue
 		}
-		if ctx.Err() != nil {
-			_ = db.Close()
-			return
-		}
-		s.dbMu.Lock()
-		s.database = db
-		s.worker = s.newWorker(db)
-		s.dbMu.Unlock()
-		slog.Info("Database reached; starting what needs it")
-		start()
-		return
 	}
 }
 
+// New creates a new web server. It does nothing slow: Start reaches the
+// database and loads the ATT&CK data behind the web UI, and the API endpoints
+// that need them answer 503 until then.
 func New(cfg *config.Config) (*Server, error) {
 	mgr, err := instance.NewManager(cfg)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create manager: %w", err)
 	}
 
-	// Attempt DB connection; log a warning but do not abort server creation.
-	db := connectDatabase(cfg)
-
 	s := &Server{
-		config:   cfg,
-		manager:  mgr,
-		database: db,
-		mux:      http.NewServeMux(),
+		config:  cfg,
+		manager: mgr,
+		mux:     http.NewServeMux(),
 	}
 
 	// Load the cluster ("group") membership if this node is paired. A missing
@@ -257,18 +278,6 @@ func New(cfg *config.Config) (*Server, error) {
 				slog.Error("Canary outbox unavailable; a trip the database refuses is only logged", "error", err)
 			}
 		}
-	}
-
-	// Wire up the intelligence subsystem when enabled.
-	if cfg.Intelligence.Enabled {
-		loader := intelligence.NewATTCKLoader(cfg.Intelligence.ATTCKDataPath)
-		loader.Load(context.Background())
-		ttpBuilder := intelligence.NewTTPBuilder(cfg.Intelligence.InactivityWindow)
-		classifier := intelligence.NewClassifier(loader, ttpBuilder)
-		s.attckLoader = loader
-		s.ttpBuilder = ttpBuilder
-		s.classifier = classifier
-		s.worker = s.newWorker(db)
 	}
 
 	s.setupRoutes()
@@ -482,48 +491,72 @@ func (s *Server) Start(ctx context.Context) error {
 	// within their limits (internal/cleanup).
 	go s.cleanupLoop(ctx)
 
-	// What needs the database starts now, or once it is reached.
+	// The web UI is served at once. Behind it the database is reached and the
+	// ATT&CK data loaded; what needs them starts as soon as they are there.
+	// Before, the UI waited for both: up to 90 seconds for a database still
+	// starting, up to 30 for MITRE's download.
 	var (
-		startMu sync.Mutex
-		stopped bool
-		workers sync.WaitGroup
+		startMu                      sync.Mutex
+		stopped                      bool
+		outboxStarted, workerStarted bool
+		workers                      sync.WaitGroup
 	)
-	startDatabaseWork := func() {
+	startReady := func() {
 		startMu.Lock()
 		defer startMu.Unlock()
-		if stopped {
+		if stopped || s.db() == nil {
 			return
-		}
-		// Canary values used inside a honeypot trip within seconds. The
-		// intelligence worker scans every event it classifies as well, so it
-		// matches what this misses; without it the honeypot channel is off.
-		if s.canaries != nil && s.intelWorker() != nil {
-			go s.canaryScanLoop(ctx)
 		}
 		// Canary trips the database did not take yet, this run's or an
 		// earlier one's (canary_outbox.go).
-		if s.canaryOutbox != nil {
+		if !outboxStarted && s.canaryOutbox != nil {
+			outboxStarted = true
 			go s.canaryOutboxLoop(ctx)
 		}
-		if w := s.intelWorker(); w != nil {
-			workers.Add(1)
-			go func() {
-				defer workers.Done()
-				w.Run(ctx)
-			}()
+		if workerStarted || s.intelClassifier() == nil {
+			return // intelligence is off, or its ATT&CK data is still loading
 		}
-	}
-	if s.db() != nil {
-		startDatabaseWork()
-	} else {
-		// Waited for on the way out like the worker: an attempt to reach the
-		// database still running would open it after Start returned.
+		s.dbMu.Lock()
+		if s.worker == nil {
+			s.worker = s.newWorker(s.database)
+		}
+		w := s.worker
+		s.dbMu.Unlock()
+		if w == nil {
+			return
+		}
+		workerStarted = true
+		// Canary values used inside a honeypot trip within seconds. The
+		// intelligence worker scans every event it classifies as well, so it
+		// matches what this misses; without it the honeypot channel is off.
+		if s.canaries != nil {
+			go s.canaryScanLoop(ctx)
+		}
 		workers.Add(1)
 		go func() {
 			defer workers.Done()
-			s.reconnectDatabase(ctx, startDatabaseWork)
+			w.Run(ctx)
 		}()
 	}
+	// Waited for on the way out like the worker: an attempt to reach the
+	// database still running would open it after Start returned.
+	behind := func(f func()) {
+		workers.Add(1)
+		go func() {
+			defer workers.Done()
+			f()
+		}()
+	}
+	if s.config.Intelligence.Enabled && s.intelClassifier() == nil {
+		behind(func() {
+			s.prepareIntelligence(ctx)
+			startReady()
+		})
+	}
+	if s.db() == nil {
+		behind(func() { s.connectDatabase(ctx, startReady) })
+	}
+	startReady()
 
 	go func() {
 		<-ctx.Done()
@@ -1375,14 +1408,15 @@ func (s *Server) handleIntelligenceSummary(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
+	ttpBuilder, attckLoader := s.intelState()
 	activeSessions := 0
-	if s.ttpBuilder != nil {
-		activeSessions = len(s.ttpBuilder.GetActiveSessions())
+	if ttpBuilder != nil {
+		activeSessions = len(ttpBuilder.GetActiveSessions())
 	}
 
 	attckLoaded := false
-	if s.attckLoader != nil {
-		attckLoaded = s.attckLoader.Loaded()
+	if attckLoader != nil {
+		attckLoaded = attckLoader.Loaded()
 	}
 
 	var techniquesObserved int

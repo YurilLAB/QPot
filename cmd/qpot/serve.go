@@ -79,8 +79,8 @@ func runControlPlane(ctx context.Context, cfg *config.Config, mgr *instance.Mana
 		}
 	}
 
-	// server.New may wait for the database to finish starting; do that in the
-	// background so the recycler and cluster are not held up by it. The port is
+	// The web server serves at once and reaches the database behind its UI;
+	// it runs alongside the recycler and the cluster. The port is
 	// claimed-checked up front: a control plane whose web UI cannot bind used
 	// to keep running headless, while a health probe of the port reached
 	// whatever else held it (typically another instance's web UI).

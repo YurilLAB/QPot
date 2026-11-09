@@ -185,8 +185,8 @@ func (s *Server) onCanaryTrip(ctx context.Context, trip *canary.Trip) {
 
 	event := trip.ToEvent()
 	var iocs []*database.IOC
-	if s.classifier != nil {
-		iocs = s.classifier.ExtractIOCs(event)
+	if c := s.intelClassifier(); c != nil {
+		iocs = c.ExtractIOCs(event)
 	}
 	// Through the outbox (canary_outbox.go), so a database that is down or
 	// restarting, or not reached yet, still gets the trip later.

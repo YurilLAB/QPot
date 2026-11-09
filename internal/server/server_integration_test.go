@@ -45,13 +45,13 @@ func TestServerServesDataFromClickHouse(t *testing.T) {
 	if err != nil {
 		t.Fatalf("server.New: %v", err)
 	}
-	if s.database == nil {
-		t.Fatal("server came up without a database connection (ClickHouse not reachable?)")
-	}
+	// Start reaches the database behind the web UI, schema included.
+	startServer(t, s)
+	waitFor(t, "the ClickHouse connection (ClickHouse not reachable?)", func() bool { return s.db() != nil })
 
 	// Seed a couple of events directly through the DB layer.
 	ctx := context.Background()
-	if err := s.database.InsertEvents(ctx, []*database.Event{
+	if err := s.db().InsertEvents(ctx, []*database.Event{
 		{Timestamp: time.Now().UTC(), Honeypot: "cowrie", SourceIP: "203.0.113.50", DestPort: 22, Protocol: "ssh", EventType: "login_failed", Username: "root"},
 		{Timestamp: time.Now().UTC(), Honeypot: "cowrie", SourceIP: "2001:db8::1", DestPort: 23, Protocol: "telnet", EventType: "command", Command: "id"},
 	}); err != nil {

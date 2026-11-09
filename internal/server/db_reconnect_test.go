@@ -43,7 +43,13 @@ func replaceOpenDatabase(t *testing.T, open func(context.Context, *config.Config
 // ends; stop returns once Start has.
 func startServer(t *testing.T, s *Server) (stop func()) {
 	t.Helper()
-	s.config.WebUI.BindAddr, s.config.WebUI.Port = "127.0.0.1", 0
+	return startServerOn(t, s, 0)
+}
+
+// startServerOn is startServer on 127.0.0.1:port (0: any free port).
+func startServerOn(t *testing.T, s *Server, port int) (stop func()) {
+	t.Helper()
+	s.config.WebUI.BindAddr, s.config.WebUI.Port = "127.0.0.1", port
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
 	go func() { done <- s.Start(ctx) }()
