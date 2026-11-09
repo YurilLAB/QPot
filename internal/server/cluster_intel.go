@@ -22,12 +22,12 @@ const (
 // control plane calls it with the node stats, every nodeStatsInterval). A
 // failed query keeps the last ones.
 func (s *Server) updateClusterIntel(ctx context.Context, cm *cluster.Manager, now time.Time) {
-	if s.database == nil {
+	if s.db() == nil {
 		return
 	}
 	qctx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
-	top, err := s.database.GetTopAttackers(qctx, clusterIntelSources, now.Add(-time.Hour))
+	top, err := s.db().GetTopAttackers(qctx, clusterIntelSources, now.Add(-time.Hour))
 	if err != nil {
 		slog.Debug("Cluster intel: failed to read the most active sources", "error", err)
 		return

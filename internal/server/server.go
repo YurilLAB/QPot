@@ -21,6 +21,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/qpot/qpot/internal/canary"
@@ -38,8 +39,11 @@ var staticFS embed.FS
 
 // Server represents the web server
 type Server struct {
-	config      *config.Config
-	manager     *instance.Manager
+	config  *config.Config
+	manager *instance.Manager
+	// database and worker are set once the database is reached, at start or
+	// later (reconnectDatabase); read them through db() and intelWorker().
+	dbMu        sync.RWMutex
 	database    database.Database
 	mux         *http.ServeMux
 	classifier  *intelligence.Classifier
@@ -88,49 +92,124 @@ type Server struct {
 // collector dropped every event.
 var dbStartupWait = 90 * time.Second
 
+// errNoDatabaseClient: the config names no database QPot can open.
+var errNoDatabaseClient = errors.New("no database client for this config")
+
+// openDatabase makes one attempt to connect to the instance database and
+// ensure its schema. Ensuring the schema is idempotent (CREATE ... IF NOT
+// EXISTS) and makes `qpot up` work on a fresh database without a separate
+// `qpot db migrate` step; otherwise the events table is never created and the
+// collector drops everything. A cancelled ctx stops the attempt. Tests replace
+// it.
+var openDatabase = func(ctx context.Context, cfg *config.Config) (database.Database, error) {
+	rawDB, err := database.New(cfg.DatabaseClient())
+	if err != nil {
+		return nil, fmt.Errorf("%w: %w", errNoDatabaseClient, err)
+	}
+	ctx, cancel := context.WithTimeout(ctx, 15*time.Second)
+	defer cancel()
+	if err := rawDB.Connect(ctx); err != nil {
+		return nil, err
+	}
+	if err := rawDB.InitializeSchema(ctx); err != nil {
+		_ = rawDB.Close()
+		return nil, fmt.Errorf("initialize schema: %w", err)
+	}
+	return rawDB, nil
+}
+
 // connectDatabase connects to the instance database and ensures its schema,
-// retrying until dbStartupWait elapses. It returns nil when the database never
-// became reachable (the API then reports it as unavailable).
+// retrying until dbStartupWait elapses. It returns nil when the database was
+// not reachable by then; Start then keeps trying in the background
+// (reconnectDatabase), and the API reports it unavailable meanwhile.
 func connectDatabase(cfg *config.Config) database.Database {
 	deadline := time.Now().Add(dbStartupWait)
-	var lastErr error
 	for attempt := 0; ; attempt++ {
-		rawDB, err := database.New(cfg.DatabaseClient())
-		if err != nil {
+		db, err := openDatabase(context.Background(), cfg)
+		if err == nil {
+			return db
+		}
+		if errors.Is(err, errNoDatabaseClient) {
 			slog.Warn("Database not available at server start, some API endpoints will be unavailable", "error", err)
 			return nil
 		}
-		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-		err = rawDB.Connect(ctx)
-		if err == nil {
-			// Ensure the schema exists. This is idempotent (CREATE ... IF NOT
-			// EXISTS) and makes `qpot up` work on a fresh database without a
-			// separate `qpot db migrate` step — otherwise the events table is
-			// never created and the whole collection pipeline silently drops
-			// everything.
-			err = rawDB.InitializeSchema(ctx)
-			cancel()
-			if err == nil {
-				return rawDB
-			}
-			if time.Now().After(deadline) {
-				slog.Warn("Database schema initialization failed; control-plane database access and intelligence are disabled", "error", err)
-				_ = rawDB.Close()
-				return nil
-			}
-			rawDB.Close()
-		} else {
-			cancel()
-		}
-		lastErr = err
 		if time.Now().After(deadline) {
-			slog.Warn("Database connection failed, some API endpoints will be unavailable", "error", lastErr)
+			slog.Warn("Database not reached yet; retrying in the background, some API endpoints are unavailable until then", "error", err)
 			return nil
 		}
 		if attempt == 0 {
 			slog.Info("Waiting for the database to finish starting", "error", err)
 		}
 		time.Sleep(2 * time.Second)
+	}
+}
+
+// db is the instance database, or nil until it has been reached.
+func (s *Server) db() database.Database {
+	s.dbMu.RLock()
+	defer s.dbMu.RUnlock()
+	return s.database
+}
+
+// intelWorker is the intelligence worker, or nil while it has no database.
+func (s *Server) intelWorker() *intelligence.Worker {
+	s.dbMu.RLock()
+	defer s.dbMu.RUnlock()
+	return s.worker
+}
+
+// newWorker builds the intelligence worker over db, when intelligence is on.
+func (s *Server) newWorker(db database.Database) *intelligence.Worker {
+	if s.classifier == nil || db == nil {
+		return nil
+	}
+	cfg := s.config.Intelligence
+	w := intelligence.NewWorker(s.classifier, db, cfg.WorkerInterval, cfg.WorkerBatchSize)
+	// Let the worker scan captured sessions for planted canary credential
+	// values as it classifies them.
+	if s.canaries != nil {
+		w = w.WithCanaryMatcher(&canaryMatcher{s: s})
+	}
+	return w
+}
+
+// reconnectBackoff bounds the wait between attempts to reach a database that
+// was not there when the server started.
+var reconnectBackoff = [2]time.Duration{5 * time.Second, time.Minute}
+
+// reconnectDatabase keeps trying to reach a database that was not there when
+// the server started (a host that boots slowly, a database restarted along
+// with QPot), then starts what needs it. Until then the canary outbox, the
+// intelligence worker and the data endpoints wait; before, they stayed off
+// until the next restart of QPot. A config naming no database QPot can open
+// does not change while QPot runs, so that ends the trying.
+func (s *Server) reconnectDatabase(ctx context.Context, start func()) {
+	delay := reconnectBackoff[0]
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(delay):
+		}
+		db, err := openDatabase(ctx, s.config)
+		if errors.Is(err, errNoDatabaseClient) {
+			return
+		}
+		if err != nil {
+			delay = min(2*delay, reconnectBackoff[1])
+			continue
+		}
+		if ctx.Err() != nil {
+			_ = db.Close()
+			return
+		}
+		s.dbMu.Lock()
+		s.database = db
+		s.worker = s.newWorker(db)
+		s.dbMu.Unlock()
+		slog.Info("Database reached; starting what needs it")
+		start()
+		return
 	}
 }
 
@@ -189,15 +268,7 @@ func New(cfg *config.Config) (*Server, error) {
 		s.attckLoader = loader
 		s.ttpBuilder = ttpBuilder
 		s.classifier = classifier
-		if db != nil {
-			w := intelligence.NewWorker(classifier, db, cfg.Intelligence.WorkerInterval, cfg.Intelligence.WorkerBatchSize)
-			// Let the worker scan captured sessions for planted canary
-			// credential values as it classifies them.
-			if s.canaries != nil {
-				w = w.WithCanaryMatcher(&canaryMatcher{s: s})
-			}
-			s.worker = w
-		}
+		s.worker = s.newWorker(db)
 	}
 
 	s.setupRoutes()
@@ -411,27 +482,47 @@ func (s *Server) Start(ctx context.Context) error {
 	// within their limits (internal/cleanup).
 	go s.cleanupLoop(ctx)
 
-	// Canary values used inside a honeypot trip within seconds. The
-	// intelligence worker scans every event it classifies as well, so it
-	// matches what this misses; without it the honeypot channel is off.
-	if s.canaries != nil && s.database != nil && s.worker != nil {
-		go s.canaryScanLoop(ctx)
+	// What needs the database starts now, or once it is reached.
+	var (
+		startMu sync.Mutex
+		stopped bool
+		workers sync.WaitGroup
+	)
+	startDatabaseWork := func() {
+		startMu.Lock()
+		defer startMu.Unlock()
+		if stopped {
+			return
+		}
+		// Canary values used inside a honeypot trip within seconds. The
+		// intelligence worker scans every event it classifies as well, so it
+		// matches what this misses; without it the honeypot channel is off.
+		if s.canaries != nil && s.intelWorker() != nil {
+			go s.canaryScanLoop(ctx)
+		}
+		// Canary trips the database did not take yet, this run's or an
+		// earlier one's (canary_outbox.go).
+		if s.canaryOutbox != nil {
+			go s.canaryOutboxLoop(ctx)
+		}
+		if w := s.intelWorker(); w != nil {
+			workers.Add(1)
+			go func() {
+				defer workers.Done()
+				w.Run(ctx)
+			}()
+		}
 	}
-	// Canary trips the database did not take yet, this run's or an earlier
-	// one's (canary_outbox.go).
-	if s.canaryOutbox != nil && s.database != nil {
-		go s.canaryOutboxLoop(ctx)
-	}
-
-	// Start intelligence worker goroutine when enabled.
-	workerDone := make(chan struct{})
-	if s.worker != nil {
-		go func() {
-			defer close(workerDone)
-			s.worker.Run(ctx)
-		}()
+	if s.db() != nil {
+		startDatabaseWork()
 	} else {
-		close(workerDone)
+		// Waited for on the way out like the worker: an attempt to reach the
+		// database still running would open it after Start returned.
+		workers.Add(1)
+		go func() {
+			defer workers.Done()
+			s.reconnectDatabase(ctx, startDatabaseWork)
+		}()
 	}
 
 	go func() {
@@ -445,7 +536,10 @@ func (s *Server) Start(ctx context.Context) error {
 	if errors.Is(err, http.ErrServerClosed) {
 		// The worker writes what it still holds when it stops (bounded by its
 		// own timeout); returning first let the process exit before that.
-		<-workerDone
+		startMu.Lock()
+		stopped = true
+		startMu.Unlock()
+		workers.Wait()
 	}
 	return err
 }
@@ -476,11 +570,11 @@ func (s *Server) alertLoop(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			if s.database == nil {
+			if s.db() == nil {
 				continue
 			}
 			since := time.Now().Add(-time.Minute)
-			stats, err := s.database.GetStats(ctx, since)
+			stats, err := s.db().GetStats(ctx, since)
 			if err != nil {
 				slog.Warn("Alert loop: failed to get stats", "error", err)
 				continue
@@ -531,14 +625,14 @@ func (s *Server) updateNodeStats(ctx context.Context) {
 		return
 	}
 	now := time.Now()
-	if s.database != nil {
+	if s.db() != nil {
 		qctx, cancel := context.WithTimeout(ctx, 10*time.Second)
-		if day, err := s.database.GetStats(qctx, now.Add(-24*time.Hour)); err == nil {
+		if day, err := s.db().GetStats(qctx, now.Add(-24*time.Hour)); err == nil {
 			s.nodeStats.TotalEvents = day.TotalEvents
 		} else {
 			slog.Debug("Node stats: failed to count events", "error", err)
 		}
-		if recent, err := s.database.GetStats(qctx, now.Add(-5*time.Minute)); err == nil {
+		if recent, err := s.db().GetStats(qctx, now.Add(-5*time.Minute)); err == nil {
 			s.nodeStats.ActiveAttacks = recent.UniqueIPs
 		}
 		cancel()
@@ -690,11 +784,11 @@ func (s *Server) responseEnv(ctx context.Context, stats *database.Stats) []strin
 	}
 	// Top attacker IP isn't on Stats; pull it from GetTopAttackers with a
 	// short timeout so a sluggish DB doesn't delay every hook.
-	if s.database != nil {
+	if s.db() != nil {
 		lookupCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
 		defer cancel()
 		since := time.Now().Add(-time.Minute)
-		attackers, err := s.database.GetTopAttackers(lookupCtx, 1, since)
+		attackers, err := s.db().GetTopAttackers(lookupCtx, 1, since)
 		if err == nil && len(attackers) > 0 {
 			env = append(env, "QPOT_TOP_SOURCE_IP="+attackers[0].SourceIP)
 		}
@@ -938,10 +1032,10 @@ func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 
 	var stats *database.Stats
-	if s.database != nil {
+	if s.db() != nil {
 		since := time.Now().Add(-24 * time.Hour)
 		var err error
-		stats, err = s.database.GetStats(ctx, since)
+		stats, err = s.db().GetStats(ctx, since)
 		if err != nil {
 			stats = &database.Stats{}
 		}
@@ -1012,7 +1106,7 @@ func (s *Server) handleIOC(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if s.database == nil {
+	if s.db() == nil {
 		s.sendError(w, http.StatusServiceUnavailable, "database not available")
 		return
 	}
@@ -1020,7 +1114,7 @@ func (s *Server) handleIOC(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	since := time.Now().Add(-24 * time.Hour)
 
-	attackers, err := s.database.GetTopAttackers(ctx, 1000, since)
+	attackers, err := s.db().GetTopAttackers(ctx, 1000, since)
 	if err != nil {
 		s.sendInternalError(w, "get top attackers failed", err)
 		return
@@ -1061,7 +1155,7 @@ func (s *Server) handleTechniques(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	if s.database == nil {
+	if s.db() == nil {
 		s.sendError(w, http.StatusServiceUnavailable, "database not available")
 		return
 	}
@@ -1069,7 +1163,7 @@ func (s *Server) handleTechniques(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	// Fetch recent events and aggregate technique counts client-side.
 	filter := database.EventFilter{Limit: 10000}
-	events, err := s.database.GetEvents(ctx, filter)
+	events, err := s.db().GetEvents(ctx, filter)
 	if err != nil {
 		s.sendInternalError(w, "get events failed", err)
 		return
@@ -1123,12 +1217,12 @@ func (s *Server) handleCategories(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	if s.database == nil {
+	if s.db() == nil {
 		s.sendError(w, http.StatusServiceUnavailable, "database not available")
 		return
 	}
 	// The same recent sample /api/techniques counts.
-	events, err := s.database.GetEvents(r.Context(), database.EventFilter{Limit: 10000})
+	events, err := s.db().GetEvents(r.Context(), database.EventFilter{Limit: 10000})
 	if err != nil {
 		s.sendInternalError(w, "get events failed", err)
 		return
@@ -1157,7 +1251,7 @@ func (s *Server) handleIOCs(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	if s.database == nil {
+	if s.db() == nil {
 		s.sendError(w, http.StatusServiceUnavailable, "database not available")
 		return
 	}
@@ -1183,7 +1277,7 @@ func (s *Server) handleIOCs(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	iocs, err := s.database.GetIOCs(ctx, filter)
+	iocs, err := s.db().GetIOCs(ctx, filter)
 	if err != nil {
 		s.sendInternalError(w, "get iocs failed", err)
 		return
@@ -1202,7 +1296,7 @@ func (s *Server) handleIOCExport(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	if s.database == nil {
+	if s.db() == nil {
 		s.sendError(w, http.StatusServiceUnavailable, "database not available")
 		return
 	}
@@ -1232,7 +1326,7 @@ func (s *Server) handleIOCExport(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	iocs, err := s.database.GetIOCs(r.Context(), filter)
+	iocs, err := s.db().GetIOCs(r.Context(), filter)
 	if err != nil {
 		s.sendInternalError(w, "get iocs failed", err)
 		return
@@ -1249,7 +1343,7 @@ func (s *Server) handleTTPs(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	if s.database == nil {
+	if s.db() == nil {
 		s.sendError(w, http.StatusServiceUnavailable, "database not available")
 		return
 	}
@@ -1265,7 +1359,7 @@ func (s *Server) handleTTPs(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	sessions, err := s.database.GetTTPSessions(ctx, limit)
+	sessions, err := s.db().GetTTPSessions(ctx, limit)
 	if err != nil {
 		s.sendInternalError(w, "get TTP sessions failed", err)
 		return
@@ -1294,11 +1388,11 @@ func (s *Server) handleIntelligenceSummary(w http.ResponseWriter, r *http.Reques
 	var techniquesObserved int
 	var iocsTotal int
 
-	if s.database != nil {
+	if s.db() != nil {
 		ctx := r.Context()
 		// Sample up to 5000 recent events to count distinct observed techniques.
 		// This is an approximation that avoids loading the full event table.
-		events, err := s.database.GetEvents(ctx, database.EventFilter{Limit: 5000})
+		events, err := s.db().GetEvents(ctx, database.EventFilter{Limit: 5000})
 		if err == nil {
 			seen := make(map[string]bool)
 			for _, ev := range events {
@@ -1310,7 +1404,7 @@ func (s *Server) handleIntelligenceSummary(w http.ResponseWriter, r *http.Reques
 		}
 
 		// Approximate IOC count using a larger sample.
-		iocs, err := s.database.GetIOCs(ctx, database.IOCFilter{Limit: 10000})
+		iocs, err := s.db().GetIOCs(ctx, database.IOCFilter{Limit: 10000})
 		if err == nil {
 			iocsTotal = len(iocs)
 		}
@@ -1320,13 +1414,13 @@ func (s *Server) handleIntelligenceSummary(w http.ResponseWriter, r *http.Reques
 		"techniques_observed": techniquesObserved,
 		"iocs_total":          iocsTotal,
 		"active_sessions":     activeSessions,
-		"worker_enabled":      s.worker != nil,
+		"worker_enabled":      s.intelWorker() != nil,
 		"attck_loaded":        attckLoaded,
 		"worker_status":       "disabled",
 		"worker_healthy":      false,
 	}
-	if s.worker != nil {
-		state, lastError := s.worker.Status()
+	if s.intelWorker() != nil {
+		state, lastError := s.intelWorker().Status()
 		summary["worker_status"] = state
 		summary["worker_healthy"] = state == "running"
 		var coded *hostsetup.Error
@@ -1368,7 +1462,7 @@ func (s *Server) handleOverview(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		cfg = s.config
 	}
-	ov := overview.Build(ctx, cfg, s.database, cl, Version)
+	ov := overview.Build(ctx, cfg, s.db(), cl, Version)
 	ports := instance.HostPortMappings(cfg)
 	out := overviewAnswer{Overview: ov, Honeypots: make([]overviewHoneypot, 0, len(ov.Honeypots))}
 	for _, h := range ov.Honeypots {

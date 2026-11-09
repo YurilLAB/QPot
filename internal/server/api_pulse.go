@@ -154,11 +154,11 @@ func (s *Server) handlePulse(w http.ResponseWriter, r *http.Request) {
 		s.sendAPIError(w, http.StatusBadRequest, "", "Bad range: use 24h, 1h or 1m.")
 		return
 	}
-	if s.database == nil {
+	if s.db() == nil {
 		s.sendAPIError(w, http.StatusServiceUnavailable, "QP-INST-005", "The database is not available.")
 		return
 	}
-	sc, ok := s.database.(database.SlotCounter)
+	sc, ok := s.db().(database.SlotCounter)
 	if !ok {
 		s.sendAPIError(w, http.StatusNotImplemented, "", "This database cannot count the timeline.")
 		return
@@ -181,16 +181,16 @@ func (s *Server) handlePulse(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	a := buildPulse(name, pr, start, counts)
-	if st, err := s.database.GetStats(ctx, start); err != nil {
+	if st, err := s.db().GetStats(ctx, start); err != nil {
 		s.sendInternalError(w, "pulse: stats", err)
 		return
 	} else if st != nil {
 		a.Sources = st.UniqueIPs
 	}
-	if evs, err := s.database.GetEvents(ctx, database.EventFilter{StartTime: start, Limit: 1}); err == nil && len(evs) > 0 {
+	if evs, err := s.db().GetEvents(ctx, database.EventFilter{StartTime: start, Limit: 1}); err == nil && len(evs) > 0 {
 		a.Latest = evs[0].Timestamp.UnixMilli()
 	}
-	top, err := s.database.GetTopAttackers(ctx, pulseSources, start)
+	top, err := s.db().GetTopAttackers(ctx, pulseSources, start)
 	if err != nil {
 		s.sendInternalError(w, "pulse: top sources", err)
 		return

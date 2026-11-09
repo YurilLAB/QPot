@@ -460,7 +460,7 @@ func (s *Server) canaryScanLoop(ctx context.Context) {
 // canaryScanLimit, or a stop); the store's event keys keep an event from
 // tripping a canary twice.
 func (s *Server) scanRecentForCanaries(ctx context.Context, m *canaryMatcher) {
-	if s.database == nil || s.canaries == nil {
+	if s.db() == nil || s.canaries == nil {
 		return
 	}
 	s.followPlanted()
@@ -469,7 +469,7 @@ func (s *Server) scanRecentForCanaries(ctx context.Context, m *canaryMatcher) {
 	}
 	qctx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
-	events, err := s.database.GetEvents(qctx, database.EventFilter{
+	events, err := s.db().GetEvents(qctx, database.EventFilter{
 		StartTime: time.Now().Add(-canaryScanLookback),
 		Limit:     canaryScanLimit,
 	})

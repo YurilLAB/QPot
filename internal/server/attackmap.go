@@ -142,7 +142,7 @@ func (s *Server) handleMapStream(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	if s.database == nil {
+	if s.db() == nil {
 		s.sendError(w, http.StatusServiceUnavailable, "database not available")
 		return
 	}
@@ -188,7 +188,7 @@ func (s *Server) handleMapStream(w http.ResponseWriter, r *http.Request) {
 			d   time.Duration
 			dst *int64
 		}{{time.Minute, &m.Last1m}, {time.Hour, &m.Last1h}, {24 * time.Hour, &m.Last24h}} {
-			if st, err := s.database.GetStats(qctx, time.Now().Add(-win.d)); err == nil && st != nil {
+			if st, err := s.db().GetStats(qctx, time.Now().Add(-win.d)); err == nil && st != nil {
 				*win.dst = st.TotalEvents
 			}
 		}
@@ -204,7 +204,7 @@ func (s *Server) handleMapStream(w http.ResponseWriter, r *http.Request) {
 		defer cancel()
 		// Second-precision backends may return events from the boundary
 		// second again; seen de-duplicates them.
-		evs, err := s.database.GetEvents(qctx, database.EventFilter{StartTime: since.Add(-time.Second), Limit: mapBatch})
+		evs, err := s.db().GetEvents(qctx, database.EventFilter{StartTime: since.Add(-time.Second), Limit: mapBatch})
 		if err != nil {
 			slog.Debug("attack map: GetEvents failed", "error", err)
 			return true

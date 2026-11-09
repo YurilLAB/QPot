@@ -145,7 +145,7 @@ func (s *Server) handleInstance(w http.ResponseWriter, r *http.Request) {
 	info.GeoIP = geoIPInfo(cfg.InstanceName, doctor.GeoIPFile(cfg))
 	info.AttackMap = map[string]any{"country": cfg.AttackMap.Country}
 	info.Canary = map[string]any{"enabled": cfg.Canary.Enabled && s.canaries != nil, "base_url": publicOrigin(cfg.Canary.BaseURL)}
-	info.Intelligence = map[string]any{"enabled": cfg.Intelligence.Enabled, "worker_running": s.worker != nil}
+	info.Intelligence = map[string]any{"enabled": cfg.Intelligence.Enabled, "worker_running": s.intelWorker() != nil}
 	info.Alerts = map[string]any{
 		"enabled":            cfg.Alerts.Enabled,
 		"webhook_configured": cfg.Alerts.WebhookURL != "",
@@ -176,20 +176,20 @@ func (s *Server) authMode() string {
 // its address or credentials.
 func (s *Server) databaseInfo(ctx context.Context) instanceDatabase {
 	d := instanceDatabase{Type: s.config.Database.Type}
-	if s.database == nil {
+	if s.db() == nil {
 		d.Error = "The control plane has no database connection (it was not reachable when the server started)."
 		return d
 	}
 	d.Connected = true
 	pctx, cancel := context.WithTimeout(ctx, 3*time.Second)
 	defer cancel()
-	if err := s.database.Ping(pctx); err != nil {
+	if err := s.db().Ping(pctx); err != nil {
 		slog.Warn("instance info: database ping failed", "error", err)
 		d.Error = "The database does not answer."
 		return d
 	}
 	d.Healthy = true
-	if v, err := s.database.GetSchemaVersion(pctx); err == nil {
+	if v, err := s.db().GetSchemaVersion(pctx); err == nil {
 		d.SchemaVersion = v
 	}
 	return d

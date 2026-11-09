@@ -255,7 +255,7 @@ func (s *Server) queueCanaryTrip(ctx context.Context, trip *canary.Trip, event *
 		err := s.canaryOutbox.put(e, true)
 		switch {
 		case err == nil:
-			if s.database == nil {
+			if s.db() == nil {
 				slog.Warn("canary: no database yet; the trip waits in the outbox for the next start that reaches it", "trip_id", trip.ID)
 				return
 			}
@@ -269,17 +269,17 @@ func (s *Server) queueCanaryTrip(ctx context.Context, trip *canary.Trip, event *
 			slog.Error("canary: trip could not be queued; trying the database once", "trip_id", trip.ID, "error", err)
 		}
 	}
-	if s.database == nil {
+	if s.db() == nil {
 		return
 	}
 	insCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
-	if err := s.database.InsertEvent(insCtx, event); err != nil {
+	if err := s.db().InsertEvent(insCtx, event); err != nil {
 		slog.Error("canary: failed to insert trip event", "trip_id", trip.ID, "error", err)
 		return
 	}
 	if len(iocs) > 0 {
-		if err := s.database.InsertIOCs(insCtx, iocs); err != nil {
+		if err := s.db().InsertIOCs(insCtx, iocs); err != nil {
 			slog.Warn("canary: failed to insert trip IOCs", "trip_id", trip.ID, "error", err)
 		}
 	}
@@ -311,7 +311,7 @@ func (s *Server) deliverCanaryTrip(ctx context.Context, e *canaryOutboxEntry) er
 			return fmt.Errorf("look up the trip's event: %w", err)
 		}
 		if !stored {
-			if err := s.database.InsertEvent(ctx, e.Event); err != nil {
+			if err := s.db().InsertEvent(ctx, e.Event); err != nil {
 				return fmt.Errorf("insert the trip's event: %w", err)
 			}
 		}
@@ -324,7 +324,7 @@ func (s *Server) deliverCanaryTrip(ctx context.Context, e *canaryOutboxEntry) er
 		}
 	}
 	if len(e.IOCs) > 0 {
-		if err := s.database.InsertIOCs(ctx, e.IOCs); err != nil {
+		if err := s.db().InsertIOCs(ctx, e.IOCs); err != nil {
 			return fmt.Errorf("insert the trip's IOCs: %w", err)
 		}
 	}
@@ -335,7 +335,7 @@ func (s *Server) deliverCanaryTrip(ctx context.Context, e *canaryOutboxEntry) er
 // a canary trip event near the trip's time with its trip ID.
 func (s *Server) canaryEventStored(ctx context.Context, e *canaryOutboxEntry) (bool, error) {
 	at := e.Event.Timestamp
-	events, err := s.database.GetEvents(ctx, database.EventFilter{
+	events, err := s.db().GetEvents(ctx, database.EventFilter{
 		Honeypots:  []string{"canary"},
 		EventTypes: []string{e.Event.EventType},
 		StartTime:  at.Add(-canaryLookupSlack),
@@ -356,7 +356,7 @@ func (s *Server) canaryEventStored(ctx context.Context, e *canaryOutboxEntry) (b
 // replayCanaryOutbox delivers every queued trip it can, oldest first, and
 // stops at the first failure (the database is most likely down).
 func (s *Server) replayCanaryOutbox(ctx context.Context) {
-	if s.canaryOutbox == nil || s.database == nil {
+	if s.canaryOutbox == nil || s.db() == nil {
 		return
 	}
 	entries, err := s.canaryOutbox.pending()

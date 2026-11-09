@@ -180,7 +180,7 @@ func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 		s.sendInternalError(w, "events filter", err)
 		return
 	}
-	if s.database == nil {
+	if s.db() == nil {
 		s.sendAPIError(w, http.StatusServiceUnavailable, "QP-INST-005", "The database is not available.")
 		return
 	}
@@ -188,7 +188,7 @@ func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 	// One more than asked tells whether there is a next page.
 	q := f
 	q.Limit = f.Limit + 1
-	events, err := s.database.GetEvents(r.Context(), q)
+	events, err := s.db().GetEvents(r.Context(), q)
 	if err != nil {
 		s.sendInternalError(w, "get events failed", err)
 		return
