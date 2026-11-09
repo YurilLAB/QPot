@@ -66,11 +66,17 @@ buffers-to-inspect, or rewrites SSH. Therefore:
   **cannot be coerced into dialing attacker-chosen hosts** (no SSRF): backend
   addresses come only from operator configuration.
 
-Capture combines **inside-backend** sshd `VERBOSE` auth logging and PTY session
-recording via `script(1)` with the broker's independent per-connection metadata
-(source, byte counts, duration and teardown reason). The broker never sees SSH
-plaintext. A hostile guest root can interfere with guest-side logs; those
-recordings are useful evidence, not a tamper-proof command audit.
+Capture happens **inside the backend's own sshd**: Debian's openssh package,
+built with one small patch (`docker/ssh-backend/openssh`) whose authenticated
+session process copies each session channel's plaintext to the container's
+error stream, beside sshd's `VERBOSE` log. The control plane converts that
+stream into evidence files on the host (`internal/sshcapture`) and joins each
+session to the broker's independent per-connection metadata (source, byte
+counts, duration and teardown reason). The broker never sees SSH plaintext.
+Nothing in the guest records: accounts keep `/bin/bash`, no wrapper, script
+or log file exists there, and nothing from the host is mounted. A hostile guest
+root can still kill or replace sshd, so this is useful evidence, not a
+tamper-proof command audit.
 
 ---
 
@@ -81,7 +87,8 @@ recordings are useful evidence, not a tamper-proof command audit.
 | Broker library | `internal/proxy/` | The L4 splice, backend pool, admission control, event log. Pure Go, no privileges. |
 | Broker binary | `cmd/qpot-sshproxy/` | Wires the library from environment config; graceful shutdown. |
 | Broker image | `docker/ssh-proxy/Dockerfile` | Distroless, **nonroot**, static binary. No shell, no docker access. |
-| Backend image | `docker/ssh-backend/` | Real Debian + OpenSSH + PTY recording. The genuinely interactive jail. |
+| Backend image | `docker/ssh-backend/` | Real Debian + Debian's own OpenSSH, built with session capture. The genuinely interactive jail. |
+| Capture converter | `internal/sshcapture/` | Turns each backend's capture stream into per-command evidence files on the host, joined to the broker's connections. |
 
 ### 3.1 Broker library (`internal/proxy`)
 
@@ -118,8 +125,6 @@ recordings are useful evidence, not a tamper-proof command audit.
 | `QPOT_SSHPROXY_CONC_IP` | `3` | Max concurrent sessions per IP |
 | `QPOT_SSHPROXY_CONC` | `128` | Max concurrent sessions globally |
 | `QPOT_SSHPROXY_GENERATIONS` | unset | Read-only host recreation counters; set by generated Compose |
-| `QPOT_SSHPROXY_CONTEXT_DIR` | unset | Per-cell context root; generated Compose sets `/run/audit-contexts`. Requires generation counters and a literal, non-wildcard listen address |
-| `QPOT_SSHPROXY_CONTEXT_NAMESPACE` | unset | Generated per-instance namespace mapping finite backend IDs to opaque context directories; empty retains compatibility for custom broker deployments |
 
 ---
 
@@ -210,10 +215,10 @@ parties, is a liability — so the backend is wrapped in defense-in-depth:
 | 9 | **Log injection** via attacker-controlled fields | Events carry only trusted fields, encoded with `encoding/json`; fuzz-verified to emit exactly one valid JSON line. |
 | 10 | **Panic in one session** taking down the listener | Per-connection `recover`. |
 | 11 | **Backend used as an outbound attack platform** | Private per-slot bridges, host cell guard, ingress-only broker listener and disabled sshd forwarding. Organization peers are the only connected decoys. |
-| 12 | **Backend escape** | gVisor/Kata when available, limited capabilities/resources and narrowly scoped mounts. Runtime boundaries still require validation on the deployment host. |
+| 12 | **Backend escape** | gVisor/Kata when available, limited capabilities/resources and no host mounts. Runtime boundaries still require validation on the deployment host. |
 | 13 | **Cross-connection contamination / persistence** | The entire leased cell resets; failed resets or peer health checks quarantine the slot. |
 | 14 | **Privileged broker** (docker socket) | Broker is distroless nonroot with no docker access; resets are done by the host-side qpot control plane. |
-| 15 | **Host-key rotation tell** | The trusted host generates and persists app host keys once and mounts them read-only at `/run/sshd/bootstrap/keys`, below a root-only bootstrap directory even when the source reports permissive Desktop modes. Connected backup hosts have their own stable key, matching the scene's known_hosts. |
+| 15 | **Host-key rotation tell** | The trusted host generates and persists app host keys once and hands them to each backend at start through Compose's `env_file`, never a mount; the backend installs them where Debian keeps them (`/etc/ssh/ssh_host_*_key`, root's alone, with each `.pub` beside it). Connected backup hosts have their own stable key, matching the scene's known_hosts. |
 | 16 | **Pool-inconsistency tell** (different host key / hostname per backend → SSH "host identification changed" warning on reconnect) | All backends share the SAME host keys (#15) AND the SAME hostname, so the pool presents as one server regardless of which backend a session lands on. |
 
 ---
@@ -350,7 +355,8 @@ quarantined and requests a trusted reset before its first lease:
    `ssh_proxy_backend_error`) with the backend id to its session log.
 2. The trusted host-side control plane (`qpot up` in the foreground, or the
    background `qpot serve` that `qpot up -d` starts) follows that log and runs
-   stop, host-only recording archival and fresh Docker recreation for exactly
+   stop, conversion of what the stopped backends still hold, host-only
+   recording archival and fresh Docker recreation for exactly
    that configured cell. In organization mode
    the app, database and backup are one reset boundary. Only names from the
    instance's configured pool are acted on, and Docker is invoked without a
@@ -360,7 +366,7 @@ quarantined and requests a trusted reset before its first lease:
    mounted **read-only** into the broker and unreachable from any backend.
 4. The broker's `RecycleReset` hook keeps the backend out of rotation until it
    has *seen* the recreation: the app answers with an OpenSSH banner,
-   all required cell peers are healthy, **and** its generation counter has
+   its cell peers have started (the database healthy), **and** its generation counter has
    moved past the value it had when the connection started. The counter is what
    makes this trustworthy: root on a backend can make sshd disappear and come back (e.g. `kill 1` with a
    restart policy), but cannot make the host record a recreation. If a real
@@ -373,16 +379,17 @@ and is then held back (fail closed). A backend is unavailable for a few seconds
 after each connection, and an organization cell needs its database/backup ready
 too. Raise `backends` (honeypot `custom_config`) for expected concurrency while
 accounting for the extra containers. The shared host keys are generated by
-`qpot` on the host and mounted read-only, so root on a backend cannot replace
-the pool's key.
+`qpot` on the host and copied into each backend at start: root on a backend can
+read its copy, as root on any server can, but cannot change the key the pool
+presents.
 
 ---
 
 ## 6. Capture & analytics
 
-The TCP broker records connection metadata; genuine OpenSSH and the session
-recorder collect evidence after decryption. OpenSSH does not log plaintext
-passwords.
+The TCP broker records connection metadata; the backend's own sshd captures
+sessions after decryption, and the control plane writes them as the files
+below. OpenSSH does not log plaintext passwords.
 
 | Evidence | Logical collector location | Analytics |
 |---|---|---|
@@ -392,44 +399,59 @@ passwords.
 | OpenSSH authentication diagnostics | `<service>/current/sshd.log` within the cells log tree | Retained text; not parsed into authentication events |
 | PostgreSQL JSON statement and connection logs | `<database-service>/current/*.json` within the cells log tree | Database role, actual internal client address, query preview and PostgreSQL session ID |
 
-The broker writes a separate, read-only connection context into each cell before
-forwarding its first byte. App and backup command events retain the original TCP
-source, outer `session_id`, lease `generation`, and per-command `capture_id`.
-`peer_ip`/`peer_port` identify the actual SSH hop. Missing or malformed context is
-reported as `peer-only` or `context-unavailable`; it is not presented as trusted
-original-source attribution. These files expose only that cell's context.
+Before forwarding a connection's first byte, the broker logs an
+`ssh_proxy_connect` event with the visitor's source, the lease and the local
+port it dialed the backend from. The converter joins each app session to it by
+that port, which sshd records as the session's peer port; a backup host's
+sessions, reached from inside the cell, take the cell's latest lease. Joined
+command events carry the original TCP source, the outer `session_id` and the
+lease `generation`, marked `attribution: broker-cell`; `peer_ip`/`peer_port`
+identify the actual SSH hop. A session with no matching connection is marked
+`peer-only`; it is never presented as trusted original-source attribution.
+Nothing about the connection is written into the guest. The collector drops
+`ssh_proxy_connect`; `ssh_proxy_session` reports the connection itself.
 
 Database events retain their actual internal client and `pg_session_id`.
 Correlate them with the cell, observed timestamp and command evidence; delayed
 SQL logs are never attributed using a newer visitor's current connection file.
 
-A command-start record is synced before the child starts. Its matching finish
-record carries the real exit code, including zero. Abrupt termination can leave
-a start without a finish. Non-interactive exec records the command and binary
-stdin, stdout, and stderr, including raw inbound SFTP requests and file bodies.
-Its cancellable input pump allows completed commands to return while the client
-still has stdin open. Interactive PTYs retain input/output and script timing;
-the input preview is not a parsed shell-command audit. Stream capture has a
-shared 8 MiB limit per command and reports truncation without truncating the
-actual SSH byte stream. Per-user admission checks limit retained files/bytes;
-concurrent commands and arbitrary guest files still require host disk quotas.
+sshd emits a session's open record before its command starts and its exit
+status when it ends; they become the start and finish lines of the command's
+record, the finish with the real exit code (128 + the signal for a killed
+command), including zero. Abrupt termination leaves a start without a finish.
+Non-interactive exec records the command and binary stdin, stdout and stderr,
+including raw inbound SFTP requests and file bodies. Interactive PTYs retain
+input/output and timing; the input preview is not a parsed shell-command
+audit. Capture is limited to 8 MiB per channel and 64 MiB per connection and
+reports truncation without truncating the actual SSH byte stream; each
+backend's container log keeps room for one such connection until it is
+converted. Per-account limits bound the retained files and bytes; arbitrary
+guest files still require host disk quotas.
+
+The conversion is a deterministic replay of a backend's container log: a
+follower converts it live while the control plane runs and replays it from the
+first line after a restart, and every path that removes a backend container
+(reset, deployment, `qpot down`, retiring a cell) first converts what it still
+holds. Two conversions of the same container, in any order, leave the same
+files. With the control plane stopped, captured sessions wait in the container
+log until one of those paths runs.
 
 The genuine SFTP subsystem retains both protocol directions as binary streams,
 subject to the shared capture limit. These streams are evidence, rather than a
 separate extracted-file archive. Files left only in a guest's writable layer
-disappear when that cell resets. Configured accounts and the default for new
-accounts use the recorder as their login shell, so writable shell startup files
-execute after recording starts. Authorized-key command restrictions retain
-OpenSSH's normal behavior. Guests can alter capture files owned by their account;
-genuine guest root can also replace shells and the in-guest recorder. Independent
-broker metadata and host-only archives have separate trust boundaries.
+disappear when that cell resets. Accounts keep an ordinary shell (`/bin/bash`
+for configured accounts, Debian's `useradd` default for new ones); sshd records
+every session whatever the shell, including startup-file output and
+authorized-key forced commands, which keep OpenSSH's normal behavior. The
+evidence files live only on the host, out of every guest's reach.
 
-Before a cell is reused, the trusted recycler stops all members, moves their
-recordings to host-only `archive-g<generation>-<random>/logs/` directories, and
-creates empty current directories. Only a successful fresh recreation and health
-check advances the generation. Operator recreation uses the same discard and
-archive boundary. The next guest mounts only its empty current directory; the
-collector reads both current and archived JSON. Existing age/size retention and
+Before a cell is reused, the trusted recycler stops all members, converts what
+the stopped backends still hold, moves their recordings to host-only
+`archive-g<generation>-<random>/logs/` directories, and creates empty current
+directories. Only a successful fresh recreation advances the generation.
+Operator recreation uses the same discard and archive boundary. Backends mount
+none of these directories (a cell database mounts only its own current one);
+the collector reads both current and archived JSON. Existing age/size retention and
 archive cleanup apply under the logical `ssh-proxy` log tree. A closed archive is
 removed only after its JSON logs have complete, unambiguous acknowledged native
 source checkpoints. Missing checkpoints, unsupported file objects, fingerprint
@@ -449,20 +471,21 @@ recreating or upgrading the collector and when restoring its retained logs.
 Removing checkpoints makes retained JSON start from the beginning again and can
 insert duplicate historical events. Log retention does not remove these cursors.
 
-Guest root can interfere with guest-side recording or replace its login shell
-and recorder. It cannot alter the independent broker records or the host-only archived
-recordings through its guest mount. This is useful evidence, not a tamper-proof
-command audit. Shared application and separate backup host keys remain protected
-in the persistent runtime store described below.
+Guest root can end capture for later connections by killing or replacing sshd,
+and can read its own copy of the host keys. It cannot alter the broker's records
+or the evidence already converted on the host. This is useful evidence, not a
+tamper-proof command audit. Shared application and separate backup host keys
+remain protected in the persistent runtime store described below.
 
 ### Persistent runtime storage and upgrades
 
-The canonical host sources of guest bind mounts use a persistent private store,
-so genuine Linux mount metadata does not expose QPot-generated instance or
-honeypot directory names. Public root IDs are derived separately from the
+Backends mount nothing from the host. The canonical host sources of the
+remaining cell bind mounts (a cell database's log folder) use a persistent
+private store, so genuine Linux mount metadata does not expose QPot-generated
+instance or honeypot directory names. Public root IDs are derived separately from the
 private per-instance namespace used to name cells; the visible root ID cannot
 be used as a key for a service-name dictionary check. Keep that namespace in
-private control metadata and the trusted broker. No `/proc` contents are fabricated. Container/runtime
+private control metadata; no container receives it. No `/proc` contents are fabricated. Container/runtime
 artifacts and operator-selected home or data directory names can still be
 observable; this is not a claim that containers cannot be identified.
 
@@ -561,9 +584,15 @@ remove them separately only after verifying ownership and stopping all users.
   or run on a host kernel plausible for the persona. (See §4 item 2 for the
   gVisor-detectability trade-off — gVisor closes the SSH tell but adds a
   sandbox tell.)
-* **`script(1)` recording** captures the PTY; for non-interactive `ssh host cmd`
-  invocations the bounded command line is logged and all three streams are
-  captured as separate binary files under a shared capture budget.
+* **sshd capture** records what sshd carries: a PTY session's input and
+  output, and for non-interactive `ssh host cmd` the bounded command line and
+  all three streams as separate binary files. It sees nothing of a process the
+  visitor detaches from the session, and nothing after guest root replaces
+  sshd. A patched sshd differs from Debian's own binary, which a visitor with
+  root could compare against Debian's published package.
+* **Container tells remain.** No recorder, mount or context is visible in the
+  guest, but container artifacts (such as `/.dockerenv`, cgroup paths and
+  `sshd -D -e` as process 1) still identify a container.
 
 ---
 
@@ -631,3 +660,13 @@ through it:
 * **Capture + admission control.** The broker writes one NDJSON session record
   per connection (`src_ip`, `bytes_in/out`, `duration_ms`, `reason`) and cleanly
   emits `no_backend_available` when the finite pool is exhausted.
+* **A guest with nothing to find.** `TestSSHBackendLive` (run on every image
+  build) checks from inside a session that the process list, accounts,
+  `/etc/shells`, `/usr/local`, the mount table, sshd's own environment and
+  descriptors and `dpkg -V` show nothing beyond stock Debian, and that a
+  command inherits only its three streams. It then converts the container's
+  capture with the control plane's own code and checks every command,
+  stream, SFTP body and exit status, a replay, and a killed container. The
+  same test against an image built without the patch fails on missing
+  evidence, and against an image with one leftover recorder trace fails on
+  the guest check.

@@ -108,6 +108,8 @@ are pinned to tested versions, like the honeypot images.
 **HiFi mode.** With the `hifi` profile, an SSH broker accepts attackers and
 passes each connection to a real OpenSSH server on a network with no outbound
 access. Each of those servers is thrown away and recreated after every session.
+Their own sshd records the sessions on the container's log stream; nothing
+inside the server records or is mounted from the host.
 See [ssh-hifi-proxy.md](ssh-hifi-proxy.md).
 
 ## The control plane
@@ -135,6 +137,9 @@ inside `qpot up`. It is not a container: it runs on the host as your user.
 - **Cluster membership.** It keeps this node in touch with the other nodes of
   its cluster over TLS. See [clustering.md](clustering.md).
 - **HiFi recycler.** It recreates each HiFi backend after its session ends.
+- **HiFi session capture.** It turns each HiFi backend's session capture into
+  per-command evidence files on the host, joined to the broker's connection,
+  and converts what a backend still holds before anything removes it.
 
 ## From an attack to the dashboard
 
@@ -165,6 +170,7 @@ cluster ID. See [clustering.md](clustering.md).
 |---|---|
 | `cmd/qpot` | The CLI and the control plane |
 | `cmd/qpot-sshproxy` | The HiFi SSH broker |
+| `internal/sshcapture` | Turns HiFi backends' session capture into evidence files |
 | `internal/instance` | Compose and collector generation, deception, instance lifecycle |
 | `internal/hostsetup` | Guided setup, Docker installation and the coded error catalogue |
 | `internal/server` | The web UI and API |

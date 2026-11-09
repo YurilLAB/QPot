@@ -9,7 +9,6 @@ import (
 	"net/netip"
 	"os"
 	"path/filepath"
-	"reflect"
 	"strconv"
 	"strings"
 	"testing"
@@ -247,81 +246,6 @@ func FuzzGenerationID(f *testing.F) {
 			}
 		default:
 			t.Fatalf("Generation(%q) = %d, read outside the directory", id, n)
-		}
-	})
-}
-
-// FuzzConnectionContextReplacementIsolation checks the publisher's observable
-// boundary: a failed replacement preserves both existing leases, and a
-// successful replacement changes only its named cell and publishes the exact
-// complete document. The adjacent sentinel also catches a path escaping the
-// configured context root. This covers arbitrary metadata separately from the
-// parser/reader fuzzers and does not assume that accepted input is well formed.
-func FuzzConnectionContextReplacementIsolation(f *testing.F) {
-	for _, id := range []string{"cell1", "cell2", "../outside", "cell1/../cell2", "cell1\\child", "NUL", ""} {
-		f.Add(id, "192.0.2.17", strings.Repeat("a", 32), 2222, uint64(7))
-	}
-	f.Add("cell1", "2001:db8::17", strings.Repeat("b", 32), 65535, ^uint64(0))
-	f.Add("cell2", "forged\nsource", "bad-session", -1, uint64(0))
-	f.Fuzz(func(t *testing.T, id, ip, sessionID string, port int, generation uint64) {
-		if len(id) > 128 || len(ip) > 256 || len(sessionID) > 256 {
-			t.Skip()
-		}
-		parent := t.TempDir()
-		dir := filepath.Join(parent, "contexts")
-		if err := os.Mkdir(dir, 0o755); err != nil {
-			t.Fatal(err)
-		}
-		before := map[string][]byte{}
-		for _, cell := range []string{"cell1", "cell2"} {
-			if err := writeConnectionContext(dir, cell, contextFixture()); err != nil {
-				t.Fatal(err)
-			}
-			data, err := os.ReadFile(filepath.Join(dir, cell, "connection.json"))
-			if err != nil {
-				t.Fatal(err)
-			}
-			before[cell] = data
-		}
-		outside := filepath.Join(parent, "outside")
-		if err := os.Mkdir(outside, 0o755); err != nil {
-			t.Fatal(err)
-		}
-		sentinel := filepath.Join(outside, "connection.json")
-		if err := os.WriteFile(sentinel, []byte("adjacent-context-must-survive"), 0o600); err != nil {
-			t.Fatal(err)
-		}
-		next := ConnectionContext{SessionID: sessionID, SrcIP: ip, SrcPort: port,
-			StartedAt: "2026-11-09T00:00:00Z", Generation: &generation}
-		writeErr := writeConnectionContext(dir, id, next)
-		for cell, previous := range before {
-			// Configured pool IDs are unique without regard to case. A
-			// case-insensitive filesystem may resolve the same slot spelling.
-			if writeErr == nil && strings.EqualFold(cell, id) {
-				continue
-			}
-			current, err := os.ReadFile(filepath.Join(dir, cell, "connection.json"))
-			if err != nil || !bytes.Equal(current, previous) {
-				t.Fatalf("replacement id=%q err=%v changed other/prior cell %q: %v", id, writeErr, cell, err)
-			}
-		}
-		if data, err := os.ReadFile(sentinel); err != nil || string(data) != "adjacent-context-must-survive" {
-			t.Fatalf("replacement id=%q escaped context root: %q %v", id, data, err)
-		}
-		if writeErr != nil {
-			return
-		}
-		data, err := os.ReadFile(filepath.Join(dir, id, "connection.json"))
-		if err != nil || bytes.Count(data, []byte{'\n'}) != 1 {
-			t.Fatalf("successful replacement has no single complete document: %q %v", data, err)
-		}
-		var got ConnectionContext
-		if err := json.Unmarshal(data, &got); err != nil || !reflect.DeepEqual(got, next) {
-			t.Fatalf("published context differs from this lease: got=%+v want=%+v err=%v", got, next, err)
-		}
-		entries, err := os.ReadDir(filepath.Join(dir, id))
-		if err != nil || len(entries) != 1 || entries[0].Name() != "connection.json" {
-			t.Fatalf("replacement leaked temporary context files: %v %v", entries, err)
 		}
 	})
 }

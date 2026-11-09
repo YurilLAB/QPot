@@ -174,6 +174,7 @@ func (m *Manager) prepareSSHDeployment(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	drainSSHCaptures(ctx, m.config.DataPath, m.config.InstanceName, recycler.LogPath, services)
 	for _, app := range apps {
 		if err := archiveSSHCellLogs(m.config.DataPath, layout.Groups[app], recycler.generation(app)); err != nil {
 			return err

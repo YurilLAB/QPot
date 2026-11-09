@@ -15,7 +15,9 @@ import (
 
 // TestSSHCollectorPrivateLogsLive exercises real bind mounts and Vector's file
 // source, not a stdin substitute. It never opens a network or changes modes to
-// make private guest recordings readable by the host test process.
+// make private recordings readable by the host test process. A cell database
+// still writes its own log through such a mount; backend sessions are written
+// by the control plane, but the collector must read private files either way.
 func TestSSHCollectorPrivateLogsLive(t *testing.T) {
 	if os.Getenv("QPOT_TEST_SSH_COLLECTOR") != "1" {
 		t.Skip("set QPOT_TEST_SSH_COLLECTOR=1 for actual private log mounts")

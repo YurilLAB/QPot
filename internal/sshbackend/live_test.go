@@ -7,6 +7,7 @@ import (
 	"context"
 	"crypto/ed25519"
 	"crypto/rand"
+	"encoding/base64"
 	"encoding/binary"
 	"encoding/json"
 	"encoding/pem"
@@ -16,18 +17,20 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
+	"github.com/qpot/qpot/internal/sshcapture"
 	"golang.org/x/crypto/ssh"
 )
 
 // TestSSHBackendLive follows genuine OpenSSH exec/SFTP requests in an entirely
 // network-none container. The Docker exec bridge carries bytes, not SSH parsing.
-// A separate organization test must establish broker/cell routing containment.
+// The evidence comes from sshd's own capture, converted from the container's
+// output by the same code the control plane runs. A separate organization test
+// must establish broker/cell routing containment and attribution.
 func TestSSHBackendLive(t *testing.T) {
 	if os.Getenv("QPOT_TEST_SSH_BACKEND") != "1" {
 		t.Skip("set QPOT_TEST_SSH_BACKEND=1 for real backend integration")
@@ -36,31 +39,18 @@ func TestSSHBackendLive(t *testing.T) {
 	if image == "" {
 		image = "qpot-local/ssh-backend:development"
 	}
-	root := t.TempDir()
-	keys := filepath.Join(root, "keys")
-	logs := filepath.Join(root, "logs")
-	audit := filepath.Join(root, "context")
-	for _, dir := range []string{keys, logs, audit} {
-		if err := os.Mkdir(dir, 0o755); err != nil {
-			t.Fatal(err)
-		}
-		if err := os.Chmod(dir, 0o755); err != nil {
-			t.Fatal(err)
-		}
-	}
-	for _, kind := range []string{"ed25519", "rsa", "ecdsa"} {
-		cmd := exec.Command("ssh-keygen", "-q", "-t", kind, "-N", "", "-f", filepath.Join(keys, "ssh_host_"+kind+"_key"))
-		if output, err := cmd.CombinedOutput(); err != nil {
+	keys := t.TempDir()
+	var hostKeys []string
+	for _, kind := range hostKeyKinds {
+		file := filepath.Join(keys, "ssh_host_"+kind+"_key")
+		if output, err := exec.Command("ssh-keygen", "-q", "-t", kind, "-N", "", "-f", file).CombinedOutput(); err != nil {
 			t.Fatalf("test hostkeys: %v %s", err, output)
 		}
-		// Read-only Desktop mounts can report0777. sshd must use private
-		// runtime copies without chmodding or regenerating these source keys.
-		if err := os.Chmod(filepath.Join(keys, "ssh_host_"+kind+"_key"), 0o777); err != nil {
+		data, err := os.ReadFile(file)
+		if err != nil {
 			t.Fatal(err)
 		}
-	}
-	if err := os.Chmod(keys, 0o777); err != nil {
-		t.Fatal(err)
+		hostKeys = append(hostKeys, kind+":"+base64.StdEncoding.EncodeToString(data))
 	}
 	hostBytes, err := os.ReadFile(filepath.Join(keys, "ssh_host_ed25519_key"))
 	if err != nil {
@@ -98,19 +88,9 @@ func TestSSHBackendLive(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	generation := uint64(0)
-	connection := ConnectionContext{SessionID: strings.Repeat("a", 32), SrcIP: "198.51.100.42", SrcPort: 44001, StartedAt: time.Now().UTC().Format(time.RFC3339Nano), Generation: &generation}
-	contextBytes, _ := json.Marshal(connection)
-	contextFile := filepath.Join(audit, "connection.json")
-	if err := os.WriteFile(contextFile, contextBytes, 0o644); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Chmod(contextFile, 0o644); err != nil {
-		t.Fatal(err)
-	}
 	name := fmt.Sprintf("qpot-ssh-backend-live-%d", time.Now().UnixNano())
-	mappedOwner := backendMappedOwner(t, image)
-	args := []string{"run", "-d", "--name", name, "--network", "none", "--cap-drop", "ALL", "--security-opt", "no-new-privileges", "--memory", "256m", "--cpus", "0.5", "--pids-limit", "128", "--label", "qpot.validation=ssh-backend-live", "--mount", "type=bind,src=" + keys + ",dst=" + HostKeySourceDirectory + ",readonly", "--mount", "type=bind,src=" + logs + ",dst=/var/log/ssh-backend", "--mount", "type=bind,src=" + audit + ",dst=/run/audit-context,readonly", "--env", "BACKEND_USERS=root:labroot123,operator:laboperator123", "--env", "BACKEND_SCENE=" + string(scene)}
+	// No mounts: the guest's mount table must name nothing on the host.
+	args := []string{"run", "-d", "--name", name, "--network", "none", "--cap-drop", "ALL", "--security-opt", "no-new-privileges", "--memory", "256m", "--cpus", "0.5", "--pids-limit", "128", "--label", "qpot.validation=ssh-backend-live", "--env", "BACKEND_USERS=root:labroot123,operator:laboperator123", "--env", "BACKEND_SCENE=" + string(scene), "--env", HostKeysVariable + "=" + strings.Join(hostKeys, ",")}
 	for _, capability := range []string{"SETUID", "SETGID", "CHOWN", "DAC_OVERRIDE", "FOWNER", "SETPCAP", "KILL", "SYS_CHROOT", "AUDIT_WRITE", "NET_BIND_SERVICE"} {
 		args = append(args, "--cap-add", capability)
 	}
@@ -120,29 +100,27 @@ func TestSSHBackendLive(t *testing.T) {
 	}
 	t.Cleanup(func() {
 		_, _ = backendDocker(15*time.Second, "stop", "--time", "5", name)
-		output, _ := backendDocker(10*time.Second, "logs", name)
 		if t.Failed() {
-			t.Logf("backend log: %s", output)
+			cmd := exec.Command("docker", "logs", "--tail", "200", name)
+			var stderr bytes.Buffer
+			cmd.Stderr = &stderr
+			_ = cmd.Run()
+			t.Logf("sshd log: %s", stderr.String())
 		}
 		_, _ = backendDocker(15*time.Second, "rm", "--volumes", name)
-		// These are this test's private mapped-UID files, not production logs.
-		// Restore ownership without widening0600/0700 modes for TempDir removal.
-		cleanup := []string{"run", "--rm", "--network", "none", "--cap-drop", "ALL", "--cap-add", "CHOWN", "--cap-add", "DAC_OVERRIDE", "--security-opt", "no-new-privileges", "--user", "0:0", "--label", "qpot.validation=ssh-backend-live-cleanup", "--mount", "type=bind,src=" + logs + ",dst=/target", "--entrypoint", "/usr/bin/chown", image, "-R", "--no-dereference", mappedOwner, "/target"}
-		if output, err := backendDocker(30*time.Second, cleanup...); err != nil {
-			t.Errorf("clean owned mappedUID logs: %v %s", err, output)
-		}
 	})
-	deadline := time.Now().Add(30 * time.Second)
+	// Readiness from outside the guest's process list: only the banner.
 	ready := false
-	for time.Now().Before(deadline) {
-		if _, err := backendDocker(3*time.Second, "exec", name, "/usr/local/libexec/session-audit", "health"); err == nil {
+	for deadline := time.Now().Add(30 * time.Second); time.Now().Before(deadline); {
+		banner, err := backendDocker(3*time.Second, "exec", name, "/bin/bash", "-c", `exec 3<>/dev/tcp/127.0.0.1/22 && head -c 8 <&3`)
+		if err == nil && string(banner) == "SSH-2.0-" {
 			ready = true
 			break
 		}
 		time.Sleep(200 * time.Millisecond)
 	}
 	if !ready {
-		t.Fatal("backend did not become healthy")
+		t.Fatal("backend did not serve an SSH banner")
 	}
 	client := backendSSH(t, name, "root", clientSigner, hostSigner.PublicKey())
 	defer client.Close()
@@ -188,7 +166,8 @@ func TestSSHBackendLive(t *testing.T) {
 	if output := run(`cat /srv/app/state; stat -c '%a' /srv/app/state`, 0); string(output) != "before\n640\n" {
 		t.Fatalf("state did not persist across exec channels: %q", output)
 	}
-	run(`printf 'after\n' >> /srv/app/state; useradd -m analyst; test "$(getent passwd analyst | cut -d: -f7)" = /usr/local/bin/rec-shell`, 0)
+	// A new account gets Debian's own useradd default, as on any Debian host.
+	run(`printf 'after\n' >> /srv/app/state; useradd -m analyst; test "$(getent passwd analyst | cut -d: -f7)" = /bin/sh`, 0)
 	if output := run(`cat /srv/app/state; id analyst; test -d /home/analyst`, 0); !strings.HasPrefix(string(output), "before\nafter\nuid=") {
 		t.Fatalf("file/user consequence: %q", output)
 	}
@@ -198,32 +177,58 @@ func TestSSHBackendLive(t *testing.T) {
 		t.Fatalf("real offline package install: %q", output)
 	}
 	run(`test -f /etc/debian_version; pg_dump --version | grep -q ' 15\.'`, 0)
-	run(`set -eu; test "$(stat -c '%a %u' /run/sshd)" = '755 0'; test "$(stat -c '%a %u' /run/sshd/bootstrap)" = '700 0'; test "$(stat -c '%a %u' /run/sshd/hostkeys)" = '700 0'; for kind in rsa ecdsa ed25519; do source=/run/sshd/bootstrap/keys/ssh_host_${kind}_key; test "$(stat -c %a "$source")" = 777; test ! -w "$source"; test "$(stat -c '%a %u' /run/sshd/hostkeys/ssh_host_${kind}_key)" = '600 0'; cmp -s "$source" /run/sshd/hostkeys/ssh_host_${kind}_key; done; findmnt -n -o OPTIONS -T /run/sshd/bootstrap/keys | tr , '\n' | grep -qx ro`, 0)
-	run(`if grep -zqE '^(BACKEND_SCENE|BACKEND_USERS|SESSION_CONTAINER|HTTP_PROXY|HTTPS_PROXY|http_proxy|https_proxy)=' /proc/1/environ; then exit 9; fi`, 0)
-	run(`if LC_ALL=C grep -aiqE 'qpot|honeypot|github.com/qpot' /usr/local/bin/entrypoint /usr/local/bin/rec-shell /etc/ssh/sshd_config /usr/local/libexec/session-audit; then exit 9; fi`, 0)
-	operator := backendSSH(t, name, "operator", clientSigner, hostSigner.PublicKey())
-	defer operator.Close()
-	for _, mode := range []os.FileMode{0o600, 0o777} {
-		for _, kind := range []string{"ed25519", "rsa", "ecdsa"} {
-			if err := os.Chmod(filepath.Join(keys, "ssh_host_"+kind+"_key"), mode); err != nil {
-				t.Fatal(err)
+	// Nothing in the guest is the recorder's: the process list, accounts,
+	// files, packages, mounts and sshd's own environment look stock.
+	run(`set -eu
+trap 'echo "failed at line $LINENO" >&2' ERR
+test "$(ps -o args= -p 1 | cut -d'[' -f1)" = 'sshd: /usr/sbin/sshd -D -e '
+if ps -eo comm= | grep -iqE 'session-audit|rec-shell|qpot|honeypot|record'; then exit 10; fi
+for account in root operator; do test "$(getent passwd $account | cut -d: -f7)" = /bin/bash; done
+if grep -qvE '^(#.*|/bin/sh|/usr/bin/sh|/bin/bash|/usr/bin/bash|/bin/rbash|/usr/bin/rbash|/bin/dash|/usr/bin/dash)$' /etc/shells; then exit 11; fi
+for gone in /run/audit-context /var/log/ssh-backend /usr/local/libexec /run/sshd/hostkeys /run/sshd/bootstrap /usr/local/bin/rec-shell /usr/local/bin/entrypoint; do test ! -e $gone; done
+for dir in /usr/local/bin /usr/local/sbin; do test -z "$(ls -A $dir)"; done
+test "$(stat -c '%a %u' /run/sshd)" = '755 0'
+test "$(stat -c '%a %u' /etc/ssh)" = '755 0'
+for kind in rsa ecdsa ed25519; do
+  test "$(stat -c '%a %u' /etc/ssh/ssh_host_${kind}_key)" = '600 0'
+  test "$(stat -c '%a %u' /etc/ssh/ssh_host_${kind}_key.pub)" = '644 0'
+  ssh-keygen -y -f /etc/ssh/ssh_host_${kind}_key | cut -d' ' -f1-2 | cmp -s - <(cut -d' ' -f1-2 /etc/ssh/ssh_host_${kind}_key.pub)
+done
+test -z "$(dpkg -V openssh-server openssh-client openssh-sftp-server | grep -v '^missing ')"
+test "$(ls /proc/1/fd | sort -n | xargs)" = "0 1 2 3"
+if grep -iqE 'qpot|honeypot|session-store|records|identities|audit|hostkeys' /proc/self/mountinfo; then exit 12; fi
+if LC_ALL=C grep -aiqE 'qpot|honeypot|qpcapture|session-audit' /usr/sbin/sshd /etc/ssh/sshd_config /etc/passwd /etc/shells /etc/default/useradd; then exit 13; fi
+if grep -zqE '^(BACKEND_[A-Z_]*|SESSION_CONTAINER|HTTP_PROXY|HTTPS_PROXY|http_proxy|https_proxy)=' /proc/1/environ; then exit 14; fi
+`, 0)
+	// A command inherits only its own three streams from sshd: no capture
+	// or log descriptor. exec leaves no shell that could open pipes itself.
+	links, streams := 0, 0
+	for _, line := range strings.Split(string(run(`exec ls -l /proc/self/fd`, 0)), "\n") {
+		if _, target, ok := strings.Cut(line, " -> "); ok {
+			links++
+			if strings.HasPrefix(target, "pipe:") || strings.HasPrefix(target, "socket:") {
+				streams++
 			}
 		}
-		denial := `set -eu; test ! -x /run/sshd/bootstrap; test ! -x /run/sshd/hostkeys; for kind in rsa ecdsa ed25519; do test ! -r /run/sshd/bootstrap/keys/ssh_host_${kind}_key; test ! -r /run/sshd/hostkeys/ssh_host_${kind}_key; done`
-		session, err := operator.NewSession()
-		if err != nil {
-			t.Fatal(err)
-		}
-		output, err := session.CombinedOutput(denial)
-		session.Close()
-		if err != nil || len(output) != 0 {
-			t.Fatalf("ordinary SSH account can access source/private host keys with source mode %o: %s %v", mode, output, err)
-		}
-		if output, err := backendDocker(10*time.Second, "exec", "--user", "65534:65534", name, "/bin/sh", "-ec", denial); err != nil {
-			t.Fatalf("unrelated UID can access source/private host keys with source mode %o: %s %v", mode, output, err)
-		}
 	}
+	if links != 4 || streams != 3 {
+		t.Fatalf("a session command inherited more than its streams: %d descriptors, %d pipes or sockets", links, streams)
+	}
+	operator := backendSSH(t, name, "operator", clientSigner, hostSigner.PublicKey())
+	defer operator.Close()
+	denial := `set -eu; for kind in rsa ecdsa ed25519; do test ! -r /etc/ssh/ssh_host_${kind}_key; done; if ls /proc/$PPID/fd >/dev/null 2>&1; then exit 3; fi`
 	session, err := operator.NewSession()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if output, err := session.CombinedOutput(denial); err != nil || len(output) != 0 {
+		t.Fatalf("ordinary SSH account can read private host keys or its sshd's descriptors: %s %v", output, err)
+	}
+	session.Close()
+	if output, err := backendDocker(10*time.Second, "exec", "--user", "65534:65534", name, "/bin/sh", "-ec", `for kind in rsa ecdsa ed25519; do test ! -r /etc/ssh/ssh_host_${kind}_key; done`); err != nil {
+		t.Fatalf("unrelated UID can read private host keys: %s %v", output, err)
+	}
+	session, err = operator.NewSession()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -233,7 +238,7 @@ func TestSSHBackendLive(t *testing.T) {
 	err = session.Run(`printf 'operator-output\n'; printf 'operator-error\n' >&2`)
 	session.Close()
 	if err != nil || operatorOut.String() != "operator-output\n" || operatorErr.String() != "operator-error\n" {
-		t.Fatalf("non-root recording/login: out=%q err=%q failure=%v", operatorOut.String(), operatorErr.String(), err)
+		t.Fatalf("non-root login: out=%q err=%q failure=%v", operatorOut.String(), operatorErr.String(), err)
 	}
 	restricted := backendSSH(t, name, "operator", restrictedSigner, hostSigner.PublicKey())
 	restrictedSession, err := restricted.NewSession()
@@ -263,11 +268,11 @@ func TestSSHBackendLive(t *testing.T) {
 	err = startup.Run("printf startup-command")
 	startup.Close()
 	if err != nil || startupOutput.String() != "startup-command" || startupError.String() != "startup-recorded" {
-		t.Fatalf("startup must run inside the recorded command: stdout=%q stderr=%q %v", startupOutput.String(), startupError.String(), err)
+		t.Fatalf("startup output: stdout=%q stderr=%q %v", startupOutput.String(), startupError.String(), err)
 	}
 	run("rm /home/operator/.bashrc", 0)
-	// no-new-privileges must also prevent the ordinary account using chsh's
-	// setuid bit to replace the recording login shell with an unrecorded shell.
+	// no-new-privileges must keep chsh's setuid bit from working: an
+	// ordinary account cannot rewrite the account database.
 	changeShell, err := operator.NewSession()
 	if err != nil {
 		t.Fatal(err)
@@ -281,7 +286,7 @@ func TestSSHBackendLive(t *testing.T) {
 	}
 	var changeOutput, changeError bytes.Buffer
 	changeShell.Stdout, changeShell.Stderr = &changeOutput, &changeError
-	if err := changeShell.Start("test -t 0 || exit 90; chsh -s /bin/bash"); err != nil {
+	if err := changeShell.Start("test -t 0 || exit 90; chsh -s /bin/sh"); err != nil {
 		t.Fatal(err)
 	}
 	var changeStatus []byte
@@ -312,7 +317,7 @@ func TestSSHBackendLive(t *testing.T) {
 		t.Fatal("ordinary PTY chsh did not finish")
 	}
 	changeShell.Close()
-	run(`test "$(getent passwd operator | cut -d: -f7)" = /usr/local/bin/rec-shell`, 0)
+	run(`test "$(getent passwd operator | cut -d: -f7)" = /bin/bash`, 0)
 	postChange, err := operator.NewSession()
 	if err != nil {
 		t.Fatal(err)
@@ -358,8 +363,8 @@ func TestSSHBackendLive(t *testing.T) {
 	if err != nil || !bytes.Equal(binaryOutput, binaryInput) {
 		t.Fatalf("binary stdin delivery changed: %d %v", len(binaryOutput), err)
 	}
-	// Accounts created during this visitor's session must also be able to log
-	// in and create their own private recordings without bootstrap assistance.
+	// Accounts created during this visitor's session are recorded too: sshd
+	// records every account, whatever its shell.
 	run(`install -d -o analyst -g analyst -m 700 /home/analyst/.ssh; install -o analyst -g analyst -m 600 /root/.ssh/authorized_keys /home/analyst/.ssh/authorized_keys; printf 'analyst:lab-analyst-pass\n' | chpasswd`, 0)
 	analyst := backendSSH(t, name, "analyst", clientSigner, hostSigner.PublicKey())
 	analystSession, err := analyst.NewSession()
@@ -370,7 +375,7 @@ func TestSSHBackendLive(t *testing.T) {
 	analystSession.Close()
 	analyst.Close()
 	if err != nil || string(analystOutput) != "new-account-output\n" {
-		t.Fatalf("new account state/permissions/capture: %q %v", analystOutput, err)
+		t.Fatalf("new account state/permissions: %q %v", analystOutput, err)
 	}
 	pty, err := client.NewSession()
 	if err != nil {
@@ -384,9 +389,6 @@ func TestSSHBackendLive(t *testing.T) {
 	pty.Close()
 	if exit, ok := err.(*ssh.ExitError); !ok || exit.ExitStatus() != 3 || !strings.Contains(string(ptyOutput), "pty:sample-input") {
 		t.Fatalf("real SSH PTY: %q %v", ptyOutput, err)
-	}
-	if data, err := backendDocker(10*time.Second, "exec", name, "/bin/sh", "-c", `test "$(stat -c %a /var/log/ssh-backend/sshd.log)" = 600 && grep -q 'Accepted publickey for operator' /var/log/ssh-backend/sshd.log`); err != nil {
-		t.Fatalf("private real sshd authentication metadata: %v %s", err, data)
 	}
 	// A binary SFTP response must have no wrapper text preceding its framing.
 	sftp, err := client.NewSession()
@@ -481,63 +483,102 @@ func TestSSHBackendLive(t *testing.T) {
 	if data := run("cat /srv/app/sftp-upload", 0); !bytes.Equal(data, sftpPayload) {
 		t.Fatalf("SFTP file bytes changed: %q", data)
 	}
-	// Read private records through the container's root, never broaden modes.
-	records, err := backendDocker(10*time.Second, "exec", name, "/bin/sh", "-c", `cat /var/log/ssh-backend/uid-*/*.json`)
+	// The capture so far, converted as the control plane does it. Replaying
+	// the same container output again later must rewrite the same files.
+	evidence := t.TempDir()
+	converter := sshcapture.DockerConverter(func(context.Context) (func(), error) { return func() {}, nil })
+	target := sshcapture.Target{Service: "ssh-backend-live", Container: name, Dir: func() (string, error) { return evidence, nil }}
+	drain := func() {
+		t.Helper()
+		ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+		defer cancel()
+		if err := converter.Drain(ctx, target); err != nil {
+			t.Fatalf("convert the capture: %v", err)
+		}
+	}
+	drain()
+	if data, err := os.ReadFile(filepath.Join(evidence, sshcapture.AuthLog)); err != nil || !bytes.Contains(data, []byte("Accepted publickey for operator")) {
+		t.Fatalf("sshd's authentication log: %v %q", err, data)
+	}
+	finished := map[string]sshcapture.SessionEvent{}
+	starts := 0
+	readEvidence := func(file string) []byte {
+		t.Helper()
+		data, err := os.ReadFile(filepath.Join(evidence, file))
+		if err != nil {
+			t.Fatal(err)
+		}
+		return data
+	}
+	records, err := filepath.Glob(filepath.Join(evidence, "uid-*", "*.json"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	decoder := json.NewDecoder(bytes.NewReader(records))
-	seenOperator := false
-	seenStartup, seenRestricted, seenBinary, seenSFTP, seenPostChange := false, false, false, false, false
-	count := 0
-	for {
-		var event SessionEvent
-		if err := decoder.Decode(&event); err == io.EOF {
-			break
-		} else if err != nil {
+	for _, record := range records {
+		data, err := os.ReadFile(record)
+		if err != nil {
 			t.Fatal(err)
 		}
-		count++
-		if event.SessionID != connection.SessionID || event.SrcIP != connection.SrcIP || event.Attribution != "broker-cell" || event.PeerIP != "127.0.0.1" {
-			t.Fatalf("source context/actual peer: %+v", event)
+		info, err := os.Stat(record)
+		if err != nil || info.Mode().Perm() != 0o600 {
+			t.Fatalf("record %s is not private: %v %v", record, info, err)
 		}
-		if event.Username == "operator" && strings.Contains(event.Stdout, "operator-output") && strings.Contains(event.Stderr, "operator-error") {
-			seenOperator = true
-		}
-		if event.Phase != "finish" {
-			continue
-		}
-		if event.Input == "printf startup-command" && event.Stderr == "startup-recorded" && event.Stdout == "startup-command" {
-			seenStartup = true
-		}
-		if event.Input == "printf restricted-key" && event.Stdout == "restricted-key" {
-			seenRestricted = true
-		}
-		if event.Input == "printf post-chsh-recorded" && event.Stdout == "post-chsh-recorded" {
-			seenPostChange = true
-		}
-		var wantInput []byte
-		if event.Input == "cat # binary-stdin-capture" {
-			seenBinary, wantInput = true, binaryInput
-		} else if event.Input == "/usr/lib/openssh/sftp-server" {
-			seenSFTP, wantInput = true, sftpInput.Bytes()
-		}
-		if wantInput != nil {
-			if !event.StdinRecorded || event.InputFile == "" || filepath.Base(event.InputFile) != event.InputFile || event.Truncated || event.CaptureError != "" {
-				t.Fatalf("incomplete input archive: %+v", event)
+		decoder := json.NewDecoder(bytes.NewReader(data))
+		for {
+			var event sshcapture.SessionEvent
+			if err := decoder.Decode(&event); err == io.EOF {
+				break
+			} else if err != nil {
+				t.Fatal(err)
 			}
-			inputPath := fmt.Sprintf("%s/uid-%d/%s", LogDirectory, event.UID, event.InputFile)
-			data, err := backendDocker(10*time.Second, "exec", name, "/bin/cat", inputPath)
-			if err != nil || !bytes.Equal(data, wantInput) {
-				t.Fatalf("archived stdin differs for %q: got %d want %d err %v", event.Input, len(data), len(wantInput), err)
+			if event.PeerIP != "127.0.0.1" || event.Attribution != "peer-only" || event.Username == "" ||
+				filepath.Base(filepath.Dir(record)) != fmt.Sprintf("uid-%d", event.UID) {
+				t.Fatalf("record origin: %+v", event)
 			}
+			if event.Phase == "start" {
+				starts++
+				continue
+			}
+			finished[event.Input] = event
 		}
 	}
-	if count < 10 || !seenOperator || !seenStartup || !seenRestricted || !seenBinary || !seenSFTP || !seenPostChange {
-		t.Fatalf("private JSONL capture: count=%d nonroot=%v startup=%v restricted=%v binary=%v sftp=%v post-chsh=%v", count, seenOperator, seenStartup, seenRestricted, seenBinary, seenSFTP, seenPostChange)
+	want := func(input, user string, code int, stdout, stderr string) sshcapture.SessionEvent {
+		t.Helper()
+		event, ok := finished[input]
+		if !ok || event.Username != user || event.ExitCode == nil || *event.ExitCode != code ||
+			event.Stdout != stdout || event.Stderr != stderr || event.Truncated || event.CaptureError != "" {
+			t.Fatalf("record of %q: %+v (found %v)", input, event, ok)
+		}
+		if got := readEvidence(filepath.Join(fmt.Sprintf("uid-%d", event.UID), event.StdoutFile)); string(got) != stdout {
+			t.Fatalf("%q output file %q", input, got)
+		}
+		return event
 	}
-	// A real container teardown must retain the START record, without adding a
-	// fabricated finish/success after the recording process has been killed.
+	want(`printf 'operator-output\n'; printf 'operator-error\n' >&2`, "operator", 0, "operator-output\n", "operator-error\n")
+	want("printf startup-command", "operator", 0, "startup-command", "startup-recorded")
+	want("printf restricted-key", "operator", 0, "restricted-key", "")
+	want("printf post-chsh-recorded", "operator", 0, "post-chsh-recorded", "")
+	want(`printf 'new-account-output\n'; test ! -r /srv/app/state`, "analyst", 0, "new-account-output\n", "")
+	ptyEvent, ok := finished[`read -r reply; printf 'pty:%s\n' "$reply"; exit 3`]
+	if !ok || ptyEvent.Username != "root" || ptyEvent.ExitCode == nil || *ptyEvent.ExitCode != 3 || !strings.Contains(ptyEvent.Stdout, "pty:sample-input") ||
+		!ptyEvent.PTY || ptyEvent.TimingFile == "" || len(readEvidence(filepath.Join("uid-0", ptyEvent.TimingFile))) == 0 ||
+		string(readEvidence(filepath.Join("uid-0", ptyEvent.InputFile))) != "sample-input\n" {
+		t.Fatalf("PTY session record: %+v", ptyEvent)
+	}
+	for input, wantInput := range map[string][]byte{"cat # binary-stdin-capture": binaryInput, "/usr/lib/openssh/sftp-server": sftpInput.Bytes()} {
+		event, ok := finished[input]
+		if !ok || !event.StdinRecorded || event.InputFile == "" || event.Truncated || event.CaptureError != "" {
+			t.Fatalf("incomplete input archive for %q: %+v", input, event)
+		}
+		if data := readEvidence(filepath.Join(fmt.Sprintf("uid-%d", event.UID), event.InputFile)); !bytes.Equal(data, wantInput) {
+			t.Fatalf("archived stdin differs for %q: got %d want %d", input, len(data), len(wantInput))
+		}
+	}
+	if len(finished) < 10 || starts != len(records) {
+		t.Fatalf("capture: %d finished commands, %d starts in %d records", len(finished), starts, len(records))
+	}
+	// A real container teardown keeps the start record, without a fabricated
+	// finish: the converter only finishes what sshd saw end.
 	abrupt, err := client.NewSession()
 	if err != nil {
 		t.Fatal(err)
@@ -545,53 +586,53 @@ func TestSSHBackendLive(t *testing.T) {
 	if err := abrupt.Start("sleep 30"); err != nil {
 		t.Fatal(err)
 	}
-	var abruptPath string
-	for until := time.Now().Add(5 * time.Second); time.Now().Before(until); {
-		data, readErr := backendDocker(3*time.Second, "exec", name, "/bin/sh", "-c", `cat /var/log/ssh-backend/uid-0/*.json`)
-		if readErr == nil {
-			dec := json.NewDecoder(bytes.NewReader(data))
-			for {
-				var event SessionEvent
-				if dec.Decode(&event) != nil {
-					break
-				}
-				if event.Input == "sleep 30" && event.Phase == "start" {
-					base := strings.TrimSuffix(event.StdoutFile, ".out") + ".json"
-					if filepath.Base(base) != base {
-						t.Fatal("invalid record path")
-					}
-					abruptPath = "/target/uid-0/" + base
-					break
-				}
+	probe := t.TempDir()
+	probeTarget := sshcapture.Target{Service: "ssh-backend-live", Container: name, Dir: func() (string, error) { return probe, nil }}
+	opened := false
+	for until := time.Now().Add(5 * time.Second); time.Now().Before(until) && !opened; time.Sleep(50 * time.Millisecond) {
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		err := converter.Drain(ctx, probeTarget)
+		cancel()
+		if err != nil {
+			t.Fatal(err)
+		}
+		files, _ := filepath.Glob(filepath.Join(probe, "uid-0", "*.json"))
+		for _, file := range files {
+			if data, err := os.ReadFile(file); err == nil && bytes.Contains(data, []byte(`"input":"sleep 30"`)) {
+				opened = true
 			}
 		}
-		if abruptPath != "" {
-			break
-		}
-		time.Sleep(10 * time.Millisecond)
 	}
-	if abruptPath == "" {
-		t.Fatal("long command did not persist its START record")
+	if !opened {
+		t.Fatal("the long command's open record never reached the container output")
 	}
 	if output, err := backendDocker(10*time.Second, "kill", "--signal", "KILL", name); err != nil {
 		t.Fatalf("owned abrupt teardown: %v %s", err, output)
 	}
 	_ = abrupt.Wait()
 	_ = abrupt.Close()
-	data, err := backendDocker(10*time.Second, "run", "--rm", "--network", "none", "--read-only", "--cap-drop", "ALL", "--security-opt", "no-new-privileges", "--user", "0:0", "--entrypoint", "/bin/cat", "--mount", "type=bind,src="+logs+",dst=/target,readonly", image, abruptPath)
-	if err != nil {
-		t.Fatal(err)
+	drain()
+	again, err := filepath.Glob(filepath.Join(evidence, "uid-*", "*.json"))
+	if err != nil || len(again) != len(records)+1 {
+		t.Fatalf("replay changed the records: %d then %d (%v)", len(records), len(again), err)
 	}
-	var start SessionEvent
-	dec := json.NewDecoder(bytes.NewReader(data))
-	if err := dec.Decode(&start); err != nil || start.Phase != "start" || start.ExitCode != nil {
-		t.Fatalf("invalid aborted start: %s", data)
+	for _, record := range again {
+		data, err := os.ReadFile(record)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !bytes.Contains(data, []byte(`"input":"sleep 30"`)) {
+			if lines := bytes.Count(data, []byte("\n")); lines != 2 {
+				t.Fatalf("replay duplicated or lost a record line in %s: %d lines", record, lines)
+			}
+			continue
+		}
+		var start sshcapture.SessionEvent
+		if err := json.Unmarshal(bytes.TrimSpace(data), &start); err != nil || start.Phase != "start" || start.ExitCode != nil {
+			t.Fatalf("abrupt teardown fabricated a finish: %s", data)
+		}
 	}
-	var fabricated SessionEvent
-	if err := dec.Decode(&fabricated); err != io.EOF {
-		t.Fatalf("abrupt teardown fabricated finish: %s", data)
-	}
-	t.Logf("real SSH state, users, offline package, non-root capture, SFTP and trusted context passed; %d command records", count)
+	t.Logf("real SSH state, users, offline package, clean guest, sshd capture, SFTP and replay passed; %d command records", len(again))
 }
 
 func backendUint32(value uint32) []byte {
@@ -602,39 +643,6 @@ func backendUint32(value uint32) []byte {
 
 func backendString(value []byte) []byte {
 	return append(backendUint32(uint32(len(value))), value...)
-}
-
-func backendMappedOwner(t *testing.T, image string) string {
-	t.Helper()
-	var ids []string
-	for _, item := range []struct {
-		name string
-		host int
-	}{{"uid", os.Getuid()}, {"gid", os.Getgid()}} {
-		data, err := backendDocker(20*time.Second, "run", "--rm", "--network", "none", "--cap-drop", "ALL", "--security-opt", "no-new-privileges", "--entrypoint", "/bin/cat", image, "/proc/self/"+item.name+"_map")
-		if err != nil {
-			t.Fatalf("read%smap: %v %s", item.name, err, data)
-		}
-		mapped := ""
-		for _, line := range strings.Split(string(data), "\n") {
-			fields := strings.Fields(line)
-			if len(fields) != 3 {
-				continue
-			}
-			inside, a := strconv.ParseUint(fields[0], 10, 64)
-			outside, b := strconv.ParseUint(fields[1], 10, 64)
-			count, c := strconv.ParseUint(fields[2], 10, 64)
-			if a == nil && b == nil && c == nil && item.host >= 0 && uint64(item.host) >= outside && uint64(item.host)-outside < count {
-				mapped = strconv.FormatUint(inside+uint64(item.host)-outside, 10)
-				break
-			}
-		}
-		if mapped == "" {
-			t.Fatalf("task%s%d is not mapped by Docker; cannot privately clean fixture", item.name, item.host)
-		}
-		ids = append(ids, mapped)
-	}
-	return strings.Join(ids, ":")
 }
 
 func backendDocker(timeout time.Duration, args ...string) ([]byte, error) {

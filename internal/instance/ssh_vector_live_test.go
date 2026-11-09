@@ -67,6 +67,8 @@ func TestHiFiVectorEvidenceLive(t *testing.T) {
 		base + "ssh-backend-1/archive-g7-Ab12/logs/0/events.json\t" + `{"timestamp":"2026-11-09T00:00:02Z","event_type":"ssh_backend_command","src_ip":"203.0.113.24","src_port":40001,"session_id":"outer-1","session":"capture-1","generation":7,"phase":"finish","input":"hostname","exit_code":0,"duration_ms":3,"stdout":"sensitive-response-only","stdout_file":"0/capture-1.stdout","truncated":false}`,
 		base + "ssh-backend-2-backup/current/1000/events.json\t" + `{"event_type":"ssh_backend_command","src_ip":"172.26.0.10","src_port":40002,"input":"ls /srv/backups","session_id":"outer-2","generation":4,"phase":"finish","exit_code":1,"attribution":"broker_context","attribution_error":"","stderr":"response-only"}`,
 		base + "ssh-backend-1-db/archive-g7-X9/logs/queries.json\t" + `{"timestamp":"2026-11-09T00:00:03Z","remote_host":"172.25.0.10","remote_port":41000,"user":"postgres","session_id":"pg-123","message":"statement: SELECT * FROM assets","cell":"forged"}`,
+		// The broker's connect record only joins sessions on the host.
+		"/data/honeypots/ssh-proxy/logs/broker/sessions.json\t" + `{"timestamp":"2026-11-09T00:00:00Z","event_type":"ssh_proxy_connect","honeypot":"ssh-proxy","src_ip":"203.0.113.24","src_port":40001,"backend":"ssh-backend-1","session_id":"outer-1","generation":7,"backend_port":51000}`,
 		// Startup/health checks, malformed paths and unrelated guest JSON are dropped.
 		base + "ssh-backend-1-db/current/queries.json\t" + `{"remote_host":"127.0.0.1","message":"statement: SELECT 1"}`,
 		base + "ssh-backend-1-db/current/queries.json\t" + `{"remote_host":"","message":"database system is ready"}`,

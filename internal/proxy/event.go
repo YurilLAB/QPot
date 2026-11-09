@@ -48,7 +48,7 @@ type Event struct {
 	SrcIP     string `json:"src_ip"`               // attacker IP (from RemoteAddr)
 	SrcPort   int    `json:"src_port"`             // attacker source port
 	Backend   string `json:"backend,omitempty"`    // backend id the session was spliced to
-	SessionID string `json:"session_id,omitempty"` // connection correlation shared with the own-cell recorder
+	SessionID string `json:"session_id,omitempty"` // connection id; the host joins backend session records to it
 	// Generation is the trusted counter snapshot from this lease or startup
 	// quarantine request. A pointer keeps generation zero distinct from legacy
 	// events that carry no generation at all.
@@ -60,6 +60,10 @@ type Event struct {
 	// Suppressed counts the rejections not logged (thinned) since the previous
 	// rejection line, so a flood that exhausts the log budget is still recorded.
 	Suppressed int64 `json:"suppressed,omitempty"`
+	// BackendPort is the broker's own port on its connection to the backend:
+	// the peer port the backend's sshd records, which joins its session
+	// capture to this connection on the host.
+	BackendPort int `json:"backend_port,omitempty"`
 }
 
 // Event type constants. These are stable strings the analytics layer keys on.
@@ -72,6 +76,9 @@ const (
 	// EventBackendError is a connection accepted but for which the backend dial
 	// failed — an operational signal (backend down), not attacker-controlled.
 	EventBackendError = "ssh_proxy_backend_error"
+	// EventConnect records a connection reaching its backend, before any byte
+	// is forwarded. The collector drops it; the host's capture converter reads it.
+	EventConnect = "ssh_proxy_connect"
 )
 
 // Reasons a connection is rejected or torn down. Kept as constants so dashboards
@@ -85,7 +92,6 @@ const (
 	ReasonPerIPCap             = "max_concurrent_per_ip_reached"
 	ReasonPoolExhausted        = "no_backend_available"
 	ReasonBackendDialError     = "backend_dial_failed"
-	ReasonBackendContextError  = "backend_context_failed"
 	ReasonStartupReset         = "startup_reset"
 	ReasonIdleTimeout          = "idle_timeout"
 	ReasonSessionTimeout       = "max_session_reached"

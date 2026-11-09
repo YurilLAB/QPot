@@ -1,0 +1,181 @@
+Description: Capture session plaintext for a disposable honeypot backend
+ When sshd logs to its standard error (-e) and that is a pipe, each
+ authenticated session process writes its session channels' input, output
+ and exit status there as single-write records, beside its log lines. No
+ descriptor is added to any process. Otherwise nothing changes.
+Forwarded: not-needed
+---
+--- a/channels.c
++++ b/channels.c
+@@ -694,6 +694,8 @@
+ 	}
+ }
+ 
++void (*channel_data_observer)(int, int, const u_char *, size_t);
++
+ /* Free the channel and close its fd/socket. */
+ void
+ channel_free(struct ssh *ssh, Channel *c)
+@@ -704,6 +706,8 @@
+ 	Channel *other;
+ 	struct channel_confirm *cc;
+ 
++	if (channel_data_observer != NULL)
++		channel_data_observer(c->self, CHANNEL_OBSERVE_FREED, NULL, 0);
+ 	for (n = 0, i = 0; i < sc->channels_alloc; i++) {
+ 		if ((other = sc->channels[i]) == NULL)
+ 			continue;
+@@ -2044,7 +2048,7 @@
+ 	char buf[CHAN_RBUF];
+ 	ssize_t len;
+ 	int r, force;
+-	size_t nr = 0, have, avail, maxlen = CHANNEL_MAX_READ;
++	size_t nr = 0, have, avail, before, maxlen = CHANNEL_MAX_READ;
+ 	int pty_zeroread = 0;
+ 
+ #ifdef PTY_ZEROREAD
+@@ -2073,6 +2077,7 @@
+ 		}
+ 		if (maxlen > avail)
+ 			maxlen = avail;
++		before = sshbuf_len(c->input);
+ 		if ((r = sshbuf_read(c->rfd, c->input, maxlen, &nr)) != 0) {
+ 			if (errno == EINTR || (!force &&
+ 			    (errno == EAGAIN || errno == EWOULDBLOCK)))
+@@ -2081,8 +2086,12 @@
+ 			    c->self, c->rfd, maxlen, ssh_err(r));
+ 			goto rfail;
+ 		}
+-		if (nr != 0)
++		if (nr != 0) {
+ 			c->lastused = monotime();
++			if (channel_data_observer != NULL)
++				channel_data_observer(c->self, CHANNEL_OBSERVE_OUT,
++				    sshbuf_ptr(c->input) + before, nr);
++		}
+ 		return 1;
+ 	}
+ 
+@@ -2109,6 +2118,8 @@
+ 		return -1;
+ 	}
+ 	c->lastused = monotime();
++	if (channel_data_observer != NULL)
++		channel_data_observer(c->self, CHANNEL_OBSERVE_OUT, buf, len);
+ 	if (c->input_filter != NULL) {
+ 		if (c->input_filter(ssh, c, buf, len) == -1) {
+ 			debug2("channel %d: filter stops", c->self);
+@@ -2190,6 +2201,8 @@
+ 		return -1;
+ 	}
+ 	c->lastused = monotime();
++	if (channel_data_observer != NULL)
++		channel_data_observer(c->self, CHANNEL_OBSERVE_IN, buf, len);
+ #ifndef BROKEN_TCGETATTR_ICANON
+ 	if (c->isatty && dlen >= 1 && buf[0] != '\r') {
+ 		if (tcgetattr(c->wfd, &tio) == 0 &&
+@@ -2266,6 +2279,9 @@
+ 		return 1;
+ 	}
+ 	c->lastused = monotime();
++	if (channel_data_observer != NULL &&
++	    c->extended_usage == CHAN_EXTENDED_READ)
++		channel_data_observer(c->self, CHANNEL_OBSERVE_ERR, buf, len);
+ 	if (c->extended_usage == CHAN_EXTENDED_IGNORE)
+ 		debug3("channel %d: discard efd", c->self);
+ 	else if ((r = sshbuf_put(c->extended, buf, len)) != 0)
+--- a/channels.h
++++ b/channels.h
+@@ -288,6 +288,13 @@
+ void	 channel_set_fds(struct ssh *, int, int, int, int, int,
+ 	    int, int, u_int);
+ void	 channel_free(struct ssh *, Channel *);
++
++/* Optional observer of session channel plaintext (sshd sets it). */
++#define CHANNEL_OBSERVE_OUT	0
++#define CHANNEL_OBSERVE_IN	1
++#define CHANNEL_OBSERVE_ERR	2
++#define CHANNEL_OBSERVE_FREED	3
++extern void (*channel_data_observer)(int, int, const u_char *, size_t);
+ void	 channel_free_all(struct ssh *);
+ void	 channel_stop_listening(struct ssh *);
+ void	 channel_force_close(struct ssh *, Channel *, int);
+--- a/Makefile.in
++++ b/Makefile.in
+@@ -122,7 +122,7 @@
+ SSHDOBJS=sshd.o auth-rhosts.o auth-passwd.o \
+ 	audit.o audit-bsm.o audit-linux.o platform.o \
+ 	sshpty.o sshlogin.o servconf.o serverloop.o \
+-	auth.o auth2.o auth-options.o session.o \
++	auth.o auth2.o auth-options.o session.o qpcapture.o \
+ 	auth2-chall.o groupaccess.o \
+ 	auth-bsdauth.o auth2-hostbased.o auth2-kbdint.o \
+ 	auth2-none.o auth2-passwd.o auth2-pubkey.o auth2-pubkeyfile.o \
+--- a/session.c
++++ b/session.c
+@@ -95,6 +95,7 @@
+ #include "monitor_wrap.h"
+ #include "sftp.h"
+ #include "atomicio.h"
++#include "qpcapture.h"
+ 
+ #if defined(KRB5) && defined(USE_AFS)
+ #include <kafs.h>
+@@ -705,6 +706,9 @@
+ 	    ssh_remote_port(ssh),
+ 	    s->self);
+ 
++	qpcapture_open(ssh, s->chanid, s->pw, command, s->ttyfd != -1,
++	    s->is_subsystem != 0);
++
+ #ifdef SSH_AUDIT_EVENTS
+ 	if (command != NULL)
+ 		PRIVSEP(audit_run_command(command));
+@@ -2387,6 +2391,8 @@
+ 	debug_f("session %d channel %d pid %ld",
+ 	    s->self, s->chanid, (long)s->pid);
+ 
++	qpcapture_exit(s->chanid, status);
++
+ 	if (WIFEXITED(status)) {
+ 		channel_request_start(ssh, s->chanid, "exit-status", 0);
+ 		if ((r = sshpkt_put_u32(ssh, WEXITSTATUS(status))) != 0 ||
+--- a/sshd.c
++++ b/sshd.c
+@@ -131,6 +131,7 @@
+ #include "ssherr.h"
+ #include "sk-api.h"
+ #include "srclimit.h"
++#include "qpcapture.h"
+ #include "dh.h"
+ 
+ #ifdef LIBWRAP
+@@ -541,6 +542,7 @@
+ 		/* child */
+ 		close(pmonitor->m_sendfd);
+ 		close(pmonitor->m_log_recvfd);
++		qpcapture_drop();
+ 
+ 		/* Arrange for logging to be sent to the monitor */
+ 		set_log_handler(mm_log_handler, pmonitor);
+@@ -1767,9 +1769,10 @@
+ 		rexec_flag = 0;
+ 	if (!test_flag && rexec_flag && !path_absolute(av[0]))
+ 		fatal("sshd re-exec requires execution with an absolute path");
+-	if (rexeced_flag)
++	if (rexeced_flag) {
+ 		closefrom(REEXEC_MIN_FREE_FD);
+-	else
++		qpcapture_child_setup(log_stderr);
++	} else
+ 		closefrom(REEXEC_DEVCRYPTO_RESERVED_FD);
+ 
+ 	seed_rng();
+@@ -2396,6 +2399,7 @@
+ 		privsep_postauth(ssh, authctxt);
+ 		/* the monitor process [priv] will not return */
+ 	}
++	qpcapture_session_init();
+ 
+ 	ssh_packet_set_timeout(ssh, options.client_alive_interval,
+ 	    options.client_alive_count_max);

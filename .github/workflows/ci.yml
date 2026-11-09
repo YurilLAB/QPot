@@ -606,9 +606,7 @@ jobs:
           shellcheck -S error \
             install.sh deploy.sh update.sh uninstall.sh genuser.sh \
             scripts/install.sh scripts/distro-smoke.sh scripts/test-makefile.sh scripts/test-install.sh \
-            scripts/ci-local.sh scripts/test-hifi.sh \
-            docker/ssh-backend/files/entrypoint.sh \
-            docker/ssh-backend/files/rec-shell.sh
+            scripts/ci-local.sh scripts/test-hifi.sh
           echo "shellcheck (error level) clean"
 
   actionlint:

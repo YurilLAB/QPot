@@ -18,7 +18,6 @@ import (
 	"github.com/qpot/qpot/internal/config"
 	"github.com/qpot/qpot/internal/refrigeration"
 	"github.com/qpot/qpot/internal/security"
-	"github.com/qpot/qpot/internal/sshbackend"
 	"github.com/qpot/qpot/internal/vectorstate"
 )
 
@@ -688,8 +687,8 @@ services:
 {{template "honeypot" dict "Name" $name "HP" $hp "Config" $.Config "Sandbox" $.Sandbox}}
 {{end}}{{end}}
 {{if sshOrganizationEnabled .Config}}{{$cellLimits := .Config.GetEffectiveResourceLimits "ssh-proxy"}}{{range $c := sshOrgCells .Config}}
-{{template "sshbackend" dict "Service" $c.App "Config" $.Config "Sandbox" $.Sandbox "Network" $c.Network "Offset" 10 "Hostname" $c.AppHostname "Aliases" $c.AppAliases "Users" (sshBackendUsersCSV $.Config) "KeyDir" (sshSharedKeys $.Config) "Scene" $c.AppSceneJSON "Database" $c.Database "Backup" $c.Backup "ContextDir" $c.ContextDir}}
-{{template "sshbackend" dict "Service" $c.Backup "Config" $.Config "Sandbox" $.Sandbox "Network" $c.Network "Offset" 30 "Hostname" $c.BackupHostname "Aliases" $c.BackupAliases "Users" $c.BackupUsersCSV "KeyDir" $c.BackupKeyDir "Scene" $c.BackupSceneJSON "ContextDir" $c.ContextDir}}
+{{template "sshbackend" dict "Service" $c.App "Config" $.Config "Sandbox" $.Sandbox "Network" $c.Network "Offset" 10 "Hostname" $c.AppHostname "Aliases" $c.AppAliases "Users" (sshBackendUsersCSV $.Config) "KeyDir" (sshSharedKeys $.Config) "Scene" $c.AppSceneJSON "Database" $c.Database "Backup" $c.Backup}}
+{{template "sshbackend" dict "Service" $c.Backup "Config" $.Config "Sandbox" $.Sandbox "Network" $c.Network "Offset" 30 "Hostname" $c.BackupHostname "Aliases" $c.BackupAliases "Users" $c.BackupUsersCSV "KeyDir" $c.BackupKeyDir "Scene" $c.BackupSceneJSON}}
   {{$c.Database}}:
     image: {{$c.DBImage}}
     container_name: {{$.Config.InstanceName}}_{{$c.Database}}
@@ -749,7 +748,7 @@ services:
         max-size: "10m"
         max-file: "3"
 {{end}}{{else if sshProxyEnabled .Config}}{{range $b := sshProxyBackends .Config}}
-{{template "sshbackend" dict "Service" $b.Service "Config" $.Config "Sandbox" $.Sandbox "Network" $b.Network "Offset" 10 "Hostname" (sshBackendHostname $.Config) "Users" $b.UsersCSV "KeyDir" (sshSharedKeys $.Config) "ContextDir" (sshCellContext $.Config $b.Service)}}
+{{template "sshbackend" dict "Service" $b.Service "Config" $.Config "Sandbox" $.Sandbox "Network" $b.Network "Offset" 10 "Hostname" (sshBackendHostname $.Config) "Users" $b.UsersCSV "KeyDir" (sshSharedKeys $.Config)}}
 {{end}}{{end}}
 {{if tannerEnabled .Config}}{{range $c := tannerCompanions}}
   # tanner stack companion ({{$c.Role}}); see the tanner deploy profile.
@@ -829,15 +828,16 @@ services:
     container_name: {{.Config.InstanceName}}_{{.Service}}
     hostname: {{yamlStr .Hostname}}
     restart: on-failure:{{.Config.Security.ResourceLimits.RestartAttempts}}
-    entrypoint: ["/usr/local/libexec/session-audit", "serve"]
     depends_on:
       netguard:
         condition: service_healthy
       {{- if .Database}}
       {{.Database}}:
         condition: service_healthy
+      # Started, not healthy: a check inside the guest would show in its
+      # process list. The broker leases a cell only once its banner answers.
       {{.Backup}}:
-        condition: service_healthy
+        condition: service_started
       {{- end}}
     {{- if .Sandbox.ContainerRuntime}}
     runtime: {{.Sandbox.ContainerRuntime}}
@@ -859,25 +859,20 @@ services:
       {{- if .Scene}}
       - {{envEntry "BACKEND_SCENE" .Scene}}
       {{- end}}
-    volumes:
-      - {{yamlStr (printf "%s:%s:ro" .KeyDir (sshHostKeySource))}}
-      - {{yamlStr (printf "%s:/var/log/ssh-backend" (sshBackendLogDir .Config .Service))}}
-      - {{yamlStr (printf "%s:/run/audit-context:ro" .ContextDir)}}
+    # The pool's host keys, read by Compose from the private key folder: no
+    # host folder is mounted into the guest, whose mount table would name it.
+    env_file: [{{yamlStr (sshHostKeysEnvFile .KeyDir)}}]
     labels:
       qpot.instance: {{yamlStr .Config.InstanceName}}
       qpot.honeypot: "ssh-backend"
       qpot.role: "ssh"
     # Real accounts, packages and file edits use the disposable writable image
-    # layer. Only logs and protected host keys survive a whole-cell recreation.
+    # layer; nothing is mounted. sshd's log and its session capture leave on
+    # the container's error stream, which the control plane converts into the
+    # cell's evidence files (internal/sshcapture) before any recreation.
     security_opt: ["no-new-privileges:true"]
     cap_drop: ["ALL"]
     cap_add: ["SETUID", "SETGID", "CHOWN", "DAC_OVERRIDE", "FOWNER", "SETPCAP", "KILL", "SYS_CHROOT", "AUDIT_WRITE", "NET_BIND_SERVICE"]
-    healthcheck:
-      test: ["CMD", "/usr/local/libexec/session-audit", "health"]
-      interval: 2s
-      timeout: 3s
-      retries: 15
-      start_period: 10s
     deploy:
       resources:
         limits:
@@ -889,11 +884,13 @@ services:
           memory: {{if gt 32 $cellLimits.MaxMemoryMB}}{{$cellLimits.MaxMemoryMB}}{{else}}32{{end}}M
     mem_swappiness: 0
     oom_kill_disable: false
+    # Its log carries the session capture until the control plane converts
+    # it: room for a connection's whole capture (64 MiB, as base64).
     logging:
       driver: "json-file"
       options:
-        max-size: "10m"
-        max-file: "3"
+        max-size: "32m"
+        max-file: "4"
         labels: "qpot.instance,qpot.honeypot"
 {{end}}
 
@@ -963,9 +960,6 @@ services:
       {{- end}}
     {{- end}}
     {{- end}}
-    {{- if eq .Name "ssh-proxy"}}
-      - {{yamlStr (printf "%s:/run/audit-contexts" (sshStoreContextRoot $.Config))}}
-    {{- end}}
     networks:
       # Only its own network: the collector reads the honeypot's logs from the
       # bind mounts above, so nothing on qpot_internal (the database, the
@@ -1015,8 +1009,6 @@ services:
       # no SSRF) and the logical name used in the broker's session events.
       - QPOT_SSHPROXY_NAME=ssh-proxy
       - QPOT_SSHPROXY_LISTEN={{netAddress "ssh-proxy" 10}}:2222
-      - QPOT_SSHPROXY_CONTEXT_DIR=/run/audit-contexts
-      - QPOT_SSHPROXY_CONTEXT_NAMESPACE={{sshStoreNamespace $.Config}}
       {{- if sshBrokerHostReadable $.Config}}
       - QPOT_SSHPROXY_HOST_READABLE_LOG=1
       {{- end}}
@@ -1211,7 +1203,6 @@ services:
 	funcMap := template.FuncMap{
 		"yamlStr":                 yamlInterpolatedStr,
 		"runtimeProxyKeys":        runtimeProxyKeys,
-		"sshHostKeySource":        func() string { return sshbackend.HostKeySourceDirectory },
 		"conpotStart":             conpotStartScript,
 		"databaseHostPort":        func() int { return dbHostPort },
 		"sshProxyGenerationsPath": func() string { return sshProxyGenerationsPath },
@@ -1270,9 +1261,7 @@ services:
 		"sshBrokerLogDir":        sshBrokerLogDir,
 		"sshBrokerHostReadable":  sshBrokerHostReadable,
 		"sshSharedKeys":          sshStoreSharedKeys,
-		"sshCellContext":         sshStoreContext,
-		"sshStoreContextRoot":    sshStoreContextRoot,
-		"sshStoreNamespace":      sshStoreNamespace,
+		"sshHostKeysEnvFile":     sshHostKeysEnvFile,
 		"tannerEnabled":          tannerEnabled,
 		"tannerCompanions":       tannerCompanions,
 		"sshProxyBackends":       sshProxyBackends,
@@ -1589,6 +1578,13 @@ transforms:
         hp = string(m.hp) ?? "unknown"
       }
       .honeypot = hp
+
+      # The broker's connect record only joins backend sessions to visitors
+      # on the host (internal/sshcapture); its session event reports the
+      # connection itself.
+      if hp == "ssh-proxy" && starts_with(src_file, "/data/honeypots/ssh-proxy/logs/broker/") && (to_string(.event_type) ?? "") == "ssh_proxy_connect" {
+        abort
+      }
 
       # Native SSH evidence belongs to the configured HiFi sensor. Cell and
       # role come from the trusted file-source path, never from guest JSON.

@@ -94,6 +94,7 @@ func (r *BackendRecycler) composeRecreateLocked(ctx context.Context, service str
 	if err := stopSSHServices(ctx, r.ComposeFile, members); err != nil {
 		return err
 	}
+	drainSSHCaptures(ctx, filepath.Dir(r.ComposeFile), r.InstanceName, r.LogPath, members)
 	if err := archiveSSHCellLogs(filepath.Dir(r.ComposeFile), members, r.generation(service)); err != nil {
 		return err
 	}

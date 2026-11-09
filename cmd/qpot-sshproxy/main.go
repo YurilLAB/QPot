@@ -17,7 +17,6 @@
 //	QPOT_SSHPROXY_BACKENDS   REQUIRED, e.g. "be1=ssh-backend-1:22,be2=ssh-backend-2:22"
 //	QPOT_SSHPROXY_LOG        NDJSON session log path  (default "/var/log/ssh-proxy/sessions.json")
 //	QPOT_SSHPROXY_HOST_READABLE_LOG optional bool; generated private host storage only
-//	QPOT_SSHPROXY_CONTEXT_DIR own-cell attribution root (optional; requires generations)
 //	QPOT_SSHPROXY_IDLE       idle timeout             (default "15m")
 //	QPOT_SSHPROXY_MAXSESSION absolute session cap     (default "2h")
 //	QPOT_SSHPROXY_RATE_IP    new conns/sec per IP     (default "5")
@@ -68,18 +67,13 @@ func run() error {
 	}
 
 	cfg := proxy.Config{
-		Honeypot:         name,
-		IdleTimeout:      envDuration("QPOT_SSHPROXY_IDLE", 15*time.Minute),
-		MaxSession:       envDuration("QPOT_SSHPROXY_MAXSESSION", 2*time.Hour),
-		RatePerSecPerIP:  envFloat("QPOT_SSHPROXY_RATE_IP", 5),
-		BurstPerIP:       envFloat("QPOT_SSHPROXY_BURST_IP", 10),
-		MaxConcurrentIP:  envInt("QPOT_SSHPROXY_CONC_IP", 3),
-		MaxConcurrent:    envInt("QPOT_SSHPROXY_CONC", 128),
-		ContextDir:       os.Getenv("QPOT_SSHPROXY_CONTEXT_DIR"),
-		ContextNamespace: os.Getenv("QPOT_SSHPROXY_CONTEXT_NAMESPACE"),
-	}
-	if err := proxy.ValidateContextNamespace(cfg.ContextNamespace); err != nil {
-		return fmt.Errorf("QPOT_SSHPROXY_CONTEXT_NAMESPACE: %w", err)
+		Honeypot:        name,
+		IdleTimeout:     envDuration("QPOT_SSHPROXY_IDLE", 15*time.Minute),
+		MaxSession:      envDuration("QPOT_SSHPROXY_MAXSESSION", 2*time.Hour),
+		RatePerSecPerIP: envFloat("QPOT_SSHPROXY_RATE_IP", 5),
+		BurstPerIP:      envFloat("QPOT_SSHPROXY_BURST_IP", 10),
+		MaxConcurrentIP: envInt("QPOT_SSHPROXY_CONC_IP", 3),
+		MaxConcurrent:   envInt("QPOT_SSHPROXY_CONC", 128),
 	}
 
 	logFile, err := openSessionLog(logPath, hostReadableLog)
@@ -114,9 +108,6 @@ func run() error {
 		})
 	} else {
 		log.Printf("warning: QPOT_SSHPROXY_RECYCLE=off - backends are reused WITHOUT being reset between attackers")
-	}
-	if err := validateCaptureListener(cfg.ContextDir, listen, gate); err != nil {
-		return err
 	}
 	pool := startupPool(backends, reset, gate)
 	if gate != nil {
@@ -230,21 +221,6 @@ func openSessionLog(name string, hostReadable bool) (*os.File, error) {
 		}
 	}
 	return file, nil
-}
-
-func validateCaptureListener(contextDir, listen string, gate *proxy.GenerationGate) error {
-	if contextDir == "" {
-		return nil
-	}
-	if gate == nil {
-		return errors.New("QPOT_SSHPROXY_CONTEXT_DIR requires generation-gated backend recycling")
-	}
-	host, _, err := net.SplitHostPort(listen)
-	address := net.ParseIP(host)
-	if err != nil || address == nil || address.IsUnspecified() {
-		return errors.New("QPOT_SSHPROXY_CONTEXT_DIR requires QPOT_SSHPROXY_LISTEN bound to one concrete ingress IP")
-	}
-	return nil
 }
 
 func startupPool(backends []proxy.Backend, reset proxy.ResetFunc, gate *proxy.GenerationGate) *proxy.Pool {

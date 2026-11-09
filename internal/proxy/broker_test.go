@@ -42,6 +42,18 @@ func (c *capSink) wait(t *testing.T, typ string, d time.Duration) Event {
 	return Event{}
 }
 
+// find returns the first recorded event of the given type.
+func (c *capSink) find(typ string) (Event, bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	for _, e := range c.ev {
+		if e.EventType == typ {
+			return e, true
+		}
+	}
+	return Event{}, false
+}
+
 func (c *capSink) snapshot() []Event {
 	c.mu.Lock()
 	defer c.mu.Unlock()

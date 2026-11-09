@@ -677,21 +677,6 @@ func validateSSHStorePlan(cfg *config.Config) error {
 	return err
 }
 
-func sshStoreNamespace(cfg *config.Config) (string, error) {
-	store, err := planSSHStore(cfg)
-	return store.Namespace, err
-}
-
-func sshStoreContextRoot(cfg *config.Config) (string, error) {
-	store, err := planSSHStore(cfg)
-	return store.contextRoot(), err
-}
-
-func sshStoreContext(cfg *config.Config, service string) (string, error) {
-	store, err := planSSHStore(cfg)
-	return store.context(service), err
-}
-
 func sshStoreSharedKeys(cfg *config.Config) (string, error) {
 	store, err := planSSHStore(cfg)
 	return store.keys(false), err

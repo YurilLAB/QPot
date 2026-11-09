@@ -10,10 +10,14 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"gopkg.in/yaml.v3"
 )
 
-// This is a metadata-only proof with a real native image and genuine procfs.
-// It makes no SSH connection and grants no guest capabilities or host network.
+// This is a metadata-only proof with a real native image and genuine procfs:
+// a backend started as Compose starts it mounts nothing from the host, so its
+// mount table names no folder of the instance, its store or its secret
+// namespace. It makes no SSH connection and grants no guest capabilities.
 func TestSSHStoreNativeMountMetadataLive(t *testing.T) {
 	if os.Getenv("QPOT_TEST_DOCKER") != "1" {
 		t.Skip("set QPOT_TEST_DOCKER=1 for real kernel mount metadata")
@@ -29,17 +33,18 @@ func TestSSHStoreNativeMountMetadataLive(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	current := store.current("ssh-backend-1")
-	contextDir := store.context("ssh-backend-1")
-	keys := store.keys(false)
-	for _, dir := range []string{current, contextDir, keys} {
-		if err := os.MkdirAll(dir, 0o700); err != nil {
-			t.Fatal(err)
-		}
+	var doc struct {
+		Services map[string]struct {
+			Volumes []string `yaml:"volumes"`
+		} `yaml:"services"`
 	}
-	archive := filepath.Join(filepath.Dir(current), "archive-g1-123", "logs")
-	if err := os.MkdirAll(archive, 0o700); err != nil {
+	if err := yaml.Unmarshal([]byte(renderComposeCfg(t, cfg)), &doc); err != nil {
 		t.Fatal(err)
+	}
+	for _, service := range allSSHCellServiceNames(cfg) {
+		if sshCaptureService(service) && len(doc.Services[service].Volumes) != 0 {
+			t.Fatalf("%s mounts host folders: %v", service, doc.Services[service].Volumes)
+		}
 	}
 	image := os.Getenv("QPOT_TEST_SSH_BACKEND_IMAGE")
 	if image == "" {
@@ -51,48 +56,30 @@ func TestSSHStoreNativeMountMetadataLive(t *testing.T) {
 	if err != nil {
 		t.Fatalf("native image required: %v %s", err, id)
 	}
-	mounts := map[string]string{current: "/var/log/audit", contextDir: "/run/audit-context", keys: "/run/sshd/bootstrap/keys"}
-	args := []string{"run", "--rm", "--network", "none", "--read-only", "--cap-drop", "ALL", "--security-opt", "no-new-privileges"}
-	for _, host := range []string{current, contextDir, keys} {
-		mount := "type=bind,source=" + host + ",target=" + mounts[host]
-		if host != current {
-			mount += ",readonly"
-		}
-		args = append(args, "--mount", mount)
-	}
-	args = append(args, "--entrypoint", "/bin/cat", image, "/proc/self/mountinfo")
-	output, err := exec.CommandContext(ctx, "docker", args...).CombinedOutput()
+	output, err := exec.CommandContext(ctx, "docker", "run", "--rm", "--network", "none", "--cap-drop", "ALL", "--security-opt", "no-new-privileges", "--entrypoint", "/bin/cat", image, "/proc/self/mountinfo").CombinedOutput()
 	if err != nil {
 		t.Fatalf("actual native metadata read: %v %s", err, output)
 	}
-	observed := map[string]string{}
+	lines := 0
 	for _, line := range strings.Split(string(output), "\n") {
 		fields := strings.Fields(line)
 		if len(fields) < 6 {
 			continue
 		}
-		for host, target := range mounts {
-			if fields[4] != target {
-				continue
-			}
-			observed[target] = line
-			if !strings.Contains(line, filepath.ToSlash(host)) || strings.Contains(strings.ToLower(fields[3]), "qpot") || strings.Contains(strings.ToLower(fields[3]), "honeypot") || strings.Contains(line, "ssh-backend-1") || strings.Contains(line, "archive-g") || strings.Contains(line, store.Namespace) {
-				t.Fatalf("native bind source still exposes generated identity: %s", line)
-			}
-			readonly := strings.Contains(","+fields[5]+",", ",ro,")
-			if readonly != (host != current) {
-				t.Fatalf("wrong actual bind trust mode: %s", line)
-			}
+		lines++
+		lower := strings.ToLower(line)
+		if strings.Contains(line, filepath.ToSlash(cfg.DataPath)) || strings.Contains(line, filepath.ToSlash(store.Root)) || strings.Contains(line, store.Namespace) ||
+			strings.Contains(lower, "qpot") || strings.Contains(lower, "honeypot") || strings.Contains(line, "ssh-backend") || strings.Contains(line, "archive-g") {
+			t.Fatalf("the guest's mount table names the instance: %s", line)
 		}
 	}
-	if len(observed) != len(mounts) {
-		t.Fatalf("missing actual mounts: %v", observed)
+	if lines == 0 {
+		t.Fatalf("no mount table read: %s", output)
 	}
 	record := struct {
 		ImageID, Root string
-		Mounts        map[string]string
-		Observed      map[string]string
-	}{strings.TrimSpace(string(id)), store.Root, mounts, observed}
+		Mounts        int
+	}{strings.TrimSpace(string(id)), store.Root, lines}
 	data, err := json.MarshalIndent(record, "", "  ")
 	if err != nil {
 		t.Fatal(err)

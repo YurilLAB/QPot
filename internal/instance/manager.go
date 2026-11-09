@@ -325,6 +325,20 @@ func (m *Manager) Stop(ctx context.Context) error {
 // deletion. A false/unknown status probe never authorizes deleting a live bind.
 func (m *Manager) stopLocked(ctx context.Context) error {
 	composeFile := m.config.GetDockerComposePath()
+	// Removing a backend container loses its session capture: stop the cells
+	// first and convert what they still hold.
+	if layout, err := readSSHLayout(composeFile, m.config.InstanceName); err == nil && len(layout.Groups) > 0 {
+		var services []string
+		for _, members := range layout.Groups {
+			services = append(services, members...)
+		}
+		sort.Strings(services)
+		if err := stopSSHServices(ctx, composeFile, services); err != nil {
+			slog.Warn("SSH cells did not stop before the instance; their last sessions may be unconverted", "error", err)
+		} else if brokerLog, err := sshBrokerSessionLog(m.config); err == nil {
+			drainSSHCaptures(ctx, m.config.DataPath, m.config.InstanceName, brokerLog, services)
+		}
+	}
 	cmd := exec.CommandContext(ctx, "docker", "compose", "-f", composeFile, "down", "--remove-orphans")
 	cmd.Dir = m.config.DataPath
 
@@ -954,36 +968,12 @@ func (m *Manager) generateServiceConfigs() error {
 			}
 		}
 
-		// HiFi ssh-proxy: pre-create each real-OpenSSH backend's persisted
-		// host-key dir and log dir, so the bind mounts resolve to real
-		// directories owned by us (rather than docker creating them as root). The
-		// backend reads protected host keys through its read-only leaf mount;
-		// only its current recording directory is writable by guest accounts.
+		// HiFi ssh-proxy: prepare the pool's host keys (handed to each backend
+		// at start), the broker's log folder and each cell's evidence folder,
+		// which the control plane fills from the backends' session capture.
 		if name == sshProxyHoneypot {
 			if err := prepareSSHOrganization(m.config); err != nil {
 				return err
-			}
-			contextRoot, err := sshStoreContextRoot(m.config)
-			if err != nil {
-				return err
-			}
-			// The broker runs as its own user (65532) and opens this root
-			// through its mount. Store preparation makes the folder 0750, and
-			// MkdirAll keeps an existing folder's mode: set it, not ask for it.
-			if err := os.MkdirAll(filepath.Dir(contextRoot), 0o700); err != nil {
-				return fmt.Errorf("prepare SSH audit context directory: %w", err)
-			}
-			if err := ensureContainerDir(contextRoot, 0o755); err != nil {
-				return fmt.Errorf("prepare SSH audit context directory: %w", err)
-			}
-			for _, app := range sshBackendServiceNames(m.config) {
-				contextDir, err := sshStoreContext(m.config, app)
-				if err != nil {
-					return err
-				}
-				if err := ensureContainerDir(contextDir, 0o777); err != nil {
-					return fmt.Errorf("prepare SSH audit context slot: %w", err)
-				}
 			}
 			brokerLogs, err := sshBrokerLogDir(m.config)
 			if err != nil {
@@ -997,7 +987,7 @@ func (m *Manager) generateServiceConfigs() error {
 			}
 			// One SHARED host-key dir for the whole pool (so all backends present
 			// the same fingerprint), plus a per-backend log dir. The keys are
-			// generated here and the dir is mounted read-only into the backends.
+			// generated here, on the host, and copied into each backend at start.
 			keyDir, err := sshStoreSharedKeys(m.config)
 			if err != nil {
 				return err

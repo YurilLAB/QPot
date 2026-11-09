@@ -1,0 +1,268 @@
+package sshcapture
+
+import (
+	"context"
+	"fmt"
+	"io"
+	"log/slog"
+	"os"
+	"path/filepath"
+	"strings"
+	"sync"
+	"testing"
+	"time"
+)
+
+// fakeDocker serves one container. Its error stream carries log lines, the
+// capture records in two parts (the second released by the test) and a
+// final log fragment; its output stream carries noise that must be ignored.
+type fakeDocker struct {
+	mu       sync.Mutex
+	id       string
+	running  bool
+	capture  [][]byte
+	log      string // before the capture
+	tail     string // after it
+	noise    string // on the output stream
+	release  chan struct{}
+	streamed chan struct{}
+}
+
+func (d *fakeDocker) inspect(context.Context, string) (string, bool, error) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.id, d.running, nil
+}
+
+func (d *fakeDocker) stream(ctx context.Context, id string, follow bool) (io.ReadCloser, io.ReadCloser, func() error, error) {
+	outR, outW := io.Pipe()
+	errR, errW := io.Pipe()
+	half := len(d.capture) / 2
+	go func() {
+		_, _ = errW.Write([]byte(d.log))
+		for _, l := range d.capture[:half] {
+			_, _ = errW.Write(append(append([]byte(nil), l...), '\n'))
+		}
+		if follow && d.release != nil {
+			if d.streamed != nil {
+				close(d.streamed)
+			}
+			select {
+			case <-d.release:
+			case <-ctx.Done():
+			}
+		}
+		for _, l := range d.capture[half:] {
+			_, _ = errW.Write(append(append([]byte(nil), l...), '\n'))
+		}
+		_, _ = errW.Write([]byte(d.tail))
+		_ = errW.Close()
+	}()
+	go func() {
+		_, _ = outW.Write([]byte(d.noise))
+		_ = outW.Close()
+	}()
+	return outR, errR, func() error { return nil }, nil
+}
+
+func mutexLock(mu *sync.Mutex) Lock {
+	return func(context.Context) (func(), error) { mu.Lock(); return mu.Unlock, nil }
+}
+
+func testTarget(dir string) Target {
+	return Target{Service: "ssh-backend-1", Container: "qpot_ssh-backend-1", Dir: func() (string, error) { return dir, nil }}
+}
+
+func TestDrainWritesCompleteRecordsAndAuthLog(t *testing.T) {
+	e := newEmitter(testConn)
+	session(e)
+	// A record-shaped line that arrives as a log line (with sshd's carriage
+	// return) or on the output stream is not capture.
+	forged := newEmitter(strings.Repeat("f", 32))
+	forged.open(7, 0, false, 41007, "forged")
+	forged.rec(7, KindExit, 1, []byte("exit=0"))
+	forged.rec(7, KindClosed, 1, nil)
+	var asLog, onStdout strings.Builder
+	for _, l := range forged.lines {
+		asLog.Write(l)
+		asLog.WriteString("\r\n")
+		onStdout.Write(l)
+		onStdout.WriteString("\n")
+	}
+	d := &fakeDocker{id: testContainer, capture: e.lines,
+		log:   "Accepted password for root from 172.20.0.10 port 41000 ssh2\r\n" + asLog.String(),
+		tail:  "no newline at end",
+		noise: onStdout.String()}
+	var mu sync.Mutex
+	c := &Converter{Stream: d.stream, Inspect: d.inspect, Lock: mutexLock(&mu), Poll: time.Millisecond}
+	dir := t.TempDir()
+	if err := c.Drain(context.Background(), testTarget(dir)); err != nil {
+		t.Fatal(err)
+	}
+	files := snapshot(t, dir)
+	if files[AuthLog] != "Accepted password for root from 172.20.0.10 port 41000 ssh2\r\n"+asLog.String()+"no newline at end\n" {
+		t.Fatalf("auth log: %q", files[AuthLog])
+	}
+	want := t.TempDir()
+	apply(t, want, e.lines, nil)
+	got := snapshot(t, dir)
+	delete(got, AuthLog)
+	if fmt.Sprint(got) != fmt.Sprint(snapshot(t, want)) {
+		t.Fatalf("drain differs from a direct replay: %v", keys(got))
+	}
+}
+
+func TestFollowStopsWritingAfterAResetArchivesTheFolder(t *testing.T) {
+	e := newEmitter(testConn)
+	session(e)
+	e2 := newEmitter(strings.Repeat("e", 32))
+	e2.open(1, 0, false, 41001, "id")
+	e2.rec(1, KindExit, 1, []byte("exit=0"))
+	e2.rec(1, KindClosed, 1, nil)
+	d := &fakeDocker{id: testContainer, running: true, capture: append(e.lines, e2.lines...), release: make(chan struct{}), streamed: make(chan struct{})}
+	var mu sync.Mutex
+	c := &Converter{Stream: d.stream, Inspect: d.inspect, Lock: mutexLock(&mu), Poll: time.Millisecond, Logger: discardLogger()}
+	parent := t.TempDir()
+	dir := filepath.Join(parent, "current")
+	if err := os.Mkdir(dir, 0o777); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	finished := make(chan struct{})
+	go func() { c.Follow(ctx, testTarget(dir)); close(finished) }()
+	<-d.streamed
+	// Wait until the first half is on disk.
+	deadline := time.Now().Add(10 * time.Second)
+	for len(snapshot(t, dir)) == 0 {
+		if time.Now().After(deadline) {
+			t.Fatal("the follower wrote nothing")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	// A reset: under the lock, archive the folder and create a fresh one.
+	mu.Lock()
+	if err := os.Rename(dir, filepath.Join(parent, "archive-g1-x")); err != nil {
+		mu.Unlock()
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(dir, 0o777); err != nil {
+		mu.Unlock()
+		t.Fatal(err)
+	}
+	d.mu.Lock()
+	d.running = false
+	d.mu.Unlock()
+	mu.Unlock()
+	close(d.release)
+	time.Sleep(200 * time.Millisecond)
+	cancel()
+	<-finished
+	if files := snapshot(t, dir); len(files) != 0 {
+		t.Fatalf("the old container's capture leaked into the new folder: %v", keys(files))
+	}
+	if files := snapshot(t, filepath.Join(parent, "archive-g1-x")); len(files) == 0 {
+		t.Fatal("the archived folder lost the first half")
+	}
+}
+
+func TestFollowReplaysToTheSameFiles(t *testing.T) {
+	e := newEmitter(testConn)
+	session(e)
+	d := &fakeDocker{id: testContainer, running: false, capture: e.lines, log: "Server listening on 0.0.0.0 port 22.\r\n"}
+	var mu sync.Mutex
+	c := &Converter{Stream: d.stream, Inspect: d.inspect, Lock: mutexLock(&mu), Poll: time.Millisecond, Logger: discardLogger()}
+	dir := t.TempDir()
+	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
+	defer cancel()
+	c.Follow(ctx, testTarget(dir)) // a stopped container is replayed once
+	want := t.TempDir()
+	apply(t, want, e.lines, nil)
+	got := snapshot(t, dir)
+	delete(got, AuthLog)
+	if fmt.Sprint(got) != fmt.Sprint(snapshot(t, want)) {
+		t.Fatalf("follow differs from a direct replay: %v", keys(got))
+	}
+}
+
+func TestReadLinesTellsRecordsFromLogLines(t *testing.T) {
+	e := newEmitter(testConn)
+	e.open(1, 0, false, 41000, "id")
+	record := string(e.lines[0])
+	long := strings.Repeat("A", maxLogLine+10)
+	input := "first\r\n" + record + "\n" + long + "\n" + record + "\r\n" + "second\n" + record
+	out := make(chan streamLine, 10)
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go readLines(io.NopCloser(strings.NewReader(input)), out, &wg)
+	wg.Wait()
+	close(out)
+	var got []string
+	for l := range out {
+		got = append(got, fmt.Sprintf("%v:%q", l.record, l.data))
+	}
+	want := []string{
+		fmt.Sprintf("false:%q", "first\r\n"),
+		fmt.Sprintf("true:%q", record),
+		fmt.Sprintf("false:%q", record+"\r\n"), // a log line, whatever it says
+		fmt.Sprintf("false:%q", "second\n"),
+		fmt.Sprintf("false:%q", record+"\n"), // cut off at the end: not one whole write
+	}
+	if fmt.Sprint(got) != fmt.Sprint(want) {
+		t.Fatalf("lines:\n%v\nwant\n%v", got, want)
+	}
+}
+
+func TestBrokerIndex(t *testing.T) {
+	dir := t.TempDir()
+	log := filepath.Join(dir, "sessions.json")
+	gen := func(n uint64) string { return fmt.Sprintf("%d", n) }
+	line := func(ts, backend string, port int, src string, g uint64) string {
+		return fmt.Sprintf(`{"timestamp":%q,"event_type":"ssh_proxy_connect","honeypot":"ssh-proxy","src_ip":%q,"src_port":5000,"backend":%q,"session_id":"%032d","generation":%s,"backend_port":%d}`+"\n",
+			ts, src, backend, g, gen(g), port)
+	}
+	body := line("2026-11-09T10:00:00Z", "ssh-backend-1", 40000, "203.0.113.1", 1) +
+		`{"timestamp":"2026-11-09T10:00:01Z","event_type":"ssh_proxy_session","src_ip":"203.0.113.1","backend":"ssh-backend-1","backend_port":40000}` + "\n" +
+		"garbage\n" +
+		line("2026-11-09T11:00:00Z", "ssh-backend-1", 40000, "203.0.113.2", 2) // the port came round again
+	if err := os.WriteFile(log, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	x := NewBrokerIndex(log)
+	at := func(ts string) int64 { v, _ := time.Parse(time.RFC3339, ts); return v.UnixMilli() }
+	app := x.Attributor("ssh-backend-1", true)
+	for _, c := range []struct {
+		ts, want string
+		port     int
+		ok       bool
+	}{
+		{"2026-11-09T10:00:05Z", "203.0.113.1", 40000, true},
+		{"2026-11-09T11:30:00Z", "203.0.113.2", 40000, true},
+		{"2026-11-09T10:00:05Z", "", 40001, false},
+		{"2026-11-09T09:00:00Z", "", 40000, false}, // before any connect
+	} {
+		a, ok := app(Open{TimeMillis: at(c.ts), PeerPort: c.port})
+		if ok != c.ok || a.SrcIP != c.want {
+			t.Fatalf("%s port %d: %+v %v", c.ts, c.port, a, ok)
+		}
+	}
+	backup := x.Attributor("ssh-backend-1", false)
+	if a, ok := backup(Open{TimeMillis: at("2026-11-09T10:30:00Z"), PeerPort: 5555}); !ok || a.SrcIP != "203.0.113.1" || a.Generation == nil || *a.Generation != 1 {
+		t.Fatalf("backup attribution: %+v %v", a, ok)
+	}
+	if _, ok := x.Attributor("ssh-backend-2", true)(Open{TimeMillis: at("2026-11-09T12:00:00Z"), PeerPort: 40000}); ok {
+		t.Fatal("another cell's connection was used")
+	}
+	// Appended later: found on the miss-triggered refresh.
+	f, err := os.OpenFile(log, os.O_APPEND|os.O_WRONLY, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _ = f.WriteString(line("2026-11-09T12:00:00Z", "ssh-backend-2", 41000, "198.51.100.7", 4))
+	_ = f.Close()
+	if a, ok := x.Attributor("ssh-backend-2", true)(Open{TimeMillis: at("2026-11-09T12:00:01Z"), PeerPort: 41000}); !ok || a.SrcIP != "198.51.100.7" {
+		t.Fatalf("appended connect: %+v %v", a, ok)
+	}
+}
+
+func discardLogger() *slog.Logger { return slog.New(slog.NewTextHandler(io.Discard, nil)) }

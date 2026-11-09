@@ -1,0 +1,363 @@
+package sshcapture
+
+import (
+	"encoding/base64"
+	"encoding/json"
+	"fmt"
+	"os"
+	"path/filepath"
+	"sort"
+	"strings"
+	"testing"
+)
+
+const testContainer = "4f1c0de5a6b7c8d9e0f1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c2d3"
+
+// emitter writes capture lines the way the backend's sshd does.
+type emitter struct {
+	conn  string
+	seq   map[int]uint64
+	lines [][]byte
+}
+
+func newEmitter(conn string) *emitter { return &emitter{conn: conn, seq: map[int]uint64{}} }
+
+func (e *emitter) rec(ch int, kind Kind, ms int64, payload []byte) {
+	l := fmt.Sprintf("%s %d %d %c %d %s", e.conn, ch, e.seq[ch], kind, ms, base64.StdEncoding.EncodeToString(payload))
+	e.seq[ch]++
+	e.lines = append(e.lines, []byte(l))
+}
+
+func (e *emitter) open(ch, uid int, pty bool, rport int, command string) {
+	e.seq[ch] = 0
+	for off := 0; off < len(command); off += maxPayload {
+		e.rec(ch, KindCommand, 0, []byte(command[off:min(len(command), off+maxPayload)]))
+	}
+	p := map[bool]int{false: 0, true: 1}
+	cmd := 0
+	if command != "" {
+		cmd = 1
+	}
+	e.rec(ch, KindOpen, 0, []byte(fmt.Sprintf("time=1731136000123 uid=%d pty=%d sub=0 cmd=%d rport=%d lport=22 rip=172.20.0.10 host=web01 user=%s", uid, p[pty], cmd, rport, map[int]string{0: "root"}[uid]+"u")))
+}
+
+func apply(t *testing.T, dir string, lines [][]byte, attribute Attributor) {
+	t.Helper()
+	w, err := NewWriter(dir, testContainer, attribute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, l := range lines {
+		if err := w.Apply(l); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := w.Finish(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// snapshot reads every file below dir.
+func snapshot(t *testing.T, dir string) map[string]string {
+	t.Helper()
+	files := map[string]string{}
+	err := filepath.WalkDir(dir, func(p string, d os.DirEntry, err error) error {
+		if err != nil || d.IsDir() {
+			return err
+		}
+		data, err := os.ReadFile(p)
+		rel, _ := filepath.Rel(dir, p)
+		files[filepath.ToSlash(rel)] = string(data)
+		return err
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return files
+}
+
+func records(t *testing.T, files map[string]string) map[string][]SessionEvent {
+	t.Helper()
+	out := map[string][]SessionEvent{}
+	for name, body := range files {
+		if !strings.HasSuffix(name, ".json") {
+			continue
+		}
+		for _, line := range strings.Split(strings.TrimSpace(body), "\n") {
+			var ev SessionEvent
+			if err := json.Unmarshal([]byte(line), &ev); err != nil {
+				t.Fatalf("%s: %v", name, err)
+			}
+			out[name] = append(out[name], ev)
+		}
+	}
+	return out
+}
+
+func session(e *emitter) {
+	e.open(0, 0, false, 41000, "uname -a")
+	e.rec(0, KindInput, 1, []byte("stdin-bytes"))
+	e.rec(0, KindOutput, 2, []byte("Linux web01\n"))
+	e.rec(0, KindError, 3, []byte("warning\n"))
+	e.rec(0, KindExit, 4, []byte("exit=3"))
+	e.rec(0, KindOutput, 5, []byte("late\n")) // drained after the exit
+	e.rec(0, KindClosed, 6, nil)
+}
+
+func TestWriterWritesTheCollectorRecord(t *testing.T) {
+	e := newEmitter(testConn)
+	session(e)
+	dir := t.TempDir()
+	gen := uint64(7)
+	apply(t, dir, e.lines, func(o Open) (Attribution, bool) {
+		if o.PeerIP != "172.20.0.10" || o.PeerPort != 41000 {
+			t.Fatalf("attributor got %+v", o)
+		}
+		return Attribution{SrcIP: "203.0.113.9", SrcPort: 55555, SessionID: strings.Repeat("ab", 16), Generation: &gen}, true
+	})
+	files := snapshot(t, dir)
+	recs := records(t, files)
+	if len(recs) != 1 {
+		t.Fatalf("want one command record, got %v", files)
+	}
+	for name, evs := range recs {
+		if !strings.HasPrefix(name, "uid-0/20241109T070640Z-") || len(evs) != 2 {
+			t.Fatalf("record %s has %d lines", name, len(evs))
+		}
+		start, finish := evs[0], evs[1]
+		if start.EventType != "ssh_backend_command_start" || start.Phase != "start" || finish.EventType != "ssh_backend_command" || finish.Phase != "finish" {
+			t.Fatalf("phases: %+v / %+v", start, finish)
+		}
+		if start.Input != "uname -a" || start.SrcIP != "203.0.113.9" || start.SrcPort != 55555 || start.PeerIP != "172.20.0.10" || start.PeerPort != 41000 ||
+			start.Attribution != "broker-cell" || start.Generation == nil || *start.Generation != 7 || start.Hostname != "web01" || start.Username != "rootu" {
+			t.Fatalf("start record: %+v", start)
+		}
+		if finish.ExitCode == nil || *finish.ExitCode != 3 || finish.DurationMS != 6 || finish.Stdout != "Linux web01\nlate\n" || finish.Stderr != "warning\n" || finish.CaptureError != "" {
+			t.Fatalf("finish record: %+v", finish)
+		}
+		base := strings.TrimSuffix(name, ".json")
+		if files[base+".in"] != "stdin-bytes" || files[base+".out"] != "Linux web01\nlate\n" || files[base+".err"] != "warning\n" {
+			t.Fatalf("streams: %q %q %q", files[base+".in"], files[base+".out"], files[base+".err"])
+		}
+		if start.StdoutFile != filepath.Base(base)+".out" || start.TimingFile != "" {
+			t.Fatalf("file names: %+v", start)
+		}
+	}
+}
+
+func TestWriterReplayIsIdempotent(t *testing.T) {
+	e := newEmitter(testConn)
+	session(e)
+	other := newEmitter(strings.Repeat("f", 32))
+	other.open(3, 1000, true, 42000, "")
+	other.rec(3, KindInput, 10, []byte("ls\r"))
+	other.rec(3, KindOutput, 1250, []byte("ls\r\nfile\r\n"))
+	other.rec(3, KindExit, 1300, []byte("signal=9"))
+	other.rec(3, KindClosed, 1300, nil)
+	// Interleave the two connections as concurrent writers to one pipe would.
+	var lines [][]byte
+	for i := 0; i < max(len(e.lines), len(other.lines)); i++ {
+		if i < len(e.lines) {
+			lines = append(lines, e.lines[i])
+		}
+		if i < len(other.lines) {
+			lines = append(lines, other.lines[i])
+		}
+	}
+	once, twice, crashed := t.TempDir(), t.TempDir(), t.TempDir()
+	apply(t, once, lines, nil)
+	apply(t, twice, lines, nil)
+	apply(t, twice, lines, nil)
+	// A follower that stopped half way, then a full replay.
+	apply(t, crashed, lines[:len(lines)/2], nil)
+	apply(t, crashed, lines, nil)
+	want := snapshot(t, once)
+	if len(want) != 9 {
+		t.Fatalf("want two commands (5 + 4 files), got %d: %v", len(want), keys(want))
+	}
+	for name, dir := range map[string]string{"replayed": twice, "crash then replay": crashed} {
+		if got := snapshot(t, dir); fmt.Sprint(got) != fmt.Sprint(want) {
+			t.Fatalf("%s files differ:\n%v\n%v", name, keys(got), keys(want))
+		}
+	}
+	for name, evs := range records(t, want) {
+		if len(evs) != 2 {
+			t.Fatalf("%s has %d lines", name, len(evs))
+		}
+		if strings.HasPrefix(name, "uid-1000/") {
+			base := strings.TrimSuffix(name, ".json")
+			if evs[1].ExitCode == nil || *evs[1].ExitCode != 137 || !evs[0].PTY || evs[1].Input != "ls\r" ||
+				want[base+".timing"] != "I 0.010000 3\nO 1.240000 10\n" || evs[0].Attribution != "peer-only" || evs[0].SrcIP != "172.20.0.10" {
+				t.Fatalf("pty session: %+v timing %q", evs[1], want[base+".timing"])
+			}
+		}
+	}
+}
+
+func TestWriterKeepsReusedChannelsApart(t *testing.T) {
+	e := newEmitter(testConn)
+	for i := 0; i < 2; i++ {
+		e.open(0, 0, false, 41000, fmt.Sprintf("echo %d", i))
+		e.rec(0, KindOutput, 1, []byte(fmt.Sprintf("%d\n", i)))
+		e.rec(0, KindExit, 1, []byte("exit=0"))
+		e.rec(0, KindClosed, 2, nil)
+	}
+	dir := t.TempDir()
+	apply(t, dir, e.lines, nil)
+	recs := records(t, snapshot(t, dir))
+	if len(recs) != 2 {
+		t.Fatalf("a reused channel merged sessions: %v", recs)
+	}
+	seen := map[string]bool{}
+	for _, evs := range recs {
+		seen[evs[1].Input+"|"+evs[1].Stdout] = true
+	}
+	if !seen["echo 0|0\n"] || !seen["echo 1|1\n"] {
+		t.Fatalf("sessions: %v", seen)
+	}
+}
+
+func TestWriterAbruptTeardown(t *testing.T) {
+	e := newEmitter(testConn)
+	e.open(0, 0, false, 41000, "sleep 100")
+	e.rec(0, KindOutput, 1, []byte("partial"))
+	e.open(1, 0, false, 41000, "true")
+	e.rec(1, KindExit, 2, []byte("exit=0")) // exited; the close never arrived
+	dir := t.TempDir()
+	apply(t, dir, e.lines, nil)
+	for name, evs := range records(t, snapshot(t, dir)) {
+		switch evs[0].Input {
+		case "sleep 100":
+			if len(evs) != 1 {
+				t.Fatalf("%s: an unfinished command gained a finish: %+v", name, evs)
+			}
+		case "true":
+			if len(evs) != 2 || evs[1].ExitCode == nil || *evs[1].ExitCode != 0 {
+				t.Fatalf("%s: a captured exit was not finished: %+v", name, evs)
+			}
+		default:
+			t.Fatalf("unexpected record %s", name)
+		}
+	}
+}
+
+func TestWriterLimitsAndTruncation(t *testing.T) {
+	long := strings.Repeat("x", maxCommand+maxPayload)
+	e := newEmitter(testConn)
+	e.open(0, 0, false, 41000, long)
+	e.rec(0, KindTruncated, 1, nil)
+	e.rec(0, KindExit, 2, []byte("exit=0"))
+	e.rec(0, KindClosed, 2, nil)
+	dir := t.TempDir()
+	apply(t, dir, e.lines, nil)
+	for _, evs := range records(t, snapshot(t, dir)) {
+		if len(evs[0].Input) != maxCommand || !evs[0].CommandTruncated || !evs[1].Truncated {
+			t.Fatalf("long command / truncation not recorded: %d %v %v", len(evs[0].Input), evs[0].CommandTruncated, evs[1].Truncated)
+		}
+	}
+
+	// Past the per-account file limit, commands keep their record but no streams.
+	e = newEmitter(testConn)
+	n := maxUserFiles/filesPerEntry + 1
+	for i := 0; i < n; i++ {
+		e.open(i, 0, false, 41000, "true")
+		e.rec(i, KindOutput, 1, []byte("o"))
+		e.rec(i, KindExit, 1, []byte("exit=0"))
+		e.rec(i, KindClosed, 1, nil)
+	}
+	dir = t.TempDir()
+	apply(t, dir, e.lines, nil)
+	limited := 0
+	for _, evs := range records(t, snapshot(t, dir)) {
+		if strings.Contains(evs[1].CaptureError, "account capture limit") {
+			limited++
+			if !evs[1].Truncated || evs[1].Stdout != "" {
+				t.Fatalf("limited command: %+v", evs[1])
+			}
+		}
+	}
+	if limited != 1 {
+		t.Fatalf("want exactly one limited command, got %d", limited)
+	}
+}
+
+func TestWriterIgnoresForeignLines(t *testing.T) {
+	e := newEmitter(testConn)
+	e.rec(0, KindOutput, 1, []byte("orphan data")) // no open: rotated out
+	dir := t.TempDir()
+	apply(t, dir, append(e.lines, []byte("not a record"), []byte("")), nil)
+	if files := snapshot(t, dir); len(files) != 0 {
+		t.Fatalf("foreign lines wrote %v", keys(files))
+	}
+}
+
+func keys(m map[string]string) []string {
+	var out []string
+	for k := range m {
+		out = append(out, k)
+	}
+	sort.Strings(out)
+	return out
+}
+
+// A live follower that lags behind a reset's drain must not duplicate or cut
+// anything: both replay the same container, in turns under the cells lock,
+// so every split of the work between them gives the files of one replay.
+func TestWritersReplayingInTurnsConverge(t *testing.T) {
+	e := newEmitter(testConn)
+	session(e)
+	e.open(2, 1000, true, 41001, "")
+	for i := 0; i < 6; i++ {
+		e.rec(2, KindInput, int64(10+i), []byte(fmt.Sprintf("key %d\n", i)))
+		e.rec(2, KindOutput, int64(11+i), []byte(fmt.Sprintf("echo %d\r\n", i)))
+	}
+	e.rec(2, KindExit, 30, []byte("exit=0"))
+	e.rec(2, KindClosed, 31, nil)
+	want := t.TempDir()
+	apply(t, want, e.lines, nil)
+	reference := snapshot(t, want)
+	for lag := 0; lag <= len(e.lines); lag++ {
+		dir := t.TempDir()
+		follower, err := NewWriter(dir, testContainer, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, l := range e.lines[:lag] {
+			if err := follower.Apply(l); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if err := follower.Flush(); err != nil {
+			t.Fatal(err)
+		}
+		apply(t, dir, e.lines, nil) // the drain: everything, then finished
+		for _, l := range e.lines[lag:] {
+			if err := follower.Apply(l); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if err := follower.Finish(); err != nil {
+			t.Fatal(err)
+		}
+		if got := snapshot(t, dir); fmt.Sprint(got) != fmt.Sprint(reference) {
+			t.Fatalf("follower %d lines behind the drain left different files:\n%v\nwant\n%v", len(e.lines)-lag, got, reference)
+		}
+		// A follower that starts after the drain and stops partway (the
+		// control plane killed) must not cut what the drain completed.
+		late, err := NewWriter(dir, testContainer, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, l := range e.lines[:lag] {
+			if err := late.Apply(l); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if err := late.Flush(); err != nil {
+			t.Fatal(err)
+		}
+		if got := snapshot(t, dir); fmt.Sprint(got) != fmt.Sprint(reference) {
+			t.Fatalf("a follower stopped after %d lines cut the drained files:\n%v\nwant\n%v", lag, got, reference)
+		}
+	}
+}

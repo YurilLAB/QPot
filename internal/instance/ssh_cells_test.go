@@ -290,6 +290,7 @@ type sshCellCompose struct {
 		ReadOnly    bool                                  `yaml:"read_only"`
 		User        string                                `yaml:"user"`
 		Volumes     []string                              `yaml:"volumes"`
+		EnvFile     []string                              `yaml:"env_file"`
 		Tmpfs       []string                              `yaml:"tmpfs"`
 		Healthcheck struct{ Test []string }               `yaml:"healthcheck"`
 		DependsOn   map[string]struct{ Condition string } `yaml:"depends_on"`
@@ -450,18 +451,10 @@ func TestHiFiPrivateCellTopologyAndIngress(t *testing.T) {
 						if svc.PullPolicy != "never" || svc.Image != "qpot-local/ssh-backend:development" {
 							t.Fatalf("local backend image not protected: %s", name)
 						}
-						contextMount := false
-						for _, mount := range svc.Volumes {
-							if strings.HasSuffix(mount, ":/run/audit-context:ro") {
-								contextDir, err := sshStoreContext(cfg, app)
-								if err != nil {
-									t.Fatal(err)
-								}
-								contextMount = strings.HasPrefix(filepath.ToSlash(mount), filepath.ToSlash(contextDir)+":")
-							}
-						}
-						if !contextMount {
-							t.Fatalf("%s lacks its own read-only lease context", name)
+						// Nothing from the host is mounted into a guest: its
+						// mount table would name the host's folders.
+						if len(svc.Volumes) != 0 || len(svc.EnvFile) != 1 || filepath.Base(svc.EnvFile[0]) != hostKeysEnvFile || svc.Healthcheck.Test != nil {
+							t.Fatalf("%s mounts host folders, runs a check in the guest or lacks its host keys: %v %v %v", name, svc.Volumes, svc.EnvFile, svc.Healthcheck.Test)
 						}
 					}
 				}

@@ -1,4 +1,5 @@
-// Command qpot-sshbackend initializes and audits disposable OpenSSH backends.
+// Command qpot-sshbackend initializes a disposable OpenSSH backend, then
+// replaces itself with sshd.
 package main
 
 import (
@@ -9,29 +10,12 @@ import (
 )
 
 func main() {
-	code := 1
-	var err error
-	if len(os.Args) > 1 {
-		switch os.Args[1] {
-		case "serve":
-			err = sshbackend.Serve()
-			code = 0
-		case "record":
-			code, err = sshbackend.Record(os.Args[2:], os.Stdin, os.Stdout, os.Stderr)
-		case "health":
-			err = sshbackend.Health()
-			code = 0
-		default:
-			err = fmt.Errorf("unknown session service command")
-		}
-	} else {
-		err = fmt.Errorf("missing session service command")
+	if len(os.Args) != 2 || os.Args[1] != "serve" {
+		fmt.Fprintln(os.Stderr, "Session service unavailable: unknown command")
+		os.Exit(2)
 	}
-	if err != nil {
+	if err := sshbackend.Serve(); err != nil {
 		fmt.Fprintln(os.Stderr, "Session service unavailable:", err)
-		if code == 0 {
-			code = 1
-		}
+		os.Exit(1)
 	}
-	os.Exit(code)
 }

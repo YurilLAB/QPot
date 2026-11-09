@@ -31,7 +31,6 @@ type sshOrgCell struct {
 	AppSceneJSON, BackupSceneJSON                         string
 	DBUsername, DBPassword, DBName, DBImage               string
 	DBInitSQLPath, DBLogDir, BackupUsersCSV, BackupKeyDir string
-	ContextDir                                            string
 }
 
 type sshOrganization struct {
@@ -167,7 +166,6 @@ func sshOrgCells(cfg *config.Config) ([]sshOrgCell, error) {
 			DBUsername: "postgres", DBPassword: s.adminPassword, DBName: s.database, DBImage: sshOrganizationDBImage,
 			DBInitSQLPath:  store.database(app),
 			DBLogDir:       store.current(app + "-db"),
-			ContextDir:     store.context(app),
 			BackupUsersCSV: s.backupUser + ":" + s.backupPassword,
 			BackupKeyDir:   store.keys(true),
 		})
@@ -469,6 +467,13 @@ func retireSSHCells(ctx context.Context, cfg *config.Config, oldCompose []byte) 
 	}
 	ctx, cancel := context.WithTimeout(ctx, 3*time.Minute)
 	defer cancel()
+	// Their session capture leaves with the containers: stop and convert it.
+	if err := stopSSHServices(ctx, oldPath, remove); err != nil {
+		return fmt.Errorf("retire prior SSH cells: %w", err)
+	}
+	if brokerLog, err := sshBrokerSessionLog(cfg); err == nil {
+		drainSSHCaptures(ctx, cfg.DataPath, cfg.InstanceName, brokerLog, remove)
+	}
 	args := append([]string{"compose", "-f", oldPath, "rm", "--stop", "--force"}, remove...)
 	cmd := exec.CommandContext(ctx, "docker", args...)
 	cmd.Dir = cfg.DataPath

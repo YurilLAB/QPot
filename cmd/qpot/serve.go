@@ -127,7 +127,8 @@ func runControlPlane(ctx context.Context, cfg *config.Config, mgr *instance.Mana
 	}
 	if rec != nil {
 		go rec.Run(ctx)
-		slog.Info("HiFi backend recycler started")
+		go rec.RunCapture(ctx)
+		slog.Info("HiFi backend recycler and session capture started")
 	}
 
 	select {

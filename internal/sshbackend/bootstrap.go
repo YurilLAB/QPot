@@ -4,30 +4,35 @@ import (
 	"bytes"
 	"context"
 	"crypto/rand"
+	"encoding/base64"
 	"encoding/hex"
 	"errors"
 	"fmt"
-	"io"
-	"net"
 	"os"
 	"os/exec"
 	"os/user"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
 )
 
 const (
-	// LogDirectory contains private session records read by the collector.
-	LogDirectory = "/var/log/ssh-backend"
-	// HostKeySourceDirectory is the read-only orchestration mount. Its private
-	// parent protects source keys even when Desktop reports permissive modes.
-	HostKeySourceDirectory = "/run/sshd/bootstrap/keys"
-	defaultUsers           = "admin:admin,ubuntu:ubuntu,user:password,root:root123"
-	loginShell             = "/usr/local/bin/rec-shell"
+	// HostKeyDirectory is where Debian keeps sshd's host keys; sshd's default
+	// HostKey paths read them there, so the configuration names none.
+	HostKeyDirectory = "/etc/ssh"
+	defaultUsers     = "admin:admin,ubuntu:ubuntu,user:password,root:root123"
+	// Accounts get the system's ordinary shell: sshd itself records sessions,
+	// so nothing in the guest stands between the visitor and bash.
+	loginShell = "/bin/bash"
+	// HostKeysVariable carries the pool's shared host keys, so no host folder
+	// is mounted into the guest (a mount shows its host path in mountinfo).
+	HostKeysVariable = "BACKEND_HOST_KEYS"
 )
+
+var hostKeyKinds = []string{"rsa", "ecdsa", "ed25519"}
 
 // Account is one bounded local account supplied by trusted orchestration.
 type Account struct{ Name, Password string }
@@ -60,6 +65,8 @@ func ParseAccounts(value string) ([]Account, error) {
 // Serve completes local initialization then replaces itself with genuine sshd.
 // Replacing the process, rather than merely unsetting variables, removes the
 // startup credential/manifest environment from the running daemon's proc entry.
+// It also deletes its own program first: once sshd runs, nothing in the guest
+// is QPot's.
 func Serve() error {
 	if runtime.GOOS != "linux" || os.Getenv("SESSION_CONTAINER") != "1" {
 		return errors.New("server initialization requires its configured Linux container")
@@ -79,12 +86,8 @@ func Serve() error {
 		}
 		manifest = &m
 	}
-	if err := os.MkdirAll(LogDirectory, 0o751); err != nil {
-		return err
-	}
-	// Sticky write/traverse permits accounts created later in the disposable
-	// system to create their own0700 subdirectory, without listing other users.
-	if err := os.Chmod(LogDirectory, os.ModeSticky|0o733); err != nil {
+	keys, err := ParseHostKeys(os.Getenv(HostKeysVariable))
+	if err != nil {
 		return err
 	}
 	for _, account := range accounts {
@@ -106,20 +109,6 @@ func Serve() error {
 		if err := runLocal(strings.NewReader(account.Name+":"+account.Password+"\n"), "/usr/sbin/chpasswd"); err != nil {
 			return fmt.Errorf("set configured account password: %w", err)
 		}
-		uid, gid, err := lookupOwner(account.Name)
-		if err != nil {
-			return err
-		}
-		dir := filepath.Join(LogDirectory, "uid-"+strconv.Itoa(uid))
-		if err := os.MkdirAll(dir, 0o700); err != nil {
-			return err
-		}
-		if err := os.Chown(dir, uid, gid); err != nil {
-			return err
-		}
-		if err := os.Chmod(dir, 0o700); err != nil {
-			return err
-		}
 	}
 	if manifest != nil {
 		if err := Seed("/", *manifest, lookupOwner); err != nil {
@@ -129,46 +118,36 @@ func Serve() error {
 	if err := os.MkdirAll("/run/sshd", 0o755); err != nil {
 		return err
 	}
-	bootstrap, err := privateHostKeyDirectory(filepath.Dir(HostKeySourceDirectory))
-	if err != nil {
+	if keys == nil {
+		// A standalone image run: a key pool of its own.
+		if keys, err = generateHostKeys(); err != nil {
+			return err
+		}
+	}
+	if err := writeHostKeys(HostKeyDirectory, keys, derivePublicKey); err != nil {
 		return err
 	}
-	if err := bootstrap.Close(); err != nil {
-		return err
-	}
-	if err := prepareKeys(HostKeySourceDirectory); err != nil {
-		return err
-	}
-	if err := copyPrivateHostKeys(HostKeySourceDirectory, "/run/sshd/hostkeys"); err != nil {
-		return err
-	}
-	if err := prepareAuthLog(LogDirectory); err != nil {
+	if err := removeSelf(); err != nil {
 		return err
 	}
 	// Preserve the recreation gap used by existing broker reset verification.
 	time.Sleep(time.Second)
-	return execDaemon("/usr/sbin/sshd", []string{"/usr/sbin/sshd", "-D", "-E", filepath.Join(LogDirectory, "sshd.log"), "-f", "/etc/ssh/sshd_config"}, FilterEnvironment(os.Environ()))
+	// -e: sshd's own log goes to the container's error stream, its session
+	// capture to its output stream; both leave the guest through Docker.
+	return execDaemon("/usr/sbin/sshd", []string{"/usr/sbin/sshd", "-D", "-e"}, FilterEnvironment(os.Environ()))
 }
 
-func prepareAuthLog(dir string) error {
-	name := filepath.Join(dir, "sshd.log")
-	info, err := os.Lstat(name)
-	if err != nil && !errors.Is(err, os.ErrNotExist) {
-		return err
-	}
-	if err == nil && !info.Mode().IsRegular() {
-		return errors.New("authentication log is not a regular file")
-	}
-	r, err := os.OpenRoot(dir)
+// removeSelf deletes this program, and its folder when that is left empty.
+func removeSelf() error {
+	self, err := os.Executable()
 	if err != nil {
 		return err
 	}
-	defer r.Close()
-	file, err := r.OpenFile("sshd.log", os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
-	if err != nil {
-		return err
+	if err := os.Remove(self); err != nil {
+		return fmt.Errorf("remove the bootstrap program: %w", err)
 	}
-	return errors.Join(file.Chown(os.Getuid(), os.Getgid()), file.Chmod(0o600), file.Close())
+	_ = os.Remove(filepath.Dir(self)) // only succeeds when empty
+	return nil
 }
 
 // FilterEnvironment removes bootstrap secrets before replacing the process.
@@ -177,7 +156,7 @@ func FilterEnvironment(environ []string) []string {
 	for _, item := range environ {
 		name, _, _ := strings.Cut(item, "=")
 		switch strings.ToUpper(name) {
-		case "BACKEND_SCENE", "BACKEND_USERS", "SESSION_CONTAINER", "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "FTP_PROXY", "NO_PROXY", "DOCKER_HOST", "DOCKER_CONTEXT", "DOCKER_CERT_PATH", "DOCKER_TLS", "DOCKER_TLS_VERIFY":
+		case "BACKEND_SCENE", "BACKEND_USERS", HostKeysVariable, "SESSION_CONTAINER", "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "FTP_PROXY", "NO_PROXY", "DOCKER_HOST", "DOCKER_CONTEXT", "DOCKER_CERT_PATH", "DOCKER_TLS", "DOCKER_TLS_VERIFY":
 			continue
 		default:
 			filtered = append(filtered, item)
@@ -240,166 +219,152 @@ func (b *boundedDiagnostic) Write(data []byte) (int, error) {
 	return n, nil
 }
 
-func prepareKeys(dir string) error {
-	missing := false
-	for _, kind := range []string{"rsa", "ecdsa", "ed25519"} {
-		if _, err := os.Stat(filepath.Join(dir, "ssh_host_"+kind+"_key")); err != nil {
-			missing = true
+// ParseHostKeys decodes the shared host keys handed over as
+// "rsa:<base64>,ecdsa:<base64>,ed25519:<base64>". An empty value means none.
+func ParseHostKeys(value string) (map[string][]byte, error) {
+	const maxHostKeyBytes = 64 << 10
+	if value == "" {
+		return nil, nil
+	}
+	if len(value) > 3*(maxHostKeyBytes*4/3+16) {
+		return nil, errors.New("host key configuration exceeds the size limit")
+	}
+	keys := map[string][]byte{}
+	for _, item := range strings.Split(value, ",") {
+		kind, encoded, ok := strings.Cut(item, ":")
+		if !ok || !slices.Contains(hostKeyKinds, kind) || keys[kind] != nil {
+			return nil, errors.New("invalid or duplicate host key entry")
+		}
+		data, err := base64.StdEncoding.Strict().DecodeString(encoded)
+		if err != nil || len(data) == 0 || len(data) > maxHostKeyBytes ||
+			!bytes.HasPrefix(data, []byte("-----BEGIN ")) || !bytes.Contains(data, []byte("PRIVATE KEY-----")) {
+			return nil, fmt.Errorf("host key %s is not a private key", kind)
+		}
+		keys[kind] = data
+	}
+	for _, kind := range hostKeyKinds {
+		if keys[kind] == nil {
+			return nil, fmt.Errorf("host key %s is missing", kind)
 		}
 	}
-	if !missing {
-		return nil
-	}
-	if err := os.MkdirAll(dir, 0o750); err != nil {
-		return err
-	}
-	lock, err := os.OpenFile(filepath.Join(dir, ".keygen.lock"), os.O_CREATE|os.O_RDWR, 0o600)
-	if err != nil {
-		return err
-	}
-	defer lock.Close()
-	if err := lockFile(lock); err != nil {
-		return err
-	}
-	for _, kind := range []string{"rsa", "ecdsa", "ed25519"} {
-		key := filepath.Join(dir, "ssh_host_"+kind+"_key")
-		if _, err := os.Stat(key); err == nil {
-			continue
-		}
-		if err := runLocal(nil, "/usr/bin/ssh-keygen", "-q", "-t", kind, "-f", key, "-N", ""); err != nil {
-			return err
-		}
-	}
-	return nil
+	return keys, nil
 }
 
-// copyPrivateHostKeys gives sshd private regular files even when a read-only
-// desktop bind reports permissive modes. Existing source keys are never chmodded
-// or replaced, preserving the shared identity across cells and restarts.
-func copyPrivateHostKeys(source, destination string) error {
-	const maxHostKeyBytes = 64 << 10
-	sourceInfo, err := os.Lstat(source)
+func generateHostKeys() (map[string][]byte, error) {
+	dir, err := os.MkdirTemp("", "")
 	if err != nil {
-		return err
+		return nil, err
 	}
-	if !sourceInfo.IsDir() || sourceInfo.Mode()&os.ModeSymlink != 0 {
-		return errors.New("host key source is not an ordinary directory")
-	}
-	from, err := os.OpenRoot(source)
-	if err != nil {
-		return err
-	}
-	defer from.Close()
-	keys := make(map[string][]byte, 3)
-	for _, kind := range []string{"rsa", "ecdsa", "ed25519"} {
-		name := "ssh_host_" + kind + "_key"
-		before, err := from.Lstat(name)
+	defer os.RemoveAll(dir)
+	keys := map[string][]byte{}
+	for _, kind := range hostKeyKinds {
+		key := filepath.Join(dir, "ssh_host_"+kind+"_key")
+		if err := runLocal(nil, "/usr/bin/ssh-keygen", "-q", "-t", kind, "-f", key, "-N", ""); err != nil {
+			return nil, err
+		}
+		data, err := os.ReadFile(key)
 		if err != nil {
-			return fmt.Errorf("inspect host key %s: %w", kind, err)
+			return nil, err
 		}
-		if !before.Mode().IsRegular() {
-			return fmt.Errorf("host key %s is not a regular file", kind)
-		}
-		file, err := from.OpenFile(name, privateKeyReadFlags, 0)
-		if err != nil {
-			return fmt.Errorf("open host key %s: %w", kind, err)
-		}
-		opened, statErr := file.Stat()
-		if statErr != nil || !opened.Mode().IsRegular() || !os.SameFile(before, opened) {
-			_ = file.Close()
-			return fmt.Errorf("host key %s changed while opening: %w", kind, errors.Join(statErr, errors.New("file identity or type changed")))
-		}
-		data, readErr := io.ReadAll(io.LimitReader(file, maxHostKeyBytes+1))
-		if err := errors.Join(readErr, file.Close()); err != nil {
-			return fmt.Errorf("read host key %s: %w", kind, err)
-		}
-		if len(data) == 0 || len(data) > maxHostKeyBytes {
-			return fmt.Errorf("host key %s is empty or exceeds the size limit", kind)
-		}
-		keys[name] = data
+		keys[kind] = data
 	}
-	to, err := privateHostKeyDirectory(destination)
+	return keys, nil
+}
+
+// writeHostKeys installs the host keys the way Debian's own package leaves
+// them: each private key root's alone (sshd refuses one others may read) and
+// its public half beside it, readable by all. The directory keeps its mode.
+func writeHostKeys(destination string, keys map[string][]byte, public func(string) ([]byte, error)) error {
+	to, err := hostKeyDirectory(destination)
 	if err != nil {
 		return err
 	}
 	defer to.Close()
-	for name, data := range keys {
-		if existing, err := to.Lstat(name); err == nil && !existing.Mode().IsRegular() {
-			return fmt.Errorf("private host key destination %s is not a regular file", name)
-		} else if err != nil && !errors.Is(err, os.ErrNotExist) {
-			return err
+	for _, kind := range hostKeyKinds {
+		name := "ssh_host_" + kind + "_key"
+		if err := replaceFile(to, name, keys[kind], 0o600); err != nil {
+			return fmt.Errorf("write private host key: %w", err)
 		}
-		var random [16]byte
-		if _, err := rand.Read(random[:]); err != nil {
-			return err
-		}
-		temporary := ".hostkey-" + hex.EncodeToString(random[:])
-		file, err := to.OpenFile(temporary, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
+		derived, err := public(filepath.Join(destination, name))
 		if err != nil {
-			return err
+			return fmt.Errorf("derive public host key: %w", err)
 		}
-		_, writeErr := file.Write(data)
-		writeErr = errors.Join(writeErr, file.Chmod(0o600), file.Sync(), file.Close())
-		if writeErr == nil {
-			writeErr = to.Rename(temporary, name)
-		}
-		if writeErr != nil {
-			_ = to.Remove(temporary)
-			return fmt.Errorf("copy private host key: %w", writeErr)
+		if err := replaceFile(to, name+".pub", derived, 0o644); err != nil {
+			return fmt.Errorf("write public host key: %w", err)
 		}
 	}
 	return nil
 }
 
-func privateHostKeyDirectory(destination string) (*os.Root, error) {
-	if err := safeParents("/", destination, true); err != nil {
-		return nil, fmt.Errorf("prepare private host key path: %w", err)
+// replaceFile writes a regular file atomically, refusing to follow or replace
+// anything that is not a regular file.
+func replaceFile(to *os.Root, name string, data []byte, mode os.FileMode) error {
+	if existing, err := to.Lstat(name); err == nil && !existing.Mode().IsRegular() {
+		return fmt.Errorf("%s is not a regular file", name)
+	} else if err != nil && !errors.Is(err, os.ErrNotExist) {
+		return err
 	}
-	if err := os.MkdirAll(destination, 0o700); err != nil {
+	var random [16]byte
+	if _, err := rand.Read(random[:]); err != nil {
+		return err
+	}
+	temporary := ".hostkey-" + hex.EncodeToString(random[:])
+	file, err := to.OpenFile(temporary, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
+	if err != nil {
+		return err
+	}
+	_, writeErr := file.Write(data)
+	writeErr = errors.Join(writeErr, file.Chmod(mode), file.Sync(), file.Close())
+	if writeErr == nil {
+		writeErr = to.Rename(temporary, name)
+	}
+	if writeErr != nil {
+		_ = to.Remove(temporary)
+	}
+	return writeErr
+}
+
+// derivePublicKey reads a private key's public half with OpenSSH's own tool.
+func derivePublicKey(private string) ([]byte, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "/usr/bin/ssh-keygen", "-y", "-f", private)
+	diagnostic := &boundedDiagnostic{}
+	cmd.Stderr = diagnostic
+	out, err := cmd.Output()
+	if err != nil {
+		return nil, fmt.Errorf("ssh-keygen: %w (%s)", err, strings.TrimSpace(diagnostic.String()))
+	}
+	if len(out) == 0 || len(out) > 16<<10 || bytes.Count(out, []byte("\n")) != 1 || out[len(out)-1] != '\n' {
+		return nil, errors.New("ssh-keygen printed no single public key")
+	}
+	return out, nil
+}
+
+// hostKeyDirectory opens the root-owned host key directory without changing
+// its mode, refusing a symlink or a directory anyone else owns.
+func hostKeyDirectory(destination string) (*os.Root, error) {
+	if err := safeParents("/", destination, true); err != nil {
+		return nil, fmt.Errorf("prepare host key path: %w", err)
+	}
+	if err := os.MkdirAll(destination, 0o755); err != nil {
 		return nil, err
 	}
 	info, err := os.Lstat(destination)
 	if err != nil {
 		return nil, err
 	}
-	if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 || fileUID(info) != os.Geteuid() {
-		return nil, errors.New("private host key directory is not owned by the daemon")
+	if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 || fileUID(info) != os.Geteuid() || info.Mode().Perm()&0o022 != 0 {
+		return nil, errors.New("host key directory is not the daemon's own")
 	}
 	to, err := os.OpenRoot(destination)
 	if err != nil {
 		return nil, err
 	}
-	directory, err := to.Open(".")
-	if err != nil {
+	opened, err := to.Stat(".")
+	if err != nil || !os.SameFile(info, opened) {
 		_ = to.Close()
-		return nil, err
-	}
-	opened, err := directory.Stat()
-	if err != nil || !os.SameFile(info, opened) || fileUID(opened) != os.Geteuid() {
-		_ = directory.Close()
-		_ = to.Close()
-		return nil, errors.Join(err, errors.New("private host key directory changed while opening"))
-	}
-	if err := errors.Join(directory.Chmod(0o700), directory.Close()); err != nil {
-		_ = to.Close()
-		return nil, err
+		return nil, errors.Join(err, errors.New("host key directory changed while opening"))
 	}
 	return to, nil
-}
-
-// Health checks the local daemon's ordinary SSH banner without authenticating.
-func Health() error {
-	conn, err := net.DialTimeout("tcp", "127.0.0.1:22", time.Second)
-	if err != nil {
-		return err
-	}
-	defer conn.Close()
-	if err := conn.SetReadDeadline(time.Now().Add(time.Second)); err != nil {
-		return err
-	}
-	var prefix [4]byte
-	if _, err := io.ReadFull(conn, prefix[:]); err != nil || string(prefix[:]) != "SSH-" {
-		return errors.New("SSH daemon is not ready")
-	}
-	return nil
 }

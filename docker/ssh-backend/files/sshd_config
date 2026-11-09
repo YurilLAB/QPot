@@ -9,22 +9,15 @@ Port 22
 AddressFamily any
 ListenAddress 0.0.0.0
 
-# Host keys live below /run/sshd/bootstrap, a private parent of the read-only
-# SHARED volume mounted identically into every
-# backend in the pool, so all backends present the SAME host-key fingerprint. A
-# pool of backends behind one broker that each had their own keys would make a
-# returning attacker's SSH client warn "REMOTE HOST IDENTIFICATION HAS CHANGED" —
-# an instant honeypot/pool tell. Keeping the keys out of /etc/ssh also means the
-# shared mount never shadows this hardened sshd_config. sshd reads the copies the
-# entrypoint makes, root's alone: it refuses a host key others may read, and a
-# mounted file keeps the host's mode (Docker Desktop shows Windows files as 0777).
-# The private bootstrap parent also prevents reading those original files.
-HostKey /run/sshd/hostkeys/ssh_host_ed25519_key
-HostKey /run/sshd/hostkeys/ssh_host_rsa_key
-HostKey /run/sshd/hostkeys/ssh_host_ecdsa_key
+# No HostKey lines: sshd reads Debian's default /etc/ssh/ssh_host_*_key. Every
+# backend in the pool gets the SAME keys at start, so all present one host-key
+# fingerprint. A pool whose backends each had their own keys would make a
+# returning attacker's SSH client warn "REMOTE HOST IDENTIFICATION HAS CHANGED",
+# an instant honeypot/pool tell.
 
-# VERBOSE retains authentication metadata and offered key fingerprints in the
-# private daemon log. Command/PTY evidence is separately encoded as JSONL.
+# VERBOSE retains authentication metadata and offered key fingerprints. sshd
+# runs with -e, so its log leaves through the container's error stream; the
+# session capture built into this sshd leaves through its output stream.
 LogLevel VERBOSE
 SyslogFacility AUTH
 
@@ -59,5 +52,3 @@ PrintMotd no
 PrintLastLog yes
 AcceptEnv LANG LC_*
 Subsystem sftp /usr/lib/openssh/sftp-server
-# The account's login shell is rec-shell. Running the recorder directly avoids
-# user-writable Bash startup files before admission and preserves key commands.

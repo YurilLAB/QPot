@@ -429,10 +429,11 @@ func TestHiFiPublicationRequiresLiveGate(t *testing.T) {
 					return false // All smoke controls must use the matrix's loaded image.
 				}
 				if id == "build" && strings.Contains(st.Run, "--name be2") &&
-					(!strings.Contains(st.Run, "/run/sshd/bootstrap/keys:ro") ||
-						!strings.Contains(st.Run, "chmod 0777 /k /k/*") ||
-						!strings.Contains(st.Run, "docker exec --user 65534:65534 be2 sh -c 'test ! -r /run/sshd/bootstrap/keys/ssh_host_ed25519_key'")) {
-					return false // Windows-readable source files require a protected parent.
+					(!strings.Contains(st.Run, `-e "BACKEND_HOST_KEYS=$pool"`) ||
+						strings.Contains(st.Run, " -v ") || strings.Contains(st.Run, "--mount") ||
+						!strings.Contains(st.Run, `test "$(docker inspect --format '{{len .Mounts}}' be2)" = 0`) ||
+						!strings.Contains(st.Run, "docker exec --user 65534:65534 be2 sh -c 'test ! -r /etc/ssh/ssh_host_ed25519_key'")) {
+					return false // The pool's keys arrive without a mount, readable by root alone.
 				}
 				if st.Uses != "" && !regexp.MustCompile(`^[A-Za-z0-9_.-]+/[A-Za-z0-9_./-]+@[0-9a-f]{40}$`).MatchString(st.Uses) {
 					return false
@@ -469,9 +470,9 @@ func TestHiFiPublicationRequiresLiveGate(t *testing.T) {
 		"main path filter":         {"push:\n    branches: [main]", "push:\n    branches: [main]\n    paths: ['docker/**']"},
 		"main ignored paths":       {"push:\n    branches: [main]", "push:\n    branches: [main]\n    paths-ignore: ['README.md']"},
 		"unbuilt smoke image":      {"\"${TEST_IMAGE}\"", "\"${IMAGE}:ci\""},
-		"public host-key source":   {"/run/sshd/bootstrap/keys:ro", "/etc/ssh/keys:ro"},
-		"private key fixture dir":  {"chmod 0777 /k /k/*", "chmod 0777 /k/*"},
-		"host-key denial omitted":  {"docker exec --user 65534:65534 be2 sh -c 'test ! -r /run/sshd/bootstrap/keys/ssh_host_ed25519_key'", "true"},
+		"mounted host keys":        {`-e "BACKEND_HOST_KEYS=$pool"`, `-v "$keys:/etc/ssh/keys:ro"`},
+		"mount check omitted":      {`test "$(docker inspect --format '{{len .Mounts}}' be2)" = 0`, "true"},
+		"host-key denial omitted":  {"docker exec --user 65534:65534 be2 sh -c 'test ! -r /etc/ssh/ssh_host_ed25519_key'", "true"},
 		"no validation dependency": {"needs: [build, hifi-validation, source-validation, semantic-validation]", "needs: [build]"},
 		"publish on failure":       {"if: github.event_name == 'push' && github.ref == 'refs/heads/main'", "if: always()"},
 		"skipped live gate":        {"run: bash scripts/test-hifi.sh --use-built-images", "run: true"},

@@ -6,6 +6,11 @@
 # fingerprinting gap that every Python-transport honeypot (Cowrie/Kippo, incl.
 # Cowrie proxy mode) leaves open.
 #
+# Sessions are recorded inside sshd itself: Debian's own openssh package, built
+# here with one small patch (docker/ssh-backend/openssh) whose privileged
+# monitor copies each session's plaintext to the container's output stream.
+# Accounts keep /bin/bash; no wrapper, script or log file exists in the guest.
+#
 # This container is GENUINE code execution for the attacker. The orchestration
 # layer (see doc/ssh-hifi-proxy.md) restricts reachable peers to its private cell,
 # caps its resources, and RESETS it between sessions. It applies a stronger
@@ -19,8 +24,8 @@ FROM --platform=$BUILDPLATFORM public.ecr.aws/docker/library/golang:1.26.10-alpi
 ARG TARGETOS
 ARG TARGETARCH
 WORKDIR /src
-# The helper only uses the standard library. A small neutral module avoids
-# embedding repository names in the attacker-readable audit binary.
+# The start-up helper only uses the standard library, and deletes itself
+# before sshd starts. A small neutral module keeps repository names out of it.
 COPY internal/sshbackend ./internal/sshbackend
 COPY cmd/qpot-sshbackend/main.go ./cmd/session-audit/main.go
 RUN printf 'module session-audit\n\ngo 1.26.0\n' > go.mod \
@@ -30,14 +35,39 @@ RUN printf 'module session-audit\n\ngo 1.26.0\n' > go.mod \
        go build -buildvcs=false -trimpath -ldflags="-s -w -buildid=" \
        -o /out/session-audit ./cmd/session-audit
 
+# Debian's openssh source, built the way Debian builds it, plus the capture
+# patch. The packages keep Debian's version, so dpkg and apt see the stock
+# package and `dpkg -V openssh-server` is clean. A security update that moves
+# the patched lines fails this build loudly instead of shipping an unrecorded sshd.
+FROM public.ecr.aws/docker/library/debian:12-slim@sha256:734a72b3d6142a71993b4bc580ca01d8ca687f77a2c422d96a961d3376b179bc AS openssh
+ENV DEBIAN_FRONTEND=noninteractive
+RUN sed -i 's/^Types: deb$/Types: deb deb-src/' /etc/apt/sources.list.d/debian.sources \
+    && apt-get update \
+    && apt-get install -y --no-install-recommends dpkg-dev fakeroot quilt \
+    && apt-get build-dep -y -P pkg.openssh.nognome,noudeb openssh
+WORKDIR /build
+COPY docker/ssh-backend/openssh/ /build/capture/
+RUN apt-get source openssh \
+    && cd openssh-*/ \
+    && cp /build/capture/qpcapture.c /build/capture/qpcapture.h . \
+    && QUILT_PATCHES=debian/patches quilt import -P session-capture.patch /build/capture/session-capture.patch \
+    && QUILT_PATCHES=debian/patches quilt push \
+    && DEB_BUILD_OPTIONS="nocheck noddebs parallel=$(nproc)" DEB_BUILD_PROFILES="pkg.openssh.nognome noudeb" \
+       dpkg-buildpackage -b -uc -us \
+    && mkdir /debs \
+    && mv /build/openssh-client_*.deb /build/openssh-server_*.deb /build/openssh-sftp-server_*.deb /debs/
+
 FROM public.ecr.aws/docker/library/debian:12-slim@sha256:734a72b3d6142a71993b4bc580ca01d8ca687f77a2c422d96a961d3376b179bc AS runtime
 
-# Real openssh-server + `script` (util-linux/bsdextrautils) for PTY session
-# recording. Ordinary shell/database clients are genuine; orchestration, rather
-# than missing binaries, restricts reachable peers to the selected private cell.
-RUN apt-get update \
+# The patched openssh packages, and ordinary shell/database clients. They are
+# genuine; orchestration, rather than missing binaries, restricts reachable
+# peers to the selected private cell.
+RUN --mount=type=bind,from=openssh,source=/debs,target=/tmp/openssh \
+    apt-get update \
     && apt-get install -y --no-install-recommends \
-        openssh-server \
+        /tmp/openssh/openssh-client_*.deb \
+        /tmp/openssh/openssh-server_*.deb \
+        /tmp/openssh/openssh-sftp-server_*.deb \
         bsdextrautils \
         util-linux \
         ca-certificates \
@@ -45,22 +75,14 @@ RUN apt-get update \
     # Retain genuine signed package indexes and one cached optional package.
     # apt-get --no-download install tree updates real dpkg/files while offline.
     && apt-get install -y --download-only --no-install-recommends tree \
-    && mkdir -p /run/sshd/bootstrap /var/log/ssh-backend \
-    && chmod 0700 /run/sshd/bootstrap \
-    && chmod 0750 /var/log/ssh-backend \
-    # Host keys are generated/persisted at runtime so the fingerprint is stable
-    # across restarts (a key that rotates every restart is itself a tell).
+    # The pool's shared host keys are written at start: one fingerprint for
+    # every backend, stable across resets (a key that rotates is itself a tell).
     && rm -f /etc/ssh/ssh_host_*
 
-COPY docker/ssh-backend/files/sshd_config   /etc/ssh/sshd_config
-COPY docker/ssh-backend/files/rec-shell.sh  /usr/local/bin/rec-shell
-COPY docker/ssh-backend/files/entrypoint.sh /usr/local/bin/entrypoint
+COPY docker/ssh-backend/files/sshd_config /etc/ssh/sshd_config
 COPY --from=build /out/session-audit /usr/local/libexec/session-audit
-RUN sed -i '2,${/^[[:space:]]*#/d;}' /usr/local/bin/rec-shell /usr/local/bin/entrypoint \
-    && sed -i '/^[[:space:]]*#/d' /etc/ssh/sshd_config \
-    && sed -i 's|^SHELL=.*|SHELL=/usr/local/bin/rec-shell|' /etc/default/useradd \
-    && printf '/usr/local/bin/rec-shell\n' >> /etc/shells \
-    && chmod 0755 /usr/local/bin/rec-shell /usr/local/bin/entrypoint /usr/local/libexec/session-audit
+RUN sed -i '/^[[:space:]]*#/d' /etc/ssh/sshd_config \
+    && chmod 0755 /usr/local/libexec/session-audit
 
 # Keep the complete Debian filesystem in one final layer. This avoids retaining
 # repeated full rootfs snapshots on VFS-backed development Docker engines.
@@ -70,4 +92,4 @@ ENV PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin" SESSION_
 USER 0:0
 WORKDIR /
 EXPOSE 22
-ENTRYPOINT ["/usr/local/bin/entrypoint"]
+ENTRYPOINT ["/usr/local/libexec/session-audit", "serve"]

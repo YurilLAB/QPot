@@ -21,7 +21,7 @@ import (
 	"time"
 
 	"github.com/qpot/qpot/internal/config"
-	"github.com/qpot/qpot/internal/proxy"
+	"github.com/qpot/qpot/internal/sshcapture"
 	"golang.org/x/crypto/ssh"
 	"gopkg.in/yaml.v3"
 )
@@ -117,6 +117,9 @@ func TestSSHOrganizationLive(t *testing.T) {
 	})
 	recycler := requireBackendRecycler(t, cfg)
 	go func() { defer close(monitorDone); recycler.Run(monitorCtx) }()
+	// The control plane's own capture conversion: the backends' sshd records
+	// sessions on their error stream, and nothing in a guest names its lease.
+	go recycler.RunCapture(monitorCtx)
 	// Fail immediately on a host that cannot enforce the actual generated
 	// policy. This is a real Apply using the unchanged production guard image.
 	if output, err := compose(ctx, "run", "--rm", "--no-deps", "netguard", "apply"); err != nil {
@@ -202,26 +205,50 @@ func TestSSHOrganizationLive(t *testing.T) {
 		}
 		return string(output)
 	}
+	// Which cell a visitor reached, read from the host's own evidence: the
+	// converted session record, joined to the broker's connection. That also
+	// proves the attribution works end to end.
+	leases := 0
 	lease := func(client *ssh.Client) (string, uint64) {
-		var connection proxy.ConnectionContext
-		if err := json.Unmarshal([]byte(command(client, "cat /run/audit-context/connection.json")), &connection); err != nil || connection.Generation == nil {
-			t.Fatalf("missing trusted connection context: %v", err)
-		}
-		for _, app := range sshBackendServiceNames(cfg) {
-			contextDir, err := sshStoreContext(cfg, app)
-			if err != nil {
-				t.Fatal(err)
+		t.Helper()
+		leases++
+		marker := fmt.Sprintf("lease-marker-%d-%d", leases, time.Now().UnixNano())
+		command(client, "printf "+marker)
+		var app string
+		var generation uint64
+		sshLiveWait(t, ctx, "converted session evidence for "+marker, func() bool {
+			for _, candidate := range sshBackendServiceNames(cfg) {
+				files, _ := filepath.Glob(filepath.Join(requireSSHLogDir(t, cfg, candidate), "uid-*", "*.json"))
+				for _, file := range files {
+					data, err := os.ReadFile(file)
+					if err != nil || !bytes.Contains(data, []byte(`"input":"printf `+marker+`"`)) {
+						continue
+					}
+					var event sshcapture.SessionEvent
+					first, _, _ := bytes.Cut(data, []byte("\n"))
+					if err := json.Unmarshal(first, &event); err != nil || event.Attribution != "broker-cell" || event.Generation == nil || event.SrcIP == "" || event.SessionID == "" {
+						t.Fatalf("session evidence is not joined to its broker connection: %s", data)
+					}
+					app, generation = candidate, *event.Generation
+					return true
+				}
 			}
-			data, _ := os.ReadFile(filepath.Join(contextDir, "connection.json"))
-			var host proxy.ConnectionContext
-			if json.Unmarshal(data, &host) == nil && host.SessionID == connection.SessionID {
-				return app, *connection.Generation
-			}
-		}
-		t.Fatal("guest connection did not match any host-owned lease")
-		return "", 0
+			return false
+		})
+		return app, generation
 	}
 	first, second := connect(), connect()
+	// The guest's own view names nothing of the host: no mount, no recorder.
+	store, err := sshStoreAt(cfg.DataPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	guestView := command(first, "cat /proc/self/mountinfo; ps -eo comm=; ls -A /usr/local/bin /usr/local/sbin /run")
+	for _, leak := range []string{filepath.ToSlash(cfg.DataPath), filepath.ToSlash(store.Root), store.Namespace, "qpot", "honeypot", "session-audit", "rec-shell", "audit-context"} {
+		if strings.Contains(strings.ToLower(guestView), strings.ToLower(leak)) {
+			t.Fatalf("a guest can see %q:\n%s", leak, guestView)
+		}
+	}
 	firstApp, firstGeneration := lease(first)
 	secondApp, secondGeneration := lease(second)
 	if firstApp == secondApp {
@@ -430,14 +457,28 @@ func TestSSHOrganizationLive(t *testing.T) {
 	}
 	// The needle is assembled at runtime so this inspection command itself
 	// cannot plant the previous visitor's literal marker into the new log.
-	if output := command(fresh, `set -eu; test ! -e /srv/app/visitor-marker; ! getent passwd validation-user; ! dpkg-query -W -f='${Status}' tree 2>/dev/null | grep -q 'install ok installed'; needle="$(printf 'first-private-\164ranscript')"; ! grep -R -l -- "$needle" /var/log/ssh-backend; `+query+`'SELECT count(*) FROM assets WHERE id=991;'`); strings.TrimSpace(output) != "0" {
+	if output := command(fresh, `set -eu; test ! -e /srv/app/visitor-marker; ! getent passwd validation-user; ! dpkg-query -W -f='${Status}' tree 2>/dev/null | grep -q 'install ok installed'; needle="$(printf 'first-private-\164ranscript')"; ! grep -R -s -l -- "$needle" /var/log /tmp /root; `+query+`'SELECT count(*) FROM assets WHERE id=991;'`); strings.TrimSpace(output) != "0" {
 		t.Fatal("fresh cell retained previous visitor SQL data")
 	}
-	command(fresh, backupCheck+shellQuote(`set -eu; test -f /srv/backups/*/initial.sql; test -z "$(find /srv/backups -name '*.sql.gz' -print)"; needle="$(printf 'first-private-\164ranscript')"; ! grep -R -l -- "$needle" /var/log/ssh-backend`))
+	command(fresh, backupCheck+shellQuote(`set -eu; test -f /srv/backups/*/initial.sql; test -z "$(find /srv/backups -name '*.sql.gz' -print)"; needle="$(printf 'first-private-\164ranscript')"; ! grep -R -s -l -- "$needle" /var/log /tmp /root`))
 	for _, service := range sshCellServiceNames(cfg, firstApp) {
 		archives, _ := filepath.Glob(filepath.Join(filepath.Dir(requireSSHLogDir(t, cfg, service)), fmt.Sprintf("archive-g%d-*", firstGeneration), "logs"))
 		if len(archives) == 0 {
 			t.Fatalf("closed %s logs were not retained outside new guests", service)
+		}
+		if service != firstApp {
+			continue
+		}
+		// The reset drained the stopped backend first: the first visitor's
+		// whole transcript is in the archive, finished.
+		records, _ := filepath.Glob(filepath.Join(archives[0], "uid-0", "*.json"))
+		finished := false
+		for _, record := range records {
+			data, _ := os.ReadFile(record)
+			finished = finished || (bytes.Contains(data, []byte("first-private-transcript")) && bytes.Count(data, []byte("\n")) == 2)
+		}
+		if !finished {
+			t.Fatalf("the reset archived %s without the first visitor's finished transcript", service)
 		}
 	}
 }
@@ -521,6 +562,7 @@ func TestSSHOrganizationServicesLive(t *testing.T) {
 		Image, User, Hostname               string
 		ReadOnly                            bool `yaml:"read_only"`
 		Entrypoint, Command, Volumes, Tmpfs []string
+		EnvFile                             []string `yaml:"env_file"`
 		CapDrop                             []string `yaml:"cap_drop"`
 		CapAdd                              []string `yaml:"cap_add"`
 		SecurityOpt                         []string `yaml:"security_opt"`
@@ -617,6 +659,9 @@ func TestSSHOrganizationServicesLive(t *testing.T) {
 		for _, mount := range spec.Volumes {
 			args = append(args, "--volume", mount)
 		}
+		for _, file := range spec.EnvFile {
+			args = append(args, "--env-file", file)
+		}
 		for _, tmp := range spec.Tmpfs {
 			args = append(args, "--tmpfs", tmp)
 		}
@@ -692,12 +737,12 @@ func TestSSHOrganizationServicesLive(t *testing.T) {
 		return err == nil
 	})
 	sshLiveWait(t, ctx, "component backup SSH", func() bool {
-		_, err := run("exec", backupName, "/usr/local/libexec/session-audit", "health")
-		return err == nil
+		output, err := run("exec", backupName, "/bin/bash", "-c", `exec 3<>/dev/tcp/127.0.0.1/22; IFS= read -r line <&3; printf '%s' "$line"`)
+		return err == nil && bytes.HasPrefix(output, []byte("SSH-2.0-OpenSSH"))
 	})
 	// Self-login uses the real planted key with an explicitly pinned app host key.
 	// Docker exec bootstraps only this test's authorized-key/known-host fixture.
-	bootstrap := `set -eu; mkdir -p /root/.ssh; chmod 700 /root/.ssh; cp /srv/app/.ssh/id_ed25519.pub /root/.ssh/authorized_keys; chmod 600 /root/.ssh/authorized_keys; printf '[127.0.0.1]:2200 %s\n' "$(cut -d' ' -f1-2 /run/sshd/bootstrap/keys/ssh_host_ed25519_key.pub)" > /tmp/component-known-hosts`
+	bootstrap := `set -eu; mkdir -p /root/.ssh; chmod 700 /root/.ssh; cp /srv/app/.ssh/id_ed25519.pub /root/.ssh/authorized_keys; chmod 600 /root/.ssh/authorized_keys; printf '[127.0.0.1]:2200 %s\n' "$(cut -d' ' -f1-2 /etc/ssh/ssh_host_ed25519_key.pub)" > /tmp/component-known-hosts`
 	if output, err := run("exec", appName, "/bin/bash", "-c", bootstrap); err != nil {
 		t.Fatalf("owned SSH component setup:%v %s", err, output)
 	}
@@ -732,7 +777,7 @@ func TestSSHOrganizationServicesLive(t *testing.T) {
 	backupQuery := `. /srv/app/.env; ssh -i /srv/app/.ssh/id_ed25519 -o BatchMode=yes -o StrictHostKeyChecking=yes -o HostKeyAlgorithms=ssh-ed25519 -o UserKnownHostsFile=/srv/app/.ssh/known_hosts "$BACKUP_USER@$BACKUP_HOST" `
 	remote(backupQuery+shellQuote(`set -eu; for file in /srv/backups/*/*.sql.gz; do gzip -t "$file"; gzip -cd "$file" | grep -q services-component; done; printf backup-verified`), 0)
 	// A valid but WRONG app public key must not be accepted as the backup's key.
-	remote(`cp /srv/app/.ssh/known_hosts /tmp/component-original-hosts; printf 'backup %s\n' "$(cut -d' ' -f1-2 /run/sshd/bootstrap/keys/ssh_host_ed25519_key.pub)" > /srv/app/.ssh/known_hosts`, 0)
+	remote(`cp /srv/app/.ssh/known_hosts /tmp/component-original-hosts; printf 'backup %s\n' "$(cut -d' ' -f1-2 /etc/ssh/ssh_host_ed25519_key.pub)" > /srv/app/.ssh/known_hosts`, 0)
 	remote("/usr/local/bin/backup-db", 255)
 	remote("cp /tmp/component-original-hosts /srv/app/.ssh/known_hosts; /usr/local/bin/backup-db", 0)
 	t.Log("actual app SQL mutation -> planted pg_dump/gzip/strict-key SSH backup -> remote readback passed in a shared network-none namespace; production routing/isolation/reset is a separate gate")

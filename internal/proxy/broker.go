@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"log"
 	"net"
 	"sync"
 	"sync/atomic"
@@ -44,13 +43,6 @@ type Config struct {
 	// Gate supplies the counter snapshot recorded by the pool's lease hook.
 	// It never grants the broker authority to recreate containers itself.
 	Gate *GenerationGate
-	// ContextDir, when configured, is a trusted writable root containing one
-	// own-cell attribution slot per backend. Capture setup must succeed before
-	// any bytes are forwarded; guests receive only their own read-only slot.
-	ContextDir string
-	// ContextNamespace selects opaque host directory names for this instance.
-	// Empty retains the older directory layout for standalone broker users.
-	ContextNamespace string
 	// Dial overrides the backend dialer; nil uses a net.Dialer with DialTimeout.
 	Dial DialFunc
 }
@@ -118,10 +110,6 @@ func NewBroker(cfg Config, pool *Pool) *Broker {
 // Serve accepts connections on ln until ctx is cancelled or ln is closed, then
 // waits for in-flight sessions to drain. It always closes ln before returning.
 func (b *Broker) Serve(ctx context.Context, ln net.Listener) error {
-	if err := ValidateContextNamespace(b.cfg.ContextNamespace); err != nil {
-		_ = ln.Close()
-		return err
-	}
 	// A background sweeper bounds the limiter's per-IP map under source churn.
 	sweepCtx, stopSweep := context.WithCancel(ctx)
 	defer stopSweep()
@@ -237,20 +225,12 @@ func (b *Broker) handle(ctx context.Context, client net.Conn) {
 			b.pool.Quarantine(backend)
 		}
 	}()
-	startedAt := time.Now().UTC()
-	sessionID, captureErr := newSessionID()
-	if captureErr == nil && b.cfg.ContextDir != "" {
-		captureErr = writeConnectionContext(b.cfg.ContextDir, backend.ID, ConnectionContext{
-			SessionID: sessionID, SrcIP: ip, SrcPort: port,
-			StartedAt: startedAt.Format(time.RFC3339Nano), Generation: generation,
-		}, b.cfg.ContextNamespace)
-	}
-	if captureErr != nil {
+	sessionID, err := newSessionID()
+	if err != nil {
 		releaseBackend = false
-		log.Printf("backend %q connection context unavailable: %v", backend.ID, captureErr)
 		b.cfg.Sink.Emit(Event{EventType: EventBackendError, Honeypot: b.cfg.Honeypot,
 			SrcIP: ip, SrcPort: port, Backend: backend.ID, Generation: generation,
-			SessionID: sessionID, Reason: ReasonBackendContextError})
+			Reason: ReasonBackendDialError})
 		return
 	}
 
@@ -267,6 +247,14 @@ func (b *Broker) handle(ctx context.Context, client net.Conn) {
 		return
 	}
 	defer upstream.Close()
+	// Before the first byte: the backend's capture of this connection is
+	// joined to it on the host by the port the broker dialed from.
+	connected := Event{EventType: EventConnect, Honeypot: b.cfg.Honeypot,
+		SrcIP: ip, SrcPort: port, Backend: backend.ID, Generation: generation, SessionID: sessionID}
+	if local, ok := upstream.LocalAddr().(*net.TCPAddr); ok {
+		connected.BackendPort = local.Port
+	}
+	b.cfg.Sink.Emit(connected)
 
 	// 4) Splice. The whole session is bounded by MaxSession; idleness within it
 	// is bounded by IdleTimeout. Either bound, ctx cancellation, or a peer close

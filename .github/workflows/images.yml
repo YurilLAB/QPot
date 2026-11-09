@@ -124,19 +124,19 @@ jobs:
           echo "::error::ssh-backend did not serve an OpenSSH banner"
           exit 1
 
-      - name: Smoke-test the backend with host keys shared from Windows
+      - name: Smoke-test the backend with the pool's host keys
         if: matrix.image == 'ssh-backend'
-        # Docker Desktop shows every file shared from Windows as 0777, root's.
-        # sshd refuses a host key others may read; the backend must still
-        # serve the mounted pool key, from a private copy.
+        # The pool's keys arrive in BACKEND_HOST_KEYS, never as a mount: a
+        # mount names a host folder in the guest's mount table. sshd must
+        # serve exactly that key, from a copy root alone can read.
         run: |
           set -euo pipefail
           keys=$(mktemp -d)
-          docker run --rm --network none --entrypoint sh -v "$keys:/k" "${TEST_IMAGE}" -c \
-            'for t in rsa ecdsa ed25519; do ssh-keygen -q -t $t -f /k/ssh_host_${t}_key -N "" </dev/null; done; chmod 0777 /k /k/*'
-          want=$(docker run --rm --network none --entrypoint ssh-keygen -v "$keys:/k:ro" "${TEST_IMAGE}" \
-            -lf /k/ssh_host_ed25519_key.pub | awk '{print $2}')
-          docker run -d --name be2 --network none -v "$keys:/run/sshd/bootstrap/keys:ro" "${TEST_IMAGE}"
+          for t in rsa ecdsa ed25519; do ssh-keygen -q -t "$t" -f "$keys/ssh_host_${t}_key" -N "" </dev/null; done
+          want=$(ssh-keygen -lf "$keys/ssh_host_ed25519_key.pub" | awk '{print $2}')
+          pool=""
+          for t in rsa ecdsa ed25519; do pool="${pool:+$pool,}$t:$(base64 -w0 < "$keys/ssh_host_${t}_key")"; done
+          docker run -d --name be2 --network none -e "BACKEND_HOST_KEYS=$pool" "${TEST_IMAGE}"
           got=""
           for _ in $(seq 1 30); do
             got=$(docker exec be2 sh -c 'ssh-keyscan -t ed25519 127.0.0.1 2>/dev/null | ssh-keygen -lf -' 2>/dev/null | awk '{print $2}' || true)
@@ -145,12 +145,14 @@ jobs:
           done
           if [ "$got" != "$want" ]; then
             docker logs be2 || true
-            echo "::error::backend served '${got}', want the mounted key ${want}"
+            echo "::error::backend served '${got}', want the pool key ${want}"
             exit 1
           fi
-          echo "backend serves the mounted key: ${got}"
-          docker exec --user 65534:65534 be2 sh -c 'test ! -r /run/sshd/bootstrap/keys/ssh_host_ed25519_key'
+          echo "backend serves the pool key: ${got}"
+          docker exec --user 65534:65534 be2 sh -c 'test ! -r /etc/ssh/ssh_host_ed25519_key'
+          test "$(docker inspect --format '{{len .Mounts}}' be2)" = 0
           docker rm -f be2 >/dev/null
+          rm -rf "$keys"
 
       - name: Smoke-test the broker (starts, refuses bad config)
         if: matrix.image == 'ssh-proxy'

@@ -144,8 +144,8 @@ func validatePath(name string, directory bool) error {
 			break
 		}
 	}
-	if !allowed || name == "/usr/local/bin/rec-shell" || name == "/usr/local/bin/entrypoint" {
-		return fmt.Errorf("scene path %q is reserved or outside scene directories", name)
+	if !allowed {
+		return fmt.Errorf("scene path %q is outside scene directories", name)
 	}
 	return nil
 }

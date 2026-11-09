@@ -564,8 +564,8 @@ func TestSSHRuntimeMarkerStateOrderAndPrivateNamespace(t *testing.T) {
 	if err := writeSSHStoreRecord(cfg.DataPath, sshStorePointer, store); err != nil {
 		t.Fatal(err)
 	}
-	// The namespace is present only in the separate trusted broker. Native
-	// service environment, generated files and visible mount sources use the
+	// The namespace is a host secret: no service, the broker included, gets
+	// it. Environment, generated files and visible mount sources use the
 	// public root ID and opaque leaf IDs, never the MAC key itself.
 	rendered := renderComposeCfg(t, cfg)
 	var doc struct {
@@ -578,12 +578,6 @@ func TestSSHRuntimeMarkerStateOrderAndPrivateNamespace(t *testing.T) {
 		data, err := yaml.Marshal(service)
 		if err != nil {
 			t.Fatal(err)
-		}
-		if name == sshProxyHoneypot {
-			if !strings.Contains(string(data), store.Namespace) {
-				t.Fatal("trusted broker lacks namespace")
-			}
-			continue
 		}
 		if strings.Contains(string(data), store.Namespace) {
 			t.Fatalf("private namespace exposed in %s", name)

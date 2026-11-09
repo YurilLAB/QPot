@@ -192,23 +192,3 @@ func TestFailedListenerDoesNotRequestBackendRecreation(t *testing.T) {
 		t.Fatalf("failed startup requested a reset: %s", data)
 	}
 }
-
-func TestCaptureRequiresGenerationAndSpecificIngressListener(t *testing.T) {
-	gate := proxy.NewGenerationGate(t.TempDir())
-	for _, listen := range []string{":2222", "0.0.0.0:2222", "[::]:2222", "broker:2222", "not-an-address"} {
-		if err := validateCaptureListener("/context", listen, gate); err == nil {
-			t.Errorf("context mode accepted wildcard/unverified listener %q", listen)
-		}
-	}
-	for _, listen := range []string{"192.0.2.10:2222", "127.0.0.1:0", "[::1]:2222"} {
-		if err := validateCaptureListener("/context", listen, gate); err != nil {
-			t.Errorf("concrete ingress listener %q rejected: %v", listen, err)
-		}
-	}
-	if err := validateCaptureListener("/context", "127.0.0.1:2222", nil); err == nil {
-		t.Fatal("context mode accepted missing generation gate")
-	}
-	if err := validateCaptureListener("", ":2222", nil); err != nil {
-		t.Fatalf("legacy listener unexpectedly restricted: %v", err)
-	}
-}

@@ -209,10 +209,10 @@ func TestSSHProxyComposeRender(t *testing.T) {
 		if !strings.Contains(blk, "cap_drop:") || !strings.Contains(blk, "SETUID") {
 			t.Errorf("%s missing expected capability hardening", svc)
 		}
-		// Anti-tell: every backend mounts the SHARED host-key dir (one fingerprint
-		// for the pool) and never the image's /etc/ssh wholesale.
-		if !strings.Contains(blk, "shared-hostkeys:/run/sshd/bootstrap/keys") {
-			t.Errorf("%s must mount the shared host-key dir at /run/sshd/bootstrap/keys", svc)
+		// Anti-tell: every backend gets the SHARED host keys (one fingerprint
+		// for the pool) at start, and nothing from the host is mounted.
+		if !strings.Contains(blk, "env_file:") || !strings.Contains(blk, "shared-hostkeys") || !strings.Contains(blk, hostKeysEnvFile) || strings.Contains(blk, "volumes:") {
+			t.Errorf("%s must get the shared host keys through its env_file, with no mounts", svc)
 		}
 		// Capture this backend's hostname for the consistency check below.
 		for _, ln := range strings.Split(blk, "\n") {
