@@ -24,6 +24,8 @@
 //	QPOT_SSHPROXY_RATE_IP    new conns/sec per IP     (default "5")
 //	QPOT_SSHPROXY_BURST_IP   rate burst per IP        (default "10")
 //	QPOT_SSHPROXY_CONC_IP    max concurrent per IP    (default "3")
+//	QPOT_SSHPROXY_REQUIRE_CAPTURE "1": admit connections only while the host's
+//	                         capture converter is live (generated Compose sets it)
 //	QPOT_SSHPROXY_CONC       max concurrent global    (default "128")
 //	QPOT_SSHPROXY_RECYCLE    wait for each used backend to be recreated by the
 //	                         host before reuse: "on" (default) or "off"
@@ -77,6 +79,7 @@ func run() error {
 		BurstPerIP:      envFloat("QPOT_SSHPROXY_BURST_IP", 10),
 		MaxConcurrentIP: envInt("QPOT_SSHPROXY_CONC_IP", 3),
 		MaxConcurrent:   envInt("QPOT_SSHPROXY_CONC", 128),
+		RequireCapture:  env("QPOT_SSHPROXY_REQUIRE_CAPTURE", "") == "1",
 	}
 
 	logFile, err := openSessionLog(logPath, hostReadableLog)

@@ -885,13 +885,16 @@ services:
     mem_swappiness: 0
     oom_kill_disable: false
     # Its log carries the session capture until the control plane converts
-    # it: room for a connection's whole capture (64 MiB, as base64).
+    # it: room for the whole capture of every connection the cell holds at
+    # once (sshd charges each record's full cost in this log, Docker's
+    # framing included), and one more such file for sshd's own log. No
+    # labels option: Docker would copy them into every line, a cost sshd
+    # does not count, and nothing outside QPot should ship this log.
     logging:
       driver: "json-file"
       options:
-        max-size: "32m"
-        max-file: "4"
-        labels: "qpot.instance,qpot.honeypot"
+        max-size: "{{sshBackendLogMaxSize}}"
+        max-file: "{{sshBackendLogFiles}}"
 {{end}}
 
 {{define "honeypot"}}
@@ -1016,6 +1019,12 @@ services:
       - QPOT_SSHPROXY_GENERATIONS={{sshProxyGenerationsPath}}
       # How long a visitor's source keeps its cell after its last connection.
       - QPOT_SSHPROXY_CELL_HOLD={{sshCellHold $.Config}}
+      # A source's open connections, all in its one cell: the backend's log
+      # retention is sized for this many.
+      - QPOT_SSHPROXY_CONC_IP={{sshCellConnections}}
+      # New connections only while the control plane converts the backends'
+      # logs, so nothing piles up there unconverted.
+      - QPOT_SSHPROXY_REQUIRE_CAPTURE=1
       {{- range $key := runtimeProxyKeys}}
       - {{$key}}=
       {{- end}}
@@ -1269,6 +1278,9 @@ services:
 		"sshProxyBackends":       sshProxyBackends,
 		"sshBackendCSV":          sshBackendCSV,
 		"sshCellHold":            sshCellHold,
+		"sshCellConnections":     func() int { return sshCellConnections },
+		"sshBackendLogFiles":     sshBackendLogFiles,
+		"sshBackendLogMaxSize":   sshBackendLogMaxSize,
 		"sshBackendHostname":     sshBackendHostname,
 		// Cowrie's persona and identity lifetime (see deception.go).
 		"cowriePersona":         cowriePersona,

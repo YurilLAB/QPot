@@ -18,6 +18,14 @@
  * line ends in a bare newline, while sshd ends every log line with a carriage
  * return too, so the two never parse as each other. Nothing here logs: a
  * capture that cannot be written is dropped, never reported to the session.
+ *
+ * The budgets count what a record costs in the container log, not just its
+ * payload: its line, base64 and all, plus Docker's JSON framing of the line.
+ * Single bytes cost about a hundred times their size, so counting payload
+ * alone let one connection grow the log far past what it holds until the
+ * host converts it. Opening a channel charges its command, its open record
+ * and room for its exit, truncation and close records, so a recorded channel
+ * always gets its end; a channel that no longer fits is not recorded at all.
  */
 
 #include "includes.h"
@@ -49,6 +57,16 @@
 #define QPC_CHAN_BUDGET	(8ULL * 1024 * 1024)
 #define QPC_CONN_BUDGET	(64ULL * 1024 * 1024)
 #define QPC_MAX_CHANS	64
+/*
+ * Docker's json-file framing of one line (its escaped newline included; QPot
+ * sets no logging labels or env, which would add attrs to every line), and
+ * the longest header: 32 + 11 + 20 + 1 + 20 characters and five spaces.
+ */
+#define QPC_LOG_FRAME	72
+#define QPC_HEADER_MAX	96
+#define QPC_RECORD_FIXED	(QPC_HEADER_MAX + 1 + QPC_LOG_FRAME)
+/* What a channel's exit, truncation and close records can cost together. */
+#define QPC_END_RESERVE	(3 * qpc_cost(16))
 
 struct qpc_chan {
 	int used;
@@ -63,6 +81,13 @@ static int qpc_fd = -1;
 static char qpc_conn[33];
 static struct qpc_chan qpc_chans[QPC_MAX_CHANS];
 static unsigned long long qpc_conn_bytes;
+
+/* What a record carrying len payload bytes costs in the container log. */
+static unsigned long long
+qpc_cost(size_t len)
+{
+	return QPC_RECORD_FIXED + 4 * (((unsigned long long)len + 2) / 3);
+}
 
 static long long
 qpc_elapsed_ms(const struct timespec *start)
@@ -140,8 +165,8 @@ static void
 qpc_observe(int id, int kind, const u_char *data, size_t len)
 {
 	struct qpc_chan *c;
-	unsigned long long room;
-	size_t keep, chunk;
+	unsigned long long room, cost;
+	size_t chunk, fit;
 	char tag;
 
 	if (qpc_fd == -1 || (c = qpc_find(id)) == NULL)
@@ -161,19 +186,28 @@ qpc_observe(int id, int kind, const u_char *data, size_t len)
 		return;
 	if (c->truncated || len == 0)
 		return;
-	room = QPC_CHAN_BUDGET - c->bytes;
-	if (QPC_CONN_BUDGET - qpc_conn_bytes < room)
-		room = QPC_CONN_BUDGET - qpc_conn_bytes;
-	keep = len < room ? len : (size_t)room;
-	c->bytes += keep;
-	qpc_conn_bytes += keep;
-	while (keep > 0) {
-		chunk = keep < QPC_RAW_CHUNK ? keep : QPC_RAW_CHUNK;
+	while (len > 0) {
+		chunk = len < QPC_RAW_CHUNK ? len : QPC_RAW_CHUNK;
+		room = QPC_CHAN_BUDGET - c->bytes;
+		if (QPC_CONN_BUDGET - qpc_conn_bytes < room)
+			room = QPC_CONN_BUDGET - qpc_conn_bytes;
+		if (qpc_cost(chunk) > room) {
+			/* The most that still fits, in whole base64 groups. */
+			fit = room > QPC_RECORD_FIXED ?
+			    (size_t)((room - QPC_RECORD_FIXED) / 4 * 3) : 0;
+			if (fit < chunk)
+				chunk = fit;
+		}
+		if (chunk == 0)
+			break;
+		cost = qpc_cost(chunk);
+		c->bytes += cost;
+		qpc_conn_bytes += cost;
 		qpc_emit(c, tag, data, chunk);
 		data += chunk;
-		keep -= chunk;
+		len -= chunk;
 	}
-	if (c->bytes >= QPC_CHAN_BUDGET || qpc_conn_bytes >= QPC_CONN_BUDGET) {
+	if (len > 0) {
 		c->truncated = 1;
 		qpc_emit(c, 't', NULL, 0);
 	}
@@ -223,10 +257,31 @@ qpcapture_open(struct ssh *ssh, int chanid, const struct passwd *pw,
 	struct timespec wall;
 	char host[256];
 	size_t len, off, chunk;
+	unsigned long long cost;
 	int i;
 
 	if (qpc_fd == -1 || pw == NULL)
 		return;
+	/*
+	 * The command chunks, the open record (whose text is at most one chunk)
+	 * and the channel's end records must fit the connection's budget, or
+	 * the channel goes unrecorded: opening channels must not grow the log
+	 * without bound.
+	 */
+	len = command == NULL ? 0 : strlen(command);
+	cost = qpc_cost(QPC_RAW_CHUNK) + QPC_END_RESERVE +
+	    (len > QPC_COMMAND_MAX ? qpc_cost(0) : 0);
+	for (off = 0; off < len && off < QPC_COMMAND_MAX; off += chunk) {
+		chunk = len - off;
+		if (chunk > QPC_RAW_CHUNK)
+			chunk = QPC_RAW_CHUNK;
+		if (off + chunk > QPC_COMMAND_MAX)
+			chunk = QPC_COMMAND_MAX - off;
+		cost += qpc_cost(chunk);
+	}
+	if (QPC_CONN_BUDGET - qpc_conn_bytes < cost)
+		return;
+	qpc_conn_bytes += cost;
 	if ((c = qpc_find(chanid)) == NULL) {
 		for (i = 0; i < QPC_MAX_CHANS && c == NULL; i++)
 			if (!qpc_chans[i].used)
@@ -240,7 +295,6 @@ qpcapture_open(struct ssh *ssh, int chanid, const struct passwd *pw,
 	monotime_ts(&c->start);
 	clock_gettime(CLOCK_REALTIME, &wall);
 	/* The command goes first: the open record completes the start. */
-	len = command == NULL ? 0 : strlen(command);
 	for (off = 0; off < len && off < QPC_COMMAND_MAX; off += chunk) {
 		chunk = len - off;
 		if (chunk > QPC_RAW_CHUNK)

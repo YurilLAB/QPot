@@ -123,9 +123,10 @@ tamper-proof command audit.
 | `QPOT_SSHPROXY_CELL_HOLD` | `30m` | How long a source keeps its cell after its last connection closes; `0` resets the cell after every connection. Generated Compose sets it from `cell_hold_minutes` |
 | `QPOT_SSHPROXY_RATE_IP` | `5` | New conns/sec per IP (token bucket) |
 | `QPOT_SSHPROXY_BURST_IP` | `10` | Rate burst per IP |
-| `QPOT_SSHPROXY_CONC_IP` | `3` | Max concurrent sessions per IP |
+| `QPOT_SSHPROXY_CONC_IP` | `3` | Max concurrent sessions per source (an IPv4 address or IPv6 /64). Generated Compose sets 3, the number the backends' log retention is sized for |
 | `QPOT_SSHPROXY_CONC` | `128` | Max concurrent sessions globally |
 | `QPOT_SSHPROXY_GENERATIONS` | unset | Read-only host recreation counters; set by generated Compose |
+| `QPOT_SSHPROXY_REQUIRE_CAPTURE` | unset (false) | `1`: take a new connection only while the host converts the backends' capture (its heartbeat in the generations folder changed in the last 30 s), else turn it away with `capture_unavailable`. Set by generated Compose |
 
 ---
 
@@ -379,8 +380,9 @@ requests a trusted reset before its first lease:
    failing) the backend is quarantined - never reused dirty - and rejoins the
    pool after a later recreation is observed.
 
-Consequences: with the control plane stopped, each backend serves one visitor
-and is then held back (fail closed). A backend is unavailable for a few seconds
+Consequences: with the control plane stopped, the broker takes no new
+connection after 30 seconds (see "Capture & analytics"), and a backend serves
+at most the visitor it has and is then held back (fail closed). A backend is unavailable for a few seconds
 after its visitor lets go of it, and an organization cell needs its
 database/backup ready too. Raise `backends` (honeypot `custom_config`) for
 expected concurrent visitors while accounting for the extra containers.
@@ -416,6 +418,36 @@ waits: `backends` bounds how many visitors are held at once. The shared host key
 `qpot` on the host and copied into each backend at start: root on a backend can
 read its copy, as root on any server can, but cannot change the key the pool
 presents.
+
+### Sizing and tuning
+
+One cell serves one visitor address at a time, so `backends` is how many
+visitors HiFi holds at once, counting those inside their hold. The defaults
+(2 backends, a 30-minute hold) suit a small sensor: two visitors fill the
+pool until half an hour after their last connections.
+
+- Watch the broker's rejections (`ssh_proxy_rejected`, by `reason`):
+  - `no_backend_available`: every cell is held or resetting. Raise `backends`
+    or shorten `cell_hold_minutes`. When every cell is held, the one idle the
+    longest is reset for the newcomer, and its visitor loses what it left.
+  - `max_concurrent_per_ip_reached`: a source already has three connections
+    open, the number the backends' log retention is sized for. A custom
+    deployment that raises `QPOT_SSHPROXY_CONC_IP` must raise that retention
+    too.
+  - `capture_unavailable`: the control plane is not converting the backends'
+    logs (`qpot serve` stopped or failing); nothing is admitted until it is.
+- A longer hold keeps a returning visitor's files and accounts, as a real
+  server would, but keeps its cell out of the pool; `0` gives every
+  connection a fresh cell.
+- Each backend adds its cell's containers (in organization mode an app, a
+  database and a backup host), their CPU and memory limits, and disk: up to
+  320 MiB of container log per backend container (five 64 MiB files) and up
+  to 256 MiB of converted evidence per container, which stays in its archive
+  until cleanup can remove it.
+- Ownership is by address: visitors behind one NAT share a cell, and one
+  visitor with many addresses or IPv6 /64s takes a cell for each, which can
+  fill a small pool. Size `backends` for the distinct sources you expect at
+  once.
 
 ---
 
@@ -457,9 +489,13 @@ Non-interactive exec records the command and binary stdin, stdout and stderr,
 including raw inbound SFTP requests and file bodies. Interactive PTYs retain
 input/output and timing; the input preview is not a parsed shell-command
 audit. Capture is limited to 8 MiB per channel and 64 MiB per connection and
-reports truncation without truncating the actual SSH byte stream; each
-backend's container log keeps room for one such connection until it is
-converted. Per-account limits (64 MiB, 2,048 files), inside limits for the whole
+reports truncation without truncating the actual SSH byte stream. The limits
+count what each record costs in the backend's container log (its header, its
+base64 and Docker's JSON framing), and opening a channel charges its command
+and records, so neither single-byte writes nor many channels take a
+connection past 64 MiB of log. Each backend's container log keeps five files
+of 64 MiB, four of them always whole: room for the three connections a source
+may have open at once and for sshd's own log until they are converted. Per-account limits (64 MiB, 2,048 files), inside limits for the whole
 container, bound the retained files and every byte written for them: streams,
 timing lines and record lines alike, so a stream of single bytes cannot make
 the host keep many times the limit. Arbitrary guest files still require host
@@ -480,6 +516,16 @@ recordings, so it does not convert first. Two conversions of the same
 container, in any order, leave the same files. With the control plane
 stopped, captured sessions wait in the container log until one of those paths
 runs.
+
+The broker takes a new connection only while that conversion runs. The
+control plane rewrites a heartbeat in the broker's read-only generations
+folder every 5 seconds; once it has not changed for 30 seconds, by the
+broker's own clock, new connections are turned away with
+`capture_unavailable` until it changes again. Connections already open carry
+on. sshd's own log, kept as `sshd.log` beside the records, is limited to
+32 MiB per container, and a last line says when later lines were not kept. A
+reset holds the cell folders only while it converts and archives them, so the
+followers of other cells wait seconds, not for its containers to come back.
 
 The genuine SFTP subsystem retains both protocol directions as binary streams,
 subject to the shared capture limit. These streams are evidence, rather than a
@@ -641,6 +687,15 @@ remove them separately only after verifying ownership and stopping all users.
   visitor detaches from the session, and nothing after guest root replaces
   sshd. A patched sshd differs from Debian's own binary, which a visitor with
   root could compare against Debian's published package.
+* **Unconverted evidence is bounded, not guaranteed.** While the control
+  plane runs, a backend's log is converted as it is written. If conversion
+  stops, connections already open carry on, and new ones are still admitted
+  for up to 30 seconds: a visitor that keeps writing then can push its own
+  oldest unconverted records out of its backend's log. Only its own cell's
+  records are at stake, since every cell is its own container. A cell's
+  backup host is reached from inside the cell, not through the broker, so
+  neither the capture gate nor the per-source limit applies to it; during an
+  outage its log is bounded only by the cell's life.
 * **Container tells remain.** No recorder, mount or context is visible in the
   guest, but container artifacts (such as `/.dockerenv`, cgroup paths and
   `sshd -D -e` as process 1) still identify a container.
@@ -721,3 +776,9 @@ through it:
   same test against an image built without the patch fails on missing
   evidence, and against an image with one leftover recorder trace fails on
   the guest check.
+* **A capture that cannot fill the log.** `TestSSHBackendCaptureCostLive`
+  sends one connection 30,000 single bytes, each echoed back before the next,
+  and then nine 7 MB outputs.
+  Every byte reaches the client, the capture lines add at most 64 MiB to the
+  container log as Docker writes it, each channel's record says it was cut
+  short, and the channels past the budget are not recorded.

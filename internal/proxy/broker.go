@@ -48,6 +48,9 @@ type Config struct {
 	// Gate supplies the counter snapshot recorded by the pool's lease hook.
 	// It never grants the broker authority to recreate containers itself.
 	Gate *GenerationGate
+	// RequireCapture admits a connection only while the host's capture
+	// converter is live (Gate.CaptureLive); without a Gate, none.
+	RequireCapture bool
 	// Dial overrides the backend dialer; nil uses a net.Dialer with DialTimeout.
 	Dial DialFunc
 }
@@ -134,6 +137,9 @@ func (b *Broker) Serve(ctx context.Context, ln net.Listener) error {
 	sweepCtx, stopSweep := context.WithCancel(ctx)
 	defer stopSweep()
 	go b.sweepLoop(sweepCtx)
+	if b.cfg.RequireCapture && b.cfg.Gate != nil {
+		go b.cfg.Gate.WatchCapture(sweepCtx, 2*time.Second)
+	}
 
 	// Closing the listener unblocks Accept on shutdown.
 	go func() {
@@ -218,6 +224,14 @@ func (b *Broker) handle(ctx context.Context, client net.Conn) {
 		return
 	}
 	defer release()
+
+	// Sessions are recorded in the backends' container logs, which hold only
+	// so much until the host converts them: with the converter down, take
+	// no new connection.
+	if b.cfg.RequireCapture && (b.cfg.Gate == nil || !b.cfg.Gate.CaptureLive()) {
+		reject(ReasonCaptureUnavailable)
+		return
+	}
 
 	// 2) Join the source's cell, or lease one (fixed pool; never
 	// attacker-influenced).

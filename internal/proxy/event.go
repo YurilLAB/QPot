@@ -105,6 +105,9 @@ const (
 	// was short and it had been idle the longest.
 	ReasonCellIdle    = "cell_hold_expired"
 	ReasonCellEvicted = "cell_evicted"
+	// ReasonCaptureUnavailable turns a connection away while the host's
+	// capture converter is not running (see CaptureHeartbeat).
+	ReasonCaptureUnavailable = "capture_unavailable"
 )
 
 // EventSink receives Events. Implementations must be safe for concurrent use by

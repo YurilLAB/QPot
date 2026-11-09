@@ -83,10 +83,10 @@ func (r *BackendRecycler) composeRecreate(ctx context.Context, service string) e
 		return err
 	}
 	defer lock.Close()
-	return r.composeRecreateLocked(ctx, service)
+	return r.composeRecreateLocked(ctx, lock, service)
 }
 
-func (r *BackendRecycler) composeRecreateLocked(ctx context.Context, service string) error {
+func (r *BackendRecycler) composeRecreateLocked(ctx context.Context, lock *sshCellLock, service string) error {
 	if err := sshStoreReady(filepath.Dir(r.ComposeFile)); err != nil {
 		return err
 	}
@@ -113,6 +113,11 @@ func (r *BackendRecycler) composeRecreateLocked(ctx context.Context, service str
 		return err
 	}
 	if err := validateSSHRuntimeResources(ctx); err != nil {
+		return err
+	}
+	// The cell's folders are archived and fresh: the recreation below leaves
+	// them alone, so the other cells' followers may write meanwhile.
+	if err := lock.releaseFolders(); err != nil {
 		return err
 	}
 	ctx, cancel := context.WithTimeout(ctx, 3*time.Minute)
@@ -172,7 +177,7 @@ func (r *BackendRecycler) resetCell(ctx context.Context, service string, expecte
 	if !strings.EqualFold(parseComposePS(output)[sshProxyHoneypot].State, "running") {
 		return nil
 	}
-	if err := r.composeRecreateLocked(ctx, service); err != nil {
+	if err := r.composeRecreateLocked(ctx, lock, service); err != nil {
 		return err
 	}
 	return bumpGeneration(r.GenerationDir, service)

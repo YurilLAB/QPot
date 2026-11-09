@@ -20,6 +20,29 @@ const AuthLog = "sshd.log"
 // maxLogLine bounds one line of sshd's error stream; longer lines are skipped.
 const maxLogLine = 64 << 10
 
+// maxAuthLog bounds sshd's own log kept for one container. A password-guessing
+// flood fills it honestly, and guest root can write to sshd's error stream;
+// past the limit one note says the rest was not kept.
+const maxAuthLog = 32 << 20
+
+// authLogFull is the note that ends a full sshd log.
+const authLogFull = "qpot: sshd log limit reached; its later lines were not kept\n"
+
+// writeAuthLine appends one sshd log line while the container's log stays
+// within maxAuthLog; written counts what this replay has kept so far.
+func writeAuthLine(f *os.File, line []byte, written *int64) {
+	if *written >= maxAuthLog {
+		return
+	}
+	if *written+int64(len(line)) > maxAuthLog {
+		_, _ = f.WriteString(authLogFull)
+		*written = maxAuthLog
+		return
+	}
+	_, _ = f.Write(line)
+	*written += int64(len(line))
+}
+
 // Target is one backend service whose capture is converted.
 type Target struct {
 	Service   string
@@ -101,6 +124,7 @@ func (c *Converter) follow(ctx context.Context, t Target, ct Container) error {
 	lines := streamLines(stdout, stderr)
 
 	var out *Writer
+	var authBytes int64
 	authStarted, stale := false, false
 	defer func() {
 		if out != nil {
@@ -134,7 +158,7 @@ func (c *Converter) follow(ctx context.Context, t Target, ct Container) error {
 					return err
 				}
 			} else {
-				_, _ = auth.Write(l.data)
+				writeAuthLine(auth, l.data, &authBytes)
 			}
 		}
 		if last {
@@ -194,9 +218,10 @@ func (c *Converter) Drain(ctx context.Context, t Target) error {
 	}
 	defer auth.Close()
 	var applyErr error
+	var authBytes int64
 	for l := range streamLines(stdout, stderr) {
 		if !l.record {
-			_, _ = auth.Write(l.data)
+			writeAuthLine(auth, l.data, &authBytes)
 		} else if applyErr == nil {
 			applyErr = out.Apply(l.data)
 		}

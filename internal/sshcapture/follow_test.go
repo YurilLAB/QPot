@@ -288,3 +288,40 @@ func TestParseInspect(t *testing.T) {
 }
 
 func discardLogger() *slog.Logger { return slog.New(slog.NewTextHandler(io.Discard, nil)) }
+
+// sshd's own log is kept up to maxAuthLog per container, then ends with one
+// note; the capture records are converted whatever the log's size, and the
+// follower keeps exactly what the drain keeps.
+func TestAuthLogIsBounded(t *testing.T) {
+	e := newEmitter(testConn)
+	session(e)
+	line := "Failed password for root from 172.20.0.10 port 41000 ssh2" + strings.Repeat(".", 40) + "\r\n"
+	d := &fakeDocker{id: testContainer, capture: e.lines, log: strings.Repeat(line, maxAuthLog/len(line)+1000)}
+	var mu sync.Mutex
+	c := &Converter{Stream: d.stream, Inspect: d.inspect, Lock: mutexLock(&mu), Poll: time.Millisecond, Logger: discardLogger()}
+	drained := t.TempDir()
+	if err := c.Drain(context.Background(), testTarget(drained)); err != nil {
+		t.Fatal(err)
+	}
+	got, err := os.ReadFile(filepath.Join(drained, AuthLog))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) > maxAuthLog+len(authLogFull) || !strings.HasSuffix(string(got), authLogFull) || !strings.HasPrefix(string(got), line) {
+		t.Fatalf("sshd log kept %d bytes against a %d-byte limit", len(got), maxAuthLog)
+	}
+	want := t.TempDir()
+	apply(t, want, e.lines, nil)
+	records := snapshot(t, drained)
+	delete(records, AuthLog)
+	if fmt.Sprint(records) != fmt.Sprint(snapshot(t, want)) {
+		t.Fatal("a full sshd log cost the capture records")
+	}
+	followed := t.TempDir()
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	c.Follow(ctx, testTarget(followed))
+	if again, err := os.ReadFile(filepath.Join(followed, AuthLog)); err != nil || string(again) != string(got) {
+		t.Fatalf("the follower kept a different sshd log: %d bytes, %v", len(again), err)
+	}
+}

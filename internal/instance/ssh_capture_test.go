@@ -6,10 +6,12 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/qpot/qpot/internal/proxy"
 	"github.com/qpot/qpot/internal/sshcapture"
 )
 
@@ -133,5 +135,142 @@ func TestSSHCellRemovalKeepsUnconvertedContainers(t *testing.T) {
 				}
 			})
 		}
+	}
+}
+
+// The lifecycle lock holds the folders lock too, so nothing writes a cell's
+// evidence while a holder drains or archives it; releasing the folders lets
+// the capture followers write while the lifecycle stays held.
+func TestSSHCellLockHoldsFoldersUntilReleased(t *testing.T) {
+	dir := t.TempDir()
+	waitBriefly := func() context.Context {
+		ctx, cancel := context.WithTimeout(t.Context(), 150*time.Millisecond)
+		t.Cleanup(cancel)
+		return ctx
+	}
+	lock, err := lockSSHCells(t.Context(), dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := lockSSHFolders(waitBriefly(), dir); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("a follower could write while the lifecycle holder owns the folders: %v", err)
+	}
+	if err := lock.releaseFolders(); err != nil {
+		t.Fatal(err)
+	}
+	folders, err := lockSSHFolders(waitBriefly(), dir)
+	if err != nil {
+		t.Fatalf("released folders stayed locked: %v", err)
+	}
+	if _, err := lockSSHCells(waitBriefly(), dir); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("releasing the folders released the lifecycle: %v", err)
+	}
+	if err := folders.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := lock.Close(); err != nil {
+		t.Fatal(err)
+	}
+	again, err := lockSSHCells(waitBriefly(), dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = again.Close()
+}
+
+// A reset recreates its cell's containers with the folders lock released:
+// the other cells' followers keep converting meanwhile, instead of stalling
+// for minutes while their containers' logs grow and rotate.
+func TestSSHResetLetsFollowersWriteWhileItRecreates(t *testing.T) {
+	cfg := organizationTestConfig(t)
+	organizationFakeDocker(t)
+	if err := os.WriteFile(cfg.GetDockerComposePath(), organizationComposeFixture(t, cfg.InstanceName, 2, true), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	r := requireBackendRecycler(t, cfg)
+	if err := os.MkdirAll(r.GenerationDir, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	started, release := filepath.Join(t.TempDir(), "up-started"), filepath.Join(t.TempDir(), "up-release")
+	t.Setenv("SSH_TEST_UP_STARTED", started)
+	t.Setenv("SSH_TEST_UP_RELEASE", release)
+	done := make(chan error, 1)
+	go func() { done <- r.composeRecreate(t.Context(), "ssh-backend-1") }()
+	for deadline := time.Now().Add(10 * time.Second); ; time.Sleep(10 * time.Millisecond) {
+		if _, err := os.Stat(started); err == nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			_ = os.WriteFile(release, nil, 0o600)
+			t.Fatalf("the reset never reached its recreation: %v", <-done)
+		}
+	}
+	ctx, cancel := context.WithTimeout(t.Context(), 2*time.Second)
+	folders, err := lockSSHFolders(ctx, cfg.DataPath)
+	cancel()
+	if err != nil {
+		_ = os.WriteFile(release, nil, 0o600)
+		<-done
+		t.Fatalf("followers stall behind a cell's recreation: %v", err)
+	}
+	_ = folders.Close()
+	ctx, cancel = context.WithTimeout(t.Context(), 150*time.Millisecond)
+	if lock, err := lockSSHCells(ctx, cfg.DataPath); err == nil {
+		_ = lock.Close()
+		t.Error("the recreation ran without the lifecycle lock")
+	}
+	cancel()
+	if err := os.WriteFile(release, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+}
+
+// The control plane's capture loop keeps the broker's capture gate open, with
+// a heartbeat the broker's non-root user can read, and stops beating with it.
+func TestRunCaptureKeepsTheBrokerGateOpen(t *testing.T) {
+	dir := t.TempDir()
+	r := &BackendRecycler{
+		InstanceName:  "beat",
+		ComposeFile:   filepath.Join(dir, "missing-compose.yml"),
+		LogPath:       filepath.Join(dir, "sessions.json"),
+		GenerationDir: filepath.Join(dir, "generations"),
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { defer close(done); r.RunCapture(ctx) }()
+	defer func() { cancel(); <-done }()
+
+	gate := proxy.NewGenerationGate(r.GenerationDir)
+	watchCtx, stopWatch := context.WithCancel(context.Background())
+	defer stopWatch()
+	go gate.WatchCapture(watchCtx, 20*time.Millisecond)
+	deadline := time.Now().Add(3 * captureHeartbeatEvery)
+	for !gate.CaptureLive() {
+		if time.Now().After(deadline) {
+			t.Fatal("the broker never saw capture running")
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	info, err := os.Stat(filepath.Join(r.GenerationDir, proxy.CaptureHeartbeat))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if runtime.GOOS != "windows" && info.Mode().Perm() != 0o644 {
+		t.Errorf("heartbeat mode %v: the broker's user cannot read it", info.Mode().Perm())
+	}
+
+	cancel()
+	<-done
+	before, err := os.ReadFile(filepath.Join(r.GenerationDir, proxy.CaptureHeartbeat))
+	if err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(captureHeartbeatEvery + time.Second)
+	after, err := os.ReadFile(filepath.Join(r.GenerationDir, proxy.CaptureHeartbeat))
+	if err != nil || string(after) != string(before) {
+		t.Fatalf("the heartbeat changed after capture stopped (%v)", err)
 	}
 }

@@ -104,7 +104,7 @@ jobs:
           QPOT_TEST_SSH_BACKEND: "1"
           QPOT_SSH_BACKEND_IMAGE: ${{ env.TEST_IMAGE }}
         # Network-none: Docker exec carries the SSH bytes; no real targets.
-        run: go test -race -count=1 -timeout 4m ./internal/sshbackend -run '^TestSSHBackendLive$'
+        run: go test -race -count=1 -timeout 6m ./internal/sshbackend -run '^TestSSHBackend(Live|CaptureCostLive)$'
 
       - name: Smoke-test the backend (real sshd answers)
         if: matrix.image == 'ssh-backend'

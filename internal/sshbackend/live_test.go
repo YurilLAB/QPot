@@ -35,31 +35,6 @@ func TestSSHBackendLive(t *testing.T) {
 	if os.Getenv("QPOT_TEST_SSH_BACKEND") != "1" {
 		t.Skip("set QPOT_TEST_SSH_BACKEND=1 for real backend integration")
 	}
-	image := os.Getenv("QPOT_SSH_BACKEND_IMAGE")
-	if image == "" {
-		image = "qpot-local/ssh-backend:development"
-	}
-	keys := t.TempDir()
-	var hostKeys []string
-	for _, kind := range hostKeyKinds {
-		file := filepath.Join(keys, "ssh_host_"+kind+"_key")
-		if output, err := exec.Command("ssh-keygen", "-q", "-t", kind, "-N", "", "-f", file).CombinedOutput(); err != nil {
-			t.Fatalf("test hostkeys: %v %s", err, output)
-		}
-		data, err := os.ReadFile(file)
-		if err != nil {
-			t.Fatal(err)
-		}
-		hostKeys = append(hostKeys, kind+":"+base64.StdEncoding.EncodeToString(data))
-	}
-	hostBytes, err := os.ReadFile(filepath.Join(keys, "ssh_host_ed25519_key"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	hostSigner, err := ssh.ParsePrivateKey(hostBytes)
-	if err != nil {
-		t.Fatal(err)
-	}
 	_, private, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {
 		t.Fatal(err)
@@ -88,40 +63,7 @@ func TestSSHBackendLive(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	name := fmt.Sprintf("qpot-ssh-backend-live-%d", time.Now().UnixNano())
-	// No mounts: the guest's mount table must name nothing on the host.
-	args := []string{"run", "-d", "--name", name, "--network", "none", "--cap-drop", "ALL", "--security-opt", "no-new-privileges", "--memory", "256m", "--cpus", "0.5", "--pids-limit", "128", "--label", "qpot.validation=ssh-backend-live", "--env", "BACKEND_USERS=root:labroot123,operator:laboperator123", "--env", "BACKEND_SCENE=" + string(scene), "--env", HostKeysVariable + "=" + strings.Join(hostKeys, ",")}
-	for _, capability := range []string{"SETUID", "SETGID", "CHOWN", "DAC_OVERRIDE", "FOWNER", "SETPCAP", "KILL", "SYS_CHROOT", "AUDIT_WRITE", "NET_BIND_SERVICE"} {
-		args = append(args, "--cap-add", capability)
-	}
-	args = append(args, image)
-	if output, err := backendDocker(time.Minute, args...); err != nil {
-		t.Fatalf("start backend: %v %s", err, output)
-	}
-	t.Cleanup(func() {
-		_, _ = backendDocker(15*time.Second, "stop", "--time", "5", name)
-		if t.Failed() {
-			cmd := exec.Command("docker", "logs", "--tail", "200", name)
-			var stderr bytes.Buffer
-			cmd.Stderr = &stderr
-			_ = cmd.Run()
-			t.Logf("sshd log: %s", stderr.String())
-		}
-		_, _ = backendDocker(15*time.Second, "rm", "--volumes", name)
-	})
-	// Readiness from outside the guest's process list: only the banner.
-	ready := false
-	for deadline := time.Now().Add(30 * time.Second); time.Now().Before(deadline); {
-		banner, err := backendDocker(3*time.Second, "exec", name, "/bin/bash", "-c", `exec 3<>/dev/tcp/127.0.0.1/22 && head -c 8 <&3`)
-		if err == nil && string(banner) == "SSH-2.0-" {
-			ready = true
-			break
-		}
-		time.Sleep(200 * time.Millisecond)
-	}
-	if !ready {
-		t.Fatal("backend did not serve an SSH banner")
-	}
+	name, keys, hostSigner := liveBackend(t, "root:labroot123,operator:laboperator123", scene)
 	client := backendSSH(t, name, "root", clientSigner, hostSigner.PublicKey())
 	defer client.Close()
 	for _, kind := range []struct {
@@ -634,6 +576,233 @@ if grep -zqE '^(BACKEND_[A-Z_]*|SESSION_CONTAINER|HTTP_PROXY|HTTPS_PROXY|http_pr
 	}
 	t.Logf("real SSH state, users, offline package, clean guest, sshd capture, SFTP and replay passed; %d command records", len(again))
 }
+
+// liveBackend starts the backend image, network-none and without mounts, with
+// the given accounts and scene and fresh host keys (kept in keys), and waits
+// for its banner. The container is removed when the test ends.
+func liveBackend(t *testing.T, users string, scene []byte) (name, keys string, host ssh.Signer) {
+	t.Helper()
+	image := os.Getenv("QPOT_SSH_BACKEND_IMAGE")
+	if image == "" {
+		image = "qpot-local/ssh-backend:development"
+	}
+	keys = t.TempDir()
+	var hostKeys []string
+	for _, kind := range hostKeyKinds {
+		file := filepath.Join(keys, "ssh_host_"+kind+"_key")
+		if output, err := exec.Command("ssh-keygen", "-q", "-t", kind, "-N", "", "-f", file).CombinedOutput(); err != nil {
+			t.Fatalf("test hostkeys: %v %s", err, output)
+		}
+		data, err := os.ReadFile(file)
+		if err != nil {
+			t.Fatal(err)
+		}
+		hostKeys = append(hostKeys, kind+":"+base64.StdEncoding.EncodeToString(data))
+	}
+	hostBytes, err := os.ReadFile(filepath.Join(keys, "ssh_host_ed25519_key"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if host, err = ssh.ParsePrivateKey(hostBytes); err != nil {
+		t.Fatal(err)
+	}
+	name = fmt.Sprintf("qpot-ssh-backend-live-%d", time.Now().UnixNano())
+	// No mounts: the guest's mount table must name nothing on the host.
+	args := []string{"run", "-d", "--name", name, "--network", "none", "--cap-drop", "ALL", "--security-opt", "no-new-privileges", "--memory", "256m", "--cpus", "0.5", "--pids-limit", "128", "--label", "qpot.validation=ssh-backend-live", "--env", "BACKEND_USERS=" + users, "--env", "BACKEND_SCENE=" + string(scene), "--env", HostKeysVariable + "=" + strings.Join(hostKeys, ",")}
+	for _, capability := range []string{"SETUID", "SETGID", "CHOWN", "DAC_OVERRIDE", "FOWNER", "SETPCAP", "KILL", "SYS_CHROOT", "AUDIT_WRITE", "NET_BIND_SERVICE"} {
+		args = append(args, "--cap-add", capability)
+	}
+	args = append(args, image)
+	if output, err := backendDocker(time.Minute, args...); err != nil {
+		t.Fatalf("start backend: %v %s", err, output)
+	}
+	t.Cleanup(func() {
+		_, _ = backendDocker(15*time.Second, "stop", "--time", "5", name)
+		if t.Failed() {
+			cmd := exec.Command("docker", "logs", "--tail", "200", name)
+			var stderr bytes.Buffer
+			cmd.Stderr = &stderr
+			_ = cmd.Run()
+			t.Logf("sshd log: %s", stderr.String())
+		}
+		_, _ = backendDocker(15*time.Second, "rm", "--volumes", name)
+	})
+	// Readiness from outside the guest's process list: only the banner.
+	for deadline := time.Now().Add(30 * time.Second); time.Now().Before(deadline); time.Sleep(200 * time.Millisecond) {
+		banner, err := backendDocker(3*time.Second, "exec", name, "/bin/bash", "-c", `exec 3<>/dev/tcp/127.0.0.1/22 && head -c 8 <&3`)
+		if err == nil && string(banner) == "SSH-2.0-" {
+			return name, keys, host
+		}
+	}
+	t.Fatal("backend did not serve an SSH banner")
+	return "", "", nil
+}
+
+// TestSSHBackendCaptureCostLive floods one connection with single bytes,
+// echoed one at a time, and bulk output over more channels than its budget
+// holds. sshd
+// charges each record what it costs in the container log, so the log grows
+// by at most 64 MiB for the connection, Docker's framing included; each
+// channel's record says it was cut short, a channel past the budget is not
+// recorded at all, and the session itself still carries every byte.
+func TestSSHBackendCaptureCostLive(t *testing.T) {
+	if os.Getenv("QPOT_TEST_SSH_BACKEND") != "1" {
+		t.Skip("set QPOT_TEST_SSH_BACKEND=1 for real backend integration")
+	}
+	_, private, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	signer, err := ssh.NewSignerFromKey(private)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := Manifest{Version: 1, Role: "app", Organization: "Workshop services", Directories: []Directory{{Path: "/root/.ssh", Mode: 0o700, Owner: "root"}}, Files: []File{{Path: "/root/.ssh/authorized_keys", Content: string(ssh.MarshalAuthorizedKey(signer.PublicKey())), Mode: 0o600, Owner: "root"}}}
+	scene, err := json.Marshal(m)
+	if err != nil {
+		t.Fatal(err)
+	}
+	name, _, host := liveBackend(t, "root:labroot123", scene)
+	client := backendSSH(t, name, "root", signer, host.PublicKey())
+
+	// Single bytes each way: the client waits for each echo, so sshd
+	// records every byte on its own, about a hundred times its size.
+	const rounds = 30000
+	echo, err := client.NewSession()
+	if err != nil {
+		t.Fatal(err)
+	}
+	stdin, err := echo.StdinPipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	stdout, err := echo.StdoutPipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := echo.Start("cat # single bytes"); err != nil {
+		t.Fatal(err)
+	}
+	one := make([]byte, 1)
+	for i := 0; i < rounds; i++ {
+		if _, err := stdin.Write([]byte{'x'}); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := io.ReadFull(stdout, one); err != nil || one[0] != 'x' {
+			t.Fatalf("the session lost byte %d: %q %v", i, one, err)
+		}
+	}
+	_ = stdin.Close()
+	if err := echo.Wait(); err != nil {
+		t.Fatal(err)
+	}
+	_ = echo.Close()
+	// Bulk out, on more channels than the connection's budget holds.
+	const bulk, channels = 7_000_000, 9
+	for i := 0; i < channels; i++ {
+		session, err := client.NewSession()
+		if err != nil {
+			t.Fatal(err)
+		}
+		var out countWriter
+		session.Stdout = &out
+		if err := session.Run(fmt.Sprintf("head -c %d /dev/zero # bulk %d", bulk, i)); err != nil || out.n != bulk {
+			t.Fatalf("bulk %d reached the client with %d bytes: %v", i, out.n, err)
+		}
+		_ = session.Close()
+	}
+	_ = client.Close()
+	if output, err := backendDocker(30*time.Second, "stop", "--time", "5", name); err != nil {
+		t.Fatalf("stop backend: %v %s", err, output)
+	}
+
+	// What the connection added to the container log, as json-file writes
+	// it: each line, its escaped newline, the stream and a timestamp.
+	logs := exec.Command("docker", "logs", name)
+	var stderr bytes.Buffer
+	logs.Stderr = &stderr
+	if err := logs.Run(); err != nil {
+		t.Fatal(err)
+	}
+	const frame = len(`{"log":"\n","stream":"stderr","time":"2006-01-02T15:04:05.999999999Z"}` + "\n")
+	var cost int
+	for _, line := range bytes.SplitAfter(stderr.Bytes(), []byte("\n")) {
+		if len(line) > 1 && line[len(line)-1] == '\n' {
+			if _, err := sshcapture.ParseRecord(line[:len(line)-1]); err == nil {
+				cost += len(line) - 1 + frame
+			}
+		}
+	}
+	if cost > 64<<20 || cost < 48<<20 {
+		t.Fatalf("the connection added %d bytes of capture to the log, want up to 64 MiB and near it", cost)
+	}
+
+	evidence := t.TempDir()
+	converter := sshcapture.DockerConverter(func(context.Context) (func(), error) { return func() {}, nil })
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+	if err := converter.Drain(ctx, sshcapture.Target{Service: "ssh-backend-live", Container: name, Dir: func() (string, error) { return evidence, nil }}); err != nil {
+		t.Fatalf("convert the capture: %v", err)
+	}
+	records, err := filepath.Glob(filepath.Join(evidence, "uid-0", "*.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	finished := map[string]sshcapture.SessionEvent{}
+	for _, record := range records {
+		data, err := os.ReadFile(record)
+		if err != nil {
+			t.Fatal(err)
+		}
+		decoder := json.NewDecoder(bytes.NewReader(data))
+		for {
+			var event sshcapture.SessionEvent
+			if err := decoder.Decode(&event); err == io.EOF {
+				break
+			} else if err != nil {
+				t.Fatal(err)
+			}
+			if event.Phase != "start" {
+				finished[event.Input] = event
+			}
+		}
+	}
+	kept := func(event sshcapture.SessionEvent, file string) int64 {
+		t.Helper()
+		info, err := os.Stat(filepath.Join(evidence, "uid-0", file))
+		if err != nil {
+			t.Fatalf("%q: %v", event.Input, err)
+		}
+		return info.Size()
+	}
+	single, ok := finished["cat # single bytes"]
+	if !ok || !single.Truncated || !single.StdinRecorded {
+		t.Fatalf("the single-byte channel's record (found %v): truncated %v, stdin %v %q, error %q", ok, single.Truncated, single.StdinRecorded, single.InputFile, single.CaptureError)
+	}
+	if n := kept(single, single.InputFile); n < rounds/2 || n >= rounds {
+		t.Fatalf("kept %d of %d single bytes: the channel budget must count each record's cost", n, rounds)
+	}
+	recorded := 0
+	for i := 0; i < channels; i++ {
+		event, ok := finished[fmt.Sprintf("head -c %d /dev/zero # bulk %d", bulk, i)]
+		if !ok {
+			continue
+		}
+		recorded++
+		if n := kept(event, event.StdoutFile); !event.Truncated || n >= bulk || n > 8<<20 {
+			t.Fatalf("bulk %d kept %d bytes, truncated %v", i, n, event.Truncated)
+		}
+	}
+	if recorded == 0 || recorded == channels {
+		t.Fatalf("%d of %d bulk channels recorded: the connection's budget must end recording", recorded, channels)
+	}
+	t.Logf("capture cost %d bytes; %d of %d bulk channels recorded", cost, recorded, channels)
+}
+
+// countWriter counts what is written to it.
+type countWriter struct{ n int }
+
+func (w *countWriter) Write(p []byte) (int, error) { w.n += len(p); return len(p), nil }
 
 func backendUint32(value uint32) []byte {
 	data := make([]byte, 4)

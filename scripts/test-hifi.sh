@@ -43,13 +43,13 @@ go run ./internal/cicheck/cirun -root "$repo_dir" run netguard-integration
 
 export QPOT_TEST_HIFI_LIVE=1 QPOT_TEST_HIFI_DATABASE=1 QPOT_TEST_HIFI_SERVICES=1 QPOT_TEST_SSH_COLLECTOR=1 QPOT_TEST_SSH_BACKEND=1 QPOT_TEST_DOCKER=1
 export QPOT_SSH_BACKEND_IMAGE=qpot-local/ssh-backend:development
-test_pattern='^Test(SSHOrganizationLive|SSHOrganizationDatabaseLive|SSHOrganizationServicesLive|SSHCollectorPrivateLogsLive|SSHBackendLive|SSHStoreNativeMountMetadataLive)$'
+test_pattern='^Test(SSHOrganizationLive|SSHOrganizationDatabaseLive|SSHOrganizationServicesLive|SSHCollectorPrivateLogsLive|SSHBackendLive|SSHStoreNativeMountMetadataLive|SSHStickyCellLive|SSHBackendCaptureCostLive)$'
 test_packages=(./internal/instance ./internal/sshbackend)
 
 # Go considers a pattern matching zero tests successful. Missing gate names
 # must instead prevent publication, including accidental future renames.
 listed=$(go test "${test_packages[@]}" -list "$test_pattern")
-for required in TestSSHOrganizationLive TestSSHOrganizationDatabaseLive TestSSHOrganizationServicesLive TestSSHCollectorPrivateLogsLive TestSSHBackendLive TestSSHStoreNativeMountMetadataLive; do
+for required in TestSSHOrganizationLive TestSSHOrganizationDatabaseLive TestSSHOrganizationServicesLive TestSSHCollectorPrivateLogsLive TestSSHBackendLive TestSSHStoreNativeMountMetadataLive TestSSHStickyCellLive TestSSHBackendCaptureCostLive; do
   if ! printf '%s\n' "$listed" | grep -Fxq "$required"; then
     echo "required HiFi test is missing: $required" >&2
     exit 1

@@ -222,6 +222,29 @@ func sshCellHold(cfg *config.Config) string {
 	return fmt.Sprintf("%dm", config.SSHCellHoldMinutes(cfg))
 }
 
+// sshCellConnections is how many connections one source may hold open at
+// once (the broker's QPOT_SSHPROXY_CONC_IP), and so how many share a cell.
+const sshCellConnections = 3
+
+// sshCaptureConnectionMiB is the most one connection's capture adds to its
+// backend's container log, Docker's framing included: QPC_CONN_BUDGET in
+// docker/ssh-backend/openssh/qpcapture.c.
+const sshCaptureConnectionMiB = 64
+
+// sshBackendLogFiles is how many json-file logs of sshCaptureConnectionMiB a
+// backend keeps. Docker rotates out the oldest once the newest fills, so all
+// but the newest are always whole: one for each connection a cell holds at
+// once and one for sshd's own log, until the control plane converts them.
+// The broker takes no new connection while conversion is down.
+func sshBackendLogFiles() int {
+	return sshCellConnections + 2
+}
+
+// sshBackendLogMaxSize is the size of each of those logs.
+func sshBackendLogMaxSize() string {
+	return fmt.Sprintf("%dm", sshCaptureConnectionMiB)
+}
+
 // sshBackendServiceNames returns the deterministic backend service names
 // ("ssh-backend-1", …). Shared by the compose renderer (to emit the services)
 // and the manager (to start/stop them alongside the broker).

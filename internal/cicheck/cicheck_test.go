@@ -602,7 +602,7 @@ func TestHiFiBootstrapPropagatesFailures(t *testing.T) {
 		args []string
 		want int
 	}{
-		{"build failure", nil, 17}, {"kernel failure", nil, 29}, {"missing gate", nil, 1}, {"missing metadata gate", nil, 1}, {"live failure", nil, 23},
+		{"build failure", nil, 17}, {"kernel failure", nil, 29}, {"missing gate", nil, 1}, {"missing metadata gate", nil, 1}, {"missing sticky gate", nil, 1}, {"missing cost gate", nil, 1}, {"live failure", nil, 23},
 		{"accepted", nil, 0}, {"bad arguments", []string{"--use-built-images", "extra"}, 2},
 	} {
 		t.Run(scenario.name, func(t *testing.T) {
@@ -633,6 +633,8 @@ case " $* " in
   printf '%s\n' TestSSHOrganizationLive TestSSHOrganizationDatabaseLive TestSSHOrganizationServicesLive TestSSHCollectorPrivateLogsLive
   if [ "$QPOT_FAKE_SCENARIO" != 'missing gate' ]; then printf '%s\n' TestSSHBackendLive; fi
   if [ "$QPOT_FAKE_SCENARIO" != 'missing metadata gate' ]; then printf '%s\n' TestSSHStoreNativeMountMetadataLive; fi
+  if [ "$QPOT_FAKE_SCENARIO" != 'missing sticky gate' ]; then printf '%s\n' TestSSHStickyCellLive; fi
+  if [ "$QPOT_FAKE_SCENARIO" != 'missing cost gate' ]; then printf '%s\n' TestSSHBackendCaptureCostLive; fi
   exit 0;;
 esac
 printf 'live %s:%s:%s:%s:%s:%s:%s\n' "$QPOT_TEST_HIFI_LIVE" "$QPOT_TEST_HIFI_DATABASE" "$QPOT_TEST_SSH_COLLECTOR" "$QPOT_TEST_SSH_BACKEND" "$QPOT_TEST_HIFI_SERVICES" "$QPOT_TEST_DOCKER" "$QPOT_SSH_BACKEND_IMAGE" >> "$QPOT_FAKE_TRACE"

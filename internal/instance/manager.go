@@ -1143,7 +1143,7 @@ func Remove(ctx context.Context, name string) error {
 	// Windows cannot delete a file a handle holds open, and the lock file is
 	// in dir. Delete everything else while still holding the lock, then
 	// release it and remove what is left.
-	if err := removeAllBut(dir, filepath.Base(cellLock.Name())); err != nil {
+	if err := removeAllBut(dir, sshCellsLockName, sshFoldersLockName); err != nil {
 		return fmt.Errorf("failed to remove data directory: %w", err)
 	}
 	_ = cellLock.Close()
@@ -1155,9 +1155,9 @@ func Remove(ctx context.Context, name string) error {
 	return nil
 }
 
-// removeAllBut removes every entry of dir except the one named keep. Like
+// removeAllBut removes every entry of dir except those named keep. Like
 // os.RemoveAll, it removes a symlink itself, never what it points at.
-func removeAllBut(dir, keep string) error {
+func removeAllBut(dir string, keep ...string) error {
 	entries, err := os.ReadDir(dir)
 	if errors.Is(err, fs.ErrNotExist) {
 		return nil
@@ -1166,7 +1166,7 @@ func removeAllBut(dir, keep string) error {
 		return err
 	}
 	for _, e := range entries {
-		if e.Name() == keep {
+		if slices.Contains(keep, e.Name()) {
 			continue
 		}
 		if err := os.RemoveAll(filepath.Join(dir, e.Name())); err != nil {

@@ -1,6 +1,11 @@
 package instance
 
 import (
+	"fmt"
+	"os"
+	"path/filepath"
+	"regexp"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -303,6 +308,50 @@ func TestSSHProxyGenerationsMountedReadOnly(t *testing.T) {
 	for _, b := range sshBackendServiceNames(cfg) {
 		if strings.Contains(serviceBlock(renderComposeCfg(t, cfg), b), "generations") {
 			t.Errorf("backend %s can see the generation counters", b)
+		}
+	}
+}
+
+// A backend's container log holds every connection its cell can have open
+// at once, each at the most sshd lets it write there, plus sshd's own log;
+// the broker caps a source at that many connections and admits none while
+// conversion is down.
+func TestSSHBackendLogHoldsEveryCellConnection(t *testing.T) {
+	src, err := os.ReadFile(filepath.Join("..", "..", "docker", "ssh-backend", "openssh", "qpcapture.c"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	budget := regexp.MustCompile(`(?m)^#define QPC_CONN_BUDGET\s+\((\d+)ULL \* 1024 \* 1024\)$`).FindSubmatch(src)
+	if budget == nil || string(budget[1]) != strconv.Itoa(sshCaptureConnectionMiB) {
+		t.Fatalf("sshd's per-connection budget is not %d MiB: %q", sshCaptureConnectionMiB, budget)
+	}
+	if whole := sshBackendLogFiles() - 1; whole < sshCellConnections+1 {
+		t.Fatalf("%d whole logs cannot hold %d connections and sshd's log", whole, sshCellConnections)
+	}
+	cfg := enableSSHProxy(t, "retention")
+	compose := renderComposeCfg(t, cfg)
+	for _, b := range sshBackendServiceNames(cfg) {
+		blk := serviceBlock(compose, b)
+		size := fmt.Sprintf("max-size: \"%dm\"\n", sshCaptureConnectionMiB)
+		files := fmt.Sprintf("max-file: \"%d\"\n", sshBackendLogFiles())
+		if !strings.Contains(blk, size) || !strings.Contains(blk, files) {
+			t.Errorf("backend %s log retention is not %s x %s:\n%s", b, size, files, blk)
+		}
+		// Per-line attrs would cost more than sshd counts.
+		_, options, _ := strings.Cut(blk, "    logging:\n")
+		for _, option := range []string{"labels", "labels-regex", "env", "env-regex"} {
+			if strings.Contains(options, "        "+option+":") {
+				t.Errorf("backend %s log adds %s to every line:\n%s", b, option, options)
+			}
+		}
+	}
+	blk := serviceBlock(compose, "ssh-proxy")
+	for _, want := range []string{
+		fmt.Sprintf("- QPOT_SSHPROXY_CONC_IP=%d\n", sshCellConnections),
+		"- QPOT_SSHPROXY_REQUIRE_CAPTURE=1\n",
+	} {
+		if !strings.Contains(blk, want) {
+			t.Errorf("broker lacks %q:\n%s", want, blk)
 		}
 	}
 }

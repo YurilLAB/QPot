@@ -5,6 +5,7 @@ import (
 	"crypto/ed25519"
 	"encoding/binary"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -386,14 +387,70 @@ func readSSHLayout(composePath, instanceName string) (sshLayout, error) {
 	return parseSSHLayout(data, instanceName)
 }
 
+// sshCellLock is the HiFi lifecycle lock, held with the cell folders lock.
+// The capture followers take only the folders lock to write cell evidence, so
+// a holder may change the cell log folders. A holder whose remaining work
+// leaves them alone (a reset's container recreation, which takes minutes)
+// releases the folders lock: the followers of every other cell would
+// otherwise stall behind it while their containers' logs grow and rotate.
+type sshCellLock struct {
+	lifecycle *os.File
+	folders   *os.File
+}
+
 // lockSSHCells serializes host-controlled layout changes and whole-cell reset
 // across the CLI and control-plane processes. The OS releases it on exit, so a
 // crashed process cannot leave a stale-directory lock that disables recycling.
-func lockSSHCells(ctx context.Context, dataPath string) (*os.File, error) {
+// Lifecycle comes first, then folders; a follower takes folders alone.
+func lockSSHCells(ctx context.Context, dataPath string) (*sshCellLock, error) {
+	lifecycle, err := lockSSHFile(ctx, filepath.Join(dataPath, sshCellsLockName))
+	if err != nil {
+		return nil, err
+	}
+	folders, err := lockSSHFolders(ctx, dataPath)
+	if err != nil {
+		_ = lifecycle.Close()
+		return nil, err
+	}
+	return &sshCellLock{lifecycle: lifecycle, folders: folders}, nil
+}
+
+// The lock files, in the instance's data folder.
+const (
+	sshCellsLockName   = ".ssh-cells.lock"
+	sshFoldersLockName = ".ssh-folders.lock"
+)
+
+// lockSSHFolders serializes writes to the cell log folders: capture
+// followers against anything that archives, drains or removes them.
+func lockSSHFolders(ctx context.Context, dataPath string) (*os.File, error) {
+	return lockSSHFile(ctx, filepath.Join(dataPath, sshFoldersLockName))
+}
+
+// Name is the lifecycle lock file's path.
+func (l *sshCellLock) Name() string { return l.lifecycle.Name() }
+
+// releaseFolders lets the capture followers write again while the lifecycle
+// stays held. The holder must not touch the cell folders afterwards.
+func (l *sshCellLock) releaseFolders() error {
+	if l.folders == nil {
+		return nil
+	}
+	err := l.folders.Close()
+	l.folders = nil
+	return err
+}
+
+// Close releases both locks.
+func (l *sshCellLock) Close() error {
+	return errors.Join(l.releaseFolders(), l.lifecycle.Close())
+}
+
+func lockSSHFile(ctx context.Context, path string) (*os.File, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	f, err := os.OpenFile(filepath.Join(dataPath, ".ssh-cells.lock"), os.O_CREATE|os.O_RDWR, 0o600)
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0o600)
 	if err != nil {
 		return nil, err
 	}

@@ -6,6 +6,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 )
 
 // GenerationGate lets the broker tell a REAL backend recreation apart from one
@@ -23,11 +24,17 @@ type GenerationGate struct {
 	dir  string
 	mu   sync.Mutex
 	base map[string]uint64 // backend ID -> generation when it was leased
+	now  func() time.Time
+
+	// The capture converter's heartbeat (see CaptureHeartbeat).
+	captureSeen    bool
+	captureValue   string
+	captureChanged time.Time
 }
 
 // NewGenerationGate reads generations from dir.
 func NewGenerationGate(dir string) *GenerationGate {
-	return &GenerationGate{dir: dir, base: map[string]uint64{}}
+	return &GenerationGate{dir: dir, base: map[string]uint64{}, now: time.Now}
 }
 
 // Generation returns the backend's current generation (0 if none recorded).

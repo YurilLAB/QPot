@@ -300,6 +300,10 @@ case " $* " in
   ;;
  *" up "*)
   : > "$SSH_TEST_COMMANDS.up"
+  if [ -n "${SSH_TEST_UP_STARTED:-}" ]; then
+   : > "$SSH_TEST_UP_STARTED"
+   while [ ! -f "$SSH_TEST_UP_RELEASE" ]; do sleep 0.01; done
+  fi
   case " $* " in
    *" ssh-proxy "*)
     if [ -n "${SSH_TEST_DEPLOY_STARTED:-}" ]; then

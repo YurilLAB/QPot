@@ -4,10 +4,13 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
+	"os"
 	"path/filepath"
 	"time"
 
 	"github.com/qpot/qpot/internal/config"
+	"github.com/qpot/qpot/internal/proxy"
 	"github.com/qpot/qpot/internal/sshcapture"
 )
 
@@ -43,7 +46,7 @@ func sshCaptureTarget(dataPath, instanceName string, index *sshcapture.BrokerInd
 
 func sshCellsLock(dataPath string) sshcapture.Lock {
 	return func(ctx context.Context) (func(), error) {
-		lock, err := lockSSHCells(ctx, dataPath)
+		lock, err := lockSSHFolders(ctx, dataPath)
 		if err != nil {
 			return nil, err
 		}
@@ -60,7 +63,17 @@ func (r *BackendRecycler) RunCapture(ctx context.Context) {
 	index := sshcapture.NewBrokerIndex(r.LogPath)
 	converter := sshcapture.DockerConverter(sshCellsLock(dataPath))
 	following := map[string]bool{}
+	var heartbeatFailing bool
 	for {
+		// The broker admits connections only while this keeps changing.
+		if err := writeCaptureHeartbeat(r.GenerationDir); err != nil {
+			if !heartbeatFailing {
+				slog.Warn("The HiFi broker cannot see that sessions are being converted; it takes no new connections", "error", err)
+			}
+			heartbeatFailing = true
+		} else {
+			heartbeatFailing = false
+		}
 		if layout, err := readSSHLayout(r.ComposeFile, r.InstanceName); err == nil {
 			for _, members := range layout.Groups {
 				for _, service := range members {
@@ -71,7 +84,7 @@ func (r *BackendRecycler) RunCapture(ctx context.Context) {
 				}
 			}
 		}
-		timer := time.NewTimer(10 * time.Second)
+		timer := time.NewTimer(captureHeartbeatEvery)
 		select {
 		case <-ctx.Done():
 			timer.Stop()
@@ -79,6 +92,37 @@ func (r *BackendRecycler) RunCapture(ctx context.Context) {
 		case <-timer.C:
 		}
 	}
+}
+
+// captureHeartbeatEvery is how often RunCapture beats: well inside
+// proxy.CaptureStale, so a slow beat never turns visitors away.
+const captureHeartbeatEvery = 5 * time.Second
+
+// writeCaptureHeartbeat rewrites the converter's heartbeat in the broker's
+// read-only generations folder, atomically, with a value that changes.
+func writeCaptureHeartbeat(dir string) error {
+	if dir == "" {
+		return nil
+	}
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return err
+	}
+	tmp, err := os.CreateTemp(dir, proxy.CaptureHeartbeat+".*")
+	if err != nil {
+		return err
+	}
+	_, werr := fmt.Fprintf(tmp, "%d\n", time.Now().UnixNano())
+	cerr := tmp.Close()
+	if werr != nil || cerr != nil {
+		_ = os.Remove(tmp.Name())
+		return errors.Join(werr, cerr)
+	}
+	// Readable by the broker's non-root user; holds no secret.
+	if err := os.Chmod(tmp.Name(), 0o644); err != nil {
+		_ = os.Remove(tmp.Name())
+		return err
+	}
+	return os.Rename(tmp.Name(), filepath.Join(dir, proxy.CaptureHeartbeat))
 }
 
 // drainSSHCaptures converts what stopped backends still hold into their
