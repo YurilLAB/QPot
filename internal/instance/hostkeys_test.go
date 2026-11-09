@@ -3,6 +3,7 @@ package instance
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -22,7 +23,11 @@ func TestEnsureSSHHostKeys(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if st.Mode().Perm() != 0o600 {
+		// Windows has no POSIX modes (Go reports a writable file as 0666): the
+		// profile folder's ACL keeps the key private there, and the backend
+		// reads a 0600 copy of its own, as Docker Desktop shows every file
+		// shared from Windows as 0777 (docker/ssh-backend).
+		if runtime.GOOS != "windows" && st.Mode().Perm() != 0o600 {
 			t.Errorf("%s: mode %v, want 0600 (sshd rejects readable private host keys)", kt, st.Mode().Perm())
 		}
 		data, _ := os.ReadFile(p)

@@ -14,10 +14,12 @@ ListenAddress 0.0.0.0
 # pool of backends behind one broker that each had their own keys would make a
 # returning attacker's SSH client warn "REMOTE HOST IDENTIFICATION HAS CHANGED" —
 # an instant honeypot/pool tell. Keeping the keys out of /etc/ssh also means the
-# shared mount never shadows this hardened sshd_config.
-HostKey /etc/ssh/keys/ssh_host_ed25519_key
-HostKey /etc/ssh/keys/ssh_host_rsa_key
-HostKey /etc/ssh/keys/ssh_host_ecdsa_key
+# shared mount never shadows this hardened sshd_config. sshd reads the copies the
+# entrypoint makes, root's alone: it refuses a host key others may read, and a
+# mounted file keeps the host's mode (Docker Desktop shows Windows files as 0777).
+HostKey /run/qpot-hostkeys/ssh_host_ed25519_key
+HostKey /run/qpot-hostkeys/ssh_host_rsa_key
+HostKey /run/qpot-hostkeys/ssh_host_ecdsa_key
 
 # VERBOSE logs every authentication attempt and the offered key fingerprints —
 # the structured capture the collector ingests, in addition to the recorded PTY.

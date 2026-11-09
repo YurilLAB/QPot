@@ -96,6 +96,33 @@ jobs:
           echo "::error::ssh-backend did not serve an OpenSSH banner"
           exit 1
 
+      - name: Smoke-test the backend with host keys shared from Windows
+        if: matrix.image == 'ssh-backend'
+        # Docker Desktop shows every file shared from Windows as 0777, root's.
+        # sshd refuses a host key others may read; the backend must still
+        # serve the mounted pool key, from a private copy.
+        run: |
+          set -euo pipefail
+          keys=$(mktemp -d)
+          docker run --rm --network none --entrypoint sh -v "$keys:/k" "${IMAGE}:ci" -c \
+            'for t in rsa ecdsa ed25519; do ssh-keygen -q -t $t -f /k/ssh_host_${t}_key -N "" </dev/null; done; chmod 0777 /k/*'
+          want=$(docker run --rm --network none --entrypoint ssh-keygen -v "$keys:/k:ro" "${IMAGE}:ci" \
+            -lf /k/ssh_host_ed25519_key.pub | awk '{print $2}')
+          docker run -d --name be2 --network none -v "$keys:/etc/ssh/keys:ro" "${IMAGE}:ci"
+          got=""
+          for _ in $(seq 1 30); do
+            got=$(docker exec be2 sh -c 'ssh-keyscan -t ed25519 127.0.0.1 2>/dev/null | ssh-keygen -lf -' 2>/dev/null | awk '{print $2}' || true)
+            if [ -n "$got" ]; then break; fi
+            sleep 1
+          done
+          if [ "$got" != "$want" ]; then
+            docker logs be2 || true
+            echo "::error::backend served '${got}', want the mounted key ${want}"
+            exit 1
+          fi
+          echo "backend serves the mounted key: ${got}"
+          docker rm -f be2 >/dev/null
+
       - name: Smoke-test the broker (starts, refuses bad config)
         if: matrix.image == 'ssh-proxy'
         run: |

@@ -2,7 +2,8 @@
 # entrypoint — prepare and run the real OpenSSH backend.
 #
 # Responsibilities:
-#   1. Generate (or reuse persisted) host keys, so the fingerprint is stable.
+#   1. Generate (or reuse persisted) host keys, so the fingerprint is stable,
+#      and give sshd private copies of them.
 #   2. Seed the persona users + weak passwords the attacker is meant to guess.
 #   3. Run sshd in the foreground, logging to stderr so docker/Vector collect it.
 #
@@ -37,6 +38,17 @@ if [ "$missing" = 1 ]; then
         done
     ) 9>"${KEYDIR}/.keygen.lock"
 fi
+# sshd refuses a host key others may read, and the mounted keys keep the host's
+# modes (Docker Desktop shows every file shared from Windows as 0777). sshd
+# reads private copies instead; the pool's keys stay read-only.
+PRIVDIR=/run/qpot-hostkeys
+rm -rf "$PRIVDIR"
+mkdir -m 0700 "$PRIVDIR"
+for kt in rsa ecdsa ed25519; do
+    if [ -f "${KEYDIR}/ssh_host_${kt}_key" ]; then
+        install -m 0600 -o root -g root "${KEYDIR}/ssh_host_${kt}_key" "${PRIVDIR}/ssh_host_${kt}_key"
+    fi
+done
 
 # 2) Persona users. Default set is deliberately weak/common; override per sensor.
 USERS="${BACKEND_USERS:-admin:admin,ubuntu:ubuntu,user:password,root:root123}"
