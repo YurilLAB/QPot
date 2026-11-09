@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -88,8 +89,8 @@ func TestAgeRemovesOnlyCapturesAndRotatedLogs(t *testing.T) {
 		put(t, cfg, "honeypots/dionaea/data/roots/www/index.html", 100, old),
 		put(t, cfg, "honeypots/miniprint/data/fs/README", 100, old),
 		put(t, cfg, "honeypots/conpot/state/registers", 100, old),
-		// A log the collector reads is not aged out while it is stopped.
-		put(t, cfg, "honeypots/cowrie/logs/cowrie.json", 100, old),
+		// A log the collector reads is never aged out.
+		putLog(t, cfg, "honeypots/cowrie/logs/cowrie.json", 3, 100, old),
 	}
 	rep := Run(context.Background(), cfg, limits(), Options{Now: now})
 	for _, p := range gone {
@@ -109,17 +110,21 @@ func TestAgeRemovesOnlyCapturesAndRotatedLogs(t *testing.T) {
 		t.Errorf("cowrie area %+v", a)
 	}
 
-	// With the collector running, the old log it read goes too.
+	// Not even with the collector running and all of it delivered: the
+	// honeypot may hold it open and would go on writing to a removed file.
+	deliver(t, cfg, "cowrie", kept[len(kept)-1], -1)
 	rep = Run(context.Background(), cfg, limits(), Options{Now: now, CollectorRunning: true})
-	if exists(kept[len(kept)-1]) || rep.Removed != 1 {
-		t.Errorf("collected old log: removed %d, still there %v", rep.Removed, exists(kept[len(kept)-1]))
+	if !exists(kept[len(kept)-1]) || rep.Removed != 0 {
+		t.Errorf("old delivered log: removed %d, still there %v", rep.Removed, exists(kept[len(kept)-1]))
 	}
 }
 
 func TestLogsAreEmptiedOnlyWhileTheCollectorRuns(t *testing.T) {
 	cfg := testInstance(t)
-	big := put(t, cfg, "honeypots/cowrie/logs/cowrie.json", 3<<20, time.Minute)
-	small := put(t, cfg, "honeypots/dionaea/logs/dionaea.json", 100, time.Minute)
+	big := putLog(t, cfg, "honeypots/cowrie/logs/cowrie.json", 3072, 1024, time.Minute)
+	small := putLog(t, cfg, "honeypots/dionaea/logs/dionaea.json", 1, 100, time.Minute)
+	deliver(t, cfg, "cowrie", big, -1)
+	deliver(t, cfg, "dionaea", small, -1)
 	before, _ := os.Stat(big)
 
 	rep := Run(context.Background(), cfg, limits(), Options{Now: now})
@@ -242,9 +247,10 @@ func TestDryRunChangesNothing(t *testing.T) {
 	cfg := testInstance(t)
 	paths := []string{
 		put(t, cfg, "honeypots/cowrie/dl/old", 100, 40*day),
-		put(t, cfg, "honeypots/cowrie/logs/cowrie.json", 3<<20, time.Minute),
+		putLog(t, cfg, "honeypots/cowrie/logs/cowrie.json", 3072, 1024, time.Minute),
 		putBackupDay(t, cfg, now.Add(-40*day), 100),
 	}
+	deliver(t, cfg, "cowrie", paths[1], -1)
 	dry := Run(context.Background(), cfg, limits(), Options{Now: now, DryRun: true, CollectorRunning: true})
 	for _, p := range paths {
 		if !exists(p) {
@@ -271,15 +277,19 @@ func TestEmptyRefusesAFileThatChanged(t *testing.T) {
 	defer root.Close()
 	infoB, _ := os.Lstat(b)
 	// a's path with b's listing: another file now has the name.
-	if err := emptyFile(root, "a.json", infoB); !errors.Is(err, errChanged) {
+	if err := emptyFile(root, "a.json", infoB, 100); !errors.Is(err, errChanged) {
 		t.Fatalf("emptyFile = %v, want errChanged", err)
 	}
 	if size(t, a) != 100 {
 		t.Fatal("emptied a file that was not the one listed")
 	}
-	// Control: the right listing empties it.
 	infoA, _ := os.Lstat(a)
-	if err := emptyFile(root, "a.json", infoA); err != nil || size(t, a) != 0 {
+	// Written since the collector delivered 99 bytes of it.
+	if err := emptyFile(root, "a.json", infoA, 99); !errors.Is(err, errGrew) || size(t, a) != 100 {
+		t.Fatalf("emptyFile = %v, size %d: want errGrew and the log kept", err, size(t, a))
+	}
+	// Control: the right listing, all of it delivered, empties it.
+	if err := emptyFile(root, "a.json", infoA, 100); err != nil || size(t, a) != 0 {
 		t.Fatalf("emptyFile = %v, size %d", err, size(t, a))
 	}
 }
@@ -302,9 +312,9 @@ func TestLimitsFor(t *testing.T) {
 
 func TestDockerHelperArguments(t *testing.T) {
 	var calls [][]string
-	d := &DockerHelper{Image: "img@sha256:x", Run: func(_ context.Context, args ...string) error {
+	d := &DockerHelper{Image: "img@sha256:x", Run: func(_ context.Context, args ...string) ([]byte, error) {
 		calls = append(calls, args)
-		return nil
+		return nil, nil
 	}}
 	dir := filepath.Join(t.TempDir(), "honeypots", "cowrie")
 	if !filepath.IsAbs(dir) {
@@ -327,11 +337,18 @@ func TestDockerHelperArguments(t *testing.T) {
 			t.Errorf("args lack %q:\n%s", want, args)
 		}
 	}
-	if err := d.Empty(context.Background(), dir, []string{"logs/cowrie.json"}); err != nil {
+	if err := d.Empty(context.Background(), dir, []string{"logs/cowrie.json", "logs/x.log"}, []int64{123, 0}); err != nil {
 		t.Fatal(err)
 	}
-	if got := strings.Join(calls[2][len(calls[2])-6:], " "); got != "img@sha256:x -c -s 0 -- /c/logs/cowrie.json" {
+	empty := calls[2]
+	if i := slices.Index(empty, "--entrypoint"); i < 0 || empty[i+1] != "sh" || empty[i+2] != "img@sha256:x" || empty[i+3] != "-c" || empty[i+4] != emptyScript {
+		t.Errorf("empty runs %q", empty)
+	}
+	if got := strings.Join(empty[len(empty)-5:], " "); got != "sh /c/logs/cowrie.json 123 /c/logs/x.log 0" {
 		t.Errorf("empty args end %q", got)
+	}
+	if err := d.Empty(context.Background(), dir, []string{"a", "b"}, []int64{1}); err == nil {
+		t.Error("sizes that do not match the files were accepted")
 	}
 	// Negative controls: nothing outside dir, no relative or odd mounts.
 	for _, bad := range [][2]string{{dir, "../escape"}, {dir, "/etc/passwd"}, {"relative/dir", "x"}, {dir + ",target=/etc", "x"}} {
@@ -341,5 +358,38 @@ func TestDockerHelperArguments(t *testing.T) {
 	}
 	if len(calls) != 3 {
 		t.Errorf("a refused request still ran docker (%d calls)", len(calls))
+	}
+}
+
+// TestDockerHelperFirstLines: the helper's hex output, one line per file,
+// comes back as each file's first line; a file it could not read has none.
+func TestDockerHelperFirstLines(t *testing.T) {
+	var got [][]string
+	out := [][]byte{[]byte("7b7d0a\n\n6869\n"), []byte("410a\n")}
+	d := &DockerHelper{Image: "img", Run: func(_ context.Context, args ...string) ([]byte, error) {
+		got = append(got, args)
+		o := out[0]
+		out = out[1:]
+		return o, nil
+	}}
+	rels := make([]string, firstLinesBatch+1)
+	for i := range rels {
+		rels[i] = "f" + strconv.Itoa(i)
+	}
+	dir := t.TempDir()
+	// Four lines for seventeen files: the count check refuses it.
+	if _, err := d.FirstLines(context.Background(), dir, rels); err == nil || !strings.Contains(err.Error(), "first lines for") {
+		t.Fatalf("output for fewer files than asked: %v", err)
+	}
+	got, out = nil, [][]byte{[]byte("7b7d0a\n\n6869\n")}
+	lines, err := d.FirstLines(context.Background(), dir, []string{"a.json", "b.json", "c.json"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(lines[0]) != "{}\n" || lines[1] != nil || string(lines[2]) != "hi" {
+		t.Errorf("first lines %q", lines)
+	}
+	if i := slices.Index(got[0], "-c"); i < 0 || !strings.Contains(got[0][i+1], "head -c 102401") || got[0][len(got[0])-1] != "/c/c.json" {
+		t.Errorf("args %q", got[0])
 	}
 }

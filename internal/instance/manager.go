@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"log/slog"
 	"os"
 	"os/exec"
@@ -22,6 +23,7 @@ import (
 	"github.com/qpot/qpot/internal/config"
 	"github.com/qpot/qpot/internal/database"
 	"github.com/qpot/qpot/internal/security"
+	"github.com/qpot/qpot/internal/vectorstate"
 )
 
 // composePSEntry is one container row from `docker compose ps --format json`.
@@ -688,6 +690,13 @@ func (m *Manager) generateServiceConfigs() error {
 		Sandbox: m.sandbox,
 	}
 
+	// The collector keeps its checkpoints in the instance folder, and reads a
+	// log it has none for from its start. When it has kept none yet (a new
+	// instance, or one an older QPot ran, which kept none), what the logs
+	// hold now counts as delivered, so it is not sent again.
+	_, statErr := os.Lstat(filepath.Join(m.config.DataPath, vectorstate.Dir))
+	firstState := errors.Is(statErr, fs.ErrNotExist)
+
 	// The collector's folders must exist before it starts: Docker would create
 	// a missing one owned by root.
 	for _, cm := range collectorMounts(m.config) {
@@ -696,6 +705,17 @@ func (m *Manager) generateServiceConfigs() error {
 		}
 		if err := os.MkdirAll(filepath.FromSlash(cm.Host), 0750); err != nil {
 			return fmt.Errorf("failed to create collector folder %s: %w", cm.Host, err)
+		}
+	}
+	if firstState {
+		for _, src := range CollectorSources(m.config) {
+			n, err := vectorstate.Seed(m.config.DataPath, src, time.Now())
+			if err != nil {
+				return fmt.Errorf("failed to seed the collector's state: %w", err)
+			}
+			if n > 0 {
+				slog.Info("Collector starts after what the logs already hold", "source", src.Name, "logs", n)
+			}
 		}
 	}
 

@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -12,6 +13,7 @@ import (
 
 	"github.com/qpot/qpot/internal/cleanup"
 	"github.com/qpot/qpot/internal/config"
+	"github.com/qpot/qpot/internal/vectorstate"
 )
 
 func cleanupTestServer(t *testing.T) *apiTestServer {
@@ -146,24 +148,47 @@ func TestScheduledCleanupHonoursOff(t *testing.T) {
 	}
 }
 
-// The collector's state decides whether logs are emptied.
+// writeCheckpoint records, as the collector does, that it has delivered the
+// cowrie log whose first line is "{}" up to pos. 2294659357232844156 is the
+// collector's fingerprint of that line (CRC-64/ECMA-182 of "{}\n").
+func writeCheckpoint(t *testing.T, a *apiTestServer, pos int64) {
+	t.Helper()
+	dir := filepath.Join(a.cfg.DataPath, vectorstate.Dir, vectorstate.HoneypotSource("cowrie"))
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	doc := fmt.Sprintf(`{"version":"1","checkpoints":[{"fingerprint":{"first_lines_checksum":2294659357232844156},"position":%d,"modified":"2026-11-09T00:00:00Z"}]}`, pos)
+	if err := os.WriteFile(filepath.Join(dir, "checkpoints.json"), []byte(doc), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// The collector's state decides whether logs are emptied: it must run, and
+// have delivered the whole log.
 func TestCleanupEmptiesLogsOnlyWithTheCollectorUp(t *testing.T) {
 	a := cleanupTestServer(t)
 	log := filepath.Join(a.cfg.DataPath, "honeypots", "cowrie", "logs", "cowrie.json")
 	if err := os.MkdirAll(filepath.Dir(log), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(log, []byte(strings.Repeat("{}\n", 500<<10)), 0o644); err != nil {
+	content := strings.Repeat("{}\n", 500<<10)
+	if err := os.WriteFile(log, []byte(content), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	if rec := a.do(http.MethodPut, "/api/cleanup", `{"max_log_mb":1}`); rec.Code != http.StatusOK {
 		t.Fatal(rec.Body.String())
 	}
+	writeCheckpoint(t, a, int64(len(content)))
 	a.s.api.cleanup.collector = func(context.Context) bool { return false }
 	if rep, _ := a.s.runCleanup(context.Background(), true, false); rep.Emptied != 0 || len(rep.Notes) == 0 {
 		t.Fatalf("collector down: %+v", rep)
 	}
 	a.s.api.cleanup.collector = func(context.Context) bool { return true }
+	writeCheckpoint(t, a, int64(len(content))-3)
+	if rep, _ := a.s.runCleanup(context.Background(), true, false); rep.Emptied != 0 || len(rep.Notes) == 0 {
+		t.Fatalf("collector up, last line not delivered: %+v", rep)
+	}
+	writeCheckpoint(t, a, int64(len(content)))
 	if rep, _ := a.s.runCleanup(context.Background(), true, false); rep.Emptied != 1 {
 		t.Fatalf("collector up: %+v", rep)
 	}

@@ -199,6 +199,36 @@ jobs:
         # its isolated network namespace; no production guard is bypassed.
         run: go test -race -count=1 -timeout 12m ./internal/instance -run '^TestRefrigerationLive'
 
+  docker-integration:
+    name: Collector delivery and disk cleanup in real containers
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      QPOT_TEST_DOCKER: "1"
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Pull the pinned collector image
+        run: |
+          set -euo pipefail
+          image=$(grep -oE 'CollectorImage += "[^"]+"' internal/instance/compose.go | cut -d'"' -f2)
+          test -n "$image"
+          docker pull -q "$image"
+      - name: Deliver, restart and clean up with the real collector and helper
+        # Also the collector's live config and transform tests, which skip
+        # wherever its image is missing.
+        # The runner's ordinary user is in the docker group, as QPot runs:
+        # logs other users own go through the helper container. The tests
+        # stop and recreate their own containers only.
+        run: >-
+          go test -race -count=1 -timeout 15m
+          ./internal/server ./internal/cleanup ./internal/instance
+          -run '^(TestCollectorAndCleanupWithRealDocker|TestDockerHelperForReal|TestVector[A-Za-z]*Live)$'
+
   build-run:
     name: Build binary & CLI smoke run
     runs-on: ubuntu-latest

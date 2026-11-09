@@ -10,6 +10,7 @@ import (
 
 	"github.com/qpot/qpot/internal/config"
 	"github.com/qpot/qpot/internal/security"
+	"github.com/qpot/qpot/internal/vectorstate"
 	"gopkg.in/yaml.v3"
 )
 
@@ -148,9 +149,61 @@ func TestCollectorMountFoldersAreCreated(t *testing.T) {
 			}
 		}
 	}
-	// honeypots, three sensors, backup; the GeoIP file is mounted as a file.
-	if dirs != 5 || files != 1 {
-		t.Errorf("got %d folders and %d files, want 5 and 1", dirs, files)
+	// honeypots, three sensors, backup, the collector's state; the GeoIP
+	// file is mounted as a file.
+	if dirs != 6 || files != 1 {
+		t.Errorf("got %d folders and %d files, want 6 and 1", dirs, files)
+	}
+}
+
+// The collector's checkpoints survive the container being recreated, and
+// move only once the database and the backup acknowledge the events: disk
+// cleanup empties a log only up to them, and a database outage must hold
+// events back rather than drop them.
+func TestCollectorCheckpointsMeanDelivered(t *testing.T) {
+	for _, db := range []string{"clickhouse", "timescaledb"} {
+		t.Run(db, func(t *testing.T) {
+			cfg := collectorTestConfig(func(c *config.Config) { c.Database.Type = db })
+			vols, vc := collectorVolumes(t, cfg)
+			if got := vols[cfg.DataPath+"/"+vectorstate.Dir]; got != "/var/lib/vector" {
+				t.Errorf("collector state mounted at %q, want a writable /var/lib/vector", got)
+			}
+			if !strings.Contains(vc, `data_dir: "/var/lib/vector"`) {
+				t.Error("vector's data_dir moved")
+			}
+			var doc struct {
+				Sinks   map[string]map[string]any `yaml:"sinks"`
+				Sources map[string]map[string]any `yaml:"sources"`
+			}
+			if err := yaml.Unmarshal([]byte(vc), &doc); err != nil {
+				t.Fatal(err)
+			}
+			for _, sink := range []string{db, "file_backup"} {
+				s, ok := doc.Sinks[sink]
+				if !ok {
+					t.Fatalf("no %s sink (have %v)", sink, doc.Sinks)
+				}
+				if ack, _ := s["acknowledgements"].(map[string]any); ack["enabled"] != true {
+					t.Errorf("%s sink does not acknowledge what it stored: %v", sink, s["acknowledgements"])
+				}
+				if req, _ := s["request"].(map[string]any); req["retry_attempts"] != nil {
+					t.Errorf("%s sink gives up after %v retries: a long outage would drop events", sink, req["retry_attempts"])
+				}
+			}
+			enabled := cfg.GetEnabledHoneypots()
+			if len(enabled) == 0 {
+				t.Fatal("no honeypot enabled")
+			}
+			for _, hp := range enabled {
+				src, ok := doc.Sources[vectorstate.HoneypotSource(hp)]
+				if !ok || src["type"] != "file" {
+					t.Errorf("no file source %s", vectorstate.HoneypotSource(hp))
+				}
+				if _, set := src["fingerprint"]; set {
+					t.Errorf("%s sets its own fingerprint: cleanup matches checkpoints by the default one", vectorstate.HoneypotSource(hp))
+				}
+			}
+		})
 	}
 }
 

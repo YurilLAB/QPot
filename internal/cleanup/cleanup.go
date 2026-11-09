@@ -6,13 +6,15 @@
 // A run, per honeypot folder (DataPath/honeypots/<name>):
 //
 //  1. Captured files and rotated logs older than the age limit are deleted.
-//  2. A log the collector reads that is larger than the log limit is emptied,
-//     only while the collector runs: its events are then already in the
-//     database and the backup, and an emptied log loses nothing. Log rotation
-//     tools (copytruncate) do the same.
+//     A log the collector reads is never deleted: the honeypot may hold it
+//     open, and would go on writing to a file nobody can find any more.
+//  2. A log the collector reads that is larger than the log limit is emptied
+//     in place, only while the collector runs and only once its checkpoint
+//     shows it has delivered the whole log to the database and the backup
+//     (see internal/vectorstate): an emptied log then loses nothing.
 //  3. A folder above its storage limit loses its oldest captured files and
-//     rotated logs, then (collector running) its largest logs, until it is
-//     back under 90% of the limit. State and config are never touched.
+//     rotated logs, then its largest delivered logs (emptied as in 2), until
+//     it is back under 90% of the limit. State and config are never touched.
 //
 // The backup folder (DataPath/backup/logs/YYYY/MM/DD) loses days older than
 // the age limit, then its oldest days while it is above its own limit; the
@@ -25,6 +27,7 @@
 package cleanup
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -43,6 +46,7 @@ import (
 
 	"github.com/qpot/qpot/internal/config"
 	"github.com/qpot/qpot/internal/instance"
+	"github.com/qpot/qpot/internal/vectorstate"
 )
 
 const (
@@ -156,6 +160,7 @@ type file struct {
 	mod  time.Time
 	kind kind
 	info fs.FileInfo
+	upTo int64 // a log queued for the helper to empty: what was delivered
 }
 
 // Run cleans the instance cfg describes.
@@ -172,7 +177,7 @@ func Run(ctx context.Context, cfg *config.Config, lim Limits, opt Options) *Repo
 		names = append(names, name)
 	}
 	slices.Sort(names)
-	notCollected := 0
+	notCollected, undelivered := 0, 0
 	for _, name := range names {
 		if ctx.Err() != nil {
 			rep.fail(ctx.Err())
@@ -186,13 +191,22 @@ func Run(ctx context.Context, cfg *config.Config, lim Limits, opt Options) *Repo
 		if lim.HoneypotLimit != nil {
 			limit = lim.HoneypotLimit(name)
 		}
-		a, skipped := cleanHoneypot(ctx, rep, name, dir, limit, lim, opt)
+		var got vectorstate.Delivered
+		if opt.CollectorRunning {
+			got = vectorstate.Load(cfg.DataPath, vectorstate.HoneypotSource(name))
+		}
+		a, skipped, waiting := cleanHoneypot(ctx, rep, name, dir, limit, lim, opt, got)
 		notCollected += skipped
+		undelivered += waiting
 		rep.Areas = append(rep.Areas, a)
 	}
 	if notCollected > 0 {
 		rep.note("%d %s above the limit not emptied: the collector is not running, and emptying a log it has not read would lose events.",
 			notCollected, plural(notCollected, "log was", "logs were"))
+	}
+	if undelivered > 0 {
+		rep.note("%d %s above the limit not emptied: the collector has not yet delivered all of %s to the database (or cannot say how far it has).",
+			undelivered, plural(undelivered, "log was", "logs were"), plural(undelivered, "it", "them"))
 	}
 	if dir := filepath.Join(cfg.DataPath, "backup"); isDir(dir) {
 		rep.Areas = append(rep.Areas, cleanBackup(ctx, rep, dir, lim, opt))
@@ -214,14 +228,16 @@ func isDir(p string) bool {
 	return err == nil && fi.IsDir()
 }
 
-// cleanHoneypot cleans one honeypot folder. It returns the area and how many
-// logs were over the log limit but left alone with the collector stopped.
-func cleanHoneypot(ctx context.Context, rep *Report, name, dir string, limit int64, lim Limits, opt Options) (Area, int) {
+// cleanHoneypot cleans one honeypot folder; got is how far the collector has
+// delivered its logs. It returns the area, how many logs were over the log
+// limit but left alone with the collector stopped, and how many were left
+// alone because the collector had not delivered all of them.
+func cleanHoneypot(ctx context.Context, rep *Report, name, dir string, limit int64, lim Limits, opt Options, got vectorstate.Delivered) (Area, int, int) {
 	area := Area{Name: name, Limit: limit}
 	root, err := os.OpenRoot(dir)
 	if err != nil {
 		rep.fail(fmt.Errorf("%s: %w", name, err))
-		return area, 0
+		return area, 0, 0
 	}
 	defer root.Close()
 
@@ -234,25 +250,26 @@ func cleanHoneypot(ctx context.Context, rep *Report, name, dir string, limit int
 	cutoff := opt.Now.Add(-lim.MaxAge)
 	act := newActor(rep, &area, root, dir, opt)
 	defer act.close()
+	if got != nil && mayEmpty(files, total, limit, lim) {
+		act.fingerprints(ctx, files, got)
+	}
 
-	// 1. Age: captured files and rotated logs, and logs nobody has written
-	// for that long once the collector has read them.
+	// 1. Age: captured files and rotated logs. Never a log the collector
+	// reads, however old: a honeypot holding it open would go on writing to
+	// a file nobody can find, and the collector would never see those lines.
 	var keep []file
 	for _, f := range files {
 		old := lim.MaxAge > 0 && f.mod.Before(cutoff)
-		switch {
-		case old && (f.kind == kindCapture || f.kind == kindRotated):
+		if old && (f.kind == kindCapture || f.kind == kindRotated) {
 			act.remove(ctx, f)
-		case old && f.kind == kindActive && opt.CollectorRunning:
-			act.remove(ctx, f)
-		default:
+		} else {
 			keep = append(keep, f)
 		}
 	}
 	files = keep
 	act.flush(ctx)
 
-	// 2. Logs over the log limit, once collected.
+	// 2. Logs over the log limit, once delivered.
 	skipped := 0
 	for i, f := range files {
 		if f.kind != kindActive || lim.MaxLog <= 0 || f.size <= lim.MaxLog {
@@ -269,7 +286,7 @@ func cleanHoneypot(ctx context.Context, rep *Report, name, dir string, limit int
 	act.flush(ctx)
 
 	// 3. The storage limit: oldest captured files and rotated logs first,
-	// then (collector running) the largest logs.
+	// then (collector running) the largest delivered logs.
 	if limit > 0 && area.Bytes > limit {
 		target := int64(float64(limit) * keepFraction)
 		var prune, logs []file
@@ -306,7 +323,7 @@ func cleanHoneypot(ctx context.Context, rep *Report, name, dir string, limit int
 		slog.Info("Storage cleanup", "area", name, "removed", area.Removed, "emptied", area.Emptied,
 			"freed_bytes", area.Freed, "bytes", area.Bytes, "dry_run", opt.DryRun)
 	}
-	return area, skipped
+	return area, skipped, len(act.waiting)
 }
 
 func sign(n int64) int64 {
@@ -415,11 +432,106 @@ type actor struct {
 	// is their size until the helper is done with them.
 	helpRemove, helpEmpty map[string][]file
 	pending               int64
+	// got is how far the collector has delivered this folder's logs; fps
+	// their fingerprints, and shared how many logs have each.
+	got    vectorstate.Delivered
+	fps    map[string]uint64
+	shared map[uint64]int
+	// waiting: logs not emptied because the collector has not delivered
+	// all of them yet.
+	waiting map[string]bool
 }
 
 func newActor(rep *Report, area *Area, root *os.Root, dir string, opt Options) *actor {
 	return &actor{rep: rep, area: area, root: root, dir: dir, opt: opt,
-		vols: map[string]*os.Root{}, helpRemove: map[string][]file{}, helpEmpty: map[string][]file{}}
+		vols: map[string]*os.Root{}, helpRemove: map[string][]file{}, helpEmpty: map[string][]file{},
+		waiting: map[string]bool{}}
+}
+
+// mayEmpty reports whether a run could empty any log in a folder: one is
+// over the log limit, or the folder over its storage limit.
+func mayEmpty(files []file, total, limit int64, lim Limits) bool {
+	if limit > 0 && total > limit {
+		return true
+	}
+	return lim.MaxLog > 0 && slices.ContainsFunc(files, func(f file) bool { return f.kind == kindActive && f.size > lim.MaxLog })
+}
+
+// fingerprints reads the collector's fingerprint of each log it reads: in
+// this process, or through the helper for a log a container's own user
+// keeps from it (cowrie writes its log 0640).
+func (a *actor) fingerprints(ctx context.Context, files []file, got vectorstate.Delivered) {
+	a.got, a.fps, a.shared = got, map[string]uint64{}, map[uint64]int{}
+	unreadable := map[string][]file{}
+	for _, f := range files {
+		if f.kind != kindActive {
+			continue
+		}
+		fp, ok, err := a.fingerprintOf(f)
+		switch {
+		case ok:
+			a.fps[f.rel] = fp
+			a.shared[fp]++
+		case a.canHelp(err):
+			vol, _, _ := split(f.rel)
+			unreadable[vol] = append(unreadable[vol], f)
+		}
+	}
+	for _, vol := range slices.Sorted(maps.Keys(unreadable)) {
+		batch := unreadable[vol]
+		inner := make([]string, len(batch))
+		for i, f := range batch {
+			_, inner[i], _ = split(f.rel)
+		}
+		lines, err := a.opt.Helper.FirstLines(ctx, filepath.Join(a.dir, vol), inner)
+		if err != nil {
+			a.rep.fail(fmt.Errorf("%s: %w", a.area.Name, err))
+			continue
+		}
+		for i, f := range batch {
+			if fp, ok := vectorstate.Fingerprint(bytes.NewReader(lines[i])); ok {
+				a.fps[f.rel] = fp
+				a.shared[fp]++
+			}
+		}
+	}
+}
+
+func (a *actor) fingerprintOf(f file) (uint64, bool, error) {
+	vol, inner, ok := split(f.rel)
+	if !ok {
+		return 0, false, nil
+	}
+	r, err := a.volume(vol)
+	if err != nil {
+		return 0, false, err
+	}
+	h, err := r.OpenFile(inner, os.O_RDONLY|noFollow, 0)
+	if err != nil {
+		return 0, false, err
+	}
+	defer h.Close()
+	fi, err := h.Stat()
+	if err != nil || !fi.Mode().IsRegular() || !os.SameFile(fi, f.info) {
+		return 0, false, err
+	}
+	fp, ok := vectorstate.Fingerprint(h)
+	return fp, ok, nil
+}
+
+// confirm returns how far the collector has delivered f, if that is all of
+// f as listed. A log two logs' fingerprints share is never confirmed: the
+// collector cannot tell them apart either.
+func (a *actor) confirm(f file) (int64, bool) {
+	fp, ok := a.fps[f.rel]
+	if !ok || a.shared[fp] != 1 {
+		return 0, false
+	}
+	pos, ok := a.got[fp]
+	if !ok || pos < f.info.Size() {
+		return 0, false
+	}
+	return pos, true
 }
 
 func (a *actor) close() {
@@ -492,8 +604,14 @@ func (a *actor) remove(ctx context.Context, f file) {
 	}
 }
 
-// empty empties a log, and reports whether it did (or would).
+// empty empties a log the collector has delivered all of, and reports
+// whether it did (or would).
 func (a *actor) empty(ctx context.Context, f file) bool {
+	upTo, ok := a.confirm(f)
+	if !ok {
+		a.waiting[f.rel] = true
+		return false
+	}
 	if a.opt.DryRun {
 		a.done(f, true)
 		return true
@@ -504,15 +622,19 @@ func (a *actor) empty(ctx context.Context, f file) bool {
 	}
 	r, err := a.volume(vol)
 	if err == nil {
-		err = emptyFile(r, inner, f.info)
+		err = emptyFile(r, inner, f.info, upTo)
 	}
 	switch {
 	case err == nil:
 		a.done(f, true)
 		return true
+	case errors.Is(err, errGrew):
+		a.waiting[f.rel] = true
+		return false
 	case errors.Is(err, errChanged), errors.Is(err, fs.ErrNotExist):
 		return false
 	case a.canHelp(err):
+		f.upTo = upTo
 		a.queue(ctx, a.helpEmpty, vol, f)
 		return true
 	default:
@@ -547,14 +669,16 @@ func (a *actor) flush(ctx context.Context) {
 			batch := m[vol]
 			delete(m, vol)
 			inner := make([]string, len(batch))
+			upTo := make([]int64, len(batch))
 			for i, f := range batch {
 				_, inner[i], _ = split(f.rel)
+				upTo[i] = f.upTo
 				a.pending -= f.size
 			}
 			dir := filepath.Join(a.dir, vol)
 			var err error
 			if emptied {
-				err = a.opt.Helper.Empty(ctx, dir, inner)
+				err = a.opt.Helper.Empty(ctx, dir, inner, upTo)
 			} else {
 				err = a.opt.Helper.Remove(ctx, dir, inner)
 			}
@@ -572,6 +696,8 @@ func (a *actor) flush(ctx context.Context) {
 					a.done(f, false)
 				case emptied && err == nil && fi.Size() < f.info.Size():
 					a.done(f, true)
+				case emptied && err == nil:
+					a.waiting[f.rel] = true // written since: the helper left it
 				}
 			}
 		}
@@ -581,8 +707,14 @@ func (a *actor) flush(ctx context.Context) {
 // errChanged: the path no longer names the file that was listed.
 var errChanged = errors.New("the file changed since it was listed")
 
-// emptyFile empties name, only if it still names the regular file listed.
-func emptyFile(root *os.Root, name string, listed fs.FileInfo) error {
+// errGrew: the log has lines the collector has not delivered yet.
+var errGrew = errors.New("written since the collector delivered it")
+
+// emptyFile empties name, only if it still names the regular file listed and
+// holds no more than upTo bytes, what the collector has delivered of it. The
+// check and the emptying use one handle, back to back; a line the honeypot
+// writes between the two would be lost, as with copytruncate.
+func emptyFile(root *os.Root, name string, listed fs.FileInfo, upTo int64) error {
 	h, err := root.OpenFile(name, os.O_WRONLY|noFollow, 0)
 	if err != nil {
 		return err
@@ -594,6 +726,9 @@ func emptyFile(root *os.Root, name string, listed fs.FileInfo) error {
 	}
 	if !fi.Mode().IsRegular() || !os.SameFile(fi, listed) {
 		return errChanged
+	}
+	if fi.Size() > upTo {
+		return errGrew
 	}
 	return h.Truncate(0)
 }

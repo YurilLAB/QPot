@@ -17,6 +17,7 @@ import (
 	"github.com/qpot/qpot/internal/config"
 	"github.com/qpot/qpot/internal/refrigeration"
 	"github.com/qpot/qpot/internal/security"
+	"github.com/qpot/qpot/internal/vectorstate"
 )
 
 // portKey identifies a (honeypot, container port) pair in the host-port map.
@@ -1293,10 +1294,17 @@ enrichment_tables:
     type: "mmdb"
     path: "{{.Config.Collector.GeoIPDBPath}}"
 {{end}}
+# Every file source reads a log from where it has delivered up to (its
+# checkpoints are kept in the instance folder), and a log it has no
+# checkpoint for from its start: one written while the collector was
+# stopped or recreated, or one it read but could not deliver. QPot seeds the
+# checkpoints when the collector first keeps them, so what the logs already
+# held is not sent again (internal/vectorstate). CollectorSources lists what
+# each source reads: keep the two in step.
 sources:
 {{- range $name, $hp := .Config.Honeypots}}
 {{- if $hp.Enabled}}
-  {{$name}}_logs:
+  {{logSource $name}}:
     type: file
     include:
       - "/data/honeypots/{{$name}}/logs/**/*.log"
@@ -1304,7 +1312,9 @@ sources:
     # cowrie's TTY recordings are binary; never tail them as log lines.
     exclude:
       - "/data/honeypots/{{$name}}/logs/tty/**"
-    read_from: end
+    read_from: beginning
+    # The default fingerprint (the first line's checksum) names each log in
+    # the checkpoints disk cleanup reads (internal/cleanup): keep it.
     multiline:
       mode: halt_before
       start_pattern: '^\{'
@@ -1319,7 +1329,7 @@ sources:
     include:
       - "/data/suricata/log/eve.json"
       - "/data/suricata/log/*.json"
-    read_from: end
+    read_from: beginning
 {{- end}}
 {{- if .Config.Collector.IngestP0f}}
   # p0f passive OS fingerprinting (one JSON object per line).
@@ -1327,7 +1337,7 @@ sources:
     type: file
     include:
       - "/data/p0f/log/p0f.json"
-    read_from: end
+    read_from: beginning
 {{- end}}
 {{- if .Config.Collector.IngestFatt}}
   # fatt network fingerprinting (JA3/HASSH; one JSON object per line).
@@ -1336,7 +1346,7 @@ sources:
     include:
       - "/data/fatt/log/fatt.log"
       - "/data/fatt/log/*.json"
-    read_from: end
+    read_from: beginning
 {{- end}}
 
 transforms:
@@ -1345,7 +1355,7 @@ transforms:
     type: remap
     inputs:
 {{- range $name, $hp := .Config.Honeypots}}{{if $hp.Enabled}}
-      - {{$name}}_logs{{end}}{{end}}
+      - {{logSource $name}}{{end}}{{end}}
     source: |
       # Remember where the line came from BEFORE merging the honeypot's JSON:
       # a log object carrying its own "file" key must not be able to redirect
@@ -1972,8 +1982,13 @@ sinks:
     batch:
       max_bytes: 1049000
       timeout_secs: 5
-    request:
-      retry_attempts: 3
+    # Retry for as long as the database is away (the default): with the
+    # acknowledgements below, the logs then wait instead of losing events.
+    # A file source checkpoints a line only once every sink acknowledging
+    # it has it, so a checkpoint means delivered; disk cleanup empties a log
+    # only up to there.
+    acknowledgements:
+      enabled: true
 {{else if eq .Config.Database.Type "timescaledb"}}
   timescaledb:
     type: postgres
@@ -1989,6 +2004,8 @@ sinks:
     batch:
       max_bytes: 1049000
       timeout_secs: 5
+    acknowledgements:
+      enabled: true
 {{end}}
 
   # Console output for debugging
@@ -2010,6 +2027,8 @@ sinks:
     path: "/data/backup/logs/%Y/%m/%d/{{"{{"}} honeypot {{"}}"}}.log"
     encoding:
       codec: json
+    acknowledgements:
+      enabled: true
 `
 
 	t := template.Must(template.New("vector").Funcs(template.FuncMap{
@@ -2017,6 +2036,7 @@ sinks:
 		"yamlStr":   yamlInterpolatedStr,
 		"pgDSN":     postgresDSN,
 		"conpotIDs": ConpotTemplateIDs,
+		"logSource": vectorstate.HoneypotSource,
 	}).Parse(config))
 
 	var buf bytes.Buffer
@@ -2025,6 +2045,40 @@ sinks:
 	}
 
 	return buf.String(), nil
+}
+
+// CollectorSources are the collector's file sources, as GenerateVectorConfig
+// writes them (keep the two in step): which logs each one reads.
+func CollectorSources(cfg *config.Config) []vectorstate.Source {
+	var out []vectorstate.Source
+	for name, hp := range cfg.SnapshotHoneypots() {
+		if !hp.Enabled {
+			continue
+		}
+		out = append(out, vectorstate.Source{Name: vectorstate.HoneypotSource(name), Dir: "honeypots/" + name + "/logs",
+			Read: func(rel string) bool {
+				if rel == "tty" || strings.HasPrefix(rel, "tty/") {
+					return false
+				}
+				return strings.HasSuffix(rel, ".log") || strings.HasSuffix(rel, ".json")
+			}})
+	}
+	top := func(rel string) bool { return !strings.Contains(rel, "/") }
+	c := cfg.Collector
+	if c.IngestSuricata {
+		out = append(out, vectorstate.Source{Name: "suricata_eve", Dir: "suricata/log",
+			Read: func(rel string) bool { return top(rel) && strings.HasSuffix(rel, ".json") }})
+	}
+	if c.IngestP0f {
+		out = append(out, vectorstate.Source{Name: "p0f_log", Dir: "p0f/log",
+			Read: func(rel string) bool { return rel == "p0f.json" }})
+	}
+	if c.IngestFatt {
+		out = append(out, vectorstate.Source{Name: "fatt_log", Dir: "fatt/log",
+			Read: func(rel string) bool { return rel == "fatt.log" || top(rel) && strings.HasSuffix(rel, ".json") }})
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
+	return out
 }
 
 // collectorMount is one bind mount of the collector (Vector) container.
@@ -2072,7 +2126,12 @@ func collectorMounts(cfg *config.Config) []collectorMount {
 			mounts = append(mounts, collectorMount{Host: cfg.DataPath + "/" + dir, Container: "/data/" + dir, ReadOnly: true, Dir: true})
 		}
 	}
-	return append(mounts, collectorMount{Host: cfg.DataPath + "/backup", Container: "/data/backup", Dir: true})
+	// Its own state (data_dir): how far it has delivered each log, which
+	// must survive the container being recreated, and which disk cleanup
+	// reads before it empties a log.
+	return append(mounts,
+		collectorMount{Host: cfg.DataPath + "/backup", Container: "/data/backup", Dir: true},
+		collectorMount{Host: cfg.DataPath + "/" + vectorstate.Dir, Container: "/var/lib/vector", Dir: true})
 }
 
 // The images of the instance's own services, pinned like the honeypot images.

@@ -16,19 +16,43 @@ last run and the settings, and `qpot cleanup` runs it by hand.
 For each honeypot's folder (`<instance>/honeypots/<name>`):
 
 1. **Old files go.** Captured files and rotated logs older than
-   `max_age_days` are deleted. A log the collector reads is aged out only
-   while the collector runs.
-2. **Large logs are emptied.** A log the collector reads that is larger than
-   `max_log_mb` is emptied, only while the collector runs: its events are then
-   already in the database and the backup. Emptying keeps the file, so the
-   honeypot goes on writing to it. Log rotation tools (`copytruncate`) work
-   the same way.
+   `max_age_days` are deleted. A log the collector reads is never deleted,
+   however old: a honeypot can hold it open, and would go on writing to a
+   file the collector can no longer find.
+2. **Large logs are emptied once delivered.** A log the collector reads that
+   is larger than `max_log_mb` is emptied, in place, only when both hold:
+   - the collector runs;
+   - the collector has delivered the whole log to the database and the
+     backup. It records how far it has delivered each log (see below), and
+     cleanup checks that mark against the log's size, then empties it on the
+     same open file.
+
+   Emptying keeps the file, so the honeypot goes on writing to it, and the
+   collector reads the new lines from the start. A log still holding lines
+   the collector has not delivered, because the database is away or the
+   collector is behind, waits for a later run. The run says so.
 3. **The folder is kept under its storage limit.** A folder above its limit
    loses its oldest captured files and rotated logs first. If that is not
-   enough and the collector runs, its largest logs are emptied too. The
-   folder is pruned to 90% of the limit so the next run does not start at it
-   again. A honeypot's state and settings are never touched; a folder that is
-   still above its limit is reported.
+   enough, its largest delivered logs are emptied as in step 2. The folder is
+   pruned to 90% of the limit so the next run does not start at it again. A
+   honeypot's state and settings are never touched; a folder that is still
+   above its limit is reported.
+
+### How cleanup knows a log is delivered
+
+The collector (Vector) keeps a checkpoint per log in the instance's
+`collector` folder. Its database and backup sinks acknowledge what they have
+stored, and a checkpoint moves only after that, so a log whose checkpoint is
+at its end holds nothing the database lacks. Cleanup finds a log's checkpoint
+by the collector's own fingerprint of it, the checksum of its first line. Two
+logs with the same first line look like one log to the collector, so neither
+is emptied.
+
+The size check and the emptying happen back to back on one file handle:
+microseconds apart, or a few milliseconds when the helper container below
+does it. A line the honeypot writes in exactly that gap would be lost, as with
+`copytruncate`. A log is only ever emptied after it has gone quiet long enough
+for the collector to deliver and checkpoint its end.
 
 The limit is `security.resource_limits.max_storage_gb` (10 GB by default), or
 the honeypot's own `resources.max_storage_gb` when it sets one.
@@ -81,7 +105,8 @@ container does it. The helper runs from the collector's image with no network,
 a read-only root and only the two capabilities that let it change another
 user's files. It mounts only that same folder (or the backup folder), so a
 planted symlink leads within it or into the helper's own throwaway filesystem,
-never anywhere else on the host.
+never anywhere else on the host. It empties a log only if the log still holds
+no more than the collector has delivered.
 
 ## `qpot cleanup`
 

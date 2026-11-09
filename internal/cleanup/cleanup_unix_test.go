@@ -3,6 +3,7 @@
 package cleanup
 
 import (
+	"bytes"
 	"context"
 	"os"
 	"path/filepath"
@@ -71,8 +72,8 @@ func TestSymlinksAreNeverFollowed(t *testing.T) {
 // fakeHelper does what it is asked as if it were root (it makes the folders
 // writable first), and records the calls.
 type fakeHelper struct {
-	removes, empties [][]string
-	dirs             []string
+	removes, empties, reads [][]string
+	dirs                    []string
 }
 
 func (f *fakeHelper) Remove(_ context.Context, dir string, rels []string) error {
@@ -93,11 +94,31 @@ func (f *fakeHelper) Remove(_ context.Context, dir string, rels []string) error 
 	return nil
 }
 
-func (f *fakeHelper) Empty(_ context.Context, dir string, rels []string) error {
+func (f *fakeHelper) FirstLines(_ context.Context, dir string, rels []string) ([][]byte, error) {
 	f.dirs = append(f.dirs, dir)
-	f.empties = append(f.empties, rels)
+	f.reads = append(f.reads, rels)
+	var out [][]byte
 	for _, r := range rels {
 		p := filepath.Join(dir, r)
+		_ = os.Chmod(p, 0o644)
+		data, err := os.ReadFile(p)
+		if i := bytes.IndexByte(data, '\n'); err == nil && i >= 0 {
+			out = append(out, data[:i+1])
+		} else {
+			out = append(out, nil)
+		}
+	}
+	return out, nil
+}
+
+func (f *fakeHelper) Empty(_ context.Context, dir string, rels []string, upTo []int64) error {
+	f.dirs = append(f.dirs, dir)
+	f.empties = append(f.empties, rels)
+	for i, r := range rels {
+		p := filepath.Join(dir, r)
+		if fi, err := os.Lstat(p); err != nil || fi.Size() > upTo[i] {
+			continue // as the helper's script: only what was delivered
+		}
 		_ = os.Chmod(p, 0o644)
 		if err := os.Truncate(p, 0); err != nil {
 			return err
@@ -114,7 +135,8 @@ func TestPermissionErrorsGoToTheHelper(t *testing.T) {
 	}
 	cfg := testInstance(t)
 	sample := put(t, cfg, "honeypots/cowrie/dl/old", 100, 40*day)
-	log := put(t, cfg, "honeypots/cowrie/logs/cowrie.json", 3<<20, time.Minute)
+	log := putLog(t, cfg, "honeypots/cowrie/logs/cowrie.json", 3072, 1024, time.Minute)
+	deliver(t, cfg, "cowrie", log, -1)
 	day := putBackupDay(t, cfg, now.Add(-40*day), 100)
 	locked := []string{filepath.Dir(sample), day, filepath.Dir(day)}
 	for _, d := range locked {
@@ -201,5 +223,50 @@ func TestASwappedFolderCannotLeadOutOfItsVolume(t *testing.T) {
 	// same name reaches the host's file.
 	if err := root.Remove("data/binaries/victim.cfg"); err != nil || exists(victim) {
 		t.Fatalf("control: a folder-wide root did not follow the swap (%v)", err)
+	}
+}
+
+// TestUnreadableLogIsFingerprintedThroughTheHelper: cowrie writes its log
+// 0640, so QPot, an ordinary user, cannot read the first line the collector
+// fingerprints. The helper reads it; without one the log is not confirmed as
+// delivered and stays.
+func TestUnreadableLogIsFingerprintedThroughTheHelper(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root reads every file")
+	}
+	cfg := testInstance(t)
+	log := putLog(t, cfg, "honeypots/cowrie/logs/cowrie.json", 3072, 1024, time.Minute)
+	deliver(t, cfg, "cowrie", log, -1)
+	if err := os.Chmod(log, 0o200); err != nil {
+		t.Fatal(err)
+	}
+	if f, err := os.Open(log); err == nil {
+		f.Close()
+		t.Fatal("the log is still readable")
+	}
+	rep := Run(context.Background(), cfg, limits(), Options{Now: now, CollectorRunning: true})
+	if rep.Emptied != 0 || size(t, log) == 0 {
+		t.Fatalf("emptied a log it could not fingerprint: %+v", rep)
+	}
+	h := &fakeHelper{}
+	if err := os.Chmod(log, 0o200); err != nil {
+		t.Fatal(err)
+	}
+	rep = Run(context.Background(), cfg, limits(), Options{Now: now, CollectorRunning: true, Helper: h})
+	if rep.Emptied != 1 || size(t, log) != 0 || len(rep.Errors) != 0 {
+		t.Fatalf("with the helper: %+v (%d bytes left)", rep, size(t, log))
+	}
+	if len(h.reads) != 1 || strings.Join(h.reads[0], ",") != "cowrie.json" {
+		t.Errorf("helper reads %q", h.reads)
+	}
+	// Nothing to empty: no helper container is started at all.
+	h2 := &fakeHelper{}
+	putLog(t, cfg, "honeypots/dionaea/logs/dionaea.json", 3, 100, time.Minute)
+	if err := os.Chmod(filepath.Join(cfg.DataPath, "honeypots/dionaea/logs/dionaea.json"), 0o200); err != nil {
+		t.Fatal(err)
+	}
+	Run(context.Background(), cfg, limits(), Options{Now: now, CollectorRunning: true, Helper: h2})
+	if len(h2.reads) != 0 {
+		t.Errorf("read first lines with nothing over a limit: %q", h2.reads)
 	}
 }

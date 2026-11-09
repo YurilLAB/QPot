@@ -87,9 +87,18 @@ each honeypot's own format into one common event: who connected, from where,
 to which honeypot and port, and what they sent, such as credentials, commands
 and download links. It adds the attacker's country from the local GeoIP
 database and writes the events to the database. It sees only the honeypot,
-sensor and GeoIP folders and its backup folder, never the rest of the instance
-folder: the logs it parses are written by attackers, and a compromised
-honeypot could plant a link in its logs folder pointing at a secret.
+sensor and GeoIP folders, its backup folder and its own state folder, never
+the rest of the instance folder: the logs it parses are written by attackers,
+and a compromised honeypot could plant a link in its logs folder pointing at a
+secret.
+
+The collector records how far it has delivered each log, in the instance's
+`collector` folder, and moves that mark only once the database and the backup
+have stored the lines. While the database is away it waits, however long, and
+the lines stay in the honeypot's log. A collector that restarts or is
+recreated reads again whatever it had not delivered, and a log it has never
+seen from its start. The first time it keeps this state, QPot marks what the
+logs already hold as delivered, so nothing is sent twice.
 
 **Database.** ClickHouse by default, or TimescaleDB. It sits on an internal
 Docker network that honeypots cannot reach, and is published on the host only

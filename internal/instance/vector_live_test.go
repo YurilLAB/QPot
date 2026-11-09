@@ -364,7 +364,8 @@ func TestVectorRemapLive(t *testing.T) {
 		}
 		event := &database.Event{Honeypot: r.Honeypot, EventType: r.EventType, SourceIP: r.SourceIP, Protocol: r.Protocol, Metadata: r.Metadata}
 		classifier.Classify(t.Context(), event)
-		if want.operation == "write" && event.TechniqueID != "T0855" || want.operation != "write" && event.TechniqueID == "T0855" {
+		// T1692.001 Unauthorized Command Message (ATT&CK v18; it replaced T0855).
+		if want.operation == "write" && event.TechniqueID != "T1692.001" || want.operation != "write" && event.TechniqueID == "T1692.001" {
 			t.Errorf("Conpot %s operation %q classified as %s", r.EventType, want.operation, event.TechniqueID)
 		}
 	}
