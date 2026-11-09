@@ -16,13 +16,21 @@ import (
 	"time"
 )
 
-// Limits per account folder, bounding what one account can make the host keep.
+// Limits on what one container's capture can make the host keep. The stream
+// is the guest's sshd's, and guest root can write to it: every count and name
+// in it is untrusted, so the per-account limits sit inside limits for the
+// whole container that no account or session number can get round.
 const (
-	maxUserBytes  = 64 << 20
-	maxUserFiles  = 2048
-	maxCommand    = 16 << 10
-	previewBytes  = 4096
-	filesPerEntry = 5
+	maxUserBytes      = 64 << 20
+	maxUserFiles      = 2048
+	maxContainerBytes = 256 << 20
+	maxContainerFiles = 8192
+	maxAccounts       = 64      // account folders per container
+	maxOpen           = 1024    // pending commands, and open sessions, held in memory
+	maxSessions       = 1 << 16 // distinct sessions per container
+	maxCommand        = 16 << 10
+	previewBytes      = 4096
+	filesPerEntry     = 5
 )
 
 // SessionEvent is one line of a command's .json record. Field names and
@@ -69,7 +77,9 @@ type Attribution struct {
 }
 
 // Attributor finds the broker connection behind a session, or reports none.
-type Attributor func(Open) (Attribution, bool)
+// since is the container's creation: a connection before it belonged to an
+// earlier lease of the cell, so a forged record cannot name that visitor.
+type Attributor func(o Open, since time.Time) (Attribution, bool)
 
 // Writer turns one container's capture into evidence files in dir (a cell
 // service's current log folder). Feeding it the container's whole capture
@@ -84,12 +94,14 @@ type Writer struct {
 	dir       string
 	root      *os.Root // opened on demand, closed by Flush
 	container string
+	created   time.Time
 	attribute Attributor
 
 	pending  map[string]*command // command bytes before their open record
 	active   map[string]*entry
 	ordinals map[string]int
 	usage    map[int]*usage
+	total    usage
 }
 
 type command struct {
@@ -117,8 +129,9 @@ type entry struct {
 	user      *usage
 }
 
-// NewWriter writes into dir for the container with the given Docker id.
-func NewWriter(dir, containerID string, attribute Attributor) (*Writer, error) {
+// NewWriter writes into dir for the container with the given Docker id,
+// created at the given time.
+func NewWriter(dir, containerID string, created time.Time, attribute Attributor) (*Writer, error) {
 	if len(containerID) < 12 {
 		return nil, errors.New("capture writer needs the container id")
 	}
@@ -127,7 +140,7 @@ func NewWriter(dir, containerID string, attribute Attributor) (*Writer, error) {
 	} else if !info.IsDir() {
 		return nil, errors.New("capture folder is not a directory")
 	}
-	return &Writer{dir: dir, container: containerID, attribute: attribute,
+	return &Writer{dir: dir, container: containerID, created: created, attribute: attribute,
 		pending: map[string]*command{}, active: map[string]*entry{}, ordinals: map[string]int{}, usage: map[int]*usage{}}, nil
 }
 
@@ -143,6 +156,9 @@ func (w *Writer) Apply(line []byte) error {
 	case KindCommand:
 		c := w.pending[key]
 		if c == nil {
+			if len(w.pending) >= maxOpen {
+				return nil
+			}
 			c = &command{}
 			w.pending[key] = c
 		}
@@ -155,7 +171,7 @@ func (w *Writer) Apply(line []byte) error {
 	case KindCommandTruncated:
 		if c := w.pending[key]; c != nil {
 			c.truncated = true
-		} else {
+		} else if len(w.pending) < maxOpen {
 			w.pending[key] = &command{truncated: true}
 		}
 		return nil
@@ -195,6 +211,18 @@ func (w *Writer) open(key string, r Record) error {
 	}
 	cmd := w.pending[key]
 	delete(w.pending, key)
+	u := w.usage[o.UID]
+	if len(w.active) >= maxOpen || (w.ordinals[key] == 0 && len(w.ordinals) >= maxSessions) ||
+		(u == nil && len(w.usage) >= maxAccounts) || w.total.files >= maxContainerFiles {
+		return nil // past what one container may make the host keep
+	}
+	if u == nil {
+		u = &usage{}
+		w.usage[o.UID] = u
+	}
+	if u.files >= maxUserFiles {
+		return nil
+	}
 	w.ordinals[key]++
 	sum := sha256.Sum256([]byte(w.container + "/" + key + "/" + strconv.Itoa(w.ordinals[key])))
 	id := hex.EncodeToString(sum[:16])
@@ -216,7 +244,7 @@ func (w *Writer) open(key string, r Record) error {
 		e.event.CommandTruncated = cmd.truncated
 	}
 	if w.attribute != nil {
-		if a, ok := w.attribute(o); ok {
+		if a, ok := w.attribute(o, w.created); ok {
 			e.event.SrcIP, e.event.SrcPort = a.SrcIP, a.SrcPort
 			e.event.SessionID, e.event.Generation = a.SessionID, a.Generation
 			e.event.Attribution = "broker-cell"
@@ -232,17 +260,16 @@ func (w *Writer) open(key string, r Record) error {
 	if err := root.Chmod(dir, 0o700); err != nil {
 		return err
 	}
-	u := w.usage[o.UID]
-	if u == nil {
-		u = &usage{}
-		w.usage[o.UID] = u
-	}
 	e.user = u
-	if u.files+filesPerEntry > maxUserFiles {
+	if u.files+filesPerEntry > maxUserFiles || w.total.files+filesPerEntry > maxContainerFiles {
+		// The record alone, which counts as one file.
 		e.limited = true
 		e.errs = append(e.errs, "account capture limit reached")
+		u.files++
+		w.total.files++
 	} else {
 		u.files += filesPerEntry
+		w.total.files += filesPerEntry
 		e.streams = true
 		suffixes := []string{".out", ".err", ".in"}
 		if o.PTY {
@@ -281,7 +308,7 @@ func (w *Writer) data(e *entry, r Record) error {
 		return nil
 	}
 	keep := int64(len(r.Payload))
-	if room := maxUserBytes - e.user.bytes; keep > room {
+	if room := min(maxUserBytes-e.user.bytes, maxContainerBytes-w.total.bytes); keep > room {
 		keep = max(room, 0)
 		e.truncated = true
 		if keep == 0 {
@@ -295,6 +322,7 @@ func (w *Writer) data(e *entry, r Record) error {
 	}
 	e.offsets[r.Kind] += keep
 	e.user.bytes += keep
+	w.total.bytes += keep
 	if e.event.PTY && r.Kind != KindError {
 		timing, err := w.stream(e, KindTruncated) // the timing file's slot
 		if err != nil {

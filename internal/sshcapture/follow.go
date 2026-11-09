@@ -34,9 +34,16 @@ type Target struct {
 // runs until the container stops.
 type Stream func(ctx context.Context, id string, follow bool) (stdout, stderr io.ReadCloser, wait func() error, err error)
 
-// Inspect reports a container's id and whether it runs. A missing container
-// returns an empty id and no error.
-type Inspect func(ctx context.Context, name string) (id string, running bool, err error)
+// Container is what Inspect reports about a container.
+type Container struct {
+	ID      string
+	Created time.Time
+	Running bool
+}
+
+// Inspect reports a container. A missing container has an empty ID and no
+// error.
+type Inspect func(ctx context.Context, name string) (Container, error)
 
 // Lock serializes writers to the cell log folders with resets that archive
 // them; it returns the release.
@@ -63,22 +70,22 @@ func DockerConverter(lock Lock) *Converter {
 func (c *Converter) Follow(ctx context.Context, t Target) {
 	done := map[string]bool{}
 	for ctx.Err() == nil {
-		id, running, err := c.Inspect(ctx, t.Container)
-		if err != nil || id == "" || (done[id] && !running) {
+		ct, err := c.Inspect(ctx, t.Container)
+		if err != nil || ct.ID == "" || (done[ct.ID] && !ct.Running) {
 			sleep(ctx, c.Poll)
 			continue
 		}
-		if err := c.follow(ctx, t, id); err != nil && ctx.Err() == nil {
+		if err := c.follow(ctx, t, ct); err != nil && ctx.Err() == nil {
 			c.Logger.Warn("SSH session capture interrupted", "service", t.Service, "error", err)
 		}
-		if _, running, err := c.Inspect(ctx, t.Container); err == nil && !running {
-			done[id] = true
+		if now, err := c.Inspect(ctx, t.Container); err == nil && !now.Running {
+			done[ct.ID] = true
 		}
 		sleep(ctx, c.Poll)
 	}
 }
 
-func (c *Converter) follow(ctx context.Context, t Target, id string) error {
+func (c *Converter) follow(ctx context.Context, t Target, ct Container) error {
 	dir, err := t.Dir()
 	if err != nil {
 		return err
@@ -87,7 +94,7 @@ func (c *Converter) follow(ctx context.Context, t Target, id string) error {
 	if err != nil {
 		return err
 	}
-	stdout, stderr, wait, err := c.Stream(ctx, id, true)
+	stdout, stderr, wait, err := c.Stream(ctx, ct.ID, true)
 	if err != nil {
 		return err
 	}
@@ -111,7 +118,7 @@ func (c *Converter) follow(ctx context.Context, t Target, id string) error {
 			return nil
 		}
 		if out == nil {
-			if out, err = NewWriter(dir, id, t.Attribute); err != nil {
+			if out, err = NewWriter(dir, ct.ID, ct.Created, t.Attribute); err != nil {
 				return err
 			}
 		}
@@ -163,8 +170,8 @@ func (c *Converter) follow(ctx context.Context, t Target, id string) error {
 // The caller holds the cells lock, so no follower writes meanwhile; the
 // files are then complete for the archive that follows.
 func (c *Converter) Drain(ctx context.Context, t Target) error {
-	id, _, err := c.Inspect(ctx, t.Container)
-	if err != nil || id == "" {
+	ct, err := c.Inspect(ctx, t.Container)
+	if err != nil || ct.ID == "" {
 		return err
 	}
 	dir, err := t.Dir()
@@ -173,11 +180,11 @@ func (c *Converter) Drain(ctx context.Context, t Target) error {
 	}
 	ctx, cancel := context.WithTimeout(ctx, 2*time.Minute)
 	defer cancel()
-	stdout, stderr, wait, err := c.Stream(ctx, id, false)
+	stdout, stderr, wait, err := c.Stream(ctx, ct.ID, false)
 	if err != nil {
 		return err
 	}
-	out, err := NewWriter(dir, id, t.Attribute)
+	out, err := NewWriter(dir, ct.ID, ct.Created, t.Attribute)
 	if err != nil {
 		return errors.Join(err, wait())
 	}
@@ -301,19 +308,27 @@ func dockerStream(ctx context.Context, id string, follow bool) (io.ReadCloser, i
 	return stdout, stderr, cmd.Wait, nil
 }
 
-func dockerInspect(ctx context.Context, name string) (string, bool, error) {
+func dockerInspect(ctx context.Context, name string) (Container, error) {
 	ctx, cancel := context.WithTimeout(ctx, 15*time.Second)
 	defer cancel()
-	out, err := exec.CommandContext(ctx, "docker", "inspect", "--type", "container", "--format", "{{.Id}} {{.State.Running}}", "--", name).CombinedOutput()
+	out, err := exec.CommandContext(ctx, "docker", "inspect", "--type", "container", "--format", "{{.Id}} {{.Created}} {{.State.Running}}", "--", name).CombinedOutput()
 	if err != nil {
 		if strings.Contains(string(out), "No such") {
-			return "", false, nil
+			return Container{}, nil
 		}
-		return "", false, fmt.Errorf("inspect %s: %w: %s", name, err, strings.TrimSpace(string(out)))
+		return Container{}, fmt.Errorf("inspect %s: %w: %s", name, err, strings.TrimSpace(string(out)))
 	}
-	id, running, ok := strings.Cut(strings.TrimSpace(string(out)), " ")
-	if !ok || len(id) < 12 {
-		return "", false, fmt.Errorf("inspect %s: unexpected output", name)
+	return parseInspect(name, string(out))
+}
+
+func parseInspect(name, out string) (Container, error) {
+	fields := strings.Fields(out)
+	if len(fields) != 3 || len(fields[0]) < 12 {
+		return Container{}, fmt.Errorf("inspect %s: unexpected output", name)
 	}
-	return id, running == "true", nil
+	created, err := time.Parse(time.RFC3339Nano, fields[1])
+	if err != nil {
+		return Container{}, fmt.Errorf("inspect %s: creation time: %w", name, err)
+	}
+	return Container{ID: fields[0], Created: created, Running: fields[2] == "true"}, nil
 }

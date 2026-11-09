@@ -28,10 +28,10 @@ type fakeDocker struct {
 	streamed chan struct{}
 }
 
-func (d *fakeDocker) inspect(context.Context, string) (string, bool, error) {
+func (d *fakeDocker) inspect(context.Context, string) (Container, error) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
-	return d.id, d.running, nil
+	return Container{ID: d.id, Created: testCreated, Running: d.running}, nil
 }
 
 func (d *fakeDocker) stream(ctx context.Context, id string, follow bool) (io.ReadCloser, io.ReadCloser, func() error, error) {
@@ -231,6 +231,7 @@ func TestBrokerIndex(t *testing.T) {
 	x := NewBrokerIndex(log)
 	at := func(ts string) int64 { v, _ := time.Parse(time.RFC3339, ts); return v.UnixMilli() }
 	app := x.Attributor("ssh-backend-1", true)
+	since := at("2026-11-09T09:59:00Z")
 	for _, c := range []struct {
 		ts, want string
 		port     int
@@ -241,16 +242,16 @@ func TestBrokerIndex(t *testing.T) {
 		{"2026-11-09T10:00:05Z", "", 40001, false},
 		{"2026-11-09T09:00:00Z", "", 40000, false}, // before any connect
 	} {
-		a, ok := app(Open{TimeMillis: at(c.ts), PeerPort: c.port})
+		a, ok := app(Open{TimeMillis: at(c.ts), PeerPort: c.port}, time.UnixMilli(since))
 		if ok != c.ok || a.SrcIP != c.want {
 			t.Fatalf("%s port %d: %+v %v", c.ts, c.port, a, ok)
 		}
 	}
 	backup := x.Attributor("ssh-backend-1", false)
-	if a, ok := backup(Open{TimeMillis: at("2026-11-09T10:30:00Z"), PeerPort: 5555}); !ok || a.SrcIP != "203.0.113.1" || a.Generation == nil || *a.Generation != 1 {
+	if a, ok := backup(Open{TimeMillis: at("2026-11-09T10:30:00Z"), PeerPort: 5555}, time.UnixMilli(since)); !ok || a.SrcIP != "203.0.113.1" || a.Generation == nil || *a.Generation != 1 {
 		t.Fatalf("backup attribution: %+v %v", a, ok)
 	}
-	if _, ok := x.Attributor("ssh-backend-2", true)(Open{TimeMillis: at("2026-11-09T12:00:00Z"), PeerPort: 40000}); ok {
+	if _, ok := x.Attributor("ssh-backend-2", true)(Open{TimeMillis: at("2026-11-09T12:00:00Z"), PeerPort: 40000}, time.UnixMilli(since)); ok {
 		t.Fatal("another cell's connection was used")
 	}
 	// Appended later: found on the miss-triggered refresh.
@@ -260,8 +261,29 @@ func TestBrokerIndex(t *testing.T) {
 	}
 	_, _ = f.WriteString(line("2026-11-09T12:00:00Z", "ssh-backend-2", 41000, "198.51.100.7", 4))
 	_ = f.Close()
-	if a, ok := x.Attributor("ssh-backend-2", true)(Open{TimeMillis: at("2026-11-09T12:00:01Z"), PeerPort: 41000}); !ok || a.SrcIP != "198.51.100.7" {
+	if a, ok := x.Attributor("ssh-backend-2", true)(Open{TimeMillis: at("2026-11-09T12:00:01Z"), PeerPort: 41000}, time.UnixMilli(since)); !ok || a.SrcIP != "198.51.100.7" {
 		t.Fatalf("appended connect: %+v %v", a, ok)
+	}
+	// A container created after a connection never takes it: a record forged
+	// with an old time and a guessed port names no earlier visitor.
+	later := time.UnixMilli(at("2026-11-09T10:30:00Z"))
+	if a, ok := app(Open{TimeMillis: at("2026-11-09T10:00:05Z"), PeerPort: 40000}, later); ok {
+		t.Fatalf("a connection from before the container was used: %+v", a)
+	}
+	if a, ok := app(Open{TimeMillis: at("2026-11-09T11:30:00Z"), PeerPort: 40000}, later); !ok || a.SrcIP != "203.0.113.2" {
+		t.Fatalf("the container's own connection: %+v %v", a, ok)
+	}
+}
+
+func TestParseInspect(t *testing.T) {
+	ct, err := parseInspect("c", "0123456789abcdef 2026-11-09T09:14:00.123456789Z true\n")
+	if err != nil || ct.ID != "0123456789abcdef" || !ct.Running || ct.Created.UnixNano() != time.Date(2026, 11, 9, 9, 14, 0, 123456789, time.UTC).UnixNano() {
+		t.Fatalf("%+v %v", ct, err)
+	}
+	for _, bad := range []string{"", "short 2026-11-09T09:14:00Z true", "0123456789abcdef not-a-time true", "0123456789abcdef 2026-11-09T09:14:00Z"} {
+		if _, err := parseInspect("c", bad); err == nil {
+			t.Fatalf("accepted %q", bad)
+		}
 	}
 }
 

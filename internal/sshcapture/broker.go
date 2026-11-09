@@ -56,18 +56,20 @@ func NewBrokerIndex(path string) *BrokerIndex {
 // Attributor answers for sessions on the given cell's service. The cell's app
 // matches the exact broker connection by the port the broker dialed from;
 // its backup host, reached from inside the cell, takes the cell's latest lease.
+// Only connections made after the container's creation count: one container
+// serves one lease, so a record forged inside it names no earlier visitor.
 func (x *BrokerIndex) Attributor(cell string, app bool) Attributor {
-	return func(o Open) (Attribution, bool) {
+	return func(o Open, since time.Time) (Attribution, bool) {
 		at := time.UnixMilli(o.TimeMillis)
-		if a, ok := x.lookup(cell, app, o.PeerPort, at); ok {
+		if a, ok := x.lookup(cell, app, o.PeerPort, at, since); ok {
 			return a, true
 		}
 		x.refresh()
-		return x.lookup(cell, app, o.PeerPort, at)
+		return x.lookup(cell, app, o.PeerPort, at, since)
 	}
 }
 
-func (x *BrokerIndex) lookup(cell string, app bool, port int, at time.Time) (Attribution, bool) {
+func (x *BrokerIndex) lookup(cell string, app bool, port int, at, since time.Time) (Attribution, bool) {
 	x.mu.Lock()
 	defer x.mu.Unlock()
 	var best *connect
@@ -75,7 +77,7 @@ func (x *BrokerIndex) lookup(cell string, app bool, port int, at time.Time) (Att
 		c := &x.byCell[cell][i]
 		// The connect line is written before the dial completes, so it is
 		// never later than the session; allow for clock granularity only.
-		if c.at.After(at.Add(time.Second)) || (app && c.backendPort != port) {
+		if c.at.Before(since) || c.at.After(at.Add(time.Second)) || (app && c.backendPort != port) {
 			continue
 		}
 		if best == nil || c.at.After(best.at) {

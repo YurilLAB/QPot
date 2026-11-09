@@ -425,8 +425,9 @@ input/output and timing; the input preview is not a parsed shell-command
 audit. Capture is limited to 8 MiB per channel and 64 MiB per connection and
 reports truncation without truncating the actual SSH byte stream; each
 backend's container log keeps room for one such connection until it is
-converted. Per-account limits bound the retained files and bytes; arbitrary
-guest files still require host disk quotas.
+converted. Per-account limits (64 MiB, 2,048 files), inside limits for the whole
+container, bound the retained files and bytes; arbitrary guest files still
+require host disk quotas.
 
 The conversion is a deterministic replay of a backend's container log: a
 follower converts it live while the control plane runs and replays it from the
@@ -472,8 +473,14 @@ Removing checkpoints makes retained JSON start from the beginning again and can
 insert duplicate historical events. Log retention does not remove these cursors.
 
 Guest root can end capture for later connections by killing or replacing sshd,
-and can read its own copy of the host keys. It cannot alter the broker's records
-or the evidence already converted on the host. This is useful evidence, not a
+and can read its own copy of the host keys. It can also write forged session
+records into sshd's error stream: they land only in its own cell's evidence,
+within limits for the whole container (256 MiB, 8,192 files, 64 account
+folders, bounded sessions held in memory) that no account or session number
+gets round, and they are joined only to broker connections made after that
+container was created. One container serves one lease, so a forged record
+can never name an earlier visitor. It cannot alter the broker's records or the
+evidence already converted on the host. This is useful evidence, not a
 tamper-proof command audit. Shared application and separate backup host keys
 remain protected in the persistent runtime store described below.
 

@@ -9,6 +9,7 @@ import (
 	"sort"
 	"strings"
 	"testing"
+	"time"
 )
 
 const testContainer = "4f1c0de5a6b7c8d9e0f1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c2d3"
@@ -43,7 +44,7 @@ func (e *emitter) open(ch, uid int, pty bool, rport int, command string) {
 
 func apply(t *testing.T, dir string, lines [][]byte, attribute Attributor) {
 	t.Helper()
-	w, err := NewWriter(dir, testContainer, attribute)
+	w, err := NewWriter(dir, testContainer, testCreated, attribute)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -109,7 +110,10 @@ func TestWriterWritesTheCollectorRecord(t *testing.T) {
 	session(e)
 	dir := t.TempDir()
 	gen := uint64(7)
-	apply(t, dir, e.lines, func(o Open) (Attribution, bool) {
+	apply(t, dir, e.lines, func(o Open, since time.Time) (Attribution, bool) {
+		if !since.Equal(testCreated) {
+			t.Fatalf("attributor got creation %v", since)
+		}
 		if o.PeerIP != "172.20.0.10" || o.PeerPort != 41000 {
 			t.Fatalf("attributor got %+v", o)
 		}
@@ -318,7 +322,7 @@ func TestWritersReplayingInTurnsConverge(t *testing.T) {
 	reference := snapshot(t, want)
 	for lag := 0; lag <= len(e.lines); lag++ {
 		dir := t.TempDir()
-		follower, err := NewWriter(dir, testContainer, nil)
+		follower, err := NewWriter(dir, testContainer, testCreated, nil)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -344,7 +348,7 @@ func TestWritersReplayingInTurnsConverge(t *testing.T) {
 		}
 		// A follower that starts after the drain and stops partway (the
 		// control plane killed) must not cut what the drain completed.
-		late, err := NewWriter(dir, testContainer, nil)
+		late, err := NewWriter(dir, testContainer, testCreated, nil)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -359,5 +363,96 @@ func TestWritersReplayingInTurnsConverge(t *testing.T) {
 		if got := snapshot(t, dir); fmt.Sprint(got) != fmt.Sprint(reference) {
 			t.Fatalf("a follower stopped after %d lines cut the drained files:\n%v\nwant\n%v", lag, got, reference)
 		}
+	}
+}
+
+// testCreated is the test container's creation time.
+var testCreated = time.Date(2026, 11, 9, 8, 0, 0, 0, time.UTC)
+
+// Guest root can write records into sshd's stream: account numbers, session
+// numbers and unclosed sessions are all its to choose. What the host keeps
+// stays within the container's limits whatever it writes.
+func TestWriterBoundsWhatAForgedStreamCanMakeTheHostKeep(t *testing.T) {
+	e := newEmitter(testConn)
+	big := []byte(strings.Repeat("A", maxPayload))
+	for uid := 0; uid < maxAccounts+20; uid++ {
+		e.open(uid, uid+1000, false, 41000, "x")
+		e.rec(uid, KindOutput, 1, big)
+		e.rec(uid, KindExit, 1, []byte("exit=0"))
+		e.rec(uid, KindClosed, 1, nil)
+	}
+	dir := t.TempDir()
+	w, err := NewWriter(dir, testContainer, testCreated, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, l := range e.lines {
+		if err := w.Apply(l); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// Pending commands and open sessions that never close stay bounded.
+	flood := newEmitter(strings.Repeat("f", 32))
+	for ch := 0; ch < 3*maxOpen; ch++ {
+		flood.rec(ch, KindCommand, 0, []byte("c"))
+	}
+	for ch := 0; ch < 3*maxOpen; ch++ {
+		flood.open(100000+ch, 1000+ch%maxAccounts, false, 41000, "")
+	}
+	for _, l := range flood.lines {
+		if err := w.Apply(l); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if len(w.pending) > maxOpen || len(w.active) > maxOpen || len(w.usage) > maxAccounts || len(w.ordinals) > maxSessions {
+		t.Fatalf("unbounded state: %d pending, %d active, %d accounts, %d sessions", len(w.pending), len(w.active), len(w.usage), len(w.ordinals))
+	}
+	if err := w.Finish(); err != nil {
+		t.Fatal(err)
+	}
+	accounts, _ := filepath.Glob(filepath.Join(dir, "uid-*"))
+	if len(accounts) != maxAccounts {
+		t.Fatalf("%d account folders, want the cap %d", len(accounts), maxAccounts)
+	}
+	if w.total.files > maxContainerFiles || w.total.bytes > maxContainerBytes {
+		t.Fatalf("over the container limits: %+v", w.total)
+	}
+	// The container-wide byte and file limits hold across accounts too.
+	one := func(total usage) (*Writer, string) {
+		t.Helper()
+		dir := t.TempDir()
+		w, err := NewWriter(dir, testContainer, testCreated, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		w.total = total
+		e := newEmitter(testConn)
+		e.open(0, 5, false, 41000, "x")
+		e.rec(0, KindOutput, 1, big)
+		e.rec(0, KindExit, 1, []byte("exit=0"))
+		e.rec(0, KindClosed, 1, nil)
+		for _, l := range e.lines {
+			if err := w.Apply(l); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if err := w.Finish(); err != nil {
+			t.Fatal(err)
+		}
+		return w, dir
+	}
+	// Room for one more session's files, but only ten more bytes.
+	w2, dir2 := one(usage{bytes: maxContainerBytes - 10, files: maxContainerFiles - filesPerEntry - 1})
+	outputs, _ := filepath.Glob(filepath.Join(dir2, "uid-5", "*.out"))
+	if w2.total.bytes != maxContainerBytes || w2.total.files != maxContainerFiles-1 || len(outputs) != 1 {
+		t.Fatalf("container byte limit not applied: %+v %v", w2.total, outputs)
+	}
+	if data, _ := os.ReadFile(outputs[0]); len(data) != 10 {
+		t.Fatalf("kept %d bytes past the container limit", len(data))
+	}
+	// No room for a session's files: its record alone, one file.
+	w3, dir3 := one(usage{files: maxContainerFiles - filesPerEntry + 1})
+	if outputs, _ := filepath.Glob(filepath.Join(dir3, "uid-5", "*.out")); w3.total.files != maxContainerFiles-filesPerEntry+2 || w3.total.bytes != 0 || len(outputs) != 0 {
+		t.Fatalf("container file limit not applied: %+v %v", w3.total, outputs)
 	}
 }
