@@ -76,6 +76,9 @@ type Attribution struct {
 	SrcPort    int
 	SessionID  string
 	Generation *uint64
+	// Visitor: the session belongs to the lease's visitor, but no single
+	// connection of its can be named (SrcPort and SessionID are empty).
+	Visitor bool
 }
 
 // Attributor finds the broker connection behind a session, or reports none.
@@ -250,6 +253,9 @@ func (w *Writer) open(key string, r Record) error {
 			e.event.SrcIP, e.event.SrcPort = a.SrcIP, a.SrcPort
 			e.event.SessionID, e.event.Generation = a.SessionID, a.Generation
 			e.event.Attribution = "broker-cell"
+			if a.Visitor {
+				e.event.Attribution = "broker-visitor"
+			}
 		}
 	}
 	root, err := w.ensureRoot()

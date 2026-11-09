@@ -54,16 +54,22 @@ func NewBrokerIndex(path string) *BrokerIndex {
 }
 
 // Attributor answers for sessions on the given cell's service. The cell's app
-// matches the exact broker connection by the port the broker dialed from;
-// its backup host, reached from inside the cell, takes the cell's latest lease.
+// matches the exact broker connection by the port the broker dialed from.
+// Its backup host is reached from inside the cell, so a backup session names
+// a connection only when that one alone had reached the cell: with more, any
+// of them, or a process one left running, may have made it, and it names the
+// visitor instead (the address of its latest connection, and the lease).
 // Only connections made after the container's creation count: one container
 // serves one lease, so a record forged inside it names no earlier visitor.
 func (x *BrokerIndex) Attributor(cell string, app bool) Attributor {
 	return func(o Open, since time.Time) (Attribution, bool) {
 		at := time.UnixMilli(o.TimeMillis)
-		if a, ok := x.lookup(cell, app, o.PeerPort, at, since); ok {
-			return a, true
+		if app {
+			if a, ok := x.lookup(cell, true, o.PeerPort, at, since); ok {
+				return a, true
+			}
 		}
+		// A backup session is judged against every connection before it.
 		x.refresh()
 		return x.lookup(cell, app, o.PeerPort, at, since)
 	}
@@ -73,6 +79,7 @@ func (x *BrokerIndex) lookup(cell string, app bool, port int, at, since time.Tim
 	x.mu.Lock()
 	defer x.mu.Unlock()
 	var best *connect
+	reached := 0
 	for i := range x.byCell[cell] {
 		c := &x.byCell[cell][i]
 		// The connect line is written before the dial completes, so it is
@@ -80,6 +87,7 @@ func (x *BrokerIndex) lookup(cell string, app bool, port int, at, since time.Tim
 		if c.at.Before(since) || c.at.After(at.Add(time.Second)) || (app && c.backendPort != port) {
 			continue
 		}
+		reached++
 		if best == nil || c.at.After(best.at) {
 			best = c
 		}
@@ -87,7 +95,10 @@ func (x *BrokerIndex) lookup(cell string, app bool, port int, at, since time.Tim
 	if best == nil {
 		return Attribution{}, false
 	}
-	return best.attribution, true
+	if app || reached == 1 {
+		return best.attribution, true
+	}
+	return Attribution{SrcIP: best.attribution.SrcIP, Generation: best.attribution.Generation, Visitor: true}, true
 }
 
 // refresh reads what the broker appended since the last read. A replaced or

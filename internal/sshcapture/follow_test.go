@@ -248,8 +248,15 @@ func TestBrokerIndex(t *testing.T) {
 		}
 	}
 	backup := x.Attributor("ssh-backend-1", false)
-	if a, ok := backup(Open{TimeMillis: at("2026-11-09T10:30:00Z"), PeerPort: 5555}, time.UnixMilli(since)); !ok || a.SrcIP != "203.0.113.1" || a.Generation == nil || *a.Generation != 1 {
+	// One connection had reached the cell: the backup session is its.
+	if a, ok := backup(Open{TimeMillis: at("2026-11-09T10:30:00Z"), PeerPort: 5555}, time.UnixMilli(since)); !ok || a.Visitor || a.SrcIP != "203.0.113.1" ||
+		a.SessionID != fmt.Sprintf("%032d", 1) || a.Generation == nil || *a.Generation != 1 {
 		t.Fatalf("backup attribution: %+v %v", a, ok)
+	}
+	// Two had: either may have made it, so it names only the visitor.
+	if a, ok := backup(Open{TimeMillis: at("2026-11-09T11:30:00Z"), PeerPort: 5555}, time.UnixMilli(since)); !ok || !a.Visitor || a.SrcIP != "203.0.113.2" ||
+		a.SessionID != "" || a.SrcPort != 0 || a.Generation == nil || *a.Generation != 2 {
+		t.Fatalf("backup attribution with two connections: %+v %v", a, ok)
 	}
 	if _, ok := x.Attributor("ssh-backend-2", true)(Open{TimeMillis: at("2026-11-09T12:00:00Z"), PeerPort: 40000}, time.UnixMilli(since)); ok {
 		t.Fatal("another cell's connection was used")
@@ -263,6 +270,20 @@ func TestBrokerIndex(t *testing.T) {
 	_ = f.Close()
 	if a, ok := x.Attributor("ssh-backend-2", true)(Open{TimeMillis: at("2026-11-09T12:00:01Z"), PeerPort: 41000}, time.UnixMilli(since)); !ok || a.SrcIP != "198.51.100.7" {
 		t.Fatalf("appended connect: %+v %v", a, ok)
+	}
+	// A backup session reads every connection before it, not just those
+	// already read: the one appended since makes it the visitor's.
+	backup2 := x.Attributor("ssh-backend-2", false)
+	if a, ok := backup2(Open{TimeMillis: at("2026-11-09T12:00:05Z")}, time.UnixMilli(since)); !ok || a.Visitor || a.SrcIP != "198.51.100.7" {
+		t.Fatalf("backup with one connection: %+v %v", a, ok)
+	}
+	if f, err = os.OpenFile(log, os.O_APPEND|os.O_WRONLY, 0); err != nil {
+		t.Fatal(err)
+	}
+	_, _ = f.WriteString(line("2026-11-09T12:10:00Z", "ssh-backend-2", 41001, "198.51.100.8", 4))
+	_ = f.Close()
+	if a, ok := backup2(Open{TimeMillis: at("2026-11-09T12:20:00Z")}, time.UnixMilli(since)); !ok || !a.Visitor || a.SrcIP != "198.51.100.8" || a.SessionID != "" {
+		t.Fatalf("backup after a second connection: %+v %v", a, ok)
 	}
 	// A container created after a connection never takes it: a record forged
 	// with an old time and a guessed port names no earlier visitor.

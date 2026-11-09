@@ -468,12 +468,19 @@ below. OpenSSH does not log plaintext passwords.
 Before forwarding a connection's first byte, the broker logs an
 `ssh_proxy_connect` event with the visitor's source, the lease and the local
 port it dialed the backend from. The converter joins each app session to it by
-that port, which sshd records as the session's peer port; a backup host's
-sessions, reached from inside the cell, take the cell's latest lease. Joined
-command events carry the original TCP source, the outer `session_id` and the
-lease `generation`, marked `attribution: broker-cell`; `peer_ip`/`peer_port`
-identify the actual SSH hop. A session with no matching connection is marked
-`peer-only`; it is never presented as trusted original-source attribution.
+that port, which sshd records as the session's peer port. Joined command
+events carry the original TCP source, the outer `session_id` and the lease
+`generation`, marked `attribution: broker-cell`; `peer_ip`/`peer_port`
+identify the actual SSH hop. A backup host is reached from inside the cell,
+not through the broker, so its sessions are joined to a connection only when
+that connection alone had reached the cell since its containers were
+created. When the visitor had several, any of them, or a process one left
+running, may have opened the backup session: it is marked
+`attribution: broker-visitor`, with the address of the visitor's latest
+connection and the lease `generation` but no `session_id` or source port.
+Correlate it with the connections by time. A session with no matching
+connection is marked `peer-only`; it is never presented as trusted
+original-source attribution.
 Nothing about the connection is written into the guest. The collector drops
 `ssh_proxy_connect`; `ssh_proxy_session` reports the connection itself.
 

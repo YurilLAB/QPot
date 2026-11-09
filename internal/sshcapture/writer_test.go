@@ -105,6 +105,29 @@ func session(e *emitter) {
 	e.rec(0, KindClosed, 6, nil)
 }
 
+// A session the broker can pin only on the visitor carries its address and
+// lease, but no connection.
+func TestWriterNamesTheVisitorWhenNoConnectionIsKnown(t *testing.T) {
+	e := newEmitter(testConn)
+	session(e)
+	dir := t.TempDir()
+	gen := uint64(9)
+	apply(t, dir, e.lines, func(Open, time.Time) (Attribution, bool) {
+		return Attribution{SrcIP: "203.0.113.9", Generation: &gen, Visitor: true}, true
+	})
+	recs := records(t, snapshot(t, dir))
+	if len(recs) != 1 {
+		t.Fatalf("want one command record, got %d", len(recs))
+	}
+	for _, evs := range recs {
+		for _, ev := range evs {
+			if ev.Attribution != "broker-visitor" || ev.SrcIP != "203.0.113.9" || ev.SrcPort != 0 || ev.SessionID != "" || ev.Generation == nil || *ev.Generation != 9 {
+				t.Fatalf("visitor attribution: %+v", ev)
+			}
+		}
+	}
+}
+
 func TestWriterWritesTheCollectorRecord(t *testing.T) {
 	e := newEmitter(testConn)
 	session(e)
