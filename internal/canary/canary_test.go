@@ -8,6 +8,7 @@ import (
 	"regexp"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestNewMintsDistinctTokens(t *testing.T) {
@@ -261,7 +262,7 @@ func TestRepeatTripsAreFolded(t *testing.T) {
 		t.Fatal("hit from a new source was folded")
 	}
 	old := TripDedupeWindow
-	TripDedupeWindow = 0
+	TripDedupeWindow = -time.Nanosecond // below zero: two trips can share a reading of Windows' coarse clock
 	defer func() { TripDedupeWindow = old }()
 	if _, ok, _ := s.TripByToken(c.Token, "203.0.113.9", "", "", Origin{}); !ok {
 		t.Fatal("hit after the dedupe window was folded")

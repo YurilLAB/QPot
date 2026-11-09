@@ -2,6 +2,7 @@ package canary
 
 import (
 	"testing"
+	"time"
 )
 
 // TestEventTripsACanaryOnce: the quick scan and, later, the intelligence
@@ -10,7 +11,9 @@ import (
 // comes; a different event with the same value still trips it.
 func TestEventTripsACanaryOnce(t *testing.T) {
 	old := TripDedupeWindow
-	TripDedupeWindow = 0 // the worker comes minutes later, past the window
+	// The worker comes minutes later, past the window. Below zero, not zero:
+	// two trips can share a reading of Windows' coarse clock.
+	TripDedupeWindow = -time.Nanosecond
 	defer func() { TripDedupeWindow = old }()
 
 	s, _ := NewStore(t.TempDir(), 0)

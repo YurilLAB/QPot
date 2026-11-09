@@ -44,7 +44,9 @@ func (d *recentDB) asked() []database.EventFilter {
 // worker reaches it minutes later.
 func TestQuickScanTripsWithinSeconds(t *testing.T) {
 	old := canary.TripDedupeWindow
-	canary.TripDedupeWindow = 0 // the worker comes minutes later, past the window
+	// The worker comes minutes later, past the window. Below zero, not zero:
+	// two trips can share a reading of Windows' coarse clock.
+	canary.TripDedupeWindow = -time.Nanosecond
 	defer func() { canary.TripDedupeWindow = old }()
 
 	db := &recentDB{fakeDB: &fakeDB{}}
