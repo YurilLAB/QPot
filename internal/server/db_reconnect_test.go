@@ -98,6 +98,14 @@ func TestServerReachesALateDatabase(t *testing.T) {
 	if s.intelWorker() == nil {
 		t.Error("the intelligence worker did not start once the database was reached")
 	}
+	// The IOCs follow the event once the outbox has marked it stored, a
+	// file write that a slow runner can take a while over.
+	for len(db.storedIOCs()) == 0 {
+		if time.Now().After(deadline) {
+			t.Fatal("the trip's IOCs never reached the database")
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
 	time.Sleep(100 * time.Millisecond) // the outbox loop's next pass changes nothing
 	wantOneTripEvent(t, s, db)
 }
