@@ -19,7 +19,7 @@
           "sha256": "543e4109c1786fd5bc8441003af67352cfff949aa1fc2934538fd2da580b3514"
         },
         "internal/instance/compose.go": {
-          "sha256": "362bab3bbbe4ba899cfa54be8d624fd8372916ee9b065d4ef75ebab1ab71358f"
+          "sha256": "7265df3accacb960a9f95282198d2f7c59d777042ebfcf455b05118fc7d93ba0"
         },
         "internal/instance/refrigeration.go": {
           "sha256": "6019107c9d99ffd1de5d7a04c824d31d51fe8581f6c8205ca3205c99615df1f3"
@@ -58,7 +58,7 @@
           "sha256": "543e4109c1786fd5bc8441003af67352cfff949aa1fc2934538fd2da580b3514"
         },
         "internal/instance/compose.go": {
-          "sha256": "362bab3bbbe4ba899cfa54be8d624fd8372916ee9b065d4ef75ebab1ab71358f"
+          "sha256": "7265df3accacb960a9f95282198d2f7c59d777042ebfcf455b05118fc7d93ba0"
         },
         "internal/instance/refrigeration.go": {
           "sha256": "6019107c9d99ffd1de5d7a04c824d31d51fe8581f6c8205ca3205c99615df1f3"
@@ -178,7 +178,7 @@
           "sha256": "543e4109c1786fd5bc8441003af67352cfff949aa1fc2934538fd2da580b3514"
         },
         "internal/instance/compose.go": {
-          "sha256": "362bab3bbbe4ba899cfa54be8d624fd8372916ee9b065d4ef75ebab1ab71358f"
+          "sha256": "7265df3accacb960a9f95282198d2f7c59d777042ebfcf455b05118fc7d93ba0"
         },
         "internal/instance/refrigeration.go": {
           "sha256": "6019107c9d99ffd1de5d7a04c824d31d51fe8581f6c8205ca3205c99615df1f3"
@@ -222,7 +222,7 @@
     {
       "disposition": "false-positive",
       "justification": "prepareOwnership first calls the exact finite deployProfileFor switch. Unknown input has no RunAsUID/OwnedSubdirs and returns before constructing a path or invoking Docker. The two reachable ownership profiles use compile-time catalog names and fixed subdirectory literals; an attacker-controlled traversal/absolute name cannot select a profile. No case is accepted merely because another API happened to validate it. The helper receives that catalog-derived local directory as an argv bind value, without a shell. The independent negative traversal/absolute/unknown-name probe creates no filesystem entries and invokes no Docker helper; the refrigeration positive control creates exactly its declared logs/state directories.",
-      "resultSHA256": "fb65378119d4bce6ba9b6230d62d8fd1fe9938a77b3d5a8f4257dabbb463f2f2",
+      "resultSHA256": "ff6ec6a8546869ebd665f30dff7edc179e06db9b1ebca8cfe823da8409e3cb93",
       "ruleId": "go/path-injection",
       "sourceSHA256": {
         "go.mod": {
@@ -238,7 +238,7 @@
           "sha256": "b1d7c6acdcd2b41c20eff73de7f8aee0a01ee86c9bcfea251accfaf91dd47289"
         },
         "internal/instance/manager.go": {
-          "sha256": "9defa17915dc432ecdc7cbc3a44cc498ca4a0b3a7d42b06ca1533a70c9f468c6"
+          "sha256": "c059ee25a63bdc8fddf870ec4efc0b0e0c5818b1563c3dcad654413340e75a97"
         },
         "internal/instance/settings.go": {
           "sha256": "3b85ef4dc13fd99e973f5a7d2ec1d5e68397964c79567a4000cbeff75832416f"
@@ -264,7 +264,7 @@
     {
       "disposition": "false-positive",
       "justification": "prepareOwnership first calls the exact finite deployProfileFor switch. Unknown input has no RunAsUID/OwnedSubdirs and returns before constructing a path or invoking Docker. The two reachable ownership profiles use compile-time catalog names and fixed subdirectory literals; an attacker-controlled traversal/absolute name cannot select a profile. No case is accepted merely because another API happened to validate it. The helper receives that catalog-derived local directory as an argv bind value, without a shell. The independent negative traversal/absolute/unknown-name probe creates no filesystem entries and invokes no Docker helper; the refrigeration positive control creates exactly its declared logs/state directories.",
-      "resultSHA256": "04e928896e39884622758760a4900406d4886a69ec7f79e249c611e8bd9630bf",
+      "resultSHA256": "b243174ae906a0f08a635e1551571257abbc22c1599114ed51d26c285be27b28",
       "ruleId": "go/path-injection",
       "sourceSHA256": {
         "go.mod": {
@@ -280,7 +280,7 @@
           "sha256": "b1d7c6acdcd2b41c20eff73de7f8aee0a01ee86c9bcfea251accfaf91dd47289"
         },
         "internal/instance/manager.go": {
-          "sha256": "9defa17915dc432ecdc7cbc3a44cc498ca4a0b3a7d42b06ca1533a70c9f468c6"
+          "sha256": "c059ee25a63bdc8fddf870ec4efc0b0e0c5818b1563c3dcad654413340e75a97"
         },
         "internal/instance/settings.go": {
           "sha256": "3b85ef4dc13fd99e973f5a7d2ec1d5e68397964c79567a4000cbeff75832416f"
@@ -387,7 +387,7 @@
     {
       "disposition": "false-positive",
       "justification": "The reported data reaches structured slog attribute values, with constant attribute keys. Logging messages are literals, except sendInternalError whose production context callers all pass literals. QPot installs the standard JSONHandler; setup temporarily uses TextHandler. These handlers quote CR, LF and control characters, so arbitrary attribute values remain one record. Actual Go 1.26.10 controls preserve values and prevent forged records. Both handler configuration sources and this trace are pinned.",
-      "resultSHA256": "af70cf7fb9c36b2a6f15fb38892eefe34a5bdaa859439ddecf7776a903ef62bc",
+      "resultSHA256": "f0385427844c83b217959cf08914f2383d89a4dc96ea2fe4d5476fc21bbf8b50",
       "ruleId": "go/log-injection",
       "sourceSHA256": {
         "cmd/qpot/main.go": {
@@ -403,7 +403,7 @@
           "sha256": "b047580f626e55257aa97061f49bc5e4bb5ed9f5cd20bcf032d577e10f14c828"
         },
         "internal/instance/manager.go": {
-          "sha256": "9defa17915dc432ecdc7cbc3a44cc498ca4a0b3a7d42b06ca1533a70c9f468c6"
+          "sha256": "c059ee25a63bdc8fddf870ec4efc0b0e0c5818b1563c3dcad654413340e75a97"
         },
         "internal/instance/settings.go": {
           "sha256": "3b85ef4dc13fd99e973f5a7d2ec1d5e68397964c79567a4000cbeff75832416f"
@@ -426,7 +426,7 @@
     {
       "disposition": "false-positive",
       "justification": "The reported data reaches structured slog attribute values, with constant attribute keys. Logging messages are literals, except sendInternalError whose production context callers all pass literals. QPot installs the standard JSONHandler; setup temporarily uses TextHandler. These handlers quote CR, LF and control characters, so arbitrary attribute values remain one record. Actual Go 1.26.10 controls preserve values and prevent forged records. Both handler configuration sources and this trace are pinned.",
-      "resultSHA256": "407c3954f582ef958662fd1c79145df576d575d352ad248489d2cf643df059b1",
+      "resultSHA256": "e6469c69b0625024390f896d6cbafb9e26e29fc05db4fa89638901d27ec75832",
       "ruleId": "go/log-injection",
       "sourceSHA256": {
         "cmd/qpot/main.go": {
@@ -442,7 +442,7 @@
           "sha256": "b047580f626e55257aa97061f49bc5e4bb5ed9f5cd20bcf032d577e10f14c828"
         },
         "internal/instance/manager.go": {
-          "sha256": "9defa17915dc432ecdc7cbc3a44cc498ca4a0b3a7d42b06ca1533a70c9f468c6"
+          "sha256": "c059ee25a63bdc8fddf870ec4efc0b0e0c5818b1563c3dcad654413340e75a97"
         },
         "internal/instance/settings.go": {
           "sha256": "3b85ef4dc13fd99e973f5a7d2ec1d5e68397964c79567a4000cbeff75832416f"
@@ -465,7 +465,7 @@
     {
       "disposition": "false-positive",
       "justification": "The reported data reaches structured slog attribute values, with constant attribute keys. Logging messages are literals, except sendInternalError whose production context callers all pass literals. QPot installs the standard JSONHandler; setup temporarily uses TextHandler. These handlers quote CR, LF and control characters, so arbitrary attribute values remain one record. Actual Go 1.26.10 controls preserve values and prevent forged records. Both handler configuration sources and this trace are pinned.",
-      "resultSHA256": "0b677b0388f1a33ba01d206c599104853fa15b8a7fe02de941e9f328bbe07013",
+      "resultSHA256": "0be752fb7ea211dda0a16b8d496096744392344266ea0674b91886647e048206",
       "ruleId": "go/log-injection",
       "sourceSHA256": {
         "cmd/qpot/main.go": {
@@ -481,7 +481,7 @@
           "sha256": "b047580f626e55257aa97061f49bc5e4bb5ed9f5cd20bcf032d577e10f14c828"
         },
         "internal/instance/manager.go": {
-          "sha256": "9defa17915dc432ecdc7cbc3a44cc498ca4a0b3a7d42b06ca1533a70c9f468c6"
+          "sha256": "c059ee25a63bdc8fddf870ec4efc0b0e0c5818b1563c3dcad654413340e75a97"
         },
         "internal/instance/settings.go": {
           "sha256": "3b85ef4dc13fd99e973f5a7d2ec1d5e68397964c79567a4000cbeff75832416f"
@@ -504,7 +504,7 @@
     {
       "disposition": "false-positive",
       "justification": "The reported data reaches structured slog attribute values, with constant attribute keys. Logging messages are literals, except sendInternalError whose production context callers all pass literals. QPot installs the standard JSONHandler; setup temporarily uses TextHandler. These handlers quote CR, LF and control characters, so arbitrary attribute values remain one record. Actual Go 1.26.10 controls preserve values and prevent forged records. Both handler configuration sources and this trace are pinned.",
-      "resultSHA256": "1cef63d1c352e36f3613dd16c1291aa63d94d79f5a047a83cc1caaba122ef213",
+      "resultSHA256": "0e491311695f084b1f3a6832f6b8d3f7a3ad98d633d3aeae5a3293607b7075b0",
       "ruleId": "go/log-injection",
       "sourceSHA256": {
         "cmd/qpot/main.go": {
@@ -520,7 +520,7 @@
           "sha256": "b047580f626e55257aa97061f49bc5e4bb5ed9f5cd20bcf032d577e10f14c828"
         },
         "internal/instance/manager.go": {
-          "sha256": "9defa17915dc432ecdc7cbc3a44cc498ca4a0b3a7d42b06ca1533a70c9f468c6"
+          "sha256": "c059ee25a63bdc8fddf870ec4efc0b0e0c5818b1563c3dcad654413340e75a97"
         },
         "internal/instance/settings.go": {
           "sha256": "3b85ef4dc13fd99e973f5a7d2ec1d5e68397964c79567a4000cbeff75832416f"
@@ -600,7 +600,7 @@
     {
       "disposition": "false-positive",
       "justification": "The reported data reaches structured slog attribute values, with constant attribute keys. Logging messages are literals, except sendInternalError whose production context callers all pass literals. QPot installs the standard JSONHandler; setup temporarily uses TextHandler. These handlers quote CR, LF and control characters, so arbitrary attribute values remain one record. Actual Go 1.26.10 controls preserve values and prevent forged records. Both handler configuration sources and this trace are pinned.",
-      "resultSHA256": "93a910be47a4548c51086ee41826c3e2096937413bf2dc218cd3bec27a6dae75",
+      "resultSHA256": "d44d939ac991126e528e79325b32808794f2cc0e2d9191649016b6a6d87f4909",
       "ruleId": "go/log-injection",
       "sourceSHA256": {
         "cmd/qpot/main.go": {
@@ -622,7 +622,7 @@
           "sha256": "deb2df4156a128b8762937437dc1f6f4d918903e20a5768f994133fc5f1037ef"
         },
         "internal/instance/manager.go": {
-          "sha256": "9defa17915dc432ecdc7cbc3a44cc498ca4a0b3a7d42b06ca1533a70c9f468c6"
+          "sha256": "c059ee25a63bdc8fddf870ec4efc0b0e0c5818b1563c3dcad654413340e75a97"
         },
         "internal/server/api_cleanup.go": {
           "sha256": "f30adc9b3c782d581ea29d303bb47e7d9c39150473f6ba62a560111c3ca7846c"
@@ -1321,7 +1321,7 @@
           "sha256": "deb2df4156a128b8762937437dc1f6f4d918903e20a5768f994133fc5f1037ef"
         },
         "internal/instance/manager.go": {
-          "sha256": "9defa17915dc432ecdc7cbc3a44cc498ca4a0b3a7d42b06ca1533a70c9f468c6"
+          "sha256": "c059ee25a63bdc8fddf870ec4efc0b0e0c5818b1563c3dcad654413340e75a97"
         },
         "internal/server/api_cleanup.go": {
           "sha256": "f30adc9b3c782d581ea29d303bb47e7d9c39150473f6ba62a560111c3ca7846c"
@@ -1372,7 +1372,7 @@
           "sha256": "deb2df4156a128b8762937437dc1f6f4d918903e20a5768f994133fc5f1037ef"
         },
         "internal/instance/manager.go": {
-          "sha256": "9defa17915dc432ecdc7cbc3a44cc498ca4a0b3a7d42b06ca1533a70c9f468c6"
+          "sha256": "c059ee25a63bdc8fddf870ec4efc0b0e0c5818b1563c3dcad654413340e75a97"
         },
         "internal/server/api_cleanup.go": {
           "sha256": "f30adc9b3c782d581ea29d303bb47e7d9c39150473f6ba62a560111c3ca7846c"
@@ -1399,6 +1399,6 @@
       "uri": "internal/server/server.go"
     }
   ],
-  "sourceCatalogSHA256": "2c59362c66960366cbfe76042ebf04486bffe03d78f0c9ff92080bfcf2950f0b",
+  "sourceCatalogSHA256": "510a109966c62b76acde1e5deb5e14afaa5f8a167f0d3ff749b361fbc6b8bb09",
   "version": 2
 }
