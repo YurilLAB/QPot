@@ -129,7 +129,9 @@ func newSandboxDockerHarness(t *testing.T) *sandboxDockerHarness {
 		name += ".exe"
 	}
 	target := filepath.Join(dir, name)
-	if err := os.Link(binary, target); err != nil {
+	// Windows refuses to delete any link to a running image, and this one
+	// would name the running test binary itself, so it gets a copy there.
+	if runtime.GOOS == "windows" || os.Link(binary, target) != nil {
 		src, openErr := os.Open(binary)
 		if openErr != nil {
 			t.Fatal(openErr)
