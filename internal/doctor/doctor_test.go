@@ -25,6 +25,44 @@ func listenLocal(t *testing.T) (net.Listener, int) {
 	return ln, ln.Addr().(*net.TCPAddr).Port
 }
 
+// TestDockerChecksReportResourceLimits: Docker accepts a limit it cannot apply
+// and drops it (swap without a cgroup for dockerd, memory on Raspberry Pi OS),
+// so doctor says which ones honeypots can exceed.
+func TestDockerChecksReportResourceLimits(t *testing.T) {
+	up := hostsetup.DockerState{CLI: true, DaemonUp: true, Server: hostsetup.MinEngine, Compose: true, ComposeVersion: hostsetup.MinCompose}
+	find := func(cs []Check) *Check {
+		for i := range cs {
+			if cs[i].Name == "resource limits" {
+				return &cs[i]
+			}
+		}
+		return nil
+	}
+	none := func() int64 { return 0 }
+	nofree := func(string) int64 { return 0 }
+	if c := find(DockerChecks(up, none, nofree)); c != nil {
+		t.Fatalf("unknown limits reported: %+v", c)
+	}
+	st := up
+	st.Limits = &hostsetup.CgroupLimits{Memory: true, Swap: true, Pids: true, CPU: true}
+	if c := find(DockerChecks(st, none, nofree)); c == nil || c.Level != "ok" {
+		t.Fatalf("all limits: %+v", c)
+	}
+	st.Limits = &hostsetup.CgroupLimits{Pids: true, CPU: true}
+	c := find(DockerChecks(st, none, nofree))
+	if c == nil || c.Level != "warn" || c.Code != "QP-RES-006" || !strings.Contains(c.Detail, "memory, swap limits") {
+		t.Fatalf("missing memory and swap: %+v", c)
+	}
+	if FirstFailCode(DockerChecks(st, none, nofree)) != "" {
+		t.Fatal("a limits warning must not stop setup")
+	}
+	down := st
+	down.DaemonUp = false
+	if c := find(DockerChecks(down, none, nofree)); c != nil {
+		t.Fatalf("limits reported for a daemon that is down: %+v", c)
+	}
+}
+
 // A web UI held by something else (e.g. another instance) must not pass the
 // health check.
 func TestWebUICheckRequiresThisInstance(t *testing.T) {

@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"errors"
+	"fmt"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -15,6 +16,32 @@ import (
 	"github.com/qpot/qpot/internal/hostsetup"
 	"github.com/qpot/qpot/internal/instance"
 )
+
+// TestExplainCodedErrorPrintsWhyAndFix: `qpot up` on Docker Desktop printed
+// only "QP-DOCKER-011: <title>" and the reason and fix stayed hidden.
+func TestExplainCodedErrorPrintsWhyAndFix(t *testing.T) {
+	coded := hostsetup.E("QP-DOCKER-011").WithWhy("no \"runsc\" runtime \x1b]52;c;x\a").WithFix("set security.sandbox_mode: none")
+	var out bytes.Buffer
+	explainCodedError(&out, fmt.Errorf("failed to start instance: %w", coded))
+	got := out.String()
+	for _, want := range []string{"  Why:  no \"runsc\" runtime", "  Fix:  set security.sandbox_mode: none\n", "  More: qpot doctor --explain QP-DOCKER-011\n"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("output %q lacks %q", got, want)
+		}
+	}
+	if strings.ContainsRune(got, 0x1b) || strings.ContainsRune(got, 0x07) {
+		t.Errorf("control bytes reached the terminal: %q", got)
+	}
+	// A message that already carries the fix, an uncoded error and no error
+	// print nothing more.
+	for _, err := range []error{fmt.Errorf("%w: %s Fix: %s", coded, coded.Cause(), coded.Remedy()), errors.New("plain"), nil} {
+		out.Reset()
+		explainCodedError(&out, err)
+		if out.Len() != 0 {
+			t.Errorf("%v: printed %q", err, out.String())
+		}
+	}
+}
 
 func TestLocalBaseURLHandlesIPv6(t *testing.T) {
 	for bind, want := range map[string]string{

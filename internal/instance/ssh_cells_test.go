@@ -20,7 +20,7 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-const sshSupportedResourceInfo = `{"CgroupDriver":"systemd","MemoryLimit":true,"PidsLimit":true,"CPUCfsQuota":true}`
+const sshSupportedResourceInfo = `{"CgroupDriver":"systemd","MemoryLimit":true,"SwapLimit":true,"PidsLimit":true,"CPUCfsQuota":true}`
 
 func TestHiFiResourceCapabilityJSONFailsClosed(t *testing.T) {
 	for _, raw := range []string{
@@ -28,6 +28,8 @@ func TestHiFiResourceCapabilityJSONFailsClosed(t *testing.T) {
 		`{"CgroupDriver":"none","MemoryLimit":true,"PidsLimit":true,"CPUCfsQuota":true}`,
 		`{"CgroupDriver":"unknown","MemoryLimit":true,"PidsLimit":true,"CPUCfsQuota":true}`,
 		`{"CgroupDriver":"systemd","MemoryLimit":false,"PidsLimit":true,"CPUCfsQuota":true}`,
+		`{"CgroupDriver":"systemd","MemoryLimit":true,"SwapLimit":false,"PidsLimit":true,"CPUCfsQuota":true}`,
+		`{"CgroupDriver":"systemd","MemoryLimit":true,"PidsLimit":true,"CPUCfsQuota":true}`,
 		`{"CgroupDriver":"systemd","MemoryLimit":true,"PidsLimit":false,"CPUCfsQuota":true}`,
 		`{"CgroupDriver":"systemd","MemoryLimit":true,"PidsLimit":true,"CPUCfsQuota":false}`,
 		`{"CgroupDriver":"systemd","MemoryLimit":true,"PidsLimit":true}`,

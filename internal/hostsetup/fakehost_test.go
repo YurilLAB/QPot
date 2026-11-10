@@ -131,7 +131,7 @@ exit 0`)
 info)
   [ -f "$S/docker-running" ] || { echo "Cannot connect to the Docker daemon at unix:///var/run/docker.sock. Is the docker daemon running?" >&2; exit 1; }
   [ -f "$S/docker-denied" ] && { echo "permission denied while trying to connect to the Docker daemon socket at unix:///var/run/docker.sock" >&2; exit 1; }
-  echo "${FAKE_DOCKER_VERSION:-27.3.1}|/var/lib/docker|Ubuntu 24.04 LTS"; exit 0 ;;
+  echo "${FAKE_DOCKER_VERSION:-27.3.1}|/var/lib/docker|${FAKE_DOCKER_OS:-Ubuntu 24.04 LTS}${FAKE_DOCKER_LIMITS}"; exit 0 ;;
 compose)
   [ -f "$S/compose" ] || { echo "docker: 'compose' is not a docker command." >&2; exit 1; }
   echo "${FAKE_COMPOSE_VERSION:-2.29.7}"; exit 0 ;;

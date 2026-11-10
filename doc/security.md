@@ -9,7 +9,7 @@ honeypot and away from your network, your host and your data.
 | Egress | Honeypots cannot open connections to your LAN, the Docker host, cloud metadata (`169.254.169.254`, the Azure WireServer) or any other private, loopback, link-local, CGNAT or multicast address. Replies to attackers, public destinations and DNS to the host's resolvers still work. |
 | Runtime | The requested gVisor or Kata runtime must be available and match the containers; missing or unverifiable isolation stops startup |
 | Containers | `cap_drop: ALL` with minimal add-backs, read-only root with tmpfs, no privileged containers |
-| Limits | CPU, memory, PID and file-descriptor limits per honeypot |
+| Limits | CPU, memory, PID and file-descriptor limits per honeypot, and CPU, memory and PID limits on the database, collector and egress guard. Swap is capped at the memory limit, so a 512 MiB container cannot use more memory by swapping. `qpot doctor` warns (QP-RES-006) when Docker cannot apply a limit. |
 | Secrets | The QPot ID is never given to honeypot containers, written to logs, sent in alerts or cluster traffic, or returned by the API. The database password is random per instance. |
 | Exposure | Web UI, API and database bound to `127.0.0.1` by default |
 | Web | CSP, `X-Frame-Options: DENY`, `nosniff`, constant-time login checks, the QPot ID accepted only in a header |
@@ -43,6 +43,13 @@ Choosing `sandbox_mode: none` deliberately uses Docker's configured default
 runtime; it does not claim a gVisor or Kata boundary. Use a dedicated sensor
 host or VM and the remaining network, resource and storage controls. Removing
 a requested runtime does not prevent stopping or inspecting an instance.
+
+Docker Desktop on Windows and macOS has only Docker's standard runtime, so
+the default policy refuses to start there (QP-DOCKER-011, which names the
+runtimes the daemon has). To run on Docker Desktop, set `sandbox_mode: none`
+in the instance config (`qpot config`), or, with only cowrie, conpot and
+refrigeration enabled, `sandbox_fallback: docker`. For gVisor, run QPot
+against a Linux Docker host and register it there with `sudo runsc install`.
 
 Changing the configured runtime requires recreating containers. Restarting
 existing containers cannot change their runtime. `qpot doctor` and the doctor

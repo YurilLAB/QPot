@@ -5,6 +5,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -126,6 +127,26 @@ func TestDetectDocker(t *testing.T) {
 	t.Setenv("FAKE_COMPOSE_VERSION", "1.29.2")
 	if st = detect(h, in); !st.ComposeMissing() || !NeedFor(st).Compose {
 		t.Fatalf("old compose: %+v", st)
+	}
+	t.Setenv("FAKE_COMPOSE_VERSION", "2.29.7")
+
+	// The four limit flags follow the operating system name, which may
+	// itself contain the separator; a daemon that names no flags (above)
+	// leaves Limits unknown rather than "all missing".
+	if st.Limits != nil {
+		t.Fatalf("limits read from a reply without them: %+v", st.Limits)
+	}
+	t.Setenv("FAKE_DOCKER_OS", "Docker Desktop|edge")
+	t.Setenv("FAKE_DOCKER_LIMITS", "|true|false|true|true")
+	st = detect(h, in)
+	if !st.Ready() || !st.Desktop || st.Limits == nil || *st.Limits != (CgroupLimits{Memory: true, Pids: true, CPU: true}) || !slices.Equal(st.Limits.Missing(), []string{"swap"}) {
+		t.Fatalf("limits: %+v %+v", st, st.Limits)
+	}
+	for _, flags := range []string{"|true|true|true", "|true|yes|true|true", "|true|true|true|<no value>"} {
+		t.Setenv("FAKE_DOCKER_LIMITS", flags)
+		if st = detect(h, in); !st.Ready() || st.Limits != nil {
+			t.Fatalf("%q: limits %+v from an incomplete reply", flags, st.Limits)
+		}
 	}
 }
 

@@ -83,6 +83,51 @@ type DockerState struct {
 	ComposeDetail    string
 	ComposeV1        bool // only the old docker-compose v1 exists
 	Desktop          bool // Docker Desktop (macOS, Windows)
+	// Limits is what the daemon says it can enforce; nil when it did not say.
+	Limits *CgroupLimits
+}
+
+// CgroupLimits reports which container resource limits the Docker daemon
+// applies. A limit it cannot apply is accepted and silently dropped.
+type CgroupLimits struct {
+	Memory, Swap, Pids, CPU bool
+}
+
+// Missing names the limits the daemon cannot apply.
+func (l CgroupLimits) Missing() []string {
+	var missing []string
+	for _, c := range []struct {
+		ok   bool
+		name string
+	}{{l.Memory, "memory"}, {l.Swap, "swap"}, {l.Pids, "PID"}, {l.CPU, "CPU"}} {
+		if !c.ok {
+			missing = append(missing, c.name)
+		}
+	}
+	return missing
+}
+
+// dockerInfoFormat ends with the four limit flags, after the free-text
+// operating system name, so older parsers' three fields stay first.
+const dockerInfoFormat = "{{.ServerVersion}}|{{.DockerRootDir}}|{{.OperatingSystem}}|{{.MemoryLimit}}|{{.SwapLimit}}|{{.PidsLimit}}|{{.CPUCfsQuota}}"
+
+// parseCgroupLimits reads the four trailing flags; anything but exactly
+// true/false in each is "not said".
+func parseCgroupLimits(fields []string) *CgroupLimits {
+	if len(fields) != 4 {
+		return nil
+	}
+	var flags [4]bool
+	for i, f := range fields {
+		switch strings.TrimSpace(f) {
+		case "true":
+			flags[i] = true
+		case "false":
+		default:
+			return nil
+		}
+	}
+	return &CgroupLimits{Memory: flags[0], Swap: flags[1], Pids: flags[2], CPU: flags[3]}
 }
 
 // Ready reports whether QPot can use Docker as is.
@@ -130,18 +175,25 @@ func DetectDocker(ctx context.Context, r Runner, lookPath func(string) (string, 
 	if v, err := ParseVersion(out); err == nil {
 		s.Client = v
 	}
-	res = r.Run(ctx, Command{Args: []string{"docker", "info", "--format", "{{.ServerVersion}}|{{.DockerRootDir}}|{{.OperatingSystem}}"}, Timeout: 30 * time.Second})
+	res = r.Run(ctx, Command{Args: []string{"docker", "info", "--format", dockerInfoFormat}, Timeout: 30 * time.Second})
 	info := strings.TrimSpace(string(res.Stdout))
 	lower := strings.ToLower(res.Combined())
 	switch {
 	case res.OK() && strings.Count(info, "|") >= 2:
-		parts := strings.SplitN(info, "|", 3)
+		parts := strings.Split(info, "|")
 		s.DaemonUp = true
 		if v, err := ParseVersion(parts[0]); err == nil {
 			s.Server = v
 		}
 		s.RootDir = strings.TrimSpace(parts[1])
-		s.Desktop = strings.Contains(strings.ToLower(parts[2]), "docker desktop")
+		osName := strings.Join(parts[2:], "|")
+		if len(parts) >= 7 {
+			if limits := parseCgroupLimits(parts[len(parts)-4:]); limits != nil {
+				s.Limits = limits
+				osName = strings.Join(parts[2:len(parts)-4], "|")
+			}
+		}
+		s.Desktop = strings.Contains(strings.ToLower(osName), "docker desktop")
 	case strings.Contains(lower, "permission denied"):
 		s.DaemonUp, s.PermissionDenied = true, true
 	default:

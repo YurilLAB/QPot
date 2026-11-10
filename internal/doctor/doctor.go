@@ -80,6 +80,14 @@ func DockerChecks(st hostsetup.DockerState, mem func() int64, free func(string) 
 	default:
 		cs = append(cs, Check{Name: "docker daemon", Level: "ok", Detail: "version " + st.Server.String()})
 	}
+	if st.Limits != nil {
+		if missing := st.Limits.Missing(); len(missing) != 0 {
+			cs = append(cs, Check{"resource limits", "warn",
+				"Docker cannot apply " + strings.Join(missing, ", ") + " limits, so honeypots can exceed them", "QP-RES-006"})
+		} else {
+			cs = append(cs, Check{Name: "resource limits", Level: "ok", Detail: "Docker applies memory, swap, PID and CPU limits"})
+		}
+	}
 	switch {
 	case !st.Compose && st.ComposeV1:
 		cs = append(cs, Check{"docker compose", "fail", "only docker-compose v1 found; QPot needs the Compose v2 plugin", "QP-COMPOSE-002"})

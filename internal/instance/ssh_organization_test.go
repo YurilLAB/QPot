@@ -284,7 +284,7 @@ case " $* " in
   ;;
  *" info "*)
   if [ -n "${SSH_TEST_RESOURCE_FILE:-}" ]; then cat "$SSH_TEST_RESOURCE_FILE"; else
-   printf '%s\n' '{"CgroupDriver":"systemd","MemoryLimit":true,"PidsLimit":true,"CPUCfsQuota":true}'
+   printf '%s\n' '{"CgroupDriver":"systemd","MemoryLimit":true,"SwapLimit":true,"PidsLimit":true,"CPUCfsQuota":true}'
   fi
   exit "${SSH_TEST_RESOURCE_EXIT:-0}"
   ;;

@@ -24,7 +24,9 @@ Supported hosts:
   AlmaLinux, RHEL, openSUSE and Arch.
 - **macOS and Windows:** through Docker Desktop. Honeypots run inside Docker
   Desktop's Linux VM, so a dedicated Linux host is the better choice for a
-  sensor exposed to the internet.
+  sensor exposed to the internet. Docker Desktop cannot run gVisor, so set
+  `security.sandbox_mode: none` there; see
+  [security.md](security.md#container-isolation-policy).
 
 ## Install the qpot program
 

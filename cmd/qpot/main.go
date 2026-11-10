@@ -148,7 +148,20 @@ Each QPot instance has a unique ID (qp_*) for tracking and authentication.`,
 	rootCmd.AddCommand(newCanaryCommand())
 	rootCmd.AddCommand(newCleanupCommand())
 
-	return rootCmd.ExecuteContext(ctx)
+	err := rootCmd.ExecuteContext(ctx)
+	explainCodedError(rootCmd.ErrOrStderr(), err)
+	return err
+}
+
+// explainCodedError adds a coded error's cause and fix under cobra's one-line
+// "Error:" message, which names only the code and its title. Messages that
+// already carry the fix (some commands append it) are left alone.
+func explainCodedError(w io.Writer, err error) {
+	var coded *hostsetup.Error
+	if !errors.As(err, &coded) || coded == nil || strings.Contains(err.Error(), coded.Remedy()) {
+		return
+	}
+	fmt.Fprintf(w, "  Why:  %s\n  Fix:  %s\n  More: qpot doctor --explain %s\n", termSafe(coded.Cause()), termSafe(coded.Remedy()), coded.Code)
 }
 
 // backgroundServe starts the control plane in the background for `qpot up -d`
@@ -1979,8 +1992,8 @@ func newDockerRestartCommand() *cobra.Command {
 			} else {
 				// Recovery of control services does not start an attacker-facing
 				// guest. Pin the inspected identity rather than a reusable name.
+				// docker echoes the ID it was given; the [OK] line names it.
 				dockerCmd := exec.CommandContext(ctx, "docker", "restart", container.ID)
-				dockerCmd.Stdout = os.Stdout
 				dockerCmd.Stderr = os.Stderr
 				if err := dockerCmd.Run(); err != nil {
 					return fmt.Errorf("failed to restart container '%s': %w", containerName, err)

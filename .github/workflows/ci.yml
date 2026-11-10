@@ -495,12 +495,17 @@ jobs:
           # must not leak self-identifying env vars into honeypot containers.
           ./qpot honeypot enable cowrie -i ci-smoke
           ./qpot honeypot enable conpot -i ci-smoke
+          # The runner has no gVisor, and 'up' refuses a missing runtime before
+          # it renders anything: choose Docker's default runtime explicitly.
+          sed -i -E 's/^([[:space:]]*sandbox_mode:).*/\1 none/' "$HOME/.qpot/instances/ci-smoke/config.yaml"
           # 'up' regenerates the compose from config (then pulls/starts images).
           # We only need the rendered compose, so cap it with a timeout - image
           # pulls/daemon availability are not what this job validates.
           timeout 90 ./qpot up -i ci-smoke -d >/dev/null 2>&1 || true
           CF="$HOME/.qpot/instances/ci-smoke/docker-compose.yml"
           test -f "$CF"
+          # conpot was enabled after 'instance create' wrote the first compose.
+          grep -q '^  conpot:$' "$CF" || { echo "::error::'up' did not regenerate the compose"; exit 1; }
           python3 -c "import yaml,sys; yaml.safe_load(open('$CF')); print('compose YAML valid')"
           if grep -qE '^[[:space:]]*- (TPOT_HONEYPOT|HONEYPOT_NAME)=' "$CF"; then
             echo "::error::honeypot container leaks self-identifying env vars"; exit 1

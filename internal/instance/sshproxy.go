@@ -27,7 +27,7 @@ import (
 	"github.com/qpot/qpot/internal/hostsetup"
 )
 
-const sshResourceInfoFormat = `{"CgroupDriver":{{json .CgroupDriver}},"MemoryLimit":{{json .MemoryLimit}},"PidsLimit":{{json .PidsLimit}},"CPUCfsQuota":{{json .CPUCfsQuota}}}`
+const sshResourceInfoFormat = `{"CgroupDriver":{{json .CgroupDriver}},"MemoryLimit":{{json .MemoryLimit}},"SwapLimit":{{json .SwapLimit}},"PidsLimit":{{json .PidsLimit}},"CPUCfsQuota":{{json .CPUCfsQuota}}}`
 
 type sshResourceInfoBuffer struct {
 	data     []byte
@@ -74,6 +74,7 @@ func validateSSHResourceInfo(data []byte) error {
 	var info struct {
 		CgroupDriver string
 		MemoryLimit  *bool
+		SwapLimit    *bool
 		PidsLimit    *bool
 		CPUCfsQuota  *bool
 	}
@@ -92,6 +93,8 @@ func validateSSHResourceInfo(data []byte) error {
 		value *bool
 	}{
 		{"memory limits", info.MemoryLimit},
+		// Without it the swap limit is dropped and a guest swaps without bound.
+		{"swap limits", info.SwapLimit},
 		{"PID limits", info.PidsLimit},
 		{"CPU CFS quotas", info.CPUCfsQuota},
 	} {

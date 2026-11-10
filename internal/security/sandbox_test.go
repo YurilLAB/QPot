@@ -8,6 +8,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 
 	"github.com/qpot/qpot/internal/config"
@@ -164,6 +165,57 @@ func TestResolveRuntimeRequiresDaemonRegistrationAndExplicitFallback(t *testing.
 				t.Fatal("explicit Docker deployment depended on a stronger-runtime probe")
 			}
 		})
+	}
+}
+
+// TestUnregisteredRuntimeErrorExplainsTheChoices: on Docker Desktop (runc
+// only) the default policy refused to start with nothing but the catalog
+// title, so a Windows user never learned what to change.
+func TestUnregisteredRuntimeErrorExplainsTheChoices(t *testing.T) {
+	desktop := map[string]json.RawMessage{"runc": nil, "io.containerd.runc.v2": nil}
+	tests := []struct {
+		mode, fallback string
+		high           bool
+		runtimes       map[string]json.RawMessage
+		why, fix       []string
+		notFix         []string
+	}{
+		{mode: "gvisor", runtimes: desktop,
+			why:    []string{`no "runsc" runtime`, `"io.containerd.runc.v2", "runc"`},
+			fix:    []string{"runsc install", "Docker Desktop", "sandbox_mode: none", "sandbox_fallback: docker runs them"},
+			notFix: []string{"kata-runtime"}},
+		{mode: "kata", fallback: "deny", runtimes: desktop,
+			why: []string{`no "kata-runtime" runtime`},
+			fix: []string{"kata-runtime", "KVM", "sandbox_mode: none"}, notFix: []string{"runsc install"}},
+		{mode: "gvisor", fallback: "docker", high: true, runtimes: desktop,
+			fix: []string{"sandbox_fallback: docker is set, but it applies only when every enabled honeypot"}},
+		{mode: "gvisor", runtimes: map[string]json.RawMessage{"a\x1b[2Jb": nil, "r1": nil, "r2": nil, "r3": nil, "r4": nil, "r5": nil, "r6": nil},
+			why: []string{`"a\x1b[2Jb"`, "1 more"}},
+	}
+	for _, tc := range tests {
+		runtimeRegistryForTest(t, func(context.Context) (map[string]json.RawMessage, error) { return tc.runtimes, nil })
+		_, err := sandboxForTest(t, tc.mode, tc.fallback).ResolveForStart(t.Context(), tc.high)
+		requireSandboxCode(t, err, "QP-DOCKER-011")
+		var coded *hostsetup.Error
+		errors.As(err, &coded)
+		for _, s := range tc.why {
+			if !strings.Contains(coded.Cause(), s) {
+				t.Errorf("%s/%s: why %q lacks %q", tc.mode, tc.fallback, coded.Cause(), s)
+			}
+		}
+		if strings.ContainsRune(coded.Cause(), 0x1b) {
+			t.Errorf("a runtime name put a raw escape byte in the message: %q", coded.Cause())
+		}
+		for _, s := range tc.fix {
+			if !strings.Contains(coded.Remedy(), s) {
+				t.Errorf("%s/%s: fix %q lacks %q", tc.mode, tc.fallback, coded.Remedy(), s)
+			}
+		}
+		for _, s := range tc.notFix {
+			if strings.Contains(coded.Remedy(), s) {
+				t.Errorf("%s/%s: fix %q names %q", tc.mode, tc.fallback, coded.Remedy(), s)
+			}
+		}
 	}
 }
 

@@ -654,6 +654,16 @@ services:
       - qpot_internal
     cap_add:
       - DAC_READ_SEARCH
+    # Vector parses attacker-written logs, so it is bounded like every other
+    # service. Its sink buffers are bounded; the room above that is for
+    # reading a backlog after a database outage.
+    deploy:
+      resources:
+        limits:
+          cpus: '1'
+          memory: 1024M
+          pids: 512
+    memswap_limit: 1024M
 {{- $eg := egressGuard .Config}}
 {{- if $eg.Enabled}}
 
@@ -691,6 +701,14 @@ services:
       QPOT_NETGUARD_IFACES: "{{$eg.Ifaces}}"
       QPOT_NETGUARD_CELLS: "{{$eg.Cells}}"
       QPOT_NETGUARD_MODE: "{{$eg.Mode}}"
+    # It only loads one nftables table over netlink, now and on an interval.
+    deploy:
+      resources:
+        limits:
+          cpus: '0.25'
+          memory: 128M
+          pids: 64
+    memswap_limit: 128M
     healthcheck:
       test: ["CMD", "/qpot-netguard", "{{if $eg.Cells}}check-cells{{else}}check{{end}}"]
       interval: 15s
@@ -763,6 +781,7 @@ services:
           cpus: '{{divf $cellLimits.MaxCPUPercent 100}}'
           memory: {{$cellLimits.MaxMemoryMB}}M
           {{if $cellLimits.MaxPids}}pids: {{$cellLimits.MaxPids}}{{end}}
+    memswap_limit: {{$cellLimits.MaxMemoryMB}}M
     logging:
       driver: "json-file"
       options:
@@ -826,6 +845,7 @@ services:
           cpus: '{{divf $.Config.Security.ResourceLimits.MaxCPUPercent 100}}'
           memory: {{$.Config.Security.ResourceLimits.MaxMemoryMB}}M
           {{if $.Config.Security.ResourceLimits.MaxPids}}pids: {{$.Config.Security.ResourceLimits.MaxPids}}{{end}}
+    memswap_limit: {{$.Config.Security.ResourceLimits.MaxMemoryMB}}M
     mem_swappiness: 0
     logging:
       driver: "json-file"
@@ -903,6 +923,7 @@ services:
         reservations:
           cpus: '{{if gt 5.0 $cellLimits.MaxCPUPercent}}{{divf $cellLimits.MaxCPUPercent 100}}{{else}}0.05{{end}}'
           memory: {{if gt 32 $cellLimits.MaxMemoryMB}}{{$cellLimits.MaxMemoryMB}}{{else}}32{{end}}M
+    memswap_limit: {{$cellLimits.MaxMemoryMB}}M
     mem_swappiness: 0
     oom_kill_disable: false
     # Its log carries the session capture until the control plane converts
@@ -1122,7 +1143,8 @@ services:
     # Hostname isolation
     hostname: "{{.Name}}-host"
 
-    # Memory and OOM settings
+    # Memory and OOM settings (swap capped at the memory limit, see below)
+    memswap_limit: {{.GlobalLimits.MaxMemoryMB}}M
     mem_swappiness: 0
     oom_kill_disable: false
 
@@ -1196,7 +1218,11 @@ services:
     {{- end}}
     {{- end}}
 
-    # Memory and OOM settings
+    # Memory and OOM settings. The swap limit is the memory limit itself:
+    # without it Docker lets a container add as much again in swap (unlimited
+    # where the daemon cannot limit swap), and cgroup v2 has no per-container
+    # swappiness, so mem_swappiness alone does not stop that.
+    memswap_limit: {{$memLimit}}M
     mem_swappiness: 0
     oom_kill_disable: false
 

@@ -9,6 +9,8 @@ import (
 	"os"
 	"os/exec"
 	"runtime"
+	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -157,11 +159,45 @@ func (sb *Sandbox) ResolveForStart(ctx context.Context, highInteraction bool) (R
 		return selection, nil
 	}
 	if highInteraction || sb.fallbackPolicy() != "docker" {
-		return RuntimeSelection{}, hostsetup.E("QP-DOCKER-011").WithWhy("The requested Docker runtime %q is not registered.", selection.Runtime)
+		return RuntimeSelection{}, hostsetup.E("QP-DOCKER-011").
+			WithWhy("security.sandbox_mode is %s, but this Docker daemon has no %q runtime (it has %s).", selection.Requested, selection.Runtime, runtimeNames(runtimes)).
+			WithFix("%s", unregisteredRuntimeFix(selection.Requested, sb.fallbackPolicy() == "docker"))
 	}
 	selection.Effective, selection.Runtime, selection.Fallback = SandboxNone, "", true
 	warnOnce(fmt.Sprintf("Warning: %s is unavailable; explicit sandbox_fallback=docker selects standard Docker isolation\n", selection.Requested))
 	return selection, nil
+}
+
+// runtimeNames lists a daemon's registered runtimes for an error message:
+// sorted, quoted (so control bytes cannot reach a terminal) and bounded.
+func runtimeNames(runtimes map[string]json.RawMessage) string {
+	names := make([]string, 0, len(runtimes))
+	for name := range runtimes {
+		if len(name) > 40 {
+			name = name[:40]
+		}
+		names = append(names, strconv.Quote(name))
+	}
+	sort.Strings(names)
+	if len(names) > 6 {
+		names = append(names[:6], fmt.Sprintf("%d more", len(names)-6))
+	}
+	return strings.Join(names, ", ")
+}
+
+// unregisteredRuntimeFix tells the operator how to get the requested runtime,
+// and the explicit choices for a Docker that cannot have it (Docker Desktop
+// runs only runc). It never suggests a downgrade the policy would refuse.
+func unregisteredRuntimeFix(mode SandboxType, fallbackSet bool) string {
+	install := "Install gVisor on the Linux host that runs Docker, run: sudo runsc install, then restart Docker."
+	if mode == SandboxKata {
+		install = "Install Kata Containers on the Linux host that runs Docker (it needs KVM) and register kata-runtime in /etc/docker/daemon.json, then restart Docker."
+	}
+	fallback := "With only cowrie, conpot and refrigeration enabled, security.sandbox_fallback: docker runs them in standard containers instead."
+	if fallbackSet {
+		fallback = "security.sandbox_fallback: docker is set, but it applies only when every enabled honeypot is cowrie, conpot or refrigeration; disable the others or install the runtime."
+	}
+	return install + " Docker Desktop (Windows, macOS) cannot run gVisor or Kata: there, set security.sandbox_mode: none in the instance config (qpot config) to accept standard containers, which isolate less. " + fallback
 }
 
 // ValidateSelection verifies that a resolved selection belongs to this policy.

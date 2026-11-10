@@ -630,6 +630,13 @@ Exit status 0 means success; 1 is a usage error (an unknown flag).
 - Why: Docker has not confirmed active CPU, memory and PID cgroup controls. Rootless Docker without systemd delegation can accept settings without enforcing them.
 - Fix: Use an isolated Docker host with working cgroup controllers, or configure systemd cgroup delegation for rootless Docker. Verify CPU, memory and PID limits on that host before starting HiFi again.
 
+### QP-RES-006
+
+**Docker cannot enforce every container resource limit.**
+
+- Why: The Docker daemon reports that it cannot apply some cgroup limits (memory, swap, PIDs or CPU). Docker accepts such a limit and drops it, so a honeypot can use more than its limit. A kernel booted without the memory controller (Raspberry Pi OS by default), rootless Docker without cgroup delegation or a daemon outside a systemd cgroup cause this.
+- Fix: Run Docker on a Linux host with cgroup v2 and systemd (current Debian, Ubuntu, Fedora), or enable the missing controllers: on Raspberry Pi OS add cgroup_enable=memory to /boot/firmware/cmdline.txt and reboot; for rootless Docker configure systemd cgroup delegation. Restart Docker and run qpot doctor again.
+
 ## Services and systemd (`SVC`, exit 19)
 
 ### QP-SVC-001
