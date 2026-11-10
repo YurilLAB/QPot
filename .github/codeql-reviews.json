@@ -19,7 +19,7 @@
           "sha256": "543e4109c1786fd5bc8441003af67352cfff949aa1fc2934538fd2da580b3514"
         },
         "internal/instance/compose.go": {
-          "sha256": "a9bbc9f235bc0c65774f8a4e627e10d72a24da24b494f21d781ba340d332dc42"
+          "sha256": "a12809c95434548d64a0fdaaf492bd5b0fb10ec261892897724d63476f0dce19"
         },
         "internal/instance/refrigeration.go": {
           "sha256": "6019107c9d99ffd1de5d7a04c824d31d51fe8581f6c8205ca3205c99615df1f3"
@@ -58,7 +58,7 @@
           "sha256": "543e4109c1786fd5bc8441003af67352cfff949aa1fc2934538fd2da580b3514"
         },
         "internal/instance/compose.go": {
-          "sha256": "a9bbc9f235bc0c65774f8a4e627e10d72a24da24b494f21d781ba340d332dc42"
+          "sha256": "a12809c95434548d64a0fdaaf492bd5b0fb10ec261892897724d63476f0dce19"
         },
         "internal/instance/refrigeration.go": {
           "sha256": "6019107c9d99ffd1de5d7a04c824d31d51fe8581f6c8205ca3205c99615df1f3"
@@ -178,7 +178,7 @@
           "sha256": "543e4109c1786fd5bc8441003af67352cfff949aa1fc2934538fd2da580b3514"
         },
         "internal/instance/compose.go": {
-          "sha256": "a9bbc9f235bc0c65774f8a4e627e10d72a24da24b494f21d781ba340d332dc42"
+          "sha256": "a12809c95434548d64a0fdaaf492bd5b0fb10ec261892897724d63476f0dce19"
         },
         "internal/instance/refrigeration.go": {
           "sha256": "6019107c9d99ffd1de5d7a04c824d31d51fe8581f6c8205ca3205c99615df1f3"
@@ -310,7 +310,7 @@
       "ruleId": "go/log-injection",
       "sourceSHA256": {
         "cmd/qpot/main.go": {
-          "sha256": "9b2138fa5d5647d70319c8cc2ef67d24b0f0fe446318272a74f8babecff37d8e"
+          "sha256": "35474886a1882e6039bbd1056d4a729cad3ff7f60a9d6b24d0c73447185aefcf"
         },
         "cmd/qpot/setup_flow.go": {
           "sha256": "cf10afbe78685aef349c3af216a8f97a7e36f7539da727200331279bc21c8cd3"
@@ -337,7 +337,7 @@
       "ruleId": "go/log-injection",
       "sourceSHA256": {
         "cmd/qpot/main.go": {
-          "sha256": "9b2138fa5d5647d70319c8cc2ef67d24b0f0fe446318272a74f8babecff37d8e"
+          "sha256": "35474886a1882e6039bbd1056d4a729cad3ff7f60a9d6b24d0c73447185aefcf"
         },
         "cmd/qpot/setup_flow.go": {
           "sha256": "cf10afbe78685aef349c3af216a8f97a7e36f7539da727200331279bc21c8cd3"
@@ -364,7 +364,7 @@
       "ruleId": "go/log-injection",
       "sourceSHA256": {
         "cmd/qpot/main.go": {
-          "sha256": "9b2138fa5d5647d70319c8cc2ef67d24b0f0fe446318272a74f8babecff37d8e"
+          "sha256": "35474886a1882e6039bbd1056d4a729cad3ff7f60a9d6b24d0c73447185aefcf"
         },
         "cmd/qpot/setup_flow.go": {
           "sha256": "cf10afbe78685aef349c3af216a8f97a7e36f7539da727200331279bc21c8cd3"
@@ -391,7 +391,7 @@
       "ruleId": "go/log-injection",
       "sourceSHA256": {
         "cmd/qpot/main.go": {
-          "sha256": "9b2138fa5d5647d70319c8cc2ef67d24b0f0fe446318272a74f8babecff37d8e"
+          "sha256": "35474886a1882e6039bbd1056d4a729cad3ff7f60a9d6b24d0c73447185aefcf"
         },
         "cmd/qpot/setup_flow.go": {
           "sha256": "cf10afbe78685aef349c3af216a8f97a7e36f7539da727200331279bc21c8cd3"
@@ -430,7 +430,7 @@
       "ruleId": "go/log-injection",
       "sourceSHA256": {
         "cmd/qpot/main.go": {
-          "sha256": "9b2138fa5d5647d70319c8cc2ef67d24b0f0fe446318272a74f8babecff37d8e"
+          "sha256": "35474886a1882e6039bbd1056d4a729cad3ff7f60a9d6b24d0c73447185aefcf"
         },
         "cmd/qpot/setup_flow.go": {
           "sha256": "cf10afbe78685aef349c3af216a8f97a7e36f7539da727200331279bc21c8cd3"
@@ -469,7 +469,7 @@
       "ruleId": "go/log-injection",
       "sourceSHA256": {
         "cmd/qpot/main.go": {
-          "sha256": "9b2138fa5d5647d70319c8cc2ef67d24b0f0fe446318272a74f8babecff37d8e"
+          "sha256": "35474886a1882e6039bbd1056d4a729cad3ff7f60a9d6b24d0c73447185aefcf"
         },
         "cmd/qpot/setup_flow.go": {
           "sha256": "cf10afbe78685aef349c3af216a8f97a7e36f7539da727200331279bc21c8cd3"
@@ -508,7 +508,7 @@
       "ruleId": "go/log-injection",
       "sourceSHA256": {
         "cmd/qpot/main.go": {
-          "sha256": "9b2138fa5d5647d70319c8cc2ef67d24b0f0fe446318272a74f8babecff37d8e"
+          "sha256": "35474886a1882e6039bbd1056d4a729cad3ff7f60a9d6b24d0c73447185aefcf"
         },
         "cmd/qpot/setup_flow.go": {
           "sha256": "cf10afbe78685aef349c3af216a8f97a7e36f7539da727200331279bc21c8cd3"
@@ -547,7 +547,7 @@
       "ruleId": "go/log-injection",
       "sourceSHA256": {
         "cmd/qpot/main.go": {
-          "sha256": "9b2138fa5d5647d70319c8cc2ef67d24b0f0fe446318272a74f8babecff37d8e"
+          "sha256": "35474886a1882e6039bbd1056d4a729cad3ff7f60a9d6b24d0c73447185aefcf"
         },
         "cmd/qpot/setup_flow.go": {
           "sha256": "cf10afbe78685aef349c3af216a8f97a7e36f7539da727200331279bc21c8cd3"
@@ -574,7 +574,7 @@
       "ruleId": "go/log-injection",
       "sourceSHA256": {
         "cmd/qpot/main.go": {
-          "sha256": "9b2138fa5d5647d70319c8cc2ef67d24b0f0fe446318272a74f8babecff37d8e"
+          "sha256": "35474886a1882e6039bbd1056d4a729cad3ff7f60a9d6b24d0c73447185aefcf"
         },
         "cmd/qpot/setup_flow.go": {
           "sha256": "cf10afbe78685aef349c3af216a8f97a7e36f7539da727200331279bc21c8cd3"
@@ -604,7 +604,7 @@
       "ruleId": "go/log-injection",
       "sourceSHA256": {
         "cmd/qpot/main.go": {
-          "sha256": "9b2138fa5d5647d70319c8cc2ef67d24b0f0fe446318272a74f8babecff37d8e"
+          "sha256": "35474886a1882e6039bbd1056d4a729cad3ff7f60a9d6b24d0c73447185aefcf"
         },
         "cmd/qpot/setup_flow.go": {
           "sha256": "cf10afbe78685aef349c3af216a8f97a7e36f7539da727200331279bc21c8cd3"
@@ -655,7 +655,7 @@
       "ruleId": "go/log-injection",
       "sourceSHA256": {
         "cmd/qpot/main.go": {
-          "sha256": "9b2138fa5d5647d70319c8cc2ef67d24b0f0fe446318272a74f8babecff37d8e"
+          "sha256": "35474886a1882e6039bbd1056d4a729cad3ff7f60a9d6b24d0c73447185aefcf"
         },
         "cmd/qpot/setup_flow.go": {
           "sha256": "cf10afbe78685aef349c3af216a8f97a7e36f7539da727200331279bc21c8cd3"
@@ -682,7 +682,7 @@
       "ruleId": "go/log-injection",
       "sourceSHA256": {
         "cmd/qpot/main.go": {
-          "sha256": "9b2138fa5d5647d70319c8cc2ef67d24b0f0fe446318272a74f8babecff37d8e"
+          "sha256": "35474886a1882e6039bbd1056d4a729cad3ff7f60a9d6b24d0c73447185aefcf"
         },
         "cmd/qpot/setup_flow.go": {
           "sha256": "cf10afbe78685aef349c3af216a8f97a7e36f7539da727200331279bc21c8cd3"
@@ -709,7 +709,7 @@
       "ruleId": "go/log-injection",
       "sourceSHA256": {
         "cmd/qpot/main.go": {
-          "sha256": "9b2138fa5d5647d70319c8cc2ef67d24b0f0fe446318272a74f8babecff37d8e"
+          "sha256": "35474886a1882e6039bbd1056d4a729cad3ff7f60a9d6b24d0c73447185aefcf"
         },
         "cmd/qpot/setup_flow.go": {
           "sha256": "cf10afbe78685aef349c3af216a8f97a7e36f7539da727200331279bc21c8cd3"
@@ -736,7 +736,7 @@
       "ruleId": "go/log-injection",
       "sourceSHA256": {
         "cmd/qpot/main.go": {
-          "sha256": "9b2138fa5d5647d70319c8cc2ef67d24b0f0fe446318272a74f8babecff37d8e"
+          "sha256": "35474886a1882e6039bbd1056d4a729cad3ff7f60a9d6b24d0c73447185aefcf"
         },
         "cmd/qpot/setup_flow.go": {
           "sha256": "cf10afbe78685aef349c3af216a8f97a7e36f7539da727200331279bc21c8cd3"
@@ -763,7 +763,7 @@
       "ruleId": "go/log-injection",
       "sourceSHA256": {
         "cmd/qpot/main.go": {
-          "sha256": "9b2138fa5d5647d70319c8cc2ef67d24b0f0fe446318272a74f8babecff37d8e"
+          "sha256": "35474886a1882e6039bbd1056d4a729cad3ff7f60a9d6b24d0c73447185aefcf"
         },
         "cmd/qpot/setup_flow.go": {
           "sha256": "cf10afbe78685aef349c3af216a8f97a7e36f7539da727200331279bc21c8cd3"
@@ -787,7 +787,7 @@
       "ruleId": "go/log-injection",
       "sourceSHA256": {
         "cmd/qpot/main.go": {
-          "sha256": "9b2138fa5d5647d70319c8cc2ef67d24b0f0fe446318272a74f8babecff37d8e"
+          "sha256": "35474886a1882e6039bbd1056d4a729cad3ff7f60a9d6b24d0c73447185aefcf"
         },
         "cmd/qpot/setup_flow.go": {
           "sha256": "cf10afbe78685aef349c3af216a8f97a7e36f7539da727200331279bc21c8cd3"
@@ -811,7 +811,7 @@
       "ruleId": "go/log-injection",
       "sourceSHA256": {
         "cmd/qpot/main.go": {
-          "sha256": "9b2138fa5d5647d70319c8cc2ef67d24b0f0fe446318272a74f8babecff37d8e"
+          "sha256": "35474886a1882e6039bbd1056d4a729cad3ff7f60a9d6b24d0c73447185aefcf"
         },
         "cmd/qpot/setup_flow.go": {
           "sha256": "cf10afbe78685aef349c3af216a8f97a7e36f7539da727200331279bc21c8cd3"
@@ -835,7 +835,7 @@
       "ruleId": "go/log-injection",
       "sourceSHA256": {
         "cmd/qpot/main.go": {
-          "sha256": "9b2138fa5d5647d70319c8cc2ef67d24b0f0fe446318272a74f8babecff37d8e"
+          "sha256": "35474886a1882e6039bbd1056d4a729cad3ff7f60a9d6b24d0c73447185aefcf"
         },
         "cmd/qpot/setup_flow.go": {
           "sha256": "cf10afbe78685aef349c3af216a8f97a7e36f7539da727200331279bc21c8cd3"
@@ -859,7 +859,7 @@
       "ruleId": "go/log-injection",
       "sourceSHA256": {
         "cmd/qpot/main.go": {
-          "sha256": "9b2138fa5d5647d70319c8cc2ef67d24b0f0fe446318272a74f8babecff37d8e"
+          "sha256": "35474886a1882e6039bbd1056d4a729cad3ff7f60a9d6b24d0c73447185aefcf"
         },
         "cmd/qpot/setup_flow.go": {
           "sha256": "cf10afbe78685aef349c3af216a8f97a7e36f7539da727200331279bc21c8cd3"
@@ -883,7 +883,7 @@
       "ruleId": "go/log-injection",
       "sourceSHA256": {
         "cmd/qpot/main.go": {
-          "sha256": "9b2138fa5d5647d70319c8cc2ef67d24b0f0fe446318272a74f8babecff37d8e"
+          "sha256": "35474886a1882e6039bbd1056d4a729cad3ff7f60a9d6b24d0c73447185aefcf"
         },
         "cmd/qpot/setup_flow.go": {
           "sha256": "cf10afbe78685aef349c3af216a8f97a7e36f7539da727200331279bc21c8cd3"
@@ -907,7 +907,7 @@
       "ruleId": "go/log-injection",
       "sourceSHA256": {
         "cmd/qpot/main.go": {
-          "sha256": "9b2138fa5d5647d70319c8cc2ef67d24b0f0fe446318272a74f8babecff37d8e"
+          "sha256": "35474886a1882e6039bbd1056d4a729cad3ff7f60a9d6b24d0c73447185aefcf"
         },
         "cmd/qpot/setup_flow.go": {
           "sha256": "cf10afbe78685aef349c3af216a8f97a7e36f7539da727200331279bc21c8cd3"
@@ -931,7 +931,7 @@
       "ruleId": "go/log-injection",
       "sourceSHA256": {
         "cmd/qpot/main.go": {
-          "sha256": "9b2138fa5d5647d70319c8cc2ef67d24b0f0fe446318272a74f8babecff37d8e"
+          "sha256": "35474886a1882e6039bbd1056d4a729cad3ff7f60a9d6b24d0c73447185aefcf"
         },
         "cmd/qpot/setup_flow.go": {
           "sha256": "cf10afbe78685aef349c3af216a8f97a7e36f7539da727200331279bc21c8cd3"
@@ -955,7 +955,7 @@
       "ruleId": "go/log-injection",
       "sourceSHA256": {
         "cmd/qpot/main.go": {
-          "sha256": "9b2138fa5d5647d70319c8cc2ef67d24b0f0fe446318272a74f8babecff37d8e"
+          "sha256": "35474886a1882e6039bbd1056d4a729cad3ff7f60a9d6b24d0c73447185aefcf"
         },
         "cmd/qpot/setup_flow.go": {
           "sha256": "cf10afbe78685aef349c3af216a8f97a7e36f7539da727200331279bc21c8cd3"
@@ -979,7 +979,7 @@
       "ruleId": "go/log-injection",
       "sourceSHA256": {
         "cmd/qpot/main.go": {
-          "sha256": "9b2138fa5d5647d70319c8cc2ef67d24b0f0fe446318272a74f8babecff37d8e"
+          "sha256": "35474886a1882e6039bbd1056d4a729cad3ff7f60a9d6b24d0c73447185aefcf"
         },
         "cmd/qpot/setup_flow.go": {
           "sha256": "cf10afbe78685aef349c3af216a8f97a7e36f7539da727200331279bc21c8cd3"
@@ -1003,7 +1003,7 @@
       "ruleId": "go/log-injection",
       "sourceSHA256": {
         "cmd/qpot/main.go": {
-          "sha256": "9b2138fa5d5647d70319c8cc2ef67d24b0f0fe446318272a74f8babecff37d8e"
+          "sha256": "35474886a1882e6039bbd1056d4a729cad3ff7f60a9d6b24d0c73447185aefcf"
         },
         "cmd/qpot/setup_flow.go": {
           "sha256": "cf10afbe78685aef349c3af216a8f97a7e36f7539da727200331279bc21c8cd3"
@@ -1027,7 +1027,7 @@
           "sha256": "26542243ad5ef13eb6770a215020311b7f09eb7fb18a3b18fbeb853c1284f12c"
         },
         "internal/hostsetup/errors.go": {
-          "sha256": "6baf085707bcc32ca1f16ec149a6af9c0a8cac89ee88f2181580f62bba4e0102"
+          "sha256": "47d4460d8035816cf5030b33b493a2e3338915101b60882e7a5c24a440324d42"
         },
         "internal/intelligence/classifier.go": {
           "sha256": "a8e6b5a9978368e555201deb861124509fb5be3cbe7c9c723b2447465f2fe044"
@@ -1047,11 +1047,11 @@
     {
       "disposition": "false-positive",
       "justification": "The reported data reaches structured slog attribute values, with constant attribute keys. Logging messages are literals, except sendInternalError whose production context callers all pass literals. QPot installs the standard JSONHandler; setup temporarily uses TextHandler. These handlers quote CR, LF and control characters, so arbitrary attribute values remain one record. Actual Go 1.26.10 controls preserve values and prevent forged records. Both handler configuration sources and this trace are pinned.",
-      "resultSHA256": "fa27cb464ae12b956718bc72c4de8effa58a197c1a0ca7f6cebe6ee7f34e9548",
+      "resultSHA256": "3cc08268af8a763cd52158108a3d0a5e4e06dff16b3194a034e88190e0026a2d",
       "ruleId": "go/log-injection",
       "sourceSHA256": {
         "cmd/qpot/main.go": {
-          "sha256": "9b2138fa5d5647d70319c8cc2ef67d24b0f0fe446318272a74f8babecff37d8e"
+          "sha256": "35474886a1882e6039bbd1056d4a729cad3ff7f60a9d6b24d0c73447185aefcf"
         },
         "cmd/qpot/setup_flow.go": {
           "sha256": "cf10afbe78685aef349c3af216a8f97a7e36f7539da727200331279bc21c8cd3"
@@ -1075,7 +1075,7 @@
           "sha256": "26542243ad5ef13eb6770a215020311b7f09eb7fb18a3b18fbeb853c1284f12c"
         },
         "internal/hostsetup/errors.go": {
-          "sha256": "6baf085707bcc32ca1f16ec149a6af9c0a8cac89ee88f2181580f62bba4e0102"
+          "sha256": "47d4460d8035816cf5030b33b493a2e3338915101b60882e7a5c24a440324d42"
         },
         "internal/intelligence/classifier.go": {
           "sha256": "a8e6b5a9978368e555201deb861124509fb5be3cbe7c9c723b2447465f2fe044"
@@ -1099,7 +1099,7 @@
       "ruleId": "go/log-injection",
       "sourceSHA256": {
         "cmd/qpot/main.go": {
-          "sha256": "9b2138fa5d5647d70319c8cc2ef67d24b0f0fe446318272a74f8babecff37d8e"
+          "sha256": "35474886a1882e6039bbd1056d4a729cad3ff7f60a9d6b24d0c73447185aefcf"
         },
         "cmd/qpot/setup_flow.go": {
           "sha256": "cf10afbe78685aef349c3af216a8f97a7e36f7539da727200331279bc21c8cd3"
@@ -1129,7 +1129,7 @@
       "ruleId": "go/log-injection",
       "sourceSHA256": {
         "cmd/qpot/main.go": {
-          "sha256": "9b2138fa5d5647d70319c8cc2ef67d24b0f0fe446318272a74f8babecff37d8e"
+          "sha256": "35474886a1882e6039bbd1056d4a729cad3ff7f60a9d6b24d0c73447185aefcf"
         },
         "cmd/qpot/setup_flow.go": {
           "sha256": "cf10afbe78685aef349c3af216a8f97a7e36f7539da727200331279bc21c8cd3"
@@ -1159,7 +1159,7 @@
       "ruleId": "go/log-injection",
       "sourceSHA256": {
         "cmd/qpot/main.go": {
-          "sha256": "9b2138fa5d5647d70319c8cc2ef67d24b0f0fe446318272a74f8babecff37d8e"
+          "sha256": "35474886a1882e6039bbd1056d4a729cad3ff7f60a9d6b24d0c73447185aefcf"
         },
         "cmd/qpot/setup_flow.go": {
           "sha256": "cf10afbe78685aef349c3af216a8f97a7e36f7539da727200331279bc21c8cd3"
@@ -1189,7 +1189,7 @@
       "ruleId": "go/log-injection",
       "sourceSHA256": {
         "cmd/qpot/main.go": {
-          "sha256": "9b2138fa5d5647d70319c8cc2ef67d24b0f0fe446318272a74f8babecff37d8e"
+          "sha256": "35474886a1882e6039bbd1056d4a729cad3ff7f60a9d6b24d0c73447185aefcf"
         },
         "cmd/qpot/setup_flow.go": {
           "sha256": "cf10afbe78685aef349c3af216a8f97a7e36f7539da727200331279bc21c8cd3"
@@ -1219,7 +1219,7 @@
       "ruleId": "go/log-injection",
       "sourceSHA256": {
         "cmd/qpot/main.go": {
-          "sha256": "9b2138fa5d5647d70319c8cc2ef67d24b0f0fe446318272a74f8babecff37d8e"
+          "sha256": "35474886a1882e6039bbd1056d4a729cad3ff7f60a9d6b24d0c73447185aefcf"
         },
         "cmd/qpot/setup_flow.go": {
           "sha256": "cf10afbe78685aef349c3af216a8f97a7e36f7539da727200331279bc21c8cd3"
@@ -1246,7 +1246,7 @@
       "ruleId": "go/log-injection",
       "sourceSHA256": {
         "cmd/qpot/main.go": {
-          "sha256": "9b2138fa5d5647d70319c8cc2ef67d24b0f0fe446318272a74f8babecff37d8e"
+          "sha256": "35474886a1882e6039bbd1056d4a729cad3ff7f60a9d6b24d0c73447185aefcf"
         },
         "cmd/qpot/setup_flow.go": {
           "sha256": "cf10afbe78685aef349c3af216a8f97a7e36f7539da727200331279bc21c8cd3"
@@ -1276,7 +1276,7 @@
       "ruleId": "go/log-injection",
       "sourceSHA256": {
         "cmd/qpot/main.go": {
-          "sha256": "9b2138fa5d5647d70319c8cc2ef67d24b0f0fe446318272a74f8babecff37d8e"
+          "sha256": "35474886a1882e6039bbd1056d4a729cad3ff7f60a9d6b24d0c73447185aefcf"
         },
         "cmd/qpot/setup_flow.go": {
           "sha256": "cf10afbe78685aef349c3af216a8f97a7e36f7539da727200331279bc21c8cd3"
@@ -1303,7 +1303,7 @@
       "ruleId": "go/log-injection",
       "sourceSHA256": {
         "cmd/qpot/main.go": {
-          "sha256": "9b2138fa5d5647d70319c8cc2ef67d24b0f0fe446318272a74f8babecff37d8e"
+          "sha256": "35474886a1882e6039bbd1056d4a729cad3ff7f60a9d6b24d0c73447185aefcf"
         },
         "cmd/qpot/setup_flow.go": {
           "sha256": "cf10afbe78685aef349c3af216a8f97a7e36f7539da727200331279bc21c8cd3"
@@ -1354,7 +1354,7 @@
       "ruleId": "go/log-injection",
       "sourceSHA256": {
         "cmd/qpot/main.go": {
-          "sha256": "9b2138fa5d5647d70319c8cc2ef67d24b0f0fe446318272a74f8babecff37d8e"
+          "sha256": "35474886a1882e6039bbd1056d4a729cad3ff7f60a9d6b24d0c73447185aefcf"
         },
         "cmd/qpot/setup_flow.go": {
           "sha256": "cf10afbe78685aef349c3af216a8f97a7e36f7539da727200331279bc21c8cd3"
@@ -1399,6 +1399,6 @@
       "uri": "internal/server/server.go"
     }
   ],
-  "sourceCatalogSHA256": "585b5afa594e4913f3eaba7f6d924c5a667040871746361879712c0a01eaab71",
+  "sourceCatalogSHA256": "afc5b19cbccabae71dca580100a03755cefdb392dfe5b193edde905c3d21f4bf",
   "version": 2
 }
