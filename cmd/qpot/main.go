@@ -33,6 +33,7 @@ import (
 	"github.com/qpot/qpot/internal/intelligence"
 	"github.com/spf13/cobra"
 	"golang.org/x/term"
+	"gopkg.in/yaml.v3"
 )
 
 // reValidName matches instance names: 1-32 chars, alphanumeric, hyphens, underscores.
@@ -1956,26 +1957,142 @@ func newDockerRestartCommand() *cobra.Command {
 			ctx := cmd.Context()
 			containerName := args[0]
 
-			// Safety check: only act on containers QPot created.
-			if err := requireQPotContainer(ctx, containerName); err != nil {
+			container, cfg, err := resolveDockerRestart(ctx, containerName)
+			if err != nil {
 				return err
 			}
 
-			dockerCmd := exec.CommandContext(ctx, "docker", "restart", containerName)
-			dockerCmd.Stdout = os.Stdout
-			dockerCmd.Stderr = os.Stderr
-
-			if err := dockerCmd.Run(); err != nil {
-				if isDockerNotFound(err) {
-					return fmt.Errorf("docker not found: install Docker to use this command")
+			if container.Honeypot != "" {
+				honeypot := container.Honeypot
+				if honeypot == "ssh-backend" {
+					honeypot = "ssh-proxy"
 				}
-				return fmt.Errorf("failed to restart container '%s': %w", containerName, err)
+				mgr, err := instance.NewManager(cfg)
+				if err != nil {
+					return err
+				}
+				// Use the same current policy, stored deployment and actual runtime
+				// checks as every other honeypot restart, including companions.
+				if err := mgr.RestartHoneypot(ctx, honeypot); err != nil {
+					return fmt.Errorf("failed to restart container '%s': %w", containerName, err)
+				}
+			} else {
+				// Recovery of control services does not start an attacker-facing
+				// guest. Pin the inspected identity rather than a reusable name.
+				dockerCmd := exec.CommandContext(ctx, "docker", "restart", container.ID)
+				dockerCmd.Stdout = os.Stdout
+				dockerCmd.Stderr = os.Stderr
+				if err := dockerCmd.Run(); err != nil {
+					return fmt.Errorf("failed to restart container '%s': %w", containerName, err)
+				}
 			}
 
 			fmt.Printf("[OK] Container '%s' restarted\n", containerName)
 			return nil
 		},
 	}
+}
+
+type dockerRestartContainer struct {
+	ID       string `json:"id"`
+	Instance string `json:"instance"`
+	Service  string `json:"service"`
+	Honeypot string `json:"honeypot"`
+}
+
+// Keep the buffer named: embedding would promote Buffer.ReadFrom, allowing
+// exec's io.Copy to bypass Write and its size bound.
+type dockerRestartOutput struct{ buffer bytes.Buffer }
+
+func (b *dockerRestartOutput) Write(p []byte) (int, error) {
+	if len(p) > (16<<10)-b.buffer.Len() {
+		return 0, fmt.Errorf("container restart metadata exceeds its size bound")
+	}
+	return b.buffer.Write(p)
+}
+
+// resolveDockerRestart refuses to infer ownership from names or from a missing
+// config (Load would create defaults). Inspect only identity labels, never the
+// full Docker document, which may contain credentials.
+func resolveDockerRestart(ctx context.Context, name string) (dockerRestartContainer, *config.Config, error) {
+	var container dockerRestartContainer
+	fail := func(err error) (dockerRestartContainer, *config.Config, error) {
+		return container, nil, hostsetup.E("QP-DOCKER-012").WithWhy("Cannot verify the saved instance and service for this container restart.").Wrap(err)
+	}
+	inspectCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	const format = `{"id":{{json .Id}},"instance":{{json (index .Config.Labels "qpot.instance")}},"service":{{json (index .Config.Labels "com.docker.compose.service")}},"honeypot":{{json (index .Config.Labels "qpot.honeypot")}}}`
+	inspect := exec.CommandContext(inspectCtx, "docker", "inspect", "--type", "container", "--format", format, "--", name)
+	var output dockerRestartOutput
+	inspect.Stdout = &output
+	if err := inspect.Run(); err != nil {
+		if isDockerNotFound(err) {
+			return container, nil, fmt.Errorf("docker not found: install Docker to use this command")
+		}
+		return fail(err)
+	}
+	decoder := json.NewDecoder(bytes.NewReader(output.buffer.Bytes()))
+	if err := decoder.Decode(&container); err != nil {
+		return fail(err)
+	}
+	var trailing any
+	if err := decoder.Decode(&trailing); !errors.Is(err, io.EOF) {
+		return fail(fmt.Errorf("container restart metadata contains trailing data"))
+	}
+	if len(container.ID) != 64 || strings.Trim(container.ID, "0123456789abcdef") != "" || container.Service == "" {
+		return fail(fmt.Errorf("container restart metadata is incomplete"))
+	}
+	if err := validateInstanceName(container.Instance); err != nil {
+		return fail(err)
+	}
+	homeDir, err := os.UserHomeDir()
+	if err != nil {
+		return fail(err)
+	}
+	path := filepath.Join(homeDir, ".qpot", "instances", container.Instance, "config.yaml")
+	data, err := config.ReadFile(path, 4<<20)
+	if err != nil {
+		return fail(err)
+	}
+	cfg, err := config.Parse(data, path)
+	if err != nil {
+		return fail(err)
+	}
+	if cfg.InstanceName != container.Instance {
+		return fail(fmt.Errorf("saved instance differs from container ownership"))
+	}
+	data, err = config.ReadFile(cfg.GetDockerComposePath(), 4<<20)
+	if err != nil {
+		return fail(err)
+	}
+	var document struct {
+		Services map[string]struct {
+			Labels map[string]string `yaml:"labels"`
+		} `yaml:"services"`
+	}
+	if err := yaml.Unmarshal(data, &document); err != nil {
+		return fail(err)
+	}
+	service, ok := document.Services[container.Service]
+	if !ok || service.Labels[qpotInstanceLabel] != container.Instance || service.Labels["qpot.honeypot"] != container.Honeypot {
+		return fail(fmt.Errorf("container service differs from the saved deployment"))
+	}
+	if container.Honeypot == "" {
+		switch container.Service {
+		case "database", "collector", "netguard":
+		default:
+			return fail(fmt.Errorf("container is not a recognized control service"))
+		}
+	} else {
+		honeypot := container.Honeypot
+		if honeypot == "ssh-backend" {
+			honeypot = "ssh-proxy"
+		}
+		if _, ok := cfg.GetHoneypotConfig(honeypot); !ok {
+			return fail(fmt.Errorf("container has no configured honeypot owner"))
+		}
+	}
+	return container, cfg, nil
 }
 
 // newConfigCommand opens the instance config file in the user's editor

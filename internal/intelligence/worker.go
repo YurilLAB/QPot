@@ -38,10 +38,19 @@ type Worker struct {
 	canaryScanned bool
 	ownershipKey  string
 	ownershipLock *os.File
+	leaseMu       sync.RWMutex
+	leaser        database.IntelligenceLeaser
+	lease         database.IntelligenceLease
+	leaseLost     error
+	leaseContext  context.Context
+	leaseCancel   context.CancelFunc
+	leaseTTL      time.Duration
+	leaseInterval time.Duration
 	errorMu       sync.RWMutex
 	lastError     error
 	running       bool
 	started       bool
+	ready         bool
 }
 
 const (
@@ -59,6 +68,8 @@ const (
 	CodeOwnership   = "QP-INTEL-004"
 	CodePreparation = "QP-INTEL-005"
 	CodeEncoding    = "QP-INTEL-006"
+	CodeLeaseLost   = "QP-INTEL-007"
+	CodeLeaseStore  = "QP-INTEL-008"
 )
 
 // LastError returns the last operational error, or nil after successful work.
@@ -75,11 +86,15 @@ func (w *Worker) LastError() error {
 func (w *Worker) Status() (state string, lastError error) {
 	w.errorMu.RLock()
 	defer w.errorMu.RUnlock()
+	var coded *hostsetup.Error
+	lost := errors.As(w.lastError, &coded) && coded != nil && coded.Code == CodeLeaseLost
 	switch {
 	case !w.started:
 		state = "not_started"
-	case !w.running:
+	case !w.running || lost:
 		state = "stopped"
+	case !w.ready:
+		state = "not_started"
 	case w.lastError != nil:
 		state = "retrying"
 	default:
@@ -89,6 +104,19 @@ func (w *Worker) Status() (state string, lastError error) {
 }
 
 func (w *Worker) report(code, stage string, err error) {
+	w.leaseMu.RLock()
+	owned := w.leaser != nil && w.lease.Owner != ""
+	w.leaseMu.RUnlock()
+	if owned && !w.hasLostLease() && (errors.Is(err, database.ErrIntelligenceLeaseLost) || errors.Is(err, database.ErrIntelligenceLeaseUnavailable)) {
+		w.loseLease(err)
+		return
+	}
+	w.leaseMu.RLock()
+	lost := w.leaseLost
+	w.leaseMu.RUnlock()
+	if lost != nil {
+		code, err = CodeLeaseLost, hostsetup.E(CodeLeaseLost).Wrap(lost)
+	}
 	var coded *hostsetup.Error
 	var encoding *database.IntelligenceEncodingError
 	if errors.As(err, &encoding) {
@@ -104,7 +132,15 @@ func (w *Worker) report(code, stage string, err error) {
 	slog.Warn("Intelligence worker paused", "code", coded.Code, "stage", stage, "remedy", coded.Remedy())
 }
 
-func (w *Worker) clearError() { w.errorMu.Lock(); w.lastError = nil; w.errorMu.Unlock() }
+func (w *Worker) clearError() {
+	w.leaseMu.RLock()
+	defer w.leaseMu.RUnlock()
+	if w.leaseLost == nil {
+		w.errorMu.Lock()
+		w.lastError = nil
+		w.errorMu.Unlock()
+	}
+}
 
 // NewWorker creates a worker. Non-positive settings use safe defaults.
 func NewWorker(classifier *Classifier, db database.Database, interval time.Duration, batchSize int) *Worker {
@@ -124,9 +160,14 @@ func NewWorker(classifier *Classifier, db database.Database, interval time.Durat
 // WithCanaryMatcher attaches the matcher used for captured event observations.
 func (w *Worker) WithCanaryMatcher(m CanaryMatcher) *Worker { w.canary = m; return w }
 
-// Run starts the worker loop and blocks until cancellation.
+// Run starts the worker loop once and blocks until cancellation. A stopped
+// worker requires a new Worker so recovery cannot reuse stale in-memory state.
 func (w *Worker) Run(ctx context.Context) {
 	w.errorMu.Lock()
+	if w.started {
+		w.errorMu.Unlock()
+		return
+	}
 	w.started, w.running = true, true
 	w.errorMu.Unlock()
 	defer func() {
@@ -134,6 +175,9 @@ func (w *Worker) Run(ctx context.Context) {
 		w.running = false
 		w.errorMu.Unlock()
 	}()
+	if ctx.Err() != nil {
+		return
+	}
 	if w.ownershipKey != "" {
 		lock, err := acquireWorkerLock(w.ownershipKey)
 		if err != nil {
@@ -143,16 +187,29 @@ func (w *Worker) Run(ctx context.Context) {
 		w.ownershipLock = lock
 		defer func() { _ = lock.Close(); w.ownershipLock = nil }()
 	}
+	if err := w.acquireDatabaseOwnership(ctx); err != nil {
+		w.report(CodeOwnership, "database ownership", err)
+		return
+	}
+	runCtx, cancelRun := context.WithCancel(ctx)
+	defer cancelRun()
+	stopRenewal := w.startLeaseRenewal(cancelRun)
+	defer stopRenewal()
+	w.errorMu.Lock()
+	w.ready = true
+	w.errorMu.Unlock()
 	ticker := time.NewTicker(w.interval)
 	defer ticker.Stop()
-	w.drain(ctx)
+	w.drain(runCtx)
 	for {
 		select {
-		case <-ctx.Done():
-			w.shutdown()
+		case <-runCtx.Done():
+			if ctx.Err() != nil && !w.hasLostLease() {
+				w.shutdown()
+			}
 			return
 		case <-ticker.C:
-			w.drain(ctx)
+			w.drain(runCtx)
 		}
 	}
 }
@@ -160,6 +217,9 @@ func (w *Worker) Run(ctx context.Context) {
 // shutdown makes one bounded attempt to complete the durable pending record.
 // Abrupt exit is safe too: recovery does not depend on this final attempt.
 func (w *Worker) shutdown() {
+	if w.hasLostLease() {
+		return
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
 	defer cancel()
 	if w.pending != nil {
@@ -231,6 +291,13 @@ func (w *Worker) replay(ctx context.Context) (int, bool) {
 	if cp == nil {
 		return 0, true
 	}
+	owned, release, err := w.ownedContext(ctx)
+	if err != nil {
+		w.report(CodeReplay, "replay ownership", err)
+		return len(cp.Events), false
+	}
+	defer release()
+	ctx = owned
 	n := len(cp.Events)
 	store := w.db.(database.IntelligenceStore)
 	fail := func(stage string, err error) (int, bool) {
@@ -248,8 +315,17 @@ func (w *Worker) replay(ctx context.Context) (int, bool) {
 		w.pendingSaved = true
 	}
 	if !cp.Complete {
+		if err := w.validateOwnedEvents(cp.Events); err != nil {
+			return fail("event identity", err)
+		}
+		if err := w.checkDatabaseOwnership(ctx); err != nil {
+			return fail("IOCs ownership", err)
+		}
 		if err := store.ReplaceIntelligenceIOCs(ctx, cp.Revision, cp.IOCs); err != nil {
 			return fail("IOCs", err)
+		}
+		if err := w.checkDatabaseOwnership(ctx); err != nil {
+			return fail("sessions ownership", err)
 		}
 		if err := store.ReplaceIntelligenceSessions(ctx, cp.Revision, cp.Sessions); err != nil {
 			return fail("sessions", err)
@@ -263,11 +339,17 @@ func (w *Worker) replay(ctx context.Context) (int, bool) {
 			if w.canary != nil {
 				for _, event := range cp.Events {
 					if event.Honeypot != "canary" {
+						if err := w.checkDatabaseOwnership(ctx); err != nil {
+							return fail("canary ownership", err)
+						}
 						w.canary.MatchEvent(ctx, event)
 					}
 				}
 			}
 			w.canaryScanned = true
+		}
+		if err := w.checkDatabaseOwnership(ctx); err != nil {
+			return fail("event tags ownership", err)
 		}
 		if bt, ok := w.db.(database.BatchTagger); ok {
 			if err := bt.TagEvents(ctx, cp.Events); err != nil {
@@ -275,6 +357,9 @@ func (w *Worker) replay(ctx context.Context) (int, bool) {
 			}
 		} else {
 			for _, event := range cp.Events {
+				if err := w.checkDatabaseOwnership(ctx); err != nil {
+					return fail("event tag ownership", err)
+				}
 				if err := w.db.TagEvent(ctx, event); err != nil {
 					return fail("event tag", err)
 				}
@@ -283,7 +368,7 @@ func (w *Worker) replay(ctx context.Context) (int, bool) {
 		// Retain the active session state, but release the completed batch's raw
 		// payloads. Completion is a new version, never a conflicting overwrite
 		// of the prepared record under the same revision.
-		revision, err := w.nextRevision(cp.Revision)
+		revision, err := w.nextRevision(ctx, cp.Revision)
 		if err != nil {
 			return fail("completion", err)
 		}
@@ -300,6 +385,13 @@ func (w *Worker) replay(ctx context.Context) (int, bool) {
 }
 
 func (w *Worker) runBatch(ctx context.Context) (int, bool) {
+	owned, release, err := w.ownedContext(ctx)
+	if err != nil {
+		w.report(CodeOwnership, "batch ownership", err)
+		return 0, false
+	}
+	defer release()
+	ctx = owned
 	if err := w.initialize(ctx); err != nil {
 		w.report(CodeRecovery, "recover checkpoint", err)
 		return 0, false
@@ -315,6 +407,10 @@ func (w *Worker) runBatch(ctx context.Context) (int, bool) {
 	if len(events) == 0 {
 		w.clearError()
 		return 0, true
+	}
+	if err := w.validateOwnedEvents(events); err != nil {
+		w.report(CodePreparation, "source event identity", err)
+		return 0, false
 	}
 
 	// Before preparing anything, save the previous builder state so a baseline
@@ -344,7 +440,7 @@ func (w *Worker) runBatch(ctx context.Context) (int, bool) {
 		w.report(CodePreparation, "prepare IOC baseline", err)
 		return len(events), false
 	}
-	revision, err := w.nextRevision(w.revision)
+	revision, err := w.nextRevision(ctx, w.revision)
 	if err != nil {
 		if w.classifier.ttpBuilder != nil {
 			_ = w.classifier.ttpBuilder.restoreCheckpoint(before)

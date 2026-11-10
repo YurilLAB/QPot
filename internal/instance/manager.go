@@ -153,6 +153,10 @@ func (m *Manager) db() (database.Database, error) {
 
 // Initialize sets up a new instance
 func (m *Manager) Initialize(ctx context.Context) error {
+	sandbox, _ := security.NewSandbox(&m.config.Security)
+	if _, err := sandbox.Selection(); err != nil {
+		return err
+	}
 	if err := os.MkdirAll(m.config.DataPath, 0o750); err != nil {
 		return err
 	}
@@ -164,7 +168,16 @@ func (m *Manager) Initialize(ctx context.Context) error {
 	return m.initializeLocked(ctx)
 }
 
-func (m *Manager) initializeLocked(ctx context.Context) error {
+func (m *Manager) initializeLocked(ctx context.Context, selections ...security.RuntimeSelection) error {
+	declared, _ := security.NewSandbox(&m.config.Security)
+	if _, err := declared.Selection(); err != nil {
+		return err
+	}
+	for _, selection := range selections {
+		if err := declared.ValidateSelection(selection, requiresStrongSandbox(m.config)); err != nil {
+			return err
+		}
+	}
 	slog.Info("Initializing QPot instance", "name", m.config.InstanceName)
 
 	// Create data directories
@@ -207,7 +220,7 @@ func (m *Manager) initializeLocked(ctx context.Context) error {
 	// Validate the candidate before touching any live cell. Auxiliary files
 	// must also be ready before obsolete services are retired or the new
 	// Compose layout becomes visible to the recycler.
-	if _, err := m.renderDockerCompose(); err != nil {
+	if _, err := m.renderDockerCompose(selections...); err != nil {
 		return fmt.Errorf("failed to generate docker-compose: %w", err)
 	}
 	if err := prepareSSHRuntimeLayout(ctx, m.config); err != nil {
@@ -215,7 +228,7 @@ func (m *Manager) initializeLocked(ctx context.Context) error {
 	}
 	// Empty-ID legacy library callers reserve randomness only after validation;
 	// all callers now render the same pinned location used by the live guest.
-	compose, err := m.renderDockerCompose()
+	compose, err := m.renderDockerCompose(selections...)
 	if err != nil {
 		return fmt.Errorf("failed to generate pinned docker-compose: %w", err)
 	}
@@ -246,6 +259,9 @@ func (m *Manager) Start(ctx context.Context, detach bool) error {
 			return err
 		}
 	}
+	if _, err := resolveSandbox(ctx, m.config); err != nil {
+		return err
+	}
 	if m.AllRunning(ctx) {
 		return fmt.Errorf("instance is already running")
 	}
@@ -257,12 +273,16 @@ func (m *Manager) Start(ctx context.Context, detach bool) error {
 		return fmt.Errorf("lock instance deployment: %w", err)
 	}
 	defer cellLock.Close()
+	selection, err := resolveSandbox(ctx, m.config)
+	if err != nil {
+		return err
+	}
 	if sshProxyEnabled(m.config) {
 		if err := validateSSHRuntimeResources(ctx); err != nil {
 			return err
 		}
 	}
-	if err := m.initializeLocked(ctx); err != nil {
+	if err := m.initializeLocked(ctx, selection); err != nil {
 		return fmt.Errorf("failed to prepare instance for start: %w", err)
 	}
 	if _, err := m.db(); err != nil {
@@ -288,6 +308,9 @@ func (m *Manager) Start(ctx context.Context, detach bool) error {
 	cmd.Stdout, cmd.Stderr = os.Stdout, os.Stderr
 	if err := cmd.Run(); err != nil {
 		return fmt.Errorf("docker compose up failed (see the output above): %w", err)
+	}
+	if err := m.verifyStartedSandbox(ctx, sandboxServices(m.config, m), selection); err != nil {
+		return err
 	}
 	_ = cellLock.Close()
 	// Health settling can require the recycler to finish a broker startup
@@ -526,6 +549,9 @@ func (m *Manager) startHoneypot(ctx context.Context, name string, recreate bool)
 			return err
 		}
 	}
+	if _, err := resolveSandbox(ctx, m.config, name); err != nil {
+		return err
+	}
 	slog.Info("Starting honeypot", "name", name, "instance", m.config.InstanceName)
 	if err := os.MkdirAll(m.config.DataPath, 0o750); err != nil {
 		return err
@@ -535,6 +561,10 @@ func (m *Manager) startHoneypot(ctx context.Context, name string, recreate bool)
 		return fmt.Errorf("lock honeypot deployment: %w", err)
 	}
 	defer cellLock.Close()
+	selection, err := resolveSandbox(ctx, m.config, name)
+	if err != nil {
+		return err
+	}
 	if name == sshProxyHoneypot {
 		if err := config.ValidateSSHEnvironment(m.config); err != nil {
 			return err
@@ -548,7 +578,7 @@ func (m *Manager) startHoneypot(ctx context.Context, name string, recreate bool)
 	// enabled on a running instance is not in the existing compose file
 	// (`compose up -d <name>` failed with "no such service") and the
 	// collector would not tail its logs.
-	if err := m.initializeLocked(ctx); err != nil {
+	if err := m.initializeLocked(ctx, selection); err != nil {
 		return fmt.Errorf("failed to regenerate the instance config: %w", err)
 	}
 	if err := m.prepareOwnership(ctx, name); err != nil {
@@ -577,6 +607,9 @@ func (m *Manager) startHoneypot(ctx context.Context, name string, recreate bool)
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("failed to start honeypot: %w\nOutput: %s", err, output)
+	}
+	if err := m.verifyStartedSandbox(ctx, append([]string{name}, m.companionServices(name)...), selection); err != nil {
+		return err
 	}
 	_ = cellLock.Close()
 
@@ -760,7 +793,7 @@ func (m *Manager) generateDockerCompose() error {
 	return m.publishDockerCompose(context.Background(), compose)
 }
 
-func (m *Manager) renderDockerCompose() (string, error) {
+func (m *Manager) renderDockerCompose(selections ...security.RuntimeSelection) (string, error) {
 	ports, subnets := siblingReservations(m.config.DataPath)
 	generator := &ComposeGenerator{
 		Config:          m.config,
@@ -768,6 +801,9 @@ func (m *Manager) renderDockerCompose() (string, error) {
 		ReservedPorts:   ports,
 		ReservedSubnets: subnets,
 		KeepPorts:       ownHostPorts(m.config.GetDockerComposePath()),
+	}
+	if len(selections) > 0 {
+		generator.executionSelection = &selections[0]
 	}
 	generator.ReservedNets, generator.KeepSubnets = hostDockerSubnets(context.Background(), composeProjectName(m.config), generator.currentNetworkNames())
 
@@ -819,6 +855,9 @@ func (m *Manager) publishDockerCompose(ctx context.Context, compose string) erro
 // These generators existed but were never invoked, so the mounts previously
 // resolved to missing files and the log pipeline could not run.
 func (m *Manager) generateServiceConfigs() error {
+	if err := prepareClickHouseKeeper(m.config); err != nil {
+		return err
+	}
 	generator := &ComposeGenerator{
 		Config:  m.config,
 		Sandbox: m.sandbox,

@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/qpot/qpot/internal/config"
+	"github.com/qpot/qpot/internal/hostsetup"
 )
 
 var (
@@ -22,9 +23,8 @@ var (
 	warnOut io.Writer // nil: standard output
 )
 
-// SetWarningOutput sends the sandbox fallback warnings to w (nil: standard
-// output) and returns the previous setting. qpot setup sends them to its log,
-// because its summary already says which isolation the honeypots get.
+// SetWarningOutput sends explicit sandbox fallback warnings to w (nil: standard
+// output) and returns the previous setting.
 func SetWarningOutput(w io.Writer) io.Writer {
 	warnMu.Lock()
 	defer warnMu.Unlock()
@@ -53,32 +53,33 @@ func warnOnce(msg string) {
 type SandboxType string
 
 const (
-	SandboxNone     SandboxType = "none"
-	SandboxGVisor   SandboxType = "gvisor"
-	SandboxKata     SandboxType = "kata"
-	SandboxFirejail SandboxType = "firejail"
+	SandboxNone   SandboxType = "none"
+	SandboxGVisor SandboxType = "gvisor"
+	SandboxKata   SandboxType = "kata"
 )
 
-// Sandbox manages container isolation for honeypots
-type Sandbox struct {
-	config      *config.SecurityConfig
-	sandboxType SandboxType
-	available   bool
+// RuntimeSelection describes both the operator's requested isolation and the
+// runtime selected for an operation. An empty Runtime explicitly means Docker's
+// default runtime; it must never be inferred from a failed availability probe.
+type RuntimeSelection struct {
+	Requested SandboxType `json:"requested"`
+	Effective SandboxType `json:"effective"`
+	Runtime   string      `json:"runtime"`
+	Fallback  bool        `json:"fallback"`
 }
 
-// ContainerRuntime returns the Docker runtime that should be set on honeypot
-// containers for the active sandbox, or "" to use the default runtime.
-//
-// It returns a non-empty runtime only when the requested runtime-based sandbox
-// is actually AVAILABLE on the host (NewSandbox falls back to SandboxNone when
-// it is not). This makes it safe to render unconditionally into compose: if the
-// operator asked for gVisor but runsc isn't installed, we emit no runtime line
-// rather than producing a compose file that docker refuses to start.
+// Sandbox retains a snapshot of the declared isolation policy. Live runtime
+// availability is checked by ResolveForStart, not by construction or rendering.
+type Sandbox struct {
+	mode     SandboxType
+	fallback string
+}
+
+// ContainerRuntime returns the declared runtime, independent of availability.
+// Call Selection before rendering and ResolveForStart before deployment; an
+// unsupported policy must not reach execution just because this returns "".
 func (sb *Sandbox) ContainerRuntime() string {
-	if !sb.available {
-		return ""
-	}
-	switch sb.sandboxType {
+	switch sb.requestedMode() {
 	case SandboxGVisor:
 		return "runsc"
 	case SandboxKata:
@@ -88,48 +89,101 @@ func (sb *Sandbox) ContainerRuntime() string {
 	}
 }
 
-// NewSandbox creates a new sandbox manager
+// NewSandbox captures the configured policy without probing Docker. Keeping
+// construction available lets operators inspect and stop a deployment even
+// when its requested runtime was removed or its saved policy is invalid.
 func NewSandbox(cfg *config.SecurityConfig) (*Sandbox, error) {
-	sb := &Sandbox{
-		config:      cfg,
-		sandboxType: SandboxType(cfg.SandboxMode),
+	sb := &Sandbox{}
+	if cfg != nil {
+		sb.mode = SandboxType(cfg.SandboxMode)
+		sb.fallback = cfg.SandboxFallback
 	}
-
-	// Check if requested sandbox is available
-	switch sb.sandboxType {
-	case SandboxGVisor:
-		sb.available = sb.checkGVisor()
-	case SandboxKata:
-		sb.available = sb.checkKata()
-	case SandboxFirejail:
-		sb.available = sb.checkFirejail()
-	case SandboxNone:
-		sb.available = true
-	default:
-		// An unknown/empty sandbox mode (a typo, or an old/partial config) must
-		// NOT take the whole platform down: degrade to plain containers and warn,
-		// consistent with QPot's "keep the honeypots running even when
-		// misconfigured" principle. (config.Load already maps an empty mode to the
-		// secure default; this is belt-and-braces for any other unrecognized value.)
-		warnOnce(fmt.Sprintf("Warning: unknown sandbox mode %q; falling back to standard containers\n", sb.sandboxType))
-		sb.sandboxType = SandboxNone
-		sb.available = true
-	}
-
-	// Fall back to none if requested sandbox unavailable
-	if !sb.available && sb.sandboxType != SandboxNone {
-		warnOnce(fmt.Sprintf("Warning: %s sandbox not available, falling back to standard containers\n", sb.sandboxType))
-		sb.sandboxType = SandboxNone
-		sb.available = true
-	}
-
 	return sb, nil
+}
+
+func (sb *Sandbox) requestedMode() SandboxType {
+	if sb == nil || sb.mode == "" {
+		return SandboxGVisor
+	}
+	return sb.mode
+}
+
+func (sb *Sandbox) fallbackPolicy() string {
+	if sb == nil || sb.fallback == "" {
+		return "deny"
+	}
+	return sb.fallback
+}
+
+// Selection validates the declared policy without querying a live daemon.
+// Firejail is not supported: finding an executable never applied it to Docker.
+func (sb *Sandbox) Selection() (RuntimeSelection, error) {
+	mode, fallback := sb.requestedMode(), sb.fallbackPolicy()
+	if mode != SandboxNone && mode != SandboxGVisor && mode != SandboxKata {
+		return RuntimeSelection{}, hostsetup.E("QP-DOCKER-010").WithWhy("Unsupported sandbox mode %q.", mode)
+	}
+	if fallback != "deny" && fallback != "docker" {
+		return RuntimeSelection{}, hostsetup.E("QP-DOCKER-010").WithWhy("Unsupported sandbox fallback policy %q.", fallback)
+	}
+	return RuntimeSelection{Requested: mode, Effective: mode, Runtime: sb.ContainerRuntime()}, nil
+}
+
+// ResolveForStart checks the execution daemon afresh. A registered runtime on a
+// remote Docker host does not need a matching executable on the QPot client.
+// Only an explicit fallback policy may select ordinary Docker, and requested
+// stronger isolation never falls back for high-interaction deployments.
+func (sb *Sandbox) ResolveForStart(ctx context.Context, highInteraction bool) (RuntimeSelection, error) {
+	selection, err := sb.Selection()
+	if err != nil {
+		return RuntimeSelection{}, err
+	}
+	if ctx == nil {
+		return RuntimeSelection{}, hostsetup.E("QP-DOCKER-011").WithWhy("Runtime validation requires an operation context.")
+	}
+	if err := ctx.Err(); err != nil {
+		return RuntimeSelection{}, hostsetup.E("QP-DOCKER-011").Wrap(err)
+	}
+	if selection.Effective == SandboxNone {
+		return selection, nil
+	}
+	runtimes, err := dockerRuntimes(ctx)
+	if err != nil {
+		return RuntimeSelection{}, hostsetup.E("QP-DOCKER-011").Wrap(err)
+	}
+	if len(runtimes) == 0 {
+		return RuntimeSelection{}, hostsetup.E("QP-DOCKER-011").WithWhy("Docker did not provide a runtime registry.")
+	}
+	if _, registered := runtimes[selection.Runtime]; registered {
+		return selection, nil
+	}
+	if highInteraction || sb.fallbackPolicy() != "docker" {
+		return RuntimeSelection{}, hostsetup.E("QP-DOCKER-011").WithWhy("The requested Docker runtime %q is not registered.", selection.Runtime)
+	}
+	selection.Effective, selection.Runtime, selection.Fallback = SandboxNone, "", true
+	warnOnce(fmt.Sprintf("Warning: %s is unavailable; explicit sandbox_fallback=docker selects standard Docker isolation\n", selection.Requested))
+	return selection, nil
+}
+
+// ValidateSelection verifies that a resolved selection belongs to this policy.
+// It does not replace the live availability check in ResolveForStart.
+func (sb *Sandbox) ValidateSelection(selection RuntimeSelection, highInteraction bool) error {
+	declared, err := sb.Selection()
+	if err != nil {
+		return err
+	}
+	if selection == declared {
+		return nil
+	}
+	if !highInteraction && sb.fallbackPolicy() == "docker" && declared.Requested != SandboxNone && selection == (RuntimeSelection{Requested: declared.Requested, Effective: SandboxNone, Fallback: true}) {
+		return nil
+	}
+	return hostsetup.E("QP-DOCKER-012").WithWhy("The selected runtime does not match the configured sandbox policy.")
 }
 
 // dockerRuntimes returns the OCI runtimes the Docker daemon has registered.
 // A variable so tests can stub the daemon.
-var dockerRuntimes = func() (map[string]json.RawMessage, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+var dockerRuntimes = func(parent context.Context) (map[string]json.RawMessage, error) {
+	ctx, cancel := context.WithTimeout(parent, 5*time.Second)
 	defer cancel()
 	out, err := exec.CommandContext(ctx, "docker", "info", "--format", "{{json .Runtimes}}").Output()
 	if err != nil {
@@ -140,34 +194,6 @@ var dockerRuntimes = func() (map[string]json.RawMessage, error) {
 		return nil, err
 	}
 	return rt, nil
-}
-
-// runtimeUsable reports whether runtime can actually be used for containers:
-// the binary is installed AND the Docker daemon has it registered. With only
-// the binary present, the compose file would name a runtime docker rejects
-// ("unknown or invalid runtime name") and the containers would not start.
-func runtimeUsable(binary, runtime string) bool {
-	if _, err := exec.LookPath(binary); err != nil {
-		return false
-	}
-	rt, err := dockerRuntimes()
-	if err != nil {
-		return false
-	}
-	_, ok := rt[runtime]
-	return ok
-}
-
-// checkGVisor checks if gVisor (runsc) is installed and registered with Docker.
-func (sb *Sandbox) checkGVisor() bool { return runtimeUsable("runsc", "runsc") }
-
-// checkKata checks if Kata Containers is installed and registered with Docker.
-func (sb *Sandbox) checkKata() bool { return runtimeUsable("kata-runtime", "kata-runtime") }
-
-// checkFirejail checks if Firejail is installed
-func (sb *Sandbox) checkFirejail() bool {
-	_, err := exec.LookPath("firejail")
-	return err == nil
 }
 
 func (sb *Sandbox) ValidateHost() error {

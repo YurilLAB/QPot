@@ -114,10 +114,10 @@ func TestIntelligenceCheckpointChunksRoundTripAndCleanup(t *testing.T) {
 	wire := &checkpointHTTP{}
 	db := checkpointTestES(t, wire)
 	cp := largeCheckpoint(7)
-	if err := db.SaveIntelligenceCheckpoint(ctx, cp); err != nil {
+	if err := db.saveLegacyIntelligenceCheckpoint(ctx, cp); err != nil {
 		t.Fatal(err)
 	}
-	got, err := db.LoadIntelligenceCheckpoint(ctx)
+	got, err := db.loadLegacyIntelligenceCheckpoint(ctx)
 	if err != nil || !reflect.DeepEqual(got, cp) {
 		t.Fatalf("chunk roundtrip differs: %v", err)
 	}
@@ -125,21 +125,21 @@ func TestIntelligenceCheckpointChunksRoundTripAndCleanup(t *testing.T) {
 		t.Fatalf("unbounded request: chunks=%d max=%d", wire.chunks, wire.maxBody)
 	}
 	newCP := &IntelligenceCheckpoint{Revision: 8, State: json.RawMessage(`{}`), Complete: true}
-	if err := db.SaveIntelligenceCheckpoint(ctx, newCP); err != nil {
+	if err := db.saveLegacyIntelligenceCheckpoint(ctx, newCP); err != nil {
 		t.Fatal(err)
 	}
 	if len(wire.docs) != 1 {
 		t.Fatalf("old chunks not collected: %d docs", len(wire.docs))
 	}
 	// A late old prepare cannot replace the newer manifest or delete its data.
-	if err := db.SaveIntelligenceCheckpoint(ctx, cp); err != nil {
+	if err := db.saveLegacyIntelligenceCheckpoint(ctx, cp); err != nil {
 		t.Fatal(err)
 	}
-	got, err = db.LoadIntelligenceCheckpoint(ctx)
+	got, err = db.loadLegacyIntelligenceCheckpoint(ctx)
 	if err != nil || !reflect.DeepEqual(got, newCP) {
 		t.Fatalf("stale manifest replaced completion: %v", err)
 	}
-	if err := db.SaveIntelligenceCheckpoint(ctx, newCP); err != nil {
+	if err := db.saveLegacyIntelligenceCheckpoint(ctx, newCP); err != nil {
 		t.Fatal(err)
 	}
 	if len(wire.docs) != 1 {
@@ -151,23 +151,23 @@ func TestIntelligenceCheckpointPartialChunksDoNotPublish(t *testing.T) {
 	wire := &checkpointHTTP{}
 	db := checkpointTestES(t, wire)
 	old := &IntelligenceCheckpoint{Revision: 1, State: json.RawMessage(`{}`), Complete: true}
-	if err := db.SaveIntelligenceCheckpoint(ctx, old); err != nil {
+	if err := db.saveLegacyIntelligenceCheckpoint(ctx, old); err != nil {
 		t.Fatal(err)
 	}
 	wire.failChunk = 2
 	cp := largeCheckpoint(2)
-	if err := db.SaveIntelligenceCheckpoint(ctx, cp); err == nil {
+	if err := db.saveLegacyIntelligenceCheckpoint(ctx, cp); err == nil {
 		t.Fatal("partial chunks accepted")
 	}
-	got, err := db.LoadIntelligenceCheckpoint(ctx)
+	got, err := db.loadLegacyIntelligenceCheckpoint(ctx)
 	if err != nil || !reflect.DeepEqual(got, old) {
 		t.Fatal("partial save published manifest")
 	}
 	wire.failChunk = 0
-	if err := db.SaveIntelligenceCheckpoint(ctx, cp); err != nil {
+	if err := db.saveLegacyIntelligenceCheckpoint(ctx, cp); err != nil {
 		t.Fatal(err)
 	}
-	got, err = db.LoadIntelligenceCheckpoint(ctx)
+	got, err = db.loadLegacyIntelligenceCheckpoint(ctx)
 	if err != nil || !reflect.DeepEqual(got, cp) {
 		t.Fatalf("retry failed: %v", err)
 	}
@@ -180,7 +180,7 @@ func TestIntelligenceCheckpointPartialChunksDoNotPublish(t *testing.T) {
 			break
 		}
 	}
-	if _, err := db.LoadIntelligenceCheckpoint(ctx); err == nil {
+	if _, err := db.loadLegacyIntelligenceCheckpoint(ctx); err == nil {
 		t.Fatal("corrupted chunk accepted")
 	}
 }
@@ -193,7 +193,7 @@ func TestIntelligenceCheckpointRejectsUncertainAcknowledgments(t *testing.T) {
 			if chunked {
 				cp = largeCheckpoint(1)
 			}
-			if err := db.SaveIntelligenceCheckpoint(context.Background(), cp); err == nil {
+			if err := db.saveLegacyIntelligenceCheckpoint(context.Background(), cp); err == nil {
 				t.Fatal("empty 2xx acknowledged as durable")
 			}
 			if len(wire.gcRevisions) != 0 {
@@ -240,7 +240,7 @@ func TestIntelligenceCheckpointLargeCommandBatchBoundsHTTPRequests(t *testing.T)
 	}))
 	defer srv.Close()
 	db := &Elasticsearch{client: srv.Client(), baseURL: srv.URL, config: &config.DatabaseConfig{}}
-	if err := db.SaveIntelligenceCheckpoint(context.Background(), cp); err != nil {
+	if err := db.saveLegacyIntelligenceCheckpoint(context.Background(), cp); err != nil {
 		t.Fatal(err)
 	}
 	if chunks < 50 || !published || maxBody > 8<<20 {

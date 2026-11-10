@@ -23,6 +23,23 @@ func (m *Manager) RestartHoneypot(ctx context.Context, name string) error {
 		if err := validateSSHRuntimeImages(m.config, HiFiImageRevision); err != nil {
 			return err
 		}
+	}
+	selection, err := resolveSandbox(ctx, m.config, name)
+	if err != nil {
+		return err
+	}
+	if name == sshProxyHoneypot || selection.Runtime != "" {
+		cellLock, err := lockSSHCells(ctx, m.config.DataPath)
+		if err != nil {
+			return fmt.Errorf("lock honeypot restart: %w", err)
+		}
+		defer cellLock.Close()
+		selection, err = resolveSandbox(ctx, m.config, name)
+		if err != nil {
+			return err
+		}
+	}
+	if name == sshProxyHoneypot {
 		layout, err := readSSHLayout(m.config.GetDockerComposePath(), m.config.InstanceName)
 		if err != nil {
 			return err
@@ -30,11 +47,6 @@ func (m *Manager) RestartHoneypot(ctx context.Context, name string) error {
 		if err := validateSSHLayoutImages(layout, HiFiImageRevision); err != nil {
 			return err
 		}
-		cellLock, err := lockSSHCells(ctx, m.config.DataPath)
-		if err != nil {
-			return fmt.Errorf("lock SSH honeypot restart: %w", err)
-		}
-		defer cellLock.Close()
 		if err := sshStoreReady(m.config.DataPath); err != nil {
 			return err
 		}
@@ -51,11 +63,18 @@ func (m *Manager) RestartHoneypot(ctx context.Context, name string) error {
 			return err
 		}
 	}
-	args := append([]string{"compose", "-f", m.config.GetDockerComposePath(), "restart", name}, m.companionServices(name)...)
+	services := append([]string{name}, m.companionServices(name)...)
+	if err := validateSandboxCompose(m.config, m.config.GetDockerComposePath(), services, selection); err != nil {
+		return err
+	}
+	if err := verifySandboxContainers(ctx, m.config, services, selection); err != nil {
+		return err
+	}
+	args := append([]string{"compose", "-f", m.config.GetDockerComposePath(), "restart"}, services...)
 	cmd := exec.CommandContext(ctx, "docker", args...)
 	cmd.Dir = m.config.DataPath
 	if out, err := cmd.CombinedOutput(); err != nil {
 		return fmt.Errorf("failed to restart honeypot: %w\nOutput: %s", err, out)
 	}
-	return nil
+	return m.verifyStartedSandbox(ctx, services, selection)
 }

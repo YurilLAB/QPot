@@ -148,9 +148,14 @@ parties, is a liability — so the backend is wrapped in defense-in-depth:
    exposure. An older helper that lacks this check is incompatible and startup
    fails closed. SSH forwarding and tunnelling remain disabled.
 2. **Stronger isolation runtime — with a deception trade-off to understand.**
-   Run backends under gVisor (`runsc`) or Kata when available (QPot detects
-   these) so real RCE sits behind more than namespaces. **But the choice affects
-   deception, not just isolation:**
+   Select gVisor (`security.sandbox_mode: gvisor`, using `runsc`) or Kata
+   (`kata`, using `kata-runtime`) so real RCE sits behind more than namespaces.
+   The selected runtime must be registered with the Docker daemon; missing or
+   unverifiable runtime availability stops startup. HiFi cannot use
+   `sandbox_fallback: docker` to downgrade a requested stronger runtime.
+   Explicit `sandbox_mode: none` deliberately chooses Docker's default runtime
+   and requires the operator to accept that weaker boundary on an isolated
+   sensor host or VM. **The choice also affects deception:**
    - **Kata Containers** runs a Linux guest kernel in a lightweight VM. This
      avoids the host-kernel identity mismatch of plain containers, but VM
      devices and behavior can still be fingerprinted. It needs suitable
@@ -219,7 +224,7 @@ parties, is a liability — so the backend is wrapped in defense-in-depth:
 | 9 | **Log injection** via attacker-controlled fields | Events carry only trusted fields, encoded with `encoding/json`; fuzz-verified to emit exactly one valid JSON line. |
 | 10 | **Panic in one session** taking down the listener | Per-connection `recover`. |
 | 11 | **Backend used as an outbound attack platform** | Private per-slot bridges, host cell guard, ingress-only broker listener and disabled sshd forwarding. Organization peers are the only connected decoys. |
-| 12 | **Backend escape** | gVisor/Kata when available, limited capabilities/resources and no host mounts. Runtime boundaries still require validation on the deployment host. |
+| 12 | **Backend escape** | A requested gVisor/Kata runtime must be available and match the created containers; HiFi never automatically downgrades it. Limited capabilities/resources and no general host mounts remain necessary. Explicit ordinary Docker does not provide the stronger runtime boundary. |
 | 13 | **Cross-connection contamination / persistence** | The entire leased cell resets; failed resets or peer health checks quarantine the slot. |
 | 14 | **Privileged broker** (docker socket) | Broker is distroless nonroot with no docker access; resets are done by the host-side qpot control plane. |
 | 15 | **Host-key rotation tell** | The trusted host generates and persists app host keys once and hands them to each backend at start through Compose's `env_file`, never a mount; the backend installs them where Debian keeps them (`/etc/ssh/ssh_host_*_key`, root's alone, with each `.pub` beside it). Connected backup hosts have their own stable key, matching the scene's known_hosts. |
@@ -668,9 +673,10 @@ remove them separately only after verifying ownership and stopping all users.
 ## 7. Honest limitations
 
 * **Real RCE.** The backend is genuinely interactive. It is only as safe as the
-  isolation around it — run it under gVisor/Kata with the egress lock (the egress
-  lock is applied automatically; the gVisor/Kata runtime is applied when QPot
-  detects it on the host). Do not deploy HiFi mode on a host without a stronger
+  isolation around it — select gVisor/Kata with the egress lock. The egress
+  lock is applied automatically; a requested stronger runtime is mandatory,
+  checked before deployment and verified on the containers. Docker fallback
+  cannot satisfy a HiFi runtime request. Do not deploy HiFi mode without stronger
   isolation runtime for the backends if you cannot accept container-escape risk.
 * **Images must be published/built.** `qpot honeypot enable ssh-proxy` renders the
   stack referencing `ghcr.io/yurillab/qpot-ssh-proxy` and `…/qpot-ssh-backend`;

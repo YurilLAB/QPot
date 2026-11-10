@@ -2,13 +2,17 @@ package doctor
 
 import (
 	"context"
+	"errors"
 	"net"
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/qpot/qpot/internal/config"
+	"github.com/qpot/qpot/internal/hostsetup"
+	"github.com/qpot/qpot/internal/instance"
 )
 
 func listenLocal(t *testing.T) (net.Listener, int) {
@@ -78,4 +82,105 @@ func TestGeoIPCheck(t *testing.T) {
 	if c := GeoIPCheck(cfg); c.Level != "ok" {
 		t.Errorf("present file: %+v", c)
 	}
+}
+
+type sandboxDoctorObservation struct {
+	status instance.SandboxStatus
+	err    error
+}
+
+func (*sandboxDoctorObservation) ServiceStates(context.Context) (map[string]instance.ServiceState, error) {
+	return map[string]instance.ServiceState{}, nil
+}
+func (o *sandboxDoctorObservation) SandboxStatus(context.Context) (instance.SandboxStatus, error) {
+	return o.status, o.err
+}
+
+type sandboxDoctorWithoutObservation struct{}
+
+func (sandboxDoctorWithoutObservation) ServiceStates(context.Context) (map[string]instance.ServiceState, error) {
+	return map[string]instance.ServiceState{}, nil
+}
+
+func TestSandboxCheckRequiresObservedRuntime(t *testing.T) {
+	for _, tt := range []struct {
+		name                string
+		status              instance.SandboxStatus
+		err                 error
+		level, code, detail string
+	}{
+		{name: "actual gVisor", status: instance.SandboxStatus{Runtime: "runsc", Verified: true, Services: map[string]string{"cowrie": "runsc"}}, level: "ok", detail: `verified runtime "runsc"`},
+		{name: "explicit none with mixed runtimes", status: instance.SandboxStatus{Runtime: "mixed", Verified: true, Services: map[string]string{"cowrie": "runc", "conpot": "runsc"}}, level: "ok", detail: `verified runtimes "runc", "runsc"`},
+		{name: "actual standard Docker", status: instance.SandboxStatus{Runtime: "runc", Verified: true, Services: map[string]string{"cowrie": "runc"}}, level: "ok", detail: `verified runtime "runc"`},
+		{name: "explicit fallback", status: instance.SandboxStatus{Requested: "gvisor", Runtime: "runc", Fallback: true, Verified: true, Services: map[string]string{"cowrie": "runc"}}, level: "warn", code: "QP-DOCKER-011", detail: "explicit Docker fallback"},
+		{name: "capability without observation", status: instance.SandboxStatus{Runtime: "runsc"}, level: "fail", code: "QP-DOCKER-011", detail: "no running honeypot"},
+		{name: "missing runtime", status: instance.SandboxStatus{Verified: true, Services: map[string]string{"cowrie": ""}}, level: "fail", code: "QP-DOCKER-011", detail: "no running honeypot"},
+		{name: "unobserved service runtime", status: instance.SandboxStatus{Runtime: "runsc", Verified: true, Services: map[string]string{"cowrie": ""}}, level: "fail", code: "QP-DOCKER-011", detail: "no running honeypot"},
+		{name: "missing services", status: instance.SandboxStatus{Runtime: "runsc", Verified: true}, level: "fail", code: "QP-DOCKER-011", detail: "no running honeypot"},
+		{name: "unavailable", err: hostsetup.E("QP-DOCKER-011").Wrap(errors.New("private diagnostics")), level: "fail", code: "QP-DOCKER-011"},
+		{name: "mismatch", status: instance.SandboxStatus{Runtime: "runc", Services: map[string]string{"cowrie": "runc"}}, err: hostsetup.E("QP-DOCKER-012").Wrap(errors.New("private diagnostics")), level: "fail", code: "QP-DOCKER-012", detail: `observed runtime "runc"`},
+		{name: "bad policy", err: hostsetup.E("QP-DOCKER-010").Wrap(errors.New("private diagnostics")), level: "fail", code: "QP-DOCKER-010"},
+		{name: "uncoded observation failure", err: errors.New("private diagnostics"), level: "fail", code: "QP-DOCKER-011"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			got := sandboxCheck(t.Context(), config.Default("isolation"), &sandboxDoctorObservation{status: tt.status, err: tt.err})
+			if got.Name != "honeypot isolation" || got.Level != tt.level || got.Code != tt.code || !strings.Contains(got.Detail, tt.detail) || strings.Contains(got.Detail, "private diagnostics") {
+				t.Fatalf("unexpected isolation check: %+v", got)
+			}
+		})
+	}
+	if got := sandboxCheck(t.Context(), config.Default("isolation"), sandboxDoctorWithoutObservation{}); got.Level != "fail" || got.Code != "QP-DOCKER-011" {
+		t.Fatalf("missing observer falsely passed: %+v", got)
+	}
+	cfg := config.Default("no-honeypots")
+	cfg.Honeypots = map[string]config.HoneypotConfig{}
+	if got := sandboxCheck(t.Context(), cfg, sandboxDoctorWithoutObservation{}); got.Level != "ok" || !strings.Contains(got.Detail, "no enabled honeypots") {
+		t.Fatalf("no-honeypot deployment requires unrelated runtime: %+v", got)
+	}
+}
+
+func TestHealthChecksIncludeSandboxObservation(t *testing.T) {
+	cfg := config.Default("health-isolation")
+	cfg.Honeypots = map[string]config.HoneypotConfig{"ddospot": {Enabled: true}}
+	cfg.WebUI.Enabled = false
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel() // Keep unrelated database inspection local, bounded and offline.
+	checks := HealthChecks(ctx, cfg, &sandboxDoctorObservation{status: instance.SandboxStatus{Runtime: "runsc", Verified: true, Services: map[string]string{"ddospot": "runsc"}}}, nil)
+	for _, check := range checks {
+		if check.Name == "honeypot isolation" {
+			if check.Level != "ok" || !strings.Contains(check.Detail, `"runsc"`) {
+				t.Fatalf("incorrect isolation result: %+v", check)
+			}
+			return
+		}
+	}
+	t.Fatal("health report omitted the actual isolation observation")
+}
+
+func TestSandboxCheckInspectsRunningOrphans(t *testing.T) {
+	cfg := config.Default("orphaned-isolation")
+	cfg.Honeypots = map[string]config.HoneypotConfig{}
+	observer := &sandboxDoctorObservation{
+		status: instance.SandboxStatus{Requested: "gvisor", Runtime: "runc", Services: map[string]string{"cowrie": "runc"}},
+		err:    hostsetup.E("QP-DOCKER-012").Wrap(errors.New("private orphan diagnostics")),
+	}
+	got := sandboxCheck(t.Context(), cfg, observer)
+	if got.Level != "fail" || got.Code != "QP-DOCKER-012" || !strings.Contains(got.Detail, `observed runtime "runc"`) || strings.Contains(got.Detail, "private orphan diagnostics") {
+		t.Fatalf("disabled configuration hid a running container runtime mismatch: %+v", got)
+	}
+	observer.err = nil
+	observer.status = instance.SandboxStatus{Requested: "none", Runtime: "runc", Verified: true, Services: map[string]string{"cowrie": "runc"}}
+	cfg.Security.SandboxMode = "none"
+	if got := sandboxCheck(t.Context(), cfg, observer); got.Level != "ok" || !strings.Contains(got.Detail, `verified runtime "runc"`) {
+		t.Fatalf("explicit ordinary-Docker orphan was not observed: %+v", got)
+	}
+	observer.status.Verified = false
+	if got := sandboxCheck(t.Context(), cfg, observer); got.Level != "fail" || got.Code != "QP-DOCKER-011" {
+		t.Fatalf("unverified running orphan passed isolation: %+v", got)
+	}
+	observer.status = instance.SandboxStatus{Services: map[string]string{}}
+	if got := sandboxCheck(t.Context(), cfg, observer); got.Level != "ok" || !strings.Contains(got.Detail, "no enabled or running honeypots") {
+		t.Fatalf("empty deployment needs unrelated runtime: %+v", got)
+	}
+
 }

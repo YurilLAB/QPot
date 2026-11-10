@@ -928,6 +928,13 @@ func (ts *TimescaleDB) GetPoolStats() PoolStats {
 
 // TagEvent updates the ATT&CK classification fields on an existing event row.
 func (ts *TimescaleDB) TagEvent(ctx context.Context, event *Event) error {
+	if _, leased := intelligenceLeaseFromContext(ctx); leased {
+		approved, err := intelligenceLeaseEvent(ctx, ts, event)
+		if err != nil {
+			return err
+		}
+		event = approved
+	}
 	if ts.pool == nil {
 		return fmt.Errorf("not connected")
 	}

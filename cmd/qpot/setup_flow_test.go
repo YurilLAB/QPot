@@ -147,7 +147,7 @@ func testEnv(t *testing.T, d *fakeDocker, stdin string, tty bool) (*setupEnv, *b
 			return []check{{Name: "database", Level: "ok", Detail: "running"}}
 		},
 		geoip:      func(ctx context.Context, cfg *config.Config) error { return errors.New("offline") },
-		runtimes:   func(context.Context) string { return "standard Docker containers" },
+		runtimes:   func(context.Context, *config.Config, bool) string { return "standard Docker containers" },
 		daemonWait: time.Second,
 	}
 	return env, out, &started
@@ -741,5 +741,92 @@ func TestSetupAttachesToARunningStack(t *testing.T) {
 	}
 	if serves != 1 {
 		t.Errorf("control plane started %d times, want 1", serves)
+	}
+}
+
+// Neither configured runtime nor daemon registration establishes what the
+// containers actually use; an ordinary-Docker selection remains ordinary.
+func TestRuntimeSummaryRequiresObservedContainers(t *testing.T) {
+	tests := []struct {
+		name, mode, fallback string
+		started              bool
+		status               instance.SandboxStatus
+		err                  error
+		want                 string
+		inspectCalls         int
+	}{
+		{name: "configured only", mode: "gvisor", want: "configured gVisor (runsc); container runtime not yet verified"},
+		{name: "explicit none without start", mode: "none", want: "configured Docker default runtime; container runtime not yet verified"},
+		{name: "explicit none with mixed runtimes", mode: "none", started: true, status: instance.SandboxStatus{Runtime: "mixed", Verified: true, Services: map[string]string{"cowrie": "runc", "conpot": "runsc"}}, want: "mixed container runtimes: standard Docker containers (runc), gVisor (runsc) (verified on honeypot containers)", inspectCalls: 1},
+		{name: "ordinary Docker", mode: "none", started: true, status: instance.SandboxStatus{Runtime: "runc", Verified: true, Services: map[string]string{"cowrie": "runc"}}, want: "standard Docker containers (runc) (verified on honeypot containers)", inspectCalls: 1},
+		{name: "selected Kata", mode: "kata", started: true, status: instance.SandboxStatus{Runtime: "kata-runtime", Verified: true, Services: map[string]string{"cowrie": "kata-runtime"}}, want: "Kata Containers (kata-runtime) (verified on honeypot containers)", inspectCalls: 1},
+		{name: "selected gVisor", mode: "gvisor", started: true, status: instance.SandboxStatus{Runtime: "runsc", Verified: true, Services: map[string]string{"cowrie": "runsc"}}, want: "gVisor (runsc) (verified on honeypot containers)", inspectCalls: 1},
+		{name: "registered but no observed containers", mode: "gvisor", started: true, status: instance.SandboxStatus{Runtime: "runsc"}, want: "configured gVisor (runsc); no running honeypot runtime verified", inspectCalls: 1},
+		{name: "unobserved service runtime", mode: "gvisor", started: true, status: instance.SandboxStatus{Runtime: "runsc", Verified: true, Services: map[string]string{"cowrie": ""}}, want: "configured gVisor (runsc); no running honeypot runtime verified", inspectCalls: 1},
+		{name: "no observed services", mode: "gvisor", started: true, status: instance.SandboxStatus{Runtime: "runsc", Verified: true}, want: "configured gVisor (runsc); no running honeypot runtime verified", inspectCalls: 1},
+		{name: "empty observed runtime", mode: "gvisor", started: true, status: instance.SandboxStatus{Verified: true}, want: "configured gVisor (runsc); no running honeypot runtime verified", inspectCalls: 1},
+		{name: "explicit fallback", mode: "gvisor", fallback: "docker", started: true, status: instance.SandboxStatus{Runtime: "runc", Verified: true, Fallback: true, Services: map[string]string{"cowrie": "runc"}}, want: "standard Docker containers (runc) (explicit Docker fallback; requested gVisor (runsc))", inspectCalls: 1},
+		{name: "verification error", mode: "gvisor", started: true, err: hostsetup.E("QP-DOCKER-011").Wrap(errors.New("secret-diagnostic")), want: "QP-DOCKER-011", inspectCalls: 1},
+		{name: "runtime mismatch", mode: "gvisor", started: true, status: instance.SandboxStatus{Runtime: "runc", Services: map[string]string{"cowrie": "runc"}}, err: hostsetup.E("QP-DOCKER-012").Wrap(errors.New("secret-diagnostic")), want: `observed container runtimes: "runc"`, inspectCalls: 1},
+		{name: "unsupported Firejail", mode: "firejail", started: true, want: "QP-DOCKER-010"},
+		{name: "unsupported mode", mode: "gvsior", started: true, want: "QP-DOCKER-010"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := config.Default("summary")
+			cfg.Security.SandboxMode = tt.mode
+			cfg.Security.SandboxFallback = tt.fallback
+			calls := 0
+			summary := realRuntimes(func(context.Context, *config.Config) (instance.SandboxStatus, error) {
+				calls++
+				return tt.status, tt.err
+			})(t.Context(), cfg, tt.started)
+			if !strings.Contains(summary, tt.want) || strings.Contains(summary, "secret-diagnostic") || calls != tt.inspectCalls {
+				t.Fatalf("summary=%q, inspect calls=%d; want %q calls=%d", summary, calls, tt.want, tt.inspectCalls)
+			}
+		})
+	}
+}
+
+func TestSetupSummaryRefreshesRuntimeAfterStart(t *testing.T) {
+	for _, noStart := range []bool{false, true} {
+		t.Run(fmt.Sprintf("noStart=%v", noStart), func(t *testing.T) {
+			env, out, started := testEnv(t, ready(), "", false)
+			var stages []bool
+			env.runtimes = func(_ context.Context, cfg *config.Config, running bool) string {
+				if cfg.InstanceName != "runtime-flow" || cfg.Security.SandboxMode != "gvisor" {
+					t.Fatalf("summary used another configuration: %+v", cfg.Security)
+				}
+				stages = append(stages, running)
+				if running {
+					return "observed-runtime-marker"
+				}
+				return "configured-runtime-marker"
+			}
+			opts := setupOptions{instance: "runtime-flow", instanceSet: true, honeypots: "cowrie", honeypotsSet: true, port: freePort(t), portSet: true, noStart: noStart, timeout: time.Second}
+			if err := runSetup(t.Context(), env, opts); err != nil {
+				t.Fatalf("setup runtime summary: %v\n%s", err, out)
+			}
+			want := []bool{false, true}
+			marker := "observed-runtime-marker"
+			if noStart {
+				want = []bool{false}
+				marker = "configured-runtime-marker"
+			}
+			if len(stages) != len(want) {
+				t.Fatalf("summary stages=%v want%v", stages, want)
+			}
+			for index, value := range want {
+				if stages[index] != value {
+					t.Fatalf("summary stages=%v want%v", stages, want)
+				}
+			}
+			if *started == noStart || !strings.Contains(out.String(), marker) {
+				t.Fatalf("summary not refreshed with effective runtime: started=%v\n%s", *started, out)
+			}
+			if !noStart && strings.Contains(out.String(), "configured-runtime-marker") {
+				t.Fatalf("final summary kept an unverified runtime: %s", out)
+			}
+		})
 	}
 }

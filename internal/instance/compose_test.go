@@ -145,19 +145,21 @@ func TestComposeHoneypotHasNoSecretMount(t *testing.T) {
 	}
 }
 
-// TestComposeRuntimeGatedOnAvailability verifies the gVisor/Kata runtime line is
-// only emitted when the sandbox runtime is actually available. Hide the runtime
-// executables so the result does not depend on the developer's installed tools
-// or Docker daemon. NewSandbox must fall back to "none" in both cases.
-func TestComposeRuntimeGatedOnAvailability(t *testing.T) {
+// Offline rendering retains the requested isolation even on a host where its
+// runtime is absent. Only execution preflight may resolve an explicit fallback.
+func TestComposeRuntimePreservesRequestedIsolationOffline(t *testing.T) {
 	t.Setenv("PATH", t.TempDir())
 	for _, mode := range []string{"gvisor", "kata"} {
 		t.Run(mode, func(t *testing.T) {
 			cfg := config.Default("compose-test")
 			cfg.Security.SandboxMode = mode
 			out := renderComposeCfg(t, cfg)
-			if strings.Contains(out, "runtime: runsc") || strings.Contains(out, "runtime: kata-runtime") {
-				t.Error("compose emitted a sandbox runtime line while the runtime is unavailable; would break docker compose up")
+			want := "runtime: runsc"
+			if mode == "kata" {
+				want = "runtime: kata-runtime"
+			}
+			if !strings.Contains(serviceBlock(out, "cowrie"), want) {
+				t.Error("offline rendering silently dropped the requested isolation")
 			}
 		})
 	}

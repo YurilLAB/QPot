@@ -1257,6 +1257,13 @@ func esCategories(c []string) []string {
 
 // TagEvent updates the ATT&CK classification fields on matching events.
 func (es *Elasticsearch) TagEvent(ctx context.Context, event *Event) error {
+	if _, leased := intelligenceLeaseFromContext(ctx); leased {
+		approved, err := intelligenceLeaseEvent(ctx, es, event)
+		if err != nil {
+			return err
+		}
+		event = approved
+	}
 	// Prefer the document id read back by GetUnclassifiedEvents;
 	// (source_ip, timestamp) is ambiguous when events share a timestamp.
 	var query interface{} = map[string]interface{}{

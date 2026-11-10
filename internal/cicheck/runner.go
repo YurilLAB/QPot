@@ -2,6 +2,7 @@ package cicheck
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -64,6 +65,10 @@ func (r *Runner) Check(w *Workflow, j Job) error {
 	if len(j.Matrix) > 0 {
 		matrix = j.Matrix[0]
 	}
+	services := make(map[string]string, len(j.Services))
+	for _, service := range j.Services {
+		services[service.Name] = "declared"
+	}
 	for _, s := range j.Steps {
 		switch {
 		case s.Uses != "" && s.Run != "":
@@ -79,11 +84,11 @@ func (r *Runner) Check(w *Workflow, j Job) error {
 			problems = append(problems, fmt.Sprintf("step %q has if: %s", s.Label(), s.If))
 		}
 		if s.Uses == "" {
-			if err := checkExpr(s.Run, matrix); err != nil {
+			if err := checkExpr(s.Run, matrix, services); err != nil {
 				problems = append(problems, fmt.Sprintf("step %q: %v", s.Label(), err))
 			}
 			for k, v := range s.Env {
-				if err := checkExpr(v, matrix); err != nil {
+				if err := checkExpr(v, matrix, services); err != nil {
 					problems = append(problems, fmt.Sprintf("step %q env %s: %v", s.Label(), k, err))
 				}
 			}
@@ -93,6 +98,11 @@ func (r *Runner) Check(w *Workflow, j Job) error {
 		if sv.Image == "" {
 			problems = append(problems, "service "+sv.Name+" has no image")
 		}
+		for _, port := range sv.Ports {
+			if _, err := localServicePort(port); err != nil {
+				problems = append(problems, fmt.Sprintf("service %s: %v", sv.Name, err))
+			}
+		}
 	}
 	if len(problems) > 0 {
 		return fmt.Errorf("job %s: %s", j.ID, strings.Join(problems, "; "))
@@ -101,8 +111,8 @@ func (r *Runner) Check(w *Workflow, j Job) error {
 }
 
 // checkExpr accepts expressions whose value the runner knows: matrix
-// values and environment variables.
-func checkExpr(s string, matrix map[string]string) error {
+// values, environment variables and declared service-container IDs.
+func checkExpr(s string, matrix, services map[string]string) error {
 	for _, m := range exprRe.FindAllStringSubmatch(s, -1) {
 		scope, key, _ := strings.Cut(strings.TrimSpace(m[1]), ".")
 		switch scope {
@@ -110,6 +120,11 @@ func checkExpr(s string, matrix map[string]string) error {
 		case "matrix":
 			if _, ok := matrix[key]; !ok {
 				return fmt.Errorf("unknown ${{ %s }}", m[1])
+			}
+		case "job":
+			service, valid := serviceIDExpression(strings.TrimSpace(m[1]))
+			if _, known := services[service]; !valid || !known {
+				return fmt.Errorf("unknown service ID expression ${{ %s }}", m[1])
 			}
 		default:
 			return fmt.Errorf("the expression ${{ %s }} has no local value", m[1])
@@ -120,9 +135,10 @@ func checkExpr(s string, matrix map[string]string) error {
 
 // jobState is one run of a job (one matrix entry).
 type jobState struct {
-	env    map[string]string
-	matrix map[string]string
-	tmp    string
+	env      map[string]string
+	matrix   map[string]string
+	services map[string]string
+	tmp      string
 }
 
 func (st *jobState) environ(extra map[string]string) []string {
@@ -229,7 +245,7 @@ func (r *Runner) runOnce(ctx context.Context, w *Workflow, j Job, matrix map[str
 		}
 	}
 	stop, err := r.startServices(ctx, j, st)
-	defer stop()
+	defer func() { err = errors.Join(err, stop()) }()
 	if err != nil {
 		return err
 	}
@@ -263,13 +279,13 @@ func (r *Runner) runOnce(ctx context.Context, w *Workflow, j Job, matrix map[str
 }
 
 func (r *Runner) runStep(ctx context.Context, st *jobState, i int, s Step) error {
-	script, err := Expand(s.Run, st.matrix, st.env)
+	script, err := expandWithServices(s.Run, st.matrix, st.env, st.services)
 	if err != nil {
 		return err
 	}
 	stepEnv := map[string]string{}
 	for k, v := range s.Env {
-		x, err := Expand(v, st.matrix, st.env)
+		x, err := expandWithServices(v, st.matrix, st.env, st.services)
 		if err != nil {
 			return err
 		}
@@ -455,20 +471,52 @@ func firstNonEmpty(s ...string) string {
 	return ""
 }
 
+// localServicePort preserves the workflow's explicit IPv4 loopback binding.
+// Legacy host:container pairs also bind locally; other addresses are refused.
+func localServicePort(mapping string) (string, error) {
+	ports := strings.TrimPrefix(mapping, "127.0.0.1:")
+	pair, protocol, hasProtocol := strings.Cut(ports, "/")
+	host, container, ok := strings.Cut(pair, ":")
+	validPort := func(port string) bool {
+		if port == "" || strings.Trim(port, "0123456789") != "" {
+			return false
+		}
+		number, err := strconv.Atoi(port)
+		return err == nil && number > 0 && number <= 65535
+	}
+	if !ok || !validPort(host) || !validPort(container) || hasProtocol && protocol != "tcp" && protocol != "udp" {
+		return "", fmt.Errorf("service port %q must be a host:container pair bound to 127.0.0.1", mapping)
+	}
+	return "127.0.0.1:" + ports, nil
+}
+
 // startServices starts the job's service containers with docker, published
 // on 127.0.0.1 only, and waits until their health checks pass.
-func (r *Runner) startServices(ctx context.Context, j Job, st *jobState) (func(), error) {
-	var started []string
-	stop := func() {
-		for _, n := range started {
-			_ = exec.Command("docker", "rm", "-f", n).Run() // #nosec G204 -- our own container names
+func (r *Runner) startServices(ctx context.Context, j Job, st *jobState) (func() error, error) {
+	if st.services == nil {
+		st.services = make(map[string]string, len(j.Services))
+	}
+	owner := filepath.Base(st.tmp)
+	attempted := false
+	stop := func() error {
+		if !attempted {
+			return nil
 		}
+		// The job context may already be canceled. Cleanup still gets a short,
+		// independent bound so partial startup cannot leak an owned database.
+		cleanupCtx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+		defer cancel()
+		return r.cleanupServiceContainers(cleanupCtx, owner)
 	}
 	for _, sv := range j.Services {
-		name := fmt.Sprintf("qpot-ci-local-%s-%s-%d", j.ID, sv.Name, os.Getpid())
+		name := fmt.Sprintf("qpot-ci-local-%s-%s-%s", j.ID, sv.Name, owner)
 		args := []string{"run", "-d", "--name", name}
 		for _, p := range sv.Ports {
-			args = append(args, "-p", "127.0.0.1:"+p)
+			mapping, err := localServicePort(p)
+			if err != nil {
+				return stop, fmt.Errorf("service %s: %w", sv.Name, err)
+			}
+			args = append(args, "-p", mapping)
 		}
 		keys := make([]string, 0, len(sv.Env))
 		for k := range sv.Env {
@@ -482,13 +530,24 @@ func (r *Runner) startServices(ctx context.Context, j Job, st *jobState) (func()
 		if err != nil {
 			return stop, fmt.Errorf("service %s options: %w", sv.Name, err)
 		}
-		args = append(append(args, opts...), sv.Image)
+		args = append(args, opts...)
+		args = append(args, "--label", "qpot.ci-local.owner="+owner, sv.Image)
 		cmd := exec.CommandContext(ctx, "docker", args...) // #nosec G204 -- the workflow's own service definition
-		cmd.Stdout, cmd.Stderr = r.Out, r.Out
-		if err := cmd.Run(); err != nil {
+		var output bytes.Buffer
+		// Keep Docker's ID separate from diagnostics. Forward it only after
+		// stderr has drained: the caller's output writer need not be concurrent.
+		cmd.Stdout, cmd.Stderr = &output, r.Out
+		attempted = true
+		runErr := cmd.Run()
+		_, outputErr := r.Out.Write(output.Bytes())
+		if err := errors.Join(runErr, outputErr); err != nil {
 			return stop, fmt.Errorf("service %s needs Docker (docker run failed: %v)", sv.Name, err)
 		}
-		started = append(started, name)
+		id := strings.TrimSpace(output.String())
+		if !validServiceID(id) {
+			return stop, fmt.Errorf("service %s did not return an actual container ID", sv.Name)
+		}
+		st.services[sv.Name] = id
 		fmt.Fprintf(r.Out, "service %s: %s\n", sv.Name, name)
 		deadline := time.Now().Add(3 * time.Minute)
 		for {
@@ -504,6 +563,34 @@ func (r *Runner) startServices(ctx context.Context, j Job, st *jobState) (func()
 		}
 	}
 	return stop, nil
+}
+
+func (r *Runner) cleanupServiceContainers(ctx context.Context, owner string) error {
+	// A failed docker run can have created a stopped container without
+	// returning its ID. Query only this job's unique ownership label.
+	list := exec.CommandContext(ctx, "docker", "ps", "--all", "--no-trunc", "--filter", "label=qpot.ci-local.owner="+owner, "--format", "{{.ID}}") // #nosec G204 -- generated per-job ownership label
+	list.Stderr = r.Out
+	killGroup(list)
+	output, err := list.Output()
+	if err != nil {
+		return fmt.Errorf("list owned CI service containers for cleanup: %w", err)
+	}
+	ids := strings.Fields(string(output))
+	for _, id := range ids {
+		if !validServiceID(id) {
+			return fmt.Errorf("cleanup refused an invalid owned service container ID")
+		}
+	}
+	var failures []error
+	for _, id := range ids {
+		remove := exec.CommandContext(ctx, "docker", "rm", "-f", id) // #nosec G204 -- full IDs selected by the unique ownership label
+		remove.Stdout, remove.Stderr = r.Out, r.Out
+		killGroup(remove)
+		if err := remove.Run(); err != nil {
+			failures = append(failures, fmt.Errorf("remove owned CI service container %s: %w", id, err))
+		}
+	}
+	return errors.Join(failures...)
 }
 
 // splitWords splits a docker options string into words, honouring double

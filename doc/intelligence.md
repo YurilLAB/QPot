@@ -127,16 +127,55 @@ Before it marks source events as classified, the worker saves a database
 checkpoint and persists its IOC totals and active TTP sessions. Interrupted
 batches replay without adding their observations twice.
 
-Run one intelligence worker per database:
+Workers acquire an exclusive lease from the database before recovering a
+checkpoint or classifying events. The database assigns a monotonically
+increasing fencing token and reserves checkpoint revisions globally, so another
+host, account or hostname alias cannot independently reuse a revision. The
+30-second lease is renewed every 10 seconds, independently of the batch cadence.
+Expiry is evaluated by the database rather than the worker's wall clock.
 
-- A local OS-account lock prevents duplicate workers on one host.
-- Separate hosts, accounts or database-host aliases still need coordinated
-  ownership.
-- Keep the `qpot/intelligence-locks` state under your OS user configuration
-  directory: it reserves revisions across interrupted saves.
-- Before moving ownership to another host or account, transfer that state or
-  verify that all earlier database requests have finished. Stopping the old
-  process alone does not settle requests already in flight.
+PostgreSQL/TimescaleDB and Elasticsearch use atomic control records. ClickHouse
+requires Keeper and strict KeeperMap compare-and-swap operations; its ordinary
+ReplacingMergeTree tables cannot provide exclusive ownership. If coordination
+is unavailable, the worker stops with `QP-INTEL-008`; event collection and the
+rest of the control plane remain available.
+
+QPot's managed ClickHouse deployment configures persistent embedded Keeper in
+the database container. Its coordination ports are never published to the host;
+keep the database's trusted container networks separate from attacker-facing
+networks. External ClickHouse installations must provision Keeper themselves.
+The initial ClickHouse implementation supports one physical database catalog
+with local MergeTree datasets; it rejects distributed, replicated and view-based
+datasets rather than allowing separate catalogs to claim the same work.
+
+PostgreSQL uses the database-wide `qpot_intelligence` coordination schema and
+binds it to the actual event and projection tables. Provision that schema once
+with an administrator before using a restricted worker role; normal workers
+need access to its existing tables, not permission to create schemas. Different
+search paths cannot create independent ownership of the same projections.
+
+The lease record also publishes the exact prepared checkpoint before its IOC,
+session and event-tag writes. A successor recovers that same durable record.
+An already accepted old projection can finish, but uses the same recorded
+payload at an older globally reserved revision. A stale owner cannot publish a
+different checkpoint, reserve another revision or complete a batch after
+takeover. Worker replay requires concrete database event IDs; it never falls
+back to tagging other rows by source IP and timestamp.
+
+Loss of ownership or an ambiguous renewal cancels current work, prevents a new
+background shutdown drain, and stops the worker with `QP-INTEL-007`. An ordinary
+shutdown can make one bounded recovery attempt while its lease is still valid.
+Releasing a lease preserves its fencing and revision history. It does not delete
+the ownership record. After an ungraceful exit, the expired lease can be acquired
+by another updated control plane.
+
+A local OS-account lock remains as additional exclusion. Keep its
+`qpot/intelligence-locks` state under the OS user configuration directory: its
+checked counter supplies the migration revision floor. Before upgrading to the
+lease protocol, stop all older workers and settle their in-flight database
+requests. Older binaries do not send fencing tokens and cannot safely run
+alongside the upgraded workers. Preserve existing checkpoints and local
+reservation files; do not delete ownership state to force a takeover.
 
 Canary notifications remain at-least-once across crashes and use their own
 direct IOC path. Recovery failures have `QP-INTEL-` codes, which
@@ -150,8 +189,10 @@ The authenticated intelligence summary reports the worker's state:
 - On failure, `worker_error_code` and a catalogue-only `worker_error_remedy`,
   without database error details.
 
-A retrying worker keeps its normal cadence. A stopped worker needs the control
-plane restarted once its cause is fixed.
+A worker waiting for its first lease is `not_started`, not healthy. A retrying
+worker keeps its normal cadence. Ownership loss is `stopped`, including while
+an already accepted server request is returning. A stopped worker needs a new
+control-plane start once its cause is fixed.
 
 ## API
 

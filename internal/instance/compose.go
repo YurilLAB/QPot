@@ -196,6 +196,9 @@ func (g *ComposeGenerator) databaseHostPort() int {
 type ComposeGenerator struct {
 	Config  *config.Config
 	Sandbox *security.Sandbox
+	// executionSelection is supplied only by a live startup preflight. Offline
+	// rendering keeps the declared runtime even when it is not installed.
+	executionSelection *security.RuntimeSelection
 	// ReservedPorts / ReservedSubnets are host ports and subnets other
 	// instances already use (see siblingReservations); allocation skips them.
 	ReservedPorts   map[int]bool
@@ -460,6 +463,23 @@ func dbPidsLimit(globalMax int64) int64 {
 }
 
 func (g *ComposeGenerator) Generate() (string, error) {
+	if g == nil || g.Config == nil {
+		return "", fmt.Errorf("compose configuration is missing")
+	}
+	declared, _ := security.NewSandbox(&g.Config.Security)
+	if _, err := declared.Selection(); err != nil {
+		return "", err
+	}
+	rendered := *g
+	rendered.Sandbox = declared // An injected nil/stale sandbox cannot weaken policy.
+	if g.executionSelection != nil {
+		if err := declared.ValidateSelection(*g.executionSelection, requiresStrongSandbox(g.Config)); err != nil {
+			return "", err
+		}
+		effective := g.Config.Security
+		effective.SandboxMode = string(g.executionSelection.Effective)
+		rendered.Sandbox, _ = security.NewSandbox(&effective)
+	}
 	if err := config.ValidateSSHEnvironment(g.Config); err != nil {
 		return "", err
 	}
@@ -554,6 +574,7 @@ services:
     volumes:
       - {{.Config.GetDatabasePath}}:/var/lib/clickhouse
       - {{.Config.DataPath}}/clickhouse-config:/etc/clickhouse-server/conf.d
+      - {{yamlStr (printf "%s:/etc/clickhouse-server/config.d/qpot-keeper.xml:ro" (clickhouseKeeperPath .Config))}}
       - {{.Config.DataPath}}/qpot.id:/run/secrets/qpot_id:ro
     ports:
       - "127.0.0.1:{{databaseHostPort}}:9000"
@@ -1244,6 +1265,7 @@ services:
 		},
 		"GetHoneypotImage":       GetHoneypotImage,
 		"clickhouseImage":        func() string { return ClickHouseImage },
+		"clickhouseKeeperPath":   clickHouseKeeperPath,
 		"timescaleImage":         func() string { return TimescaleDBImage },
 		"collectorImage":         func() string { return CollectorImage },
 		"collectorMounts":        collectorMounts,
@@ -1391,7 +1413,7 @@ services:
 	t := template.Must(template.New("compose").Funcs(funcMap).Parse(tmpl))
 
 	var buf bytes.Buffer
-	if err := t.Execute(&buf, g); err != nil {
+	if err := t.Execute(&buf, &rendered); err != nil {
 		return "", fmt.Errorf("failed to execute template: %w", err)
 	}
 

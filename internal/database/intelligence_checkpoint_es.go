@@ -88,6 +88,12 @@ func (es *Elasticsearch) readIntelligenceCheckpointDocument(ctx context.Context,
 }
 
 func (es *Elasticsearch) LoadIntelligenceCheckpoint(ctx context.Context) (*IntelligenceCheckpoint, error) {
+	if cp, handled, err := intelligenceLeaseLoad(ctx, es); handled {
+		return cp, err
+	}
+	return es.loadLegacyIntelligenceCheckpoint(ctx)
+}
+func (es *Elasticsearch) loadLegacyIntelligenceCheckpoint(ctx context.Context) (*IntelligenceCheckpoint, error) {
 	doc, err := es.readIntelligenceCheckpointDocument(ctx, "worker")
 	if err != nil || doc == nil {
 		return nil, err
@@ -140,6 +146,12 @@ func (es *Elasticsearch) LoadIntelligenceCheckpoint(ctx context.Context) (*Intel
 }
 
 func (es *Elasticsearch) SaveIntelligenceCheckpoint(ctx context.Context, cp *IntelligenceCheckpoint) error {
+	if handled, err := intelligenceLeaseSave(ctx, es, cp); handled {
+		return err
+	}
+	return es.saveLegacyIntelligenceCheckpoint(ctx, cp)
+}
+func (es *Elasticsearch) saveLegacyIntelligenceCheckpoint(ctx context.Context, cp *IntelligenceCheckpoint) error {
 	payload, err := json.Marshal(cp)
 	if err != nil {
 		return err

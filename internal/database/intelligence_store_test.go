@@ -50,7 +50,7 @@ func TestIntelligenceClickHouseReplayUsesAbsoluteVersionedBatches(t *testing.T) 
 	now := time.Now().UTC()
 	ioc := &IOC{ID: "ip:test:cowrie", Type: "ip", Value: "test", Honeypot: "cowrie", Count: 7, FirstSeen: now, LastSeen: now}
 	for n := 0; n < 2; n++ {
-		if err := db.ReplaceIntelligenceIOCs(ctx, 4, []*IOC{ioc}); err != nil {
+		if err := db.replaceLegacyIntelligenceIOCs(ctx, 4, []*IOC{ioc}); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -65,7 +65,7 @@ func TestIntelligenceClickHouseReplayUsesAbsoluteVersionedBatches(t *testing.T) 
 		t.Fatal("projection mutated input")
 	}
 	cp := &IntelligenceCheckpoint{Revision: 5, State: json.RawMessage(`{"active":[]}`)}
-	if err := db.SaveIntelligenceCheckpoint(ctx, cp); err != nil {
+	if err := db.saveLegacyIntelligenceCheckpoint(ctx, cp); err != nil {
 		t.Fatal(err)
 	}
 	var saved IntelligenceCheckpoint
@@ -76,7 +76,7 @@ func TestIntelligenceClickHouseReplayUsesAbsoluteVersionedBatches(t *testing.T) 
 		t.Fatalf("checkpoint revision %d", saved.Revision)
 	}
 	conn.sendErr = errors.New("ambiguous send")
-	if err := db.ReplaceIntelligenceSessions(ctx, 4, []*TTPSession{{SessionID: "one", EventCount: 2}}); err == nil {
+	if err := db.replaceLegacyIntelligenceSessions(ctx, 4, []*TTPSession{{SessionID: "one", EventCount: 2}}); err == nil {
 		t.Fatal("send failure hidden")
 	}
 }
@@ -139,18 +139,18 @@ func TestIntelligenceElasticsearchRevisionAndCheckpointWire(t *testing.T) {
 	defer srv.Close()
 	db := &Elasticsearch{client: srv.Client(), baseURL: srv.URL, config: &config.DatabaseConfig{}}
 	ctx := context.Background()
-	if cp, err := db.LoadIntelligenceCheckpoint(ctx); err != nil || cp != nil {
+	if cp, err := db.loadLegacyIntelligenceCheckpoint(ctx); err != nil || cp != nil {
 		t.Fatalf("empty: %+v %v", cp, err)
 	}
 	cp := &IntelligenceCheckpoint{Revision: 17, State: json.RawMessage(`{"active":["a"]}`), Complete: true}
-	if err := db.SaveIntelligenceCheckpoint(ctx, cp); err != nil {
+	if err := db.saveLegacyIntelligenceCheckpoint(ctx, cp); err != nil {
 		t.Fatal(err)
 	}
-	got, err := db.LoadIntelligenceCheckpoint(ctx)
+	got, err := db.loadLegacyIntelligenceCheckpoint(ctx)
 	if err != nil || !reflect.DeepEqual(got, cp) {
 		t.Fatalf("roundtrip %+v %v", got, err)
 	}
-	if err := db.ReplaceIntelligenceIOCs(ctx, 17, []*IOC{{ID: "x", Count: 5}}); err != nil {
+	if err := db.replaceLegacyIntelligenceIOCs(ctx, 17, []*IOC{{ID: "x", Count: 5}}); err != nil {
 		t.Fatal(err)
 	}
 	if calls != 5 {
@@ -161,10 +161,10 @@ func TestIntelligenceElasticsearchWriteFailure(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(503) }))
 	defer srv.Close()
 	db := &Elasticsearch{client: srv.Client(), baseURL: srv.URL, config: &config.DatabaseConfig{}}
-	if err := db.SaveIntelligenceCheckpoint(context.Background(), &IntelligenceCheckpoint{Revision: 1}); err == nil {
+	if err := db.saveLegacyIntelligenceCheckpoint(context.Background(), &IntelligenceCheckpoint{Revision: 1}); err == nil {
 		t.Fatal("checkpoint failure hidden")
 	}
-	if err := db.ReplaceIntelligenceIOCs(context.Background(), 1, []*IOC{{ID: "x"}}); err == nil {
+	if err := db.replaceLegacyIntelligenceIOCs(context.Background(), 1, []*IOC{{ID: "x"}}); err == nil {
 		t.Fatal("projection failure hidden")
 	}
 }
@@ -172,7 +172,7 @@ func TestIntelligenceElasticsearchWriteFailure(t *testing.T) {
 func checkIntelligenceReplay(t *testing.T, db Database) {
 	t.Helper()
 	ctx := context.Background()
-	store := db.(IntelligenceStore)
+	store := legacyIntelligenceStoreForTest{db}
 	now := time.Now().UTC().Truncate(time.Millisecond)
 	key := fmt.Sprintf("replay-%d", now.UnixNano())
 	old := &IOC{ID: "domain:" + key + ":test", Type: "domain", Value: key, Honeypot: "test", Count: 3, FirstSeen: now, LastSeen: now, Metadata: map[string]string{}}
@@ -297,7 +297,7 @@ func TestIntelligenceBulkUncertainRepliesFail(t *testing.T) {
 			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { fmt.Fprint(w, reply) }))
 			defer srv.Close()
 			db := &Elasticsearch{client: srv.Client(), baseURL: srv.URL, config: &config.DatabaseConfig{}}
-			if err := db.ReplaceIntelligenceIOCs(context.Background(), 1, []*IOC{{ID: "x"}}); err == nil {
+			if err := db.replaceLegacyIntelligenceIOCs(context.Background(), 1, []*IOC{{ID: "x"}}); err == nil {
 				t.Fatal("uncertain bulk acknowledged")
 			}
 		})
@@ -434,7 +434,7 @@ func TestIntelligenceBulkRequiresCompleteDurableAcknowledgment(t *testing.T) {
 			}))
 			defer srv.Close()
 			db := &Elasticsearch{client: srv.Client(), baseURL: srv.URL, config: &config.DatabaseConfig{}}
-			err := db.ReplaceIntelligenceIOCs(context.Background(), 2, []*IOC{{ID: "x"}})
+			err := db.replaceLegacyIntelligenceIOCs(context.Background(), 2, []*IOC{{ID: "x"}})
 			if (err != nil) != tc.wantErr {
 				t.Fatalf("error=%v, wantErr=%t", err, tc.wantErr)
 			}
@@ -450,16 +450,16 @@ func TestIntelligenceClickHousePinnedDriverColumnCompatibility(t *testing.T) {
 	db := &ClickHouse{conn: conn}
 	now := time.Date(2026, 11, 7, 12, 34, 56, 789000000, time.UTC)
 	for _, metadata := range []map[string]string{nil, {"binary\xff": "value\x00\xfe"}} {
-		if err := db.ReplaceIntelligenceIOCs(context.Background(), 31, []*IOC{{ID: "command:test", Type: "command", Value: "test\x00\xff", Honeypot: "cowrie", SourceIP: "2001:db8::1", FirstSeen: now, LastSeen: now, Count: 12, Metadata: metadata}}); err != nil {
+		if err := db.replaceLegacyIntelligenceIOCs(context.Background(), 31, []*IOC{{ID: "command:test", Type: "command", Value: "test\x00\xff", Honeypot: "cowrie", SourceIP: "2001:db8::1", FirstSeen: now, LastSeen: now, Count: 12, Metadata: metadata}}); err != nil {
 			t.Fatal(err)
 		}
 	}
 	for _, shared := range []bool{false, true} {
-		if err := db.ReplaceIntelligenceSessions(context.Background(), 31, []*TTPSession{{SessionID: "episode", CampaignFingerprint: "campaign", SharedInfrastructure: shared, SourceIPs: []string{"2001:db8::1"}, IOCIDs: []string{"command:test\xff"}, FirstSeen: now, LastSeen: now, EventCount: 12, Confidence: 0.7}}); err != nil {
+		if err := db.replaceLegacyIntelligenceSessions(context.Background(), 31, []*TTPSession{{SessionID: "episode", CampaignFingerprint: "campaign", SharedInfrastructure: shared, SourceIPs: []string{"2001:db8::1"}, IOCIDs: []string{"command:test\xff"}, FirstSeen: now, LastSeen: now, EventCount: 12, Confidence: 0.7}}); err != nil {
 			t.Fatal(err)
 		}
 	}
-	if err := db.SaveIntelligenceCheckpoint(context.Background(), &IntelligenceCheckpoint{Revision: 31, Events: []*Event{{Username: "test\xff"}}}); err != nil {
+	if err := db.saveLegacyIntelligenceCheckpoint(context.Background(), &IntelligenceCheckpoint{Revision: 31, Events: []*Event{{Username: "test\xff"}}}); err != nil {
 		t.Fatal(err)
 	}
 	iocTypes := []column.Type{"UInt64", "String", "LowCardinality(String)", "String", "LowCardinality(String)", "String", "String", "DateTime64(3)", "DateTime64(3)", "UInt64", "Map(String, String)"}

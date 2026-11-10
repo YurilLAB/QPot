@@ -64,6 +64,12 @@ func (ch *ClickHouse) initializeIntelligenceSchema(ctx context.Context) error {
 	return nil
 }
 func (ch *ClickHouse) LoadIntelligenceCheckpoint(ctx context.Context) (*IntelligenceCheckpoint, error) {
+	if cp, handled, err := intelligenceLeaseLoad(ctx, ch); handled {
+		return cp, err
+	}
+	return ch.loadLegacyIntelligenceCheckpoint(ctx)
+}
+func (ch *ClickHouse) loadLegacyIntelligenceCheckpoint(ctx context.Context) (*IntelligenceCheckpoint, error) {
 	if ch.conn == nil {
 		return nil, fmt.Errorf("not connected")
 	}
@@ -86,6 +92,12 @@ func (ch *ClickHouse) LoadIntelligenceCheckpoint(ctx context.Context) (*Intellig
 	return &cp, rows.Err()
 }
 func (ch *ClickHouse) SaveIntelligenceCheckpoint(ctx context.Context, cp *IntelligenceCheckpoint) error {
+	if handled, err := intelligenceLeaseSave(ctx, ch, cp); handled {
+		return err
+	}
+	return ch.saveLegacyIntelligenceCheckpoint(ctx, cp)
+}
+func (ch *ClickHouse) saveLegacyIntelligenceCheckpoint(ctx context.Context, cp *IntelligenceCheckpoint) error {
 	if ch.conn == nil {
 		return fmt.Errorf("not connected")
 	}
@@ -104,6 +116,16 @@ func (ch *ClickHouse) SaveIntelligenceCheckpoint(ctx context.Context, cp *Intell
 	return batch.Send()
 }
 func (ch *ClickHouse) ReplaceIntelligenceIOCs(ctx context.Context, revision uint64, iocs []*IOC) error {
+	if _, leased := intelligenceLeaseFromContext(ctx); !leased && len(iocs) == 0 {
+		return nil
+	}
+	approved, err := intelligenceLeaseIOCs(ctx, ch, revision, iocs)
+	if err != nil {
+		return err
+	}
+	return ch.replaceLegacyIntelligenceIOCs(ctx, revision, approved)
+}
+func (ch *ClickHouse) replaceLegacyIntelligenceIOCs(ctx context.Context, revision uint64, iocs []*IOC) error {
 	if len(iocs) == 0 {
 		return nil
 	}
@@ -123,6 +145,16 @@ func (ch *ClickHouse) ReplaceIntelligenceIOCs(ctx context.Context, revision uint
 	return batch.Send()
 }
 func (ch *ClickHouse) ReplaceIntelligenceSessions(ctx context.Context, revision uint64, sessions []*TTPSession) error {
+	if _, leased := intelligenceLeaseFromContext(ctx); !leased && len(sessions) == 0 {
+		return nil
+	}
+	approved, err := intelligenceLeaseSessions(ctx, ch, revision, sessions)
+	if err != nil {
+		return err
+	}
+	return ch.replaceLegacyIntelligenceSessions(ctx, revision, approved)
+}
+func (ch *ClickHouse) replaceLegacyIntelligenceSessions(ctx context.Context, revision uint64, sessions []*TTPSession) error {
 	if len(sessions) == 0 {
 		return nil
 	}
@@ -150,6 +182,12 @@ func (ts *TimescaleDB) initializeIntelligenceSchema(ctx context.Context) error {
 	return nil
 }
 func (ts *TimescaleDB) LoadIntelligenceCheckpoint(ctx context.Context) (*IntelligenceCheckpoint, error) {
+	if cp, handled, err := intelligenceLeaseLoad(ctx, ts); handled {
+		return cp, err
+	}
+	return ts.loadLegacyIntelligenceCheckpoint(ctx)
+}
+func (ts *TimescaleDB) loadLegacyIntelligenceCheckpoint(ctx context.Context) (*IntelligenceCheckpoint, error) {
 	if ts.pool == nil {
 		return nil, fmt.Errorf("not connected")
 	}
@@ -166,6 +204,12 @@ func (ts *TimescaleDB) LoadIntelligenceCheckpoint(ctx context.Context) (*Intelli
 	return &cp, err
 }
 func (ts *TimescaleDB) SaveIntelligenceCheckpoint(ctx context.Context, cp *IntelligenceCheckpoint) error {
+	if handled, err := intelligenceLeaseSave(ctx, ts, cp); handled {
+		return err
+	}
+	return ts.saveLegacyIntelligenceCheckpoint(ctx, cp)
+}
+func (ts *TimescaleDB) saveLegacyIntelligenceCheckpoint(ctx context.Context, cp *IntelligenceCheckpoint) error {
 	if ts.pool == nil {
 		return fmt.Errorf("not connected")
 	}
@@ -177,6 +221,19 @@ func (ts *TimescaleDB) SaveIntelligenceCheckpoint(ctx context.Context, cp *Intel
 	return err
 }
 func (ts *TimescaleDB) ReplaceIntelligenceIOCs(ctx context.Context, revision uint64, iocs []*IOC) error {
+	if _, leased := intelligenceLeaseFromContext(ctx); !leased && len(iocs) == 0 {
+		return nil
+	}
+	if err := validateIntelligenceTextIOCs("timescaledb", true, iocs); err != nil {
+		return err
+	}
+	approved, err := intelligenceLeaseIOCs(ctx, ts, revision, iocs)
+	if err != nil {
+		return err
+	}
+	return ts.replaceLegacyIntelligenceIOCs(ctx, revision, approved)
+}
+func (ts *TimescaleDB) replaceLegacyIntelligenceIOCs(ctx context.Context, revision uint64, iocs []*IOC) error {
 	if err := validateIntelligenceTextIOCs("timescaledb", true, iocs); err != nil {
 		return err
 	}
@@ -200,6 +257,19 @@ func (ts *TimescaleDB) ReplaceIntelligenceIOCs(ctx context.Context, revision uin
 	return tx.Commit(ctx)
 }
 func (ts *TimescaleDB) ReplaceIntelligenceSessions(ctx context.Context, revision uint64, sessions []*TTPSession) error {
+	if _, leased := intelligenceLeaseFromContext(ctx); !leased && len(sessions) == 0 {
+		return nil
+	}
+	if err := validateIntelligenceTextSessions("timescaledb", true, sessions); err != nil {
+		return err
+	}
+	approved, err := intelligenceLeaseSessions(ctx, ts, revision, sessions)
+	if err != nil {
+		return err
+	}
+	return ts.replaceLegacyIntelligenceSessions(ctx, revision, approved)
+}
+func (ts *TimescaleDB) replaceLegacyIntelligenceSessions(ctx context.Context, revision uint64, sessions []*TTPSession) error {
 	if err := validateIntelligenceTextSessions("timescaledb", true, sessions); err != nil {
 		return err
 	}
@@ -315,6 +385,19 @@ func (es *Elasticsearch) replaceIntelligenceDocuments(ctx context.Context, index
 	return flush()
 }
 func (es *Elasticsearch) ReplaceIntelligenceIOCs(ctx context.Context, revision uint64, iocs []*IOC) error {
+	if _, leased := intelligenceLeaseFromContext(ctx); !leased && len(iocs) == 0 {
+		return nil
+	}
+	if err := validateIntelligenceTextIOCs("elasticsearch", false, iocs); err != nil {
+		return err
+	}
+	approved, err := intelligenceLeaseIOCs(ctx, es, revision, iocs)
+	if err != nil {
+		return err
+	}
+	return es.replaceLegacyIntelligenceIOCs(ctx, revision, approved)
+}
+func (es *Elasticsearch) replaceLegacyIntelligenceIOCs(ctx context.Context, revision uint64, iocs []*IOC) error {
 	if err := validateIntelligenceTextIOCs("elasticsearch", false, iocs); err != nil {
 		return err
 	}
@@ -327,6 +410,19 @@ func (es *Elasticsearch) ReplaceIntelligenceIOCs(ctx context.Context, revision u
 	return es.replaceIntelligenceDocuments(ctx, "qpot-iocs", revision, ids, docs)
 }
 func (es *Elasticsearch) ReplaceIntelligenceSessions(ctx context.Context, revision uint64, sessions []*TTPSession) error {
+	if _, leased := intelligenceLeaseFromContext(ctx); !leased && len(sessions) == 0 {
+		return nil
+	}
+	if err := validateIntelligenceTextSessions("elasticsearch", false, sessions); err != nil {
+		return err
+	}
+	approved, err := intelligenceLeaseSessions(ctx, es, revision, sessions)
+	if err != nil {
+		return err
+	}
+	return es.replaceLegacyIntelligenceSessions(ctx, revision, approved)
+}
+func (es *Elasticsearch) replaceLegacyIntelligenceSessions(ctx context.Context, revision uint64, sessions []*TTPSession) error {
 	if err := validateIntelligenceTextSessions("elasticsearch", false, sessions); err != nil {
 		return err
 	}

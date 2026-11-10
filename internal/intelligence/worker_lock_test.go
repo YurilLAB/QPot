@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"testing"
+	"time"
 
 	"github.com/qpot/qpot/internal/database"
 	"github.com/qpot/qpot/internal/hostsetup"
@@ -64,8 +65,10 @@ func TestWorkerRevisionReservationSurvivesRestart(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	w := &Worker{ownershipKey: "revision-test", ownershipLock: first}
-	one, err := w.nextRevision(0)
+	if err := writeWorkerRevision(first, 1); err != nil {
+		t.Fatal(err)
+	}
+	one, err := readWorkerRevision(first)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -75,9 +78,12 @@ func TestWorkerRevisionReservationSurvivesRestart(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer second.Close()
-	w = &Worker{ownershipKey: "revision-test", ownershipLock: second}
-	two, err := w.nextRevision(0)
+	previous, err := readWorkerRevision(second)
 	if err != nil {
+		t.Fatal(err)
+	}
+	two := previous + 1
+	if err := writeWorkerRevision(second, two); err != nil {
 		t.Fatal(err)
 	}
 	if two <= one {
@@ -86,7 +92,7 @@ func TestWorkerRevisionReservationSurvivesRestart(t *testing.T) {
 	if _, err = second.WriteAt([]byte{0xff}, 0); err != nil {
 		t.Fatal(err)
 	}
-	if _, err = w.nextRevision(two); err == nil {
+	if _, err = readWorkerRevision(second); err == nil {
 		t.Fatal("torn reservation did not fail closed")
 	}
 }
@@ -95,15 +101,13 @@ func TestWorkerRevisionReservationSurvivesRestart(t *testing.T) {
 // replace a newer checkpoint or make its successor count those events again.
 func TestWorkerDelayedCheckpointCommitAfterRestart(t *testing.T) {
 	lockTestConfig(t)
-	d := recoveryStore(1)
+	authority := newWorkerLeaseAuthority(1)
+	d := authority.raw
 	d.failStage = "checkpoint"
-	first, err := acquireWorkerLock("delayed-save")
-	if err != nil {
-		t.Fatal(err)
-	}
-	w := recoveryWorker(t, d)
-	w.ownershipKey = "delayed-save"
-	w.ownershipLock = first
+	firstDB := authority.client("delayed-save-first-account")
+	w := leasedTestWorker(t, firstDB)
+	closeFirst := ownTestWorker(t, w)
+	defer closeFirst()
 	w.runOnce(context.Background())
 	data, err := json.Marshal(w.pending)
 	if err != nil {
@@ -113,23 +117,23 @@ func TestWorkerDelayedCheckpointCommitAfterRestart(t *testing.T) {
 	if err = json.Unmarshal(data, &delayed); err != nil {
 		t.Fatal(err)
 	}
-	_ = first.Close() // abrupt process exit, no shutdown drain
-	second, err := acquireWorkerLock("delayed-save")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer second.Close()
+	// A crashed account leaves no usable lease after its database expiry.
+	// The successor uses a separate local account/routing identity and still
+	// obtains its revision floor from the shared database control record.
+	authority.mu.Lock()
+	authority.clockOffset += time.Minute
 	d.failStage = ""
-	w = recoveryWorker(t, d)
-	w.ownershipKey = "delayed-save"
-	w.ownershipLock = second
+	authority.mu.Unlock()
+	w = leasedTestWorker(t, authority.client("delayed-save-successor-account"))
+	closeSecond := ownTestWorker(t, w)
+	defer closeSecond()
 	w.runOnce(context.Background())
 	before, _ := d.LoadIntelligenceCheckpoint(context.Background())
 	if before.Revision <= delayed.Revision {
 		t.Fatal("new prepare reused old revision")
 	}
-	if err = d.fakeDB.SaveIntelligenceCheckpoint(context.Background(), &delayed); err != nil {
-		t.Fatal(err)
+	if err = firstDB.SaveIntelligenceCheckpoint(context.Background(), &delayed); !errors.Is(err, database.ErrIntelligenceLeaseLost) {
+		t.Fatalf("delayed old-owner publication was not fenced: %v", err)
 	}
 	after, _ := d.LoadIntelligenceCheckpoint(context.Background())
 	if after.Revision != before.Revision || !after.Complete {

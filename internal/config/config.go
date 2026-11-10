@@ -313,7 +313,8 @@ type RetentionPolicyConfig struct {
 
 // SecurityConfig contains security hardening options
 type SecurityConfig struct {
-	SandboxMode        string           `yaml:"sandbox_mode"` // none, gvisor, kata, firejail
+	SandboxMode        string           `yaml:"sandbox_mode"`     // none, gvisor, kata
+	SandboxFallback    string           `yaml:"sandbox_fallback"` // deny (default), docker (non-executing emulators only)
 	EnableAppArmor     bool             `yaml:"enable_apparmor"`
 	EnableSeccomp      bool             `yaml:"enable_seccomp"`
 	ReadOnlyFilesystem bool             `yaml:"read_only_filesystem"`
@@ -509,6 +510,7 @@ func Default(instanceName string) *Config {
 		},
 		Security: SecurityConfig{
 			SandboxMode:        "gvisor",
+			SandboxFallback:    "deny",
 			EnableAppArmor:     true,
 			EnableSeccomp:      true,
 			ReadOnlyFilesystem: true,
@@ -892,12 +894,13 @@ func Parse(data []byte, configPath string) (*Config, error) {
 	}
 
 	// A config that omits the security section also leaves SandboxMode empty.
-	// NewSandbox treats an empty/unknown mode as an error, which would fail the
-	// whole `qpot up` for a partial config; restore the secure default so the
-	// stack starts (NewSandbox then gracefully falls back to plain containers if
-	// gVisor is not installed on the host).
+	// Restore the secure declared policy. Availability is checked at deployment;
+	// an absent requested runtime must never silently select ordinary Docker.
 	if cfg.Security.SandboxMode == "" {
 		cfg.Security.SandboxMode = "gvisor"
+	}
+	if cfg.Security.SandboxFallback == "" {
+		cfg.Security.SandboxFallback = "deny"
 	}
 	// Resolve omitted legacy global limits before checking the finite caps of
 	// an enabled HiFi cell. Explicit invalid custom overrides remain errors.

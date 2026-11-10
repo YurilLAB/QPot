@@ -1007,11 +1007,18 @@ func chCategories(c []string) []string {
 
 // TagEvent updates an event's ATT&CK classification fields in ClickHouse.
 func (ch *ClickHouse) TagEvent(ctx context.Context, event *Event) error {
+	if _, leased := intelligenceLeaseFromContext(ctx); leased {
+		approved, err := intelligenceLeaseEvent(ctx, ch, event)
+		if err != nil {
+			return err
+		}
+		event = approved
+	}
 	if ch.conn == nil {
 		return fmt.Errorf("not connected")
 	}
 	if event.ID != "" {
-		return ch.TagEvents(ctx, []*Event{event})
+		return ch.tagIntelligenceEvents(ctx, []*Event{event})
 	}
 	query := `
 		ALTER TABLE events UPDATE
@@ -1069,6 +1076,18 @@ func tagEventSize(e *Event) int {
 // events and re-extracted (double-counted) their IOCs. Events without an ID
 // fall back to TagEvent's (source_ip, timestamp) match.
 func (ch *ClickHouse) TagEvents(ctx context.Context, events []*Event) error {
+	if _, leased := intelligenceLeaseFromContext(ctx); leased {
+		approved, err := intelligenceLeaseEvents(ctx, ch, events)
+		if err != nil {
+			return err
+		}
+		events = approved
+	}
+	return ch.tagIntelligenceEvents(ctx, events)
+}
+
+// Called only after the public single-event or complete-WAL authorization.
+func (ch *ClickHouse) tagIntelligenceEvents(ctx context.Context, events []*Event) error {
 	if ch.conn == nil {
 		return fmt.Errorf("not connected")
 	}

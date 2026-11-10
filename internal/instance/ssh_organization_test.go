@@ -26,6 +26,10 @@ func organizationTestConfig(t *testing.T) *config.Config {
 	t.Helper()
 	t.Setenv("XDG_DATA_HOME", t.TempDir())
 	cfg := config.Default("organization-test")
+	// These synthetic Docker fixtures cover scenes, capture and lifecycle,
+	// not daemon runtime isolation. Select Docker explicitly; isolation tests
+	// set their own stronger policy and provide matching runtime evidence.
+	cfg.Security.SandboxMode = "none"
 	cfg.QPotID = "qp_organizationtest000000001"
 	cfg.DataPath = t.TempDir()
 	cfg.ConfigPath = filepath.Join(cfg.DataPath, "config.yaml")

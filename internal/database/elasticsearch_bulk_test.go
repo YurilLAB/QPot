@@ -352,7 +352,7 @@ func TestElasticsearchBulkAcknowledgmentBindsRequestedRows(t *testing.T) {
 				case "legacy IOCs":
 					err = db.InsertIOCs(ctx, iocs)
 				case "durable IOCs":
-					err = db.ReplaceIntelligenceIOCs(ctx, 3, iocs)
+					err = db.replaceLegacyIntelligenceIOCs(ctx, 3, iocs)
 				}
 				if (err != nil) != (corruption != "none") {
 					t.Fatalf("error=%v for %s", err, corruption)
@@ -386,7 +386,7 @@ func TestElasticsearchDurableBulkRejectsContradictoryAcknowledgments(t *testing.
 			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { _ = json.NewEncoder(w).Encode(body) }))
 			defer srv.Close()
 			db := &Elasticsearch{client: srv.Client(), baseURL: srv.URL, config: &config.DatabaseConfig{}}
-			if err := db.ReplaceIntelligenceIOCs(context.Background(), 3, []*IOC{{ID: "one"}}); err == nil {
+			if err := db.replaceLegacyIntelligenceIOCs(context.Background(), 3, []*IOC{{ID: "one"}}); err == nil {
 				t.Fatal("contradictory durable bulk response accepted")
 			}
 		})

@@ -12,6 +12,7 @@ import (
 	"os/user"
 	"path/filepath"
 	"runtime"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -61,8 +62,8 @@ type setupEnv struct {
 	// health waits for the instance to become healthy.
 	health func(ctx context.Context, cfg *config.Config, service bool, timeout time.Duration) []check
 	geoip  func(ctx context.Context, cfg *config.Config) error
-	// runtimes lists the container runtimes Docker has (for the summary).
-	runtimes func(ctx context.Context) string
+	// runtimes reports configured isolation before startup and observed isolation after it.
+	runtimes func(ctx context.Context, cfg *config.Config, started bool) string
 	// daemonWait bounds the wait for Docker to answer after starting it.
 	daemonWait time.Duration
 	// repoBase overrides where Docker's repositories are (tests).
@@ -188,7 +189,7 @@ func runSetupSteps(ctx context.Context, env *setupEnv, opts setupOptions) *hosts
 	sum := setupSummary{Instance: cfg.InstanceName, Bind: cfg.WebUI.BindAddr, Port: cfg.WebUI.Port,
 		ShowID: env.stdoutTTY, QPotID: cfg.QPotID, SSHTarget: sshTarget(env.user),
 		Honeypots: summaryHoneypots(cfg), Config: cfg.ConfigPath, DataPath: cfg.DataPath,
-		SetupLog: env.logPath, Sandbox: env.runtimes(ctx)}
+		SetupLog: env.logPath, Sandbox: env.runtimes(ctx, cfg, false)}
 	if opts.noStart {
 		renderSummary(env.stdout, sum)
 		return nil
@@ -204,6 +205,7 @@ func runSetupSteps(ctx context.Context, env *setupEnv, opts setupOptions) *hosts
 		return hostsetup.AsError(serr)
 	}
 	sum.Started, sum.Service = true, unit
+	sum.Sandbox = env.runtimes(ctx, cfg, true)
 	if unit == "" {
 		sum.ServeLog = filepath.Join(cfg.DataPath, "logs", "qpot-serve.log")
 	}
@@ -1026,19 +1028,90 @@ func realHealth(ctx context.Context, cfg *config.Config, service bool, timeout t
 	return waitHealthy(ctx, cfg, mgr, !service, timeout)
 }
 
-// realRuntimes describes the isolation the honeypots get.
-func realRuntimes(r hostsetup.Runner) func(ctx context.Context) string {
-	return func(ctx context.Context) string {
-		res := r.Run(ctx, hostsetup.Command{Args: []string{"docker", "info", "--format", "{{json .Runtimes}}"}, Timeout: 20 * time.Second})
-		out := string(res.Stdout)
-		switch {
-		case res.OK() && strings.Contains(out, `"runsc"`):
-			return "gVisor (runsc) for the honeypots"
-		case res.OK() && strings.Contains(out, `"kata-runtime"`):
-			return "Kata Containers for the honeypots"
+// realRuntimes distinguishes requested isolation from the runtime observed on
+// this instance's containers. Daemon registration alone proves neither.
+func realRuntimes(inspect func(context.Context, *config.Config) (instance.SandboxStatus, error)) func(context.Context, *config.Config, bool) string {
+	return func(ctx context.Context, cfg *config.Config, started bool) string {
+		if cfg == nil {
+			return "isolation not verified (QP-INST-002)"
 		}
-		return "standard Docker containers (optional: install gVisor for stronger isolation, https://gvisor.dev/docs/user_guide/install/)"
+		sandbox, err := security.NewSandbox(&cfg.Security)
+		if err != nil {
+			return sandboxSummaryError(err)
+		}
+		selected, err := sandbox.Selection()
+		if err != nil {
+			return sandboxSummaryError(err)
+		}
+		requested := sandboxRuntimeDescription(selected.Runtime)
+		if selected.Runtime == "" {
+			requested = "Docker default runtime"
+		}
+		if !started || inspect == nil {
+			return "configured " + requested + "; container runtime not yet verified"
+		}
+		observed, err := inspect(ctx, cfg)
+		if err != nil {
+			detail := sandboxSummaryError(err)
+			runtimes := observedSandboxRuntimes(observed)
+			if len(runtimes) > 0 {
+				for index, value := range runtimes {
+					runtimes[index] = strconv.Quote(value)
+				}
+				detail += "; observed container runtimes: " + strings.Join(runtimes, ", ")
+			}
+			return detail
+		}
+		runtimes := observedSandboxRuntimes(observed)
+		if !observed.Verified || observed.Runtime == "" || len(observed.Services) == 0 || len(runtimes) == 0 {
+			return "configured " + requested + "; no running honeypot runtime verified"
+		}
+		actual := sandboxRuntimeDescription(observed.Runtime)
+		if len(runtimes) > 1 {
+			labels := make([]string, 0, len(runtimes))
+			for _, runtime := range runtimes {
+				labels = append(labels, sandboxRuntimeDescription(runtime))
+			}
+			actual = "mixed container runtimes: " + strings.Join(labels, ", ")
+		}
+		if observed.Fallback {
+			return actual + " (explicit Docker fallback; requested " + requested + ")"
+		}
+		return actual + " (verified on honeypot containers)"
 	}
+}
+
+func observedSandboxRuntimes(observed instance.SandboxStatus) []string {
+	seen := make(map[string]bool)
+	for _, runtime := range observed.Services {
+		if runtime != "" {
+			seen[runtime] = true
+		}
+	}
+	values := make([]string, 0, len(seen))
+	for runtime := range seen {
+		values = append(values, runtime)
+	}
+	sort.Strings(values)
+	return values
+}
+
+func sandboxRuntimeDescription(runtime string) string {
+	switch runtime {
+	case "runsc":
+		return "gVisor (runsc)"
+	case "kata-runtime":
+		return "Kata Containers (kata-runtime)"
+	case "", "runc", "io.containerd.runc.v2":
+		return "standard Docker containers (" + runtime + ")"
+	default:
+		return fmt.Sprintf("Docker runtime %q", runtime)
+	}
+}
+
+func sandboxSummaryError(err error) string {
+	coded := hostsetup.AsError(err)
+	return "isolation not verified: " + coded.Entry().Title + " (" + coded.Code + ")"
 }
 
 // newSetupEnv builds the environment for a real run. Without a private
@@ -1087,8 +1160,8 @@ func newSetupEnv(cmd interface {
 			}
 		}
 	}
-	// The summary says which isolation the honeypots get, so the sandbox
-	// fallback warning goes to the log instead of between the questions.
+	// The summary reports configured and observed isolation. Explicit fallback
+	// warnings also stay in the setup log.
 	warnTo := io.Discard
 	if logW != nil {
 		warnTo = logW
@@ -1102,7 +1175,13 @@ func newSetupEnv(cmd interface {
 		r.Stream = &termSafeWriter{w: env.stdout}
 	}
 	env.runner = r
-	env.runtimes = realRuntimes(r)
+	env.runtimes = realRuntimes(func(ctx context.Context, cfg *config.Config) (instance.SandboxStatus, error) {
+		manager, err := instance.NewManager(cfg)
+		if err != nil {
+			return instance.SandboxStatus{}, err
+		}
+		return manager.SandboxStatus(ctx)
+	})
 	env.fetcher = &hostsetup.Fetcher{Root: "/", GOOS: runtime.GOOS}
 	return env, func() {
 		for i := len(cleanup) - 1; i >= 0; i-- {

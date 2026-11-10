@@ -163,6 +163,24 @@ var exprRe = regexp.MustCompile(`\$\{\{\s*([^}]*?)\s*\}\}`)
 // Expand replaces ${{ matrix.X }} and ${{ env.X }} expressions. Any other
 // expression is an error: the local runner cannot know its value.
 func Expand(s string, matrix, env map[string]string) (string, error) {
+	return expandWithServices(s, matrix, env, nil)
+}
+
+// serviceIDExpression deliberately accepts only the service-container ID
+// context used by the workflow, not arbitrary job metadata or expressions.
+func serviceIDExpression(expr string) (string, bool) {
+	parts := strings.Split(expr, ".")
+	if len(parts) != 4 || parts[0] != "job" || parts[1] != "services" || parts[2] == "" || parts[3] != "id" {
+		return "", false
+	}
+	return parts[2], true
+}
+
+func validServiceID(id string) bool {
+	return len(id) == 64 && strings.Trim(id, "0123456789abcdef") == ""
+}
+
+func expandWithServices(s string, matrix, env, services map[string]string) (string, error) {
 	var bad error
 	out := exprRe.ReplaceAllStringFunc(s, func(m string) string {
 		expr := strings.TrimSpace(exprRe.FindStringSubmatch(m)[1])
@@ -174,6 +192,11 @@ func Expand(s string, matrix, env map[string]string) (string, error) {
 			v, have = matrix[key]
 		case ok && scope == "env":
 			v, have = env[key]
+		case ok && scope == "job":
+			if service, valid := serviceIDExpression(expr); valid {
+				v, have = services[service]
+				have = have && validServiceID(v)
+			}
 		}
 		if !have {
 			if bad == nil {

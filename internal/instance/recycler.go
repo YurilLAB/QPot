@@ -18,6 +18,7 @@ import (
 	"github.com/qpot/qpot/internal/config"
 	"github.com/qpot/qpot/internal/hostsetup"
 	"github.com/qpot/qpot/internal/proxy"
+	"github.com/qpot/qpot/internal/security"
 )
 
 // BackendRecycler is the trusted, host-side half of HiFi backend reset. It
@@ -30,11 +31,13 @@ import (
 // Only backend names from this instance's configured pool are ever acted on,
 // and docker is invoked with an argv (no shell), so the log cannot steer it.
 type BackendRecycler struct {
-	InstanceName string
-	ComposeFile  string
-	LogPath      string
-	Services     map[string]bool
-	Poll         time.Duration
+	configuration *config.Config
+	requireConfig bool
+	InstanceName  string
+	ComposeFile   string
+	LogPath       string
+	Services      map[string]bool
+	Poll          time.Duration
 	// GenerationDir holds one counter file per backend, bumped after every
 	// successful recreation; the broker reads it (read-only) to tell a real
 	// reset from a restart staged inside the backend.
@@ -61,6 +64,7 @@ func NewBackendRecycler(cfg *config.Config) (*BackendRecycler, error) {
 		return nil, err
 	}
 	r := &BackendRecycler{
+		configuration:     cfg,
 		InstanceName:      cfg.InstanceName,
 		ComposeFile:       cfg.GetDockerComposePath(),
 		LogPath:           filepath.Join(logDir, "sessions.json"),
@@ -69,6 +73,11 @@ func NewBackendRecycler(cfg *config.Config) (*BackendRecycler, error) {
 		Poll:              500 * time.Millisecond,
 		RequireGeneration: true,
 	}
+	_, configErr := os.Stat(cfg.ConfigPath)
+	if configErr != nil && !errors.Is(configErr, os.ErrNotExist) {
+		return nil, configErr
+	}
+	r.requireConfig = configErr == nil
 	for n := 1; n <= maxSSHBackends; n++ {
 		r.Services[fmt.Sprintf("ssh-backend-%d", n)] = true
 	}
@@ -98,7 +107,21 @@ func (r *BackendRecycler) composeRecreateLocked(ctx context.Context, lock *sshCe
 	if !r.Services[service] || !containsSSHService(members, service) {
 		return fmt.Errorf("SSH cell %q is not in the current owned layout", service)
 	}
+	// Stopping a dirty cell is safe even when its new isolation policy cannot
+	// be satisfied. Never leave it running merely because recreation is denied.
 	if err := stopSSHServices(ctx, r.ComposeFile, members); err != nil {
+		return err
+	}
+	cfg, err := r.currentSandboxConfig()
+	if err != nil {
+		return err
+	}
+	sandbox, _ := security.NewSandbox(&cfg.Security)
+	selection, err := sandbox.ResolveForStart(ctx, true)
+	if err != nil {
+		return err
+	}
+	if err := validateSandboxCompose(cfg, r.ComposeFile, members, selection); err != nil {
 		return err
 	}
 	// Unconverted sessions are only in the stopped containers' logs: keep
@@ -128,7 +151,29 @@ func (r *BackendRecycler) composeRecreateLocked(ctx context.Context, lock *sshCe
 	if out, err := cmd.CombinedOutput(); err != nil {
 		return fmt.Errorf("recreate %s: %w: %s", service, err, out)
 	}
-	return nil
+	manager := &Manager{config: cfg}
+	return manager.verifyStartedSandbox(ctx, members, selection)
+}
+
+func (r *BackendRecycler) currentSandboxConfig() (*config.Config, error) {
+	if r.configuration == nil {
+		return nil, hostsetup.E("QP-DOCKER-012").WithWhy("The recycler has no trusted isolation policy.")
+	}
+	data, err := config.ReadFile(r.configuration.ConfigPath, 4<<20)
+	if errors.Is(err, os.ErrNotExist) && !r.requireConfig {
+		return r.configuration, nil // Explicit unsaved library configurations.
+	}
+	if err != nil {
+		return nil, hostsetup.E("QP-DOCKER-012").Wrap(err)
+	}
+	cfg, err := config.Parse(data, r.configuration.ConfigPath)
+	if err != nil {
+		return nil, hostsetup.E("QP-DOCKER-012").Wrap(err)
+	}
+	if cfg.InstanceName != r.InstanceName || !samePath(cfg.DataPath, r.configuration.DataPath) {
+		return nil, hostsetup.E("QP-DOCKER-012").WithWhy("The recycler's saved isolation policy belongs to another instance.")
+	}
+	return cfg, nil
 }
 
 func containsSSHService(members []string, service string) bool {

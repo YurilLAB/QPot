@@ -135,7 +135,7 @@ jobs:
           CLICKHOUSE_USER: qpot
           CLICKHOUSE_PASSWORD: qpotpass
         ports:
-          - 19000:9000
+          - 127.0.0.1:19000:9000
         options: >-
           --health-cmd "clickhouse-client --user qpot --password qpotpass --query 'SELECT 1'"
           --health-interval 5s
@@ -155,13 +155,154 @@ jobs:
         with:
           go-version-file: go.mod
           cache: true
-      - name: Exercise the real storage pipeline
-        # These tests otherwise skip in the normal unit job. Run packages in
-        # sequence because they share this job's disposable database.
-        run: >-
-          go test -race -p 1 -count=1 -timeout 5m
-          ./internal/database ./internal/intelligence ./internal/server
-          -run 'Test(CH|ClickHouse|WorkerClassifiesAgainstClickHouse|ServerServesDataFromClickHouse|IntelligenceClickHouse)'
+      - name: Require fail-closed behavior without Keeper
+        env:
+          QPOT_TEST_CH_EXPECT_NO_KEEPER: "1"
+        run: |
+          set -euo pipefail
+          required=TestCHIntelligenceLeaseMissingKeeperFailsClosed
+          listed=$(go test ./internal/database -list "^${required}$")
+          printf '%s\n' "$listed" | grep -Fxq "$required"
+          go test -race -count=1 -timeout 2m -json ./internal/database -run "^${required}$" | tee "$RUNNER_TEMP/clickhouse-no-keeper-tests.jsonl"
+          if grep -Fq '"Action":"skip"' "$RUNNER_TEMP/clickhouse-no-keeper-tests.jsonl"; then
+            echo "required no-Keeper integration test skipped" >&2
+            exit 1
+          fi
+      - name: Enable the production managed ClickHouse Keeper configuration
+        env:
+          CLICKHOUSE_CONTAINER: ${{ job.services.clickhouse.id }}
+        run: |
+          set -euo pipefail
+          test -n "$CLICKHOUSE_CONTAINER"
+          docker cp internal/instance/clickhouse_keeper.xml "$CLICKHOUSE_CONTAINER:/etc/clickhouse-server/config.d/qpot-keeper.xml"
+          docker exec --user 0 "$CLICKHOUSE_CONTAINER" chmod 0644 /etc/clickhouse-server/config.d/qpot-keeper.xml
+          docker restart "$CLICKHOUSE_CONTAINER"
+          ready=0
+          for _ in $(seq 1 30); do
+            if timeout 8 docker exec "$CLICKHOUSE_CONTAINER" clickhouse-client --user qpot --password qpotpass --query "SELECT count() FROM system.zookeeper WHERE path = '/'"; then
+              ready=1
+              break
+            fi
+            sleep 1
+          done
+          if [ "$ready" != 1 ]; then
+            docker logs --tail 80 "$CLICKHOUSE_CONTAINER"
+            echo "production managed Keeper did not become ready" >&2
+            exit 1
+          fi
+      - name: Exercise the real storage pipeline and Keeper fencing
+        # The negative gate ran before Keeper was installed. The positive
+        # inventory excludes that case and rejects every skipped test.
+        run: |
+          set -euo pipefail
+          test_packages=(./internal/database ./internal/intelligence ./internal/server)
+          listed=$(go test "${test_packages[@]}" -list 'Test(CH|ClickHouse|WorkerClassifiesAgainstClickHouse|ServerServesDataFromClickHouse|IntelligenceClickHouse)')
+          for required in TestCHIntelligenceLeaseNativeContentionAndFencing TestCHIntelligenceLeaseNativeExpiryAndLargeCheckpoint TestCHIntelligenceLeaseRejectsNonAtomicControlCatalog TestWorkerClassifiesAgainstClickHouse TestServerServesDataFromClickHouse; do
+            if ! printf '%s\n' "$listed" | grep -Fxq "$required"; then
+              echo "required ClickHouse integration test is missing: $required" >&2
+              exit 1
+            fi
+          done
+          names=$(printf '%s\n' "$listed" | grep '^Test' | grep -Fv TestCHIntelligenceLeaseMissingKeeperFailsClosed | paste -sd '|')
+          test -n "$names"
+          go test -race -p 1 -count=1 -timeout 5m -json "${test_packages[@]}" -run "^($names)$" | tee "$RUNNER_TEMP/clickhouse-tests.jsonl"
+          if grep -Fq '"Action":"skip"' "$RUNNER_TEMP/clickhouse-tests.jsonl"; then
+            echo "required ClickHouse integration test skipped" >&2
+            exit 1
+          fi
+
+  postgres-lease-integration:
+    name: Native PostgreSQL ownership and fencing
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    services:
+      postgres:
+        image: docker.io/library/postgres:15-bookworm@sha256:19b8449e2187e8a174b40c8832a7ed9da45813b74c2779b1c614e7e7d0ee47f0
+        env:
+          POSTGRES_DB: qpot_test
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+        ports:
+          - 127.0.0.1:15432:5432
+        options: >-
+          --health-cmd "pg_isready --username postgres --dbname qpot_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
+    env:
+      QPOT_TEST_POSTGRES: "1"
+      QPOT_TEST_PG_HOST: 127.0.0.1
+      QPOT_TEST_PG_PORT: "15432"
+      QPOT_TEST_PG_USER: postgres
+      QPOT_TEST_PG_PASS: postgres
+      QPOT_TEST_PG_DB: qpot_test
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Set up Go
+        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Exercise real transactional lease ownership and recovery
+        run: |
+          set -euo pipefail
+          pattern='^TestPGIntelligenceLease'
+          listed=$(go test ./internal/database -list "$pattern")
+          for required in TestPGIntelligenceLeaseIndependentOwnersAndAliases TestPGIntelligenceLeaseShadowCheckpointCannotSplitOwner TestPGIntelligenceLeaseRejectsDifferentProjectionScope TestPGIntelligenceLeaseCoordinatesDifferentDatabaseRoles TestPGIntelligenceLeaseExpiryRecoveryAndLargeCheckpoint TestPGIntelligenceLeaseClockCheckedAfterRowLock TestPGIntelligenceLeasePublicCheckpointProjectionAndTags; do
+            if ! printf '%s\n' "$listed" | grep -Fxq "$required"; then
+              echo "required PostgreSQL lease test is missing: $required" >&2
+              exit 1
+            fi
+          done
+          go test -race -count=1 -timeout 5m -json ./internal/database -run "$pattern" | tee "$RUNNER_TEMP/postgres-lease-tests.jsonl"
+          if grep -Fq '"Action":"skip"' "$RUNNER_TEMP/postgres-lease-tests.jsonl"; then
+            echo "required PostgreSQL lease test skipped" >&2
+            exit 1
+          fi
+
+  elasticsearch-lease-integration:
+    name: Native Elasticsearch ownership and fencing
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    services:
+      elasticsearch:
+        # Match the native lease fixture's version; pin the official image.
+        image: docker.elastic.co/elasticsearch/elasticsearch:8.17.0@sha256:2f602552550869fb29b6fd5848c5118d3ef3a2e1d5d45802e3ab9088cb2de8e2
+        env:
+          discovery.type: single-node
+          xpack.security.enabled: "false"
+          node.store.allow_mmap: "false"
+          ES_JAVA_OPTS: -Xms512m -Xmx512m
+        ports:
+          - 127.0.0.1:19200:9200
+        options: >-
+          --health-cmd "curl --fail --silent 'http://127.0.0.1:9200/_cluster/health?wait_for_status=yellow&timeout=5s'"
+          --health-interval 5s
+          --health-timeout 8s
+          --health-retries 24
+    env:
+      QPOT_TEST_ELASTICSEARCH_LEASE: "1"
+      QPOT_TEST_ELASTICSEARCH_LEASE_URL: http://127.0.0.1:19200
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Set up Go
+        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Exercise real optimistic lease ownership and recovery
+        # This test requires an unused checkpoint index and owns its cleanup.
+        # Other Elasticsearch fixtures must not share this service.
+        run: |
+          set -euo pipefail
+          required=TestElasticsearchIntelligenceLeaseLive
+          listed=$(go test ./internal/database -list "^${required}$")
+          printf '%s\n' "$listed" | grep -Fxq "$required"
+          go test -race -count=1 -timeout 3m -json ./internal/database -run "^${required}$" | tee "$RUNNER_TEMP/elasticsearch-lease-tests.jsonl"
+          if grep -Fq '"Action":"skip"' "$RUNNER_TEMP/elasticsearch-lease-tests.jsonl"; then
+            echo "required Elasticsearch lease test skipped" >&2
+            exit 1
+          fi
 
   conpot-integration:
     name: Live industrial PLC and RTU protocols

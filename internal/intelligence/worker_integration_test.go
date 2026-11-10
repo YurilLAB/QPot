@@ -77,6 +77,11 @@ func TestWorkerClassifiesAgainstClickHouse(t *testing.T) {
 	}
 	w.ownershipLock = lock
 	defer lock.Close()
+	if err := w.acquireDatabaseOwnership(ctx); err != nil {
+		t.Fatalf("database worker ownership (ClickHouse requires Keeper): %v", err)
+	}
+	stopRenewal := w.startLeaseRenewal(func() {})
+	defer stopRenewal()
 
 	classified := w.runOnce(ctx)
 	if classified == 0 {

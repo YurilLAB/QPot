@@ -512,6 +512,27 @@ Exit status 0 means success; 1 is a usage error (an unknown flag).
 - Why: The installer (Homebrew or winget) stopped with an error.
 - Fix: Read the installer's message above, fix what it names, or install Docker Desktop from https://docs.docker.com/desktop/ , then run qpot setup again.
 
+### QP-DOCKER-010
+
+**The sandbox policy is not supported.**
+
+- Why: The configured sandbox mode or fallback policy is unknown, or selects Firejail, which does not isolate QPot's Docker containers.
+- Fix: Set security.sandbox_mode to gvisor, kata or an explicitly chosen none. Set security.sandbox_fallback to deny, or explicitly allow docker for reviewed non-executing emulators. Executing and unreviewed honeypots never downgrade a requested stronger runtime.
+
+### QP-DOCKER-011
+
+**The requested container isolation could not be verified.**
+
+- Why: Docker is unreachable, its runtime report is invalid, or the requested gVisor or Kata runtime is not registered with the selected daemon.
+- Fix: Restore Docker access and install/register the requested runtime on that Docker host. Inspect docker info and retry. For reviewed non-executing emulators only, security.sandbox_fallback: docker explicitly permits standard containers; executing and unreviewed honeypots require the requested runtime.
+
+### QP-DOCKER-012
+
+**The deployment does not use the required container runtime.**
+
+- Why: An existing container or stored Compose service differs from the current isolation policy, or Docker did not provide a trustworthy runtime identity.
+- Fix: Keep the instance stopped, inspect its isolation status and recreate the affected honeypots with the intended sandbox policy. A restart does not change a container's runtime. Stop, logs and inspection remain available.
+
 ## Docker Compose (`COMPOSE`, exit 16)
 
 ### QP-COMPOSE-001
@@ -794,17 +815,17 @@ Exit status 0 means success; 1 is a usage error (an unknown flag).
 
 ### QP-INTEL-004
 
-**This local intelligence worker could not claim ownership.**
+**The intelligence worker could not claim ownership.**
 
-- Why: Another process for this database owns the local lock, or the lock directory is inaccessible.
-- Fix: Run only one worker for a database. Stop the other local control plane or repair lock-directory access, then restart this control plane. Do not delete a lock file held by a running process. Coordinate ownership separately across hosts and OS accounts.
+- Why: Another worker owns the database lease or local lock, or ownership could not be verified.
+- Fix: Keep event collection running. Wait for the current owner to stop and its database lease to expire, or repair coordination access, then restart the control plane. Do not delete lease or revision records or remove a lock file held by a running process.
 
 ### QP-INTEL-005
 
 **The intelligence batch could not be prepared safely.**
 
-- Why: The backend lacks recovery support, an IOC baseline read failed, or classifier state could not be encoded.
-- Fix: Use a supported initialized backend, inspect its error and retry. Source events remain available for later processing.
+- Why: The backend lacks recovery support, an event lacks an immutable ID, an IOC baseline read failed, or classifier state could not be encoded.
+- Fix: Use a supported initialized backend and preserve immutable source-event IDs. Inspect the preparation error and repair the source or backend before retrying. Source events remain available for later processing.
 
 ### QP-INTEL-006
 
@@ -812,6 +833,20 @@ Exit status 0 means success; 1 is a usage error (an unknown flag).
 
 - Why: An IOC or session contains invalid UTF-8, or a NUL byte unsupported by this backend. The worker pauses rather than rewriting the value or acknowledging its source events.
 - Fix: Keep the original events and checkpoints. Resolve the backend's string-storage limitation with verified lossless support before retrying. Do not normalize indicator bytes, delete recovery state or manually mark pending events classified; a restart alone will not fix this data.
+
+### QP-INTEL-007
+
+**The intelligence worker lost its database lease.**
+
+- Why: Lease renewal failed or expired, or a successor fenced this worker. Further processing and shutdown replay must stop.
+- Fix: Restore coordination access and restart the control plane after checking the active owner. Keep the lease, revision counter and published checkpoint; the next owner recovers that exact batch. Do not force an old worker to continue.
+
+### QP-INTEL-008
+
+**The database cannot provide safe intelligence ownership.**
+
+- Why: The required atomic coordination mechanism is unavailable or the backend does not implement fenced worker leases.
+- Fix: Enable the supported database coordination mechanism; ClickHouse requires Keeper and strict KeeperMap compare-and-swap. Event collection and the UI can continue while the worker is stopped. Stop and drain all pre-upgrade workers before enabling the new ownership protocol.
 
 ## Cluster trust and enrollment (`CLUSTER`, exit 23)
 

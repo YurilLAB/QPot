@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -13,6 +14,7 @@ import (
 
 	"github.com/qpot/qpot/internal/doctor"
 	"github.com/qpot/qpot/internal/geo"
+	"github.com/qpot/qpot/internal/hostsetup"
 	"github.com/qpot/qpot/internal/instance"
 )
 
@@ -55,20 +57,21 @@ type instanceGeoIP struct {
 }
 
 type instanceInfo struct {
-	Name          string             `json:"name"`
-	Version       string             `json:"version"`
-	WebUI         map[string]any     `json:"web_ui"`
-	Status        string             `json:"status"`
-	Honeypots     []instanceHoneypot `json:"honeypots"`
-	Services      []instanceService  `json:"services"`
-	ServicesError string             `json:"services_error,omitempty"`
-	Database      instanceDatabase   `json:"database"`
-	GeoIP         instanceGeoIP      `json:"geoip"`
-	AttackMap     map[string]any     `json:"attack_map"`
-	Canary        map[string]any     `json:"canary"`
-	Intelligence  map[string]any     `json:"intelligence"`
-	Alerts        map[string]any     `json:"alerts"`
-	Cluster       map[string]any     `json:"cluster"`
+	Name          string                 `json:"name"`
+	Version       string                 `json:"version"`
+	WebUI         map[string]any         `json:"web_ui"`
+	Status        string                 `json:"status"`
+	Honeypots     []instanceHoneypot     `json:"honeypots"`
+	Services      []instanceService      `json:"services"`
+	ServicesError string                 `json:"services_error,omitempty"`
+	Sandbox       instance.SandboxStatus `json:"sandbox"`
+	Database      instanceDatabase       `json:"database"`
+	GeoIP         instanceGeoIP          `json:"geoip"`
+	AttackMap     map[string]any         `json:"attack_map"`
+	Canary        map[string]any         `json:"canary"`
+	Intelligence  map[string]any         `json:"intelligence"`
+	Alerts        map[string]any         `json:"alerts"`
+	Cluster       map[string]any         `json:"cluster"`
 }
 
 // serviceStater reaches the compose services' states: the test runner when
@@ -125,7 +128,8 @@ func (s *Server) handleInstance(w http.ResponseWriter, r *http.Request) {
 	}
 
 	info.Services = []instanceService{}
-	if st := s.serviceStater(); st == nil {
+	st := s.serviceStater()
+	if st == nil {
 		info.ServicesError = "This server cannot reach the instance's containers."
 	} else if states, err := st.ServiceStates(ctx); err != nil {
 		slog.Warn("instance info: container states not read", "error", err)
@@ -141,11 +145,33 @@ func (s *Server) handleInstance(w http.ResponseWriter, r *http.Request) {
 		sort.Slice(info.Services, func(i, j int) bool { return info.Services[i].Name < info.Services[j].Name })
 	}
 
+	info.Sandbox = instance.SandboxStatus{Requested: cfg.Security.SandboxMode, FallbackPolicy: cfg.Security.SandboxFallback, Services: map[string]string{}, Code: "QP-DOCKER-011"}
+	if observer, ok := st.(interface {
+		SandboxStatus(context.Context) (instance.SandboxStatus, error)
+	}); ok {
+		// The helper exposes only fixed policy and owned runtime metadata. Its
+		// wrapped Docker error is deliberately not returned to the browser.
+		info.Sandbox, _ = observer.SandboxStatus(ctx)
+	}
 	info.Database = s.databaseInfo(ctx)
 	info.GeoIP = geoIPInfo(cfg.InstanceName, doctor.GeoIPFile(cfg))
 	info.AttackMap = map[string]any{"country": cfg.AttackMap.Country}
 	info.Canary = map[string]any{"enabled": cfg.Canary.Enabled && s.canaries != nil, "base_url": publicOrigin(cfg.Canary.BaseURL)}
-	info.Intelligence = map[string]any{"enabled": cfg.Intelligence.Enabled, "worker_running": s.intelWorker() != nil}
+	info.Intelligence = map[string]any{"enabled": cfg.Intelligence.Enabled, "worker_running": false, "worker_healthy": false, "worker_status": "disabled"}
+	if cfg.Intelligence.Enabled {
+		info.Intelligence["worker_status"] = "not_started"
+		if worker := s.intelWorker(); worker != nil {
+			state, workerErr := worker.Status()
+			info.Intelligence["worker_status"] = state
+			info.Intelligence["worker_running"] = state == "running" || state == "retrying"
+			info.Intelligence["worker_healthy"] = state == "running" && workerErr == nil
+			var coded *hostsetup.Error
+			if errors.As(workerErr, &coded) && coded != nil {
+				info.Intelligence["worker_error_code"] = coded.Code
+				info.Intelligence["worker_error_remedy"] = hostsetup.E(coded.Code).Remedy()
+			}
+		}
+	}
 	info.Alerts = map[string]any{
 		"enabled":            cfg.Alerts.Enabled,
 		"webhook_configured": cfg.Alerts.WebhookURL != "",

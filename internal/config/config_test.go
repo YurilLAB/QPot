@@ -544,6 +544,48 @@ func TestSaveActivatesPrivateResolvedProfileWithoutLoadDefaults(t *testing.T) {
 	}
 }
 
+func TestSandboxFallbackDefaultsAndRoundTrip(t *testing.T) {
+	initial := Default("sandbox-policy")
+	if initial.Security.SandboxMode != "gvisor" || initial.Security.SandboxFallback != "deny" {
+		t.Fatal("default isolation does not require the requested stronger runtime")
+	}
+	for _, policy := range []string{"", "deny", "docker"} {
+		t.Run(policy, func(t *testing.T) {
+			cfg := Default("sandbox-policy")
+			cfg.QPotID = "qp_abcdefghijklmnopqrstuvwx"
+			cfg.DataPath = t.TempDir()
+			cfg.ConfigPath = filepath.Join(cfg.DataPath, "config.yaml")
+			cfg.Security.SandboxMode = "none"
+			cfg.Security.SandboxFallback = policy
+			if err := Save(cfg); err != nil {
+				t.Fatal(err)
+			}
+			data, err := os.ReadFile(cfg.ConfigPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var saved Config
+			if err := yaml.Unmarshal(data, &saved); err != nil {
+				t.Fatal(err)
+			}
+			if saved.Security.SandboxFallback != policy {
+				t.Fatal("Save reinterpreted the operator's fallback policy")
+			}
+			loaded, err := Parse(data, cfg.ConfigPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			want := policy
+			if want == "" {
+				want = "deny"
+			}
+			if loaded.Security.SandboxFallback != want || loaded.Security.SandboxMode != "none" {
+				t.Fatalf("loaded policy changed: %+v", loaded.Security)
+			}
+		})
+	}
+}
+
 func TestConcurrentSaveAndHoneypotChangesProduceCompleteFiles(t *testing.T) {
 	cfg := Default("save-concurrent")
 	cfg.DataPath = t.TempDir()

@@ -1231,3 +1231,408 @@ if [ "$QPOT_FAKE_SCENARIO" = 'test command failure' ]; then exit 23; fi
 		})
 	}
 }
+
+func TestDeclaredServiceIDExpressionsRemainNarrow(t *testing.T) {
+	id := strings.Repeat("a", 64)
+	services := map[string]string{"clickhouse": id}
+	got, err := expandWithServices("${{ job.services.clickhouse.id }}", nil, nil, services)
+	if err != nil || got != id {
+		t.Fatalf("actual service ID was not expanded: %q %v", got, err)
+	}
+	for _, expression := range []string{
+		"job.services.missing.id", "job.services.clickhouse.ports.9000", "job.services.clickhouse", "job.container.id", "job.services.clickhouse.id.extra", "secrets.TOKEN", "job.services.clickhouse.id || secrets.TOKEN",
+	} {
+		if _, err := expandWithServices("${{ "+expression+" }}", nil, nil, services); err == nil {
+			t.Fatalf("unsupported context expanded: %s", expression)
+		}
+	}
+	for _, bad := range []string{"", strings.Repeat("a", 63), strings.Repeat("A", 64), strings.Repeat("a", 64) + "\n" + strings.Repeat("b", 64)} {
+		if _, err := expandWithServices("${{ job.services.clickhouse.id }}", nil, nil, map[string]string{"clickhouse": bad}); err == nil {
+			t.Fatal("unissued or malformed service ID expanded")
+		}
+	}
+	if _, err := Expand("${{ job.services.clickhouse.id }}", nil, map[string]string{"job.services.clickhouse.id": id}); err == nil {
+		t.Fatal("environment forged a service-container context")
+	}
+	r := &Runner{}
+	good := Job{ID: "owned-service", RunsOn: "ubuntu-latest", Services: []Service{{Name: "clickhouse", Image: "test-only:local"}}, Steps: []Step{{Env: map[string]string{"CONTAINER": "${{ job.services.clickhouse.id }}"}, Run: `test -n "$CONTAINER"`}}}
+	if err := r.Check(&Workflow{}, good); err != nil {
+		t.Fatalf("declared service rejected: %v", err)
+	}
+	good.Services = nil
+	if err := r.Check(&Workflow{}, good); err == nil {
+		t.Fatal("unknown service context accepted before startup")
+	}
+}
+
+func TestServiceIDIsCapturedFromOwnedStartup(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("ci-local service bootstrap runs on Linux")
+	}
+	for _, valid := range []bool{true, false} {
+		t.Run(map[bool]string{true: "issued ID", false: "invalid output"}[valid], func(t *testing.T) {
+			root := t.TempDir()
+			id := strings.Repeat("a", 64)
+			output := id
+			if !valid {
+				output = "not-a-container-id"
+			}
+			t.Setenv("QPOT_CI_CONTAINER_ID", output)
+			t.Setenv("QPOT_CI_OWNED_ID", id)
+			calls := filepath.Join(root, "docker-calls")
+			t.Setenv("QPOT_CI_SERVICE_CALLS", calls)
+			script := `#!/bin/sh
+set -eu
+printf '%s\n' "$*" >> "$QPOT_CI_SERVICE_CALLS"
+case "$1" in
+ run) printf '%s\n' "$QPOT_CI_CONTAINER_ID"; printf 'startup diagnostic\n' >&2 ;;
+ inspect) printf 'healthy\n' ;;
+ ps) printf '%s\n' "$QPOT_CI_OWNED_ID" ;;
+ rm) exit 0 ;;
+ *) exit 1 ;;
+esac
+`
+			if err := os.WriteFile(filepath.Join(root, "docker"), []byte(script), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			t.Setenv("PATH", root+string(os.PathListSeparator)+os.Getenv("PATH"))
+			job := Job{ID: "service-identity", RunsOn: "ubuntu-latest", Services: []Service{{Name: "clickhouse", Image: "owned-test-only:local", Ports: []string{"127.0.0.1:19000:9000"}}}, Steps: []Step{{Env: map[string]string{"OWNED_CONTAINER": "${{ job.services.clickhouse.id }}"}, Run: `test "$OWNED_CONTAINER" = "` + id + `"
+printf '%s' "$OWNED_CONTAINER" > "$GITHUB_WORKSPACE/observed-id"`}}}
+			var logs bytes.Buffer
+			r := &Runner{Root: root, Out: &logs, Env: os.Environ()}
+			err := r.RunJob(t.Context(), &Workflow{}, job)
+			if !valid {
+				if err == nil {
+					t.Fatal("startup without an actual container ID ran its steps")
+				}
+				if _, err := os.Stat(filepath.Join(root, "observed-id")); !os.IsNotExist(err) {
+					t.Fatal("invalid service identity reached workflow step")
+				}
+			} else {
+				if err != nil {
+					t.Fatal(err)
+				}
+				got, err := os.ReadFile(filepath.Join(root, "observed-id"))
+				if err != nil || string(got) != id {
+					t.Fatalf("workflow did not receive owned ID: %q %v", got, err)
+				}
+			}
+			data, readErr := os.ReadFile(calls)
+			if readErr != nil || !strings.Contains(string(data), "rm -f "+id) || !strings.Contains(string(data), "label=qpot.ci-local.owner=qpot-ci-local-") || !strings.Contains(string(data), "--label qpot.ci-local.owner=qpot-ci-local-") {
+				t.Fatalf("owned service cleanup did not run: %s %v", data, readErr)
+			}
+			if !strings.Contains(string(data), "-p 127.0.0.1:19000:9000") || strings.Contains(string(data), "127.0.0.1:127.0.0.1:") {
+				t.Fatal("service startup changed the explicit loopback binding")
+			}
+			if !strings.Contains(logs.String(), "startup diagnostic") || !strings.Contains(logs.String(), output) {
+				t.Fatal("service ID capture dropped startup output or diagnostics")
+			}
+		})
+	}
+}
+
+func TestServicePortsStayOnLoopback(t *testing.T) {
+	for _, mapping := range []string{"19000:9000", "127.0.0.1:19000:9000", "15432:5432/tcp", "127.0.0.1:15353:5353/udp"} {
+		got, err := localServicePort(mapping)
+		want := mapping
+		if !strings.HasPrefix(want, "127.0.0.1:") {
+			want = "127.0.0.1:" + want
+		}
+		if err != nil || got != want {
+			t.Fatalf("loopback mapping changed: %q → %q: %v", mapping, got, err)
+		}
+	}
+	for _, mapping := range []string{"0.0.0.0:19000:9000", "192.0.2.1:19000:9000", "[::]:19000:9000", "127.0.0.1:127.0.0.1:19000:9000", "9000", "0:9000", "19000:65536", "19000:9000/sctp", "-p 19000:9000", "19000:9000\n"} {
+		if _, err := localServicePort(mapping); err == nil {
+			t.Fatalf("unsupported service binding accepted: %q", mapping)
+		}
+		job := Job{ID: "bad-binding", RunsOn: "ubuntu-latest", Services: []Service{{Name: "database", Image: "test-only:local", Ports: []string{mapping}}}}
+		if err := (&Runner{}).Check(&Workflow{}, job); err == nil {
+			t.Fatalf("unsafe service binding was not rejected before startup: %q", mapping)
+		}
+	}
+}
+
+func TestServiceCleanupRejectsLeaksAndOwnsPartialStartup(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("ci-local service bootstrap runs on Linux")
+	}
+	for _, scenario := range []struct {
+		name                string
+		fails, removes, ran bool
+	}{
+		{"complete", false, true, true},
+		{"created then start failed", true, true, false},
+		{"failed before creation", true, false, false},
+		{"remove failed", true, true, true},
+		{"list failed", true, false, true},
+		{"invalid cleanup ID", true, false, true},
+	} {
+		t.Run(scenario.name, func(t *testing.T) {
+			dir := t.TempDir()
+			id := strings.Repeat("b", 64)
+			calls := filepath.Join(dir, "docker-calls")
+			t.Setenv("QPOT_CI_SERVICE_CALLS", calls)
+			t.Setenv("QPOT_CI_SCENARIO", scenario.name)
+			t.Setenv("QPOT_CI_OWNED_ID", id)
+			fakeDocker := `#!/bin/sh
+set -eu
+printf '%s\n' "$*" >> "$QPOT_CI_SERVICE_CALLS"
+case "$1" in
+ run)
+  if [ "$QPOT_CI_SCENARIO" = 'failed before creation' ]; then exit 125; fi
+  printf '%s\n' "$QPOT_CI_OWNED_ID"
+  if [ "$QPOT_CI_SCENARIO" = 'created then start failed' ]; then exit 125; fi;;
+ inspect) printf 'healthy\n';;
+ ps)
+  if [ "$QPOT_CI_SCENARIO" = 'list failed' ]; then exit 47; fi
+  if [ "$QPOT_CI_SCENARIO" = 'failed before creation' ]; then exit 0; fi
+  if [ "$QPOT_CI_SCENARIO" = 'invalid cleanup ID' ]; then printf 'untrusted-id\n'; else printf '%s\n' "$QPOT_CI_OWNED_ID"; fi;;
+ rm) if [ "$QPOT_CI_SCENARIO" = 'remove failed' ]; then exit 48; fi;;
+ *) exit 1;;
+esac
+`
+			if err := os.WriteFile(filepath.Join(dir, "docker"), []byte(fakeDocker), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+			job := Job{ID: "cleanup", RunsOn: "ubuntu-latest", Services: []Service{{Name: "database", Image: "owned-test-only:local"}}, Steps: []Step{{Run: `printf ran > "$GITHUB_WORKSPACE/ran"`}}}
+			var output bytes.Buffer
+			runner := Runner{Root: dir, Out: &output, Env: os.Environ()}
+			err := runner.RunJob(t.Context(), &Workflow{}, job)
+			if (err != nil) != scenario.fails {
+				t.Fatalf("job failure=%v, want %v: %s", err, scenario.fails, output.String())
+			}
+			data, err := os.ReadFile(calls)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if strings.Contains(string(data), "rm -f "+id) != scenario.removes {
+				t.Fatalf("partial startup or ownership cleanup mismatch: %s", data)
+			}
+			label := regexp.MustCompile(`--label (qpot\.ci-local\.owner=\S+)`).FindStringSubmatch(string(data))
+			if len(label) != 2 || !strings.Contains(string(data), "--filter label="+label[1]+" --format {{.ID}}") {
+				t.Fatalf("cleanup did not select this job's generated ownership label: %s", data)
+			}
+			_, runErr := os.Stat(filepath.Join(dir, "ran"))
+			if (runErr == nil) != scenario.ran {
+				t.Fatal("workflow step ran after failed service startup")
+			}
+		})
+	}
+}
+
+func TestServiceCleanupHonorsItsDeadline(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("ci-local service bootstrap runs on Linux")
+	}
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "docker"), []byte("#!/bin/sh\nexec sleep 10\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	ctx, cancel := context.WithTimeout(t.Context(), 100*time.Millisecond)
+	defer cancel()
+	start := time.Now()
+	err := (&Runner{Out: &bytes.Buffer{}}).cleanupServiceContainers(ctx, "owned-test-only")
+	if err == nil || time.Since(start) > 2*time.Second {
+		t.Fatalf("cleanup ignored its deadline: %v after %s", err, time.Since(start))
+	}
+}
+
+func TestNativeLeaseGatesUseProductionCoordinationAndRequiredTests(t *testing.T) {
+	w, err := ParseWorkflow(readRepo(t, ".github/workflows/ci.yml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ch, ok := w.Job("clickhouse-integration")
+	if !ok {
+		t.Fatal("missing ClickHouse gate")
+	}
+	if len(ch.Services) != 1 || len(ch.Services[0].Ports) != 1 || ch.Services[0].Ports[0] != "127.0.0.1:19000:9000" {
+		t.Fatal("ClickHouse CI must expose only the native port on loopback, never Keeper")
+	}
+	negative, bootstrap, positive := -1, -1, -1
+	for index, step := range ch.Steps {
+		if strings.Contains(step.Run, "required=TestCHIntelligenceLeaseMissingKeeperFailsClosed") {
+			negative = index
+			if step.Env["QPOT_TEST_CH_EXPECT_NO_KEEPER"] != "1" {
+				t.Fatal("no-Keeper regression can silently skip")
+			}
+		}
+		if strings.Contains(step.Run, "docker cp internal/instance/clickhouse_keeper.xml") {
+			bootstrap = index
+			if step.Env["CLICKHOUSE_CONTAINER"] != "${{ job.services.clickhouse.id }}" || !strings.Contains(step.Run, `docker restart "$CLICKHOUSE_CONTAINER"`) || !strings.Contains(step.Run, `docker exec --user 0 "$CLICKHOUSE_CONTAINER" chmod 0644 /etc/clickhouse-server/config.d/qpot-keeper.xml`) || !strings.Contains(step.Run, "system.zookeeper") {
+				t.Fatal("Keeper bootstrap does not target the actual job service or verify its readiness")
+			}
+		}
+		if strings.Contains(step.Run, "test_packages=(./internal/database ./internal/intelligence ./internal/server)") {
+			positive = index
+			for _, name := range []string{"TestCHIntelligenceLeaseNativeContentionAndFencing", "TestCHIntelligenceLeaseNativeExpiryAndLargeCheckpoint", "TestCHIntelligenceLeaseRejectsNonAtomicControlCatalog", "TestWorkerClassifiesAgainstClickHouse", "TestServerServesDataFromClickHouse"} {
+				if !strings.Contains(step.Run, name) {
+					t.Fatalf("native Keeper gate dropped mandatory test %s", name)
+				}
+			}
+			if !strings.Contains(step.Run, `'"Action":"skip"'`) || !strings.Contains(step.Run, "grep -Fv TestCHIntelligenceLeaseMissingKeeperFailsClosed") {
+				t.Fatal("positive Keeper gate can accept skipped or wrong-fixture tests")
+			}
+		}
+	}
+	if negative < 0 || bootstrap <= negative || positive <= bootstrap || ch.Env["QPOT_TEST_CLICKHOUSE"] != "1" {
+		t.Fatal("Keeper bootstrap/fail-closed/storage gate ordering drifted")
+	}
+	pg, ok := w.Job("postgres-lease-integration")
+	if !ok {
+		t.Fatal("native PostgreSQL lease gate missing")
+	}
+	if len(pg.Services) != 1 || !bytes.Contains(readRepo(t, "internal/instance/ssh_organization.go"), []byte(`"`+pg.Services[0].Image+`"`)) {
+		t.Fatal("PostgreSQL gate does not use the existing production PostgreSQL image")
+	}
+	if pg.Env["QPOT_TEST_POSTGRES"] != "1" {
+		t.Fatal("PostgreSQL lease integration can silently skip")
+	}
+	if len(pg.Services[0].Ports) != 1 || pg.Services[0].Ports[0] != "127.0.0.1:15432:5432" {
+		t.Fatal("PostgreSQL CI must expose its native port only on loopback")
+	}
+	var script strings.Builder
+	for _, step := range pg.Steps {
+		script.WriteString(step.Run)
+	}
+	for _, name := range []string{"TestPGIntelligenceLeaseIndependentOwnersAndAliases", "TestPGIntelligenceLeaseShadowCheckpointCannotSplitOwner", "TestPGIntelligenceLeaseRejectsDifferentProjectionScope", "TestPGIntelligenceLeaseCoordinatesDifferentDatabaseRoles", "TestPGIntelligenceLeaseExpiryRecoveryAndLargeCheckpoint", "TestPGIntelligenceLeaseClockCheckedAfterRowLock", "TestPGIntelligenceLeasePublicCheckpointProjectionAndTags"} {
+		if !strings.Contains(script.String(), name) {
+			t.Fatalf("native PostgreSQL gate dropped required test %s", name)
+		}
+	}
+	if !strings.Contains(script.String(), `'"Action":"skip"'`) {
+		t.Fatal("PostgreSQL lease gate does not reject skipped native tests")
+	}
+	es, ok := w.Job("elasticsearch-lease-integration")
+	if !ok || len(es.Services) != 1 {
+		t.Fatal("native Elasticsearch lease gate missing")
+	}
+	if es.Services[0].Image != "docker.elastic.co/elasticsearch/elasticsearch:8.17.0@sha256:2f602552550869fb29b6fd5848c5118d3ef3a2e1d5d45802e3ab9088cb2de8e2" || es.Env["QPOT_TEST_ELASTICSEARCH_LEASE"] != "1" || es.Env["QPOT_TEST_ELASTICSEARCH_LEASE_URL"] != "http://127.0.0.1:19200" {
+		t.Fatal("Elasticsearch fixture version or explicit live-test opt-in drifted")
+	}
+	if es.Env["QPOT_TEST_ELASTIC"] != "" {
+		t.Fatal("destructive legacy Elasticsearch fixtures must not share the native lease gate")
+	}
+	if len(es.Services[0].Ports) != 1 || es.Services[0].Ports[0] != "127.0.0.1:19200:9200" {
+		t.Fatal("Elasticsearch CI must expose its native port only on loopback")
+	}
+	script.Reset()
+	for _, step := range es.Steps {
+		script.WriteString(step.Run)
+	}
+	if !strings.Contains(script.String(), "required=TestElasticsearchIntelligenceLeaseLive") || !strings.Contains(script.String(), `-run "^${required}$"`) || !strings.Contains(script.String(), `'"Action":"skip"'`) {
+		t.Fatal("Elasticsearch lease gate can miss or skip its mandatory native test")
+	}
+	local := string(readRepo(t, "scripts/ci-local.sh"))
+	for _, id := range []string{pg.ID, es.ID} {
+		if !strings.Contains(local, ","+id+",") {
+			t.Fatalf("ci-local --no-docker does not skip %s", id)
+		}
+	}
+}
+
+func TestNativeLeaseGatesRejectMissingSkippedAndFailedTests(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("the local CI gate runs in Bash on Linux")
+	}
+	bash, err := exec.LookPath("bash")
+	if err != nil {
+		t.Fatal("Bash is required for the native CI gate regression")
+	}
+	w, err := ParseWorkflow(readRepo(t, ".github/workflows/ci.yml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, gate := range []struct {
+		job, marker string
+		required    []string
+	}{
+		{"clickhouse-integration", "required=TestCHIntelligenceLeaseMissingKeeperFailsClosed", []string{"TestCHIntelligenceLeaseMissingKeeperFailsClosed"}},
+		{"clickhouse-integration", "test_packages=(", []string{"TestCHIntelligenceLeaseNativeContentionAndFencing", "TestCHIntelligenceLeaseNativeExpiryAndLargeCheckpoint", "TestCHIntelligenceLeaseRejectsNonAtomicControlCatalog", "TestWorkerClassifiesAgainstClickHouse", "TestServerServesDataFromClickHouse"}},
+		{"postgres-lease-integration", "pattern='^TestPGIntelligenceLease'", []string{"TestPGIntelligenceLeaseIndependentOwnersAndAliases", "TestPGIntelligenceLeaseShadowCheckpointCannotSplitOwner", "TestPGIntelligenceLeaseRejectsDifferentProjectionScope", "TestPGIntelligenceLeaseCoordinatesDifferentDatabaseRoles", "TestPGIntelligenceLeaseExpiryRecoveryAndLargeCheckpoint", "TestPGIntelligenceLeaseClockCheckedAfterRowLock", "TestPGIntelligenceLeasePublicCheckpointProjectionAndTags"}},
+		{"elasticsearch-lease-integration", "required=TestElasticsearchIntelligenceLeaseLive", []string{"TestElasticsearchIntelligenceLeaseLive"}},
+	} {
+		t.Run(gate.marker, func(t *testing.T) {
+			job, ok := w.Job(gate.job)
+			if !ok {
+				t.Fatal("native lease job missing")
+			}
+			body := ""
+			for _, step := range job.Steps {
+				if strings.Contains(step.Run, gate.marker) {
+					body = step.Run
+				}
+			}
+			if body == "" {
+				t.Fatal("native lease gate script missing")
+			}
+			type scenario struct {
+				name, omit string
+				want       int
+			}
+			scenarios := []scenario{{"accepted", "", 0}, {"list command failure", "", 19}, {"test command failure", "", 23}, {"required test skipped", "", 1}}
+			for _, required := range gate.required {
+				scenarios = append(scenarios, scenario{"missing " + required, required, 1})
+			}
+			for _, scenario := range scenarios {
+				t.Run(scenario.name, func(t *testing.T) {
+					dir := t.TempDir()
+					bin := filepath.Join(dir, "bin")
+					if err := os.Mkdir(bin, 0o700); err != nil {
+						t.Fatal(err)
+					}
+					fakeGo := `#!/bin/sh
+set -eu
+case " $* " in
+ *' -list '*)
+  if [ "$QPOT_FAKE_SCENARIO" = 'list command failure' ]; then exit 19; fi
+  while IFS= read -r name; do
+   if [ "$name" != "$QPOT_FAKE_OMIT" ]; then printf '%s\n' "$name"; fi
+  done < "$QPOT_FAKE_INVENTORY"
+  exit 0;;
+esac
+printf '%s\n' "$*" >> "$QPOT_FAKE_TRACE"
+if [ "$QPOT_FAKE_SCENARIO" = 'test command failure' ]; then exit 23; fi
+if [ "$QPOT_FAKE_SCENARIO" = 'required test skipped' ]; then
+ printf '%s\n' '{"Action":"skip","Test":"required"}'
+else
+ printf '%s\n' '{"Action":"pass","Test":"required"}'
+fi
+`
+					if err := os.WriteFile(filepath.Join(bin, "go"), []byte(fakeGo), 0o700); err != nil {
+						t.Fatal(err)
+					}
+					inventory := filepath.Join(dir, "inventory")
+					if err := os.WriteFile(inventory, []byte(strings.Join(gate.required, "\n")+"\n"), 0o600); err != nil {
+						t.Fatal(err)
+					}
+					trace := filepath.Join(dir, "trace")
+					ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+					defer cancel()
+					cmd := exec.CommandContext(ctx, bash, "-c", body)
+					cmd.Env = append(os.Environ(), "PATH="+bin+string(os.PathListSeparator)+os.Getenv("PATH"), "RUNNER_TEMP="+dir, "QPOT_FAKE_SCENARIO="+scenario.name, "QPOT_FAKE_OMIT="+scenario.omit, "QPOT_FAKE_INVENTORY="+inventory, "QPOT_FAKE_TRACE="+trace)
+					output, runErr := cmd.CombinedOutput()
+					code := 0
+					if runErr != nil {
+						if exit, ok := runErr.(*exec.ExitError); ok {
+							code = exit.ExitCode()
+						} else {
+							t.Fatal(runErr)
+						}
+					}
+					if code != scenario.want {
+						t.Fatalf("exit %d, want %d: %s", code, scenario.want, output)
+					}
+					_, traceErr := os.Stat(trace)
+					shouldRun := scenario.omit == "" && scenario.name != "list command failure"
+					if (traceErr == nil) != shouldRun {
+						t.Fatal("required-test inventory did not control whether the native gate ran")
+					}
+				})
+			}
+		})
+	}
+}

@@ -11,6 +11,7 @@ package doctor
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -18,6 +19,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -122,6 +124,76 @@ type ServiceStater interface {
 	ServiceStates(ctx context.Context) (map[string]instance.ServiceState, error)
 }
 
+// sandboxCheck consumes the manager's read-only observation of the actual
+// owned containers. Registered daemon runtimes are not runtime proof.
+func sandboxCheck(ctx context.Context, cfg *config.Config, mgr ServiceStater) Check {
+	const name = "honeypot isolation"
+	noEnabled := cfg != nil && len(cfg.GetEnabledHoneypots()) == 0
+	observer, ok := mgr.(interface {
+		SandboxStatus(context.Context) (instance.SandboxStatus, error)
+	})
+	if noEnabled && !ok {
+		return Check{Name: name, Level: "ok", Detail: "no enabled honeypots require runtime verification"}
+	}
+	if !ok {
+		return Check{name, "fail", "container runtime has not been verified by this control plane", "QP-DOCKER-011"}
+	}
+	observed, err := observer.SandboxStatus(ctx)
+	if err != nil {
+		code := "QP-DOCKER-011"
+		var coded *hostsetup.Error
+		if errors.As(err, &coded) && coded != nil {
+			switch coded.Code {
+			case "QP-DOCKER-010", "QP-DOCKER-011", "QP-DOCKER-012":
+				code = coded.Code
+			}
+		}
+		detail := hostsetup.E(code).Entry().Title
+		if actual := observedSandboxDescription(observed); actual != "" {
+			detail += "; observed " + actual
+		}
+		return Check{name, "fail", detail, code}
+	}
+	// Saved configuration may disable a service whose stop failed. Observe
+	// physical containers before treating a no-honeypot deployment as empty.
+	if noEnabled && len(observed.Services) == 0 {
+		return Check{Name: name, Level: "ok", Detail: "no enabled or running honeypots require runtime verification"}
+	}
+	actual := observedSandboxDescription(observed)
+	if !observed.Verified || observed.Runtime == "" || len(observed.Services) == 0 || actual == "" {
+		return Check{name, "fail", "no running honeypot container runtime has been verified", "QP-DOCKER-011"}
+	}
+	detail := "verified " + actual
+
+	if observed.Fallback {
+		detail += fmt.Sprintf("; explicit Docker fallback for requested %q", observed.Requested)
+		return Check{name, "warn", detail, "QP-DOCKER-011"}
+	}
+	return Check{Name: name, Level: "ok", Detail: detail}
+}
+
+func observedSandboxDescription(observed instance.SandboxStatus) string {
+	runtimes := make(map[string]bool)
+	for _, runtime := range observed.Services {
+		if runtime != "" {
+			runtimes[runtime] = true
+		}
+	}
+	values := make([]string, 0, len(runtimes))
+	for runtime := range runtimes {
+		values = append(values, strconv.Quote(runtime))
+	}
+	sort.Strings(values)
+	switch len(values) {
+	case 0:
+		return ""
+	case 1:
+		return fmt.Sprintf("runtime %s on %d honeypot containers", values[0], len(observed.Services))
+	default:
+		return fmt.Sprintf("runtimes %s on %d honeypot containers", strings.Join(values, ", "), len(observed.Services))
+	}
+}
+
 // HealthChecks inspects a started instance: containers, database schema,
 // control plane and web UI. controlPlanePID returns the pid of the instance's
 // running control plane (0 when none runs); nil skips that check, as for an
@@ -176,6 +248,8 @@ func HealthChecks(ctx context.Context, cfg *config.Config, mgr ServiceStater, co
 			}
 		}
 	}
+
+	cs = append(cs, sandboxCheck(ctx, cfg, mgr))
 
 	// The schema must exist or the collector drops every event.
 	db, err := database.New(cfg.DatabaseClient())

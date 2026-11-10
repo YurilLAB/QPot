@@ -7,7 +7,7 @@ honeypot and away from your network, your host and your data.
 |---|---|
 | Isolation | Each honeypot on its own bridge network, with a non-overlapping subnet |
 | Egress | Honeypots cannot open connections to your LAN, the Docker host, cloud metadata (`169.254.169.254`, the Azure WireServer) or any other private, loopback, link-local, CGNAT or multicast address. Replies to attackers, public destinations and DNS to the host's resolvers still work. |
-| Runtime | gVisor or Kata for honeypots when installed |
+| Runtime | The requested gVisor or Kata runtime must be available and match the containers; missing or unverifiable isolation stops startup |
 | Containers | `cap_drop: ALL` with minimal add-backs, read-only root with tmpfs, no privileged containers |
 | Limits | CPU, memory, PID and file-descriptor limits per honeypot |
 | Secrets | The QPot ID is never given to honeypot containers, written to logs, sent in alerts or cluster traffic, or returned by the API. The database password is random per instance. |
@@ -15,6 +15,41 @@ honeypot and away from your network, your host and your data.
 | Web | CSP, `X-Frame-Options: DENY`, `nosniff`, constant-time login checks, the QPot ID accepted only in a header |
 | HiFi backends | No outbound network, recreated after every session, read-only host keys |
 | Downloads | The installers verify checksums and build provenance before installing anything |
+
+## Container isolation policy
+
+`security.sandbox_mode` selects `gvisor`, `kata` or an explicitly chosen `none`.
+The default is `gvisor`. QPot checks the selected Docker daemon for the requested
+runtime before starting or recreating honeypots. A missing runtime, unreadable
+runtime report or misspelled mode does not silently select ordinary Docker.
+Firejail is rejected: QPot does not wrap its Docker containers in Firejail, so
+finding the executable would not establish container isolation.
+
+```yaml
+security:
+  sandbox_mode: gvisor
+  sandbox_fallback: deny
+```
+
+`sandbox_fallback: deny` is the default. An operator may explicitly choose
+`docker` to permit ordinary Docker fallback for supported non-executing
+emulators when the requested runtime is absent. It does not permit fallback
+when Docker's runtime report cannot be verified. HiFi SSH, Tanner's PHP
+execution and other services not explicitly recognized as non-executing
+emulators cannot use this fallback. Per-honeypot risk labels do not override
+that restriction.
+
+Choosing `sandbox_mode: none` deliberately uses Docker's configured default
+runtime; it does not claim a gVisor or Kata boundary. Use a dedicated sensor
+host or VM and the remaining network, resource and storage controls. Removing
+a requested runtime does not prevent stopping or inspecting an instance.
+
+Changing the configured runtime requires recreating containers. Restarting
+existing containers cannot change their runtime. `qpot doctor` and the doctor
+API inspect the actual runtime of this instance's honeypot containers; runtime
+registration alone is not a healthy isolation result. Setup distinguishes the
+configured choice from verified running containers and reports an explicit
+fallback as ordinary Docker, rather than advertising the requested runtime.
 
 ## The egress guard
 

@@ -1,6 +1,7 @@
 package intelligence
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/binary"
 	"fmt"
@@ -10,10 +11,9 @@ import (
 	"path/filepath"
 )
 
-// acquireWorkerLock excludes competing processes in the same local OS account.
-// This is deliberately not a distributed lease: operators must still select one
-// owner when several hosts/accounts can reach the same database. Keep the lock
-// file after unlock, since removing it would let peers lock different inodes.
+// acquireWorkerLock is additional same-account exclusion and retains the
+// pre-lease revision counter for migration. Distributed authority belongs to
+// the database lease. Keep the file after unlock so peers lock the same inode.
 func acquireWorkerLock(identity string) (*os.File, error) {
 	root, err := os.UserConfigDir()
 	if err != nil {
@@ -44,11 +44,9 @@ func acquireWorkerLock(identity string) (*os.File, error) {
 	return f, nil
 }
 
-// nextRevision reserves a revision on disk before sending the checkpoint. A
-// process can die while its database save is still in flight; its successor
-// must never reuse that revision for a different batch. The checked counter is
-// synced under the lifetime ownership lock. Corrupt/torn writes fail closed.
-func (w *Worker) nextRevision(minimum uint64) (uint64, error) {
+// nextRevision reserves globally before sending a checkpoint. The local file
+// is retained as a migration floor; it is never the lease authority.
+func (w *Worker) nextRevision(ctx context.Context, minimum uint64) (uint64, error) {
 	if minimum >= math.MaxInt64-1 {
 		return 0, fmt.Errorf("intelligence revision exhausted")
 	}
@@ -58,8 +56,47 @@ func (w *Worker) nextRevision(minimum uint64) (uint64, error) {
 	if w.ownershipLock == nil {
 		return 0, fmt.Errorf("intelligence ownership is not held")
 	}
+	if err := w.checkDatabaseOwnership(ctx); err != nil {
+		return 0, err
+	}
+	previous, err := readWorkerRevision(w.ownershipLock)
+	if err != nil {
+		return 0, err
+	}
+	minimum = max(minimum, previous)
+	if minimum >= math.MaxInt64-1 {
+		return 0, fmt.Errorf("intelligence revision exhausted")
+	}
+	leaser, lease, _, err := w.leaseSnapshot()
+	if err != nil {
+		return 0, err
+	}
+	next, err := leaser.ReserveIntelligenceRevision(ctx, lease, minimum)
+	if err != nil {
+		w.loseLease(err)
+		return 0, err
+	}
+	if next <= minimum || next >= math.MaxInt64-1 {
+		err := fmt.Errorf("database returned invalid intelligence revision")
+		w.loseLease(err)
+		return 0, err
+	}
+	if err := writeWorkerRevision(w.ownershipLock, next); err != nil {
+		return 0, err
+	}
+	return next, nil
+}
+
+func readWorkerRevision(file *os.File) (uint64, error) {
+	info, err := file.Stat()
+	if err != nil {
+		return 0, err
+	}
+	if info.Size() != 0 && info.Size() != 16 {
+		return 0, fmt.Errorf("incomplete intelligence revision reservation")
+	}
 	var data [16]byte
-	n, err := w.ownershipLock.ReadAt(data[:], 0)
+	n, err := file.ReadAt(data[:], 0)
 	if err != nil && err != io.EOF {
 		return 0, err
 	}
@@ -73,22 +110,27 @@ func (w *Worker) nextRevision(minimum uint64) (uint64, error) {
 			return 0, fmt.Errorf("corrupt intelligence revision reservation")
 		}
 	}
-	if previous > minimum {
-		minimum = previous
-	}
-	if minimum >= math.MaxInt64-1 {
+	if previous >= math.MaxInt64-1 {
 		return 0, fmt.Errorf("intelligence revision exhausted")
 	}
-	next := minimum + 1
+	return previous, nil
+}
+
+func writeWorkerRevision(file *os.File, next uint64) error {
+	previous, err := readWorkerRevision(file)
+	if err != nil {
+		return err
+	}
+	if next <= previous || next >= math.MaxInt64-1 {
+		return fmt.Errorf("intelligence revision reservation did not advance")
+	}
+	var data [16]byte
 	binary.BigEndian.PutUint64(data[:8], next)
 	binary.BigEndian.PutUint64(data[8:], ^next)
-	if n, err = w.ownershipLock.WriteAt(data[:], 0); err != nil {
-		return 0, err
+	if n, err := file.WriteAt(data[:], 0); err != nil {
+		return err
 	} else if n != len(data) {
-		return 0, io.ErrShortWrite
+		return io.ErrShortWrite
 	}
-	if err = w.ownershipLock.Sync(); err != nil {
-		return 0, err
-	}
-	return next, nil
+	return file.Sync()
 }
