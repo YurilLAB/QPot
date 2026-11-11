@@ -1641,6 +1641,15 @@ transforms:
       # the per-event honeypot attribution below.
       src_file = string(.file) ?? ""
       raw = string(.message) ?? ""
+      # This event's identity: a hash of where the line came from and what it
+      # says, written as a UUID. The same line always gets the same ID, so a
+      # batch the sink has to send twice is the same batch byte for byte, and
+      # the database's insert deduplication stores it once. (Without it the
+      # database gave each row a random ID, and a retried batch - its first
+      # attempt had timed out while the database was frozen or its disk full,
+      # and went through all the same - was stored twice.)
+      eid = sha2((string(.file) ?? "") + "\n" + (string(.message) ?? ""), variant: "SHA-256")
+      event_uuid = slice!(eid, 0, 8) + "-" + slice!(eid, 8, 12) + "-" + slice!(eid, 12, 16) + "-" + slice!(eid, 16, 20) + "-" + slice!(eid, 20, 32)
 
       # Parse the honeypot's JSON payload FIRST so its fields are present;
       # our own metadata is stamped afterwards so an attacker-controlled log
@@ -2117,8 +2126,8 @@ transforms:
       }
       .metadata = md
 
-      # Classification is the intelligence worker's job, and event_id is the
-      # database's row identity; never trust a log line that claims either.
+      # Classification is the intelligence worker's job, and event_id is set
+      # below from the line itself: never trust a log line that claims either.
       del(.event_id)
       del(.technique_id)
       del(.technique_name)
@@ -2136,6 +2145,7 @@ transforms:
       # DateTime64 'basic' input format ("YYYY-MM-DD HH:MM:SS.fff"); a raw
       # RFC3339 value (with T/Z) is rejected by the JSONEachRow parser (400).
       del(.qpot_id)
+      .event_id = event_uuid
       .sensor_id = "{{.Config.SensorID}}"
       .qpot_instance = "{{.Config.InstanceName}}"
       .timestamp = format_timestamp!(now(), "%Y-%m-%d %H:%M:%S%.3f")
@@ -2149,6 +2159,15 @@ transforms:
     inputs:
       - suricata_eve
     source: |
+      # This event's identity: a hash of where the line came from and what it
+      # says, written as a UUID. The same line always gets the same ID, so a
+      # batch the sink has to send twice is the same batch byte for byte, and
+      # the database's insert deduplication stores it once. (Without it the
+      # database gave each row a random ID, and a retried batch - its first
+      # attempt had timed out while the database was frozen or its disk full,
+      # and went through all the same - was stored twice.)
+      eid = sha2((string(.file) ?? "") + "\n" + (string(.message) ?? ""), variant: "SHA-256")
+      event_uuid = slice!(eid, 0, 8) + "-" + slice!(eid, 8, 12) + "-" + slice!(eid, 12, 16) + "-" + slice!(eid, 16, 20) + "-" + slice!(eid, 20, 32)
       if is_string(.message) && starts_with(strip_whitespace(string!(.message)), "{") {
         parsed, perr = parse_json(string!(.message))
         if perr == null {
@@ -2175,6 +2194,7 @@ transforms:
         "sensor": "suricata"
       }
       del(.qpot_id)
+      .event_id = event_uuid
       .sensor_id = "{{.Config.SensorID}}"
       .qpot_instance = "{{.Config.InstanceName}}"
       .timestamp = format_timestamp!(now(), "%Y-%m-%d %H:%M:%S%.3f")
@@ -2187,6 +2207,15 @@ transforms:
     inputs:
       - p0f_log
     source: |
+      # This event's identity: a hash of where the line came from and what it
+      # says, written as a UUID. The same line always gets the same ID, so a
+      # batch the sink has to send twice is the same batch byte for byte, and
+      # the database's insert deduplication stores it once. (Without it the
+      # database gave each row a random ID, and a retried batch - its first
+      # attempt had timed out while the database was frozen or its disk full,
+      # and went through all the same - was stored twice.)
+      eid = sha2((string(.file) ?? "") + "\n" + (string(.message) ?? ""), variant: "SHA-256")
+      event_uuid = slice!(eid, 0, 8) + "-" + slice!(eid, 8, 12) + "-" + slice!(eid, 12, 16) + "-" + slice!(eid, 16, 20) + "-" + slice!(eid, 20, 32)
       if is_string(.message) && starts_with(strip_whitespace(string!(.message)), "{") {
         parsed, perr = parse_json(string!(.message))
         if perr == null {
@@ -2207,6 +2236,7 @@ transforms:
         "sensor": "p0f"
       }
       del(.qpot_id)
+      .event_id = event_uuid
       .sensor_id = "{{.Config.SensorID}}"
       .qpot_instance = "{{.Config.InstanceName}}"
       .timestamp = format_timestamp!(now(), "%Y-%m-%d %H:%M:%S%.3f")
@@ -2219,6 +2249,15 @@ transforms:
     inputs:
       - fatt_log
     source: |
+      # This event's identity: a hash of where the line came from and what it
+      # says, written as a UUID. The same line always gets the same ID, so a
+      # batch the sink has to send twice is the same batch byte for byte, and
+      # the database's insert deduplication stores it once. (Without it the
+      # database gave each row a random ID, and a retried batch - its first
+      # attempt had timed out while the database was frozen or its disk full,
+      # and went through all the same - was stored twice.)
+      eid = sha2((string(.file) ?? "") + "\n" + (string(.message) ?? ""), variant: "SHA-256")
+      event_uuid = slice!(eid, 0, 8) + "-" + slice!(eid, 8, 12) + "-" + slice!(eid, 12, 16) + "-" + slice!(eid, 16, 20) + "-" + slice!(eid, 20, 32)
       if is_string(.message) && starts_with(strip_whitespace(string!(.message)), "{") {
         parsed, perr = parse_json(string!(.message))
         if perr == null {
@@ -2242,6 +2281,7 @@ transforms:
         "sensor": "fatt"
       }
       del(.qpot_id)
+      .event_id = event_uuid
       .sensor_id = "{{.Config.SensorID}}"
       .qpot_instance = "{{.Config.InstanceName}}"
       .timestamp = format_timestamp!(now(), "%Y-%m-%d %H:%M:%S%.3f")

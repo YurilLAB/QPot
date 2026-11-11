@@ -254,4 +254,32 @@ whatever the visitor intended; its download URLs still count.
 
 ## Results of the last recorded run
 
-Not recorded yet.
+No comparison against a stock Cowrie has been recorded: that needs both
+deployments exposed to the internet side by side for weeks, as described
+above. What has been recorded is a check of the tool itself against traffic
+whose answers are known.
+
+2026-11-11: `qpot engagement -i <instance> --since 1d --honeypot cowrie` on
+the instance of the three-hour failure soak ([reliability.md](reliability.md)).
+The soak's load is scripted: about 57,000 connections that only exchange
+SSH version strings, and 1,113 login attempts of which 1,077 got in and each
+ran the same three commands (`uname -a`, an `echo … > file`, an `nmap`).
+All of it arrives from one address, Docker's gateway.
+
+| Metric | Reported | Expected from the load |
+|---|---|---|
+| Sessions | 57,542 | about 57,556: 56,781 accepted connections and 1,113 logins, less the 338 the soak lost to a full disk |
+| Attempted a login | 1.9% | 1,113 of 57,542 = 1.9% |
+| Logged in, ran a command | 1.9% | 1,077 of 57,542 = 1.9% |
+| Commands per interactive session, median and p90 | 3 | 3 |
+| Commands per interactive session, max | 6 | 3; three sessions were stored twice by a fault the soak injected, which the soak itself reported |
+| Top command stems | `echo`, `nmap`, `uname`, 1,080 each | 1,077 each, plus the same three duplicates |
+| Command stem entropy | 1.58 bits | log2(3) = 1.58 |
+| Payload hashes | 1,077 | one file written per session |
+| Download URLs and hosts | 0 | 0: the URL was echoed, not fetched |
+| Left after a probe | 0.0% | 0: the last command is `nmap`, not a probe |
+| Returning sources | 100% | meaningless here: one source, as the section above warns |
+| Session duration, logged in, median | 0.3 s | a scripted client; says nothing about people |
+
+Every figure matches what the load did. These are not attacker numbers and
+say nothing about how well the deception works.

@@ -105,55 +105,67 @@ about how QPot behaves with many thousands of distinct sources.
 
 ## Results of the last recorded run
 
-2026-11-11, Docker Engine 26.1.5 on Linux (WSL2, 12 cores, 15 GiB),
-`sandbox_mode: none`, ClickHouse, 4 connections a second, faults held 30
-seconds with 40 seconds between them. This was a 10-minute run that reached
-five of the twelve faults; a run of several hours over all of them is the
-release requirement and replaces this table when it is recorded.
+2026-11-11, 19:41 to 22:46 (3 h 6 min). Docker Engine 26.1.5 on Linux
+(WSL2, 12 cores, 15 GiB), `sandbox_mode: none`, ClickHouse, the instance on
+a 3 GiB filesystem of its own. 4 connections a second, each fault held for
+2 minutes with 3 minutes between faults, all twelve faults three times
+over. Commit `e4a39b24`.
 
 | Connections | Count |
 |---|---|
-| sent | 2,322 |
-| accepted by the honeypot | 2,081 |
-| refused (honeypot down) | 241 |
-| stored, distinct | 2,081 |
-| **lost** | **0** |
-| **stored twice** | **0** |
+| sent | 57,498 |
+| accepted by the honeypot | 56,781 |
+| refused (honeypot down) | 717 |
+| stored, distinct | 56,443 |
+| **lost** | **338**, all during `disk-full` |
+| **stored twice** | **238**, during `database-freeze` and `disk-full` |
 
-Collection delay: median 0.2 s, 99th percentile 31.5 s, longest 36.5 s (the
-collector being down).
+Collection delay: median 0.2 s, 99th percentile 101.6 s, longest 127.7 s
+(the collector being down for a two-minute fault).
 
-| Fault | Held | Recovery | Accepted during | Refused during | Lost | Longest collection delay |
-|---|---|---|---|---|---|---|
-| database-stop | 42 s | 34 s | 317 | 0 | 0 | 9 s |
-| collector-kill | 31 s | 6 s | 161 | 0 | 0 | 34 s |
-| control-plane-kill | 32 s | 4 s | 155 | 0 | 0 | 0 s |
-| worker-takeover (control plane frozen 95 s) | 95 s | 4 s | 409 | 0 | 0 | 1 s |
-| honeypot-kill | 86 s | 6 s | 139 | 241 | 0 | 9 s |
+Per fault, the three rounds side by side:
+
+| Fault | Recovery (s) | Lost | Stored twice |
+|---|---|---|---|
+| database-stop | 14, 19, 14 | 0 | 0 |
+| database-kill | 23, 29, 21 | 0 | 0 |
+| database-freeze | 15, 9, 7 | 0 | 40, 41, 40 |
+| collector-kill | 6, 6, 6 | 0 | 0 |
+| collector-recreate | 6, 6, 15 | 0 | 0 |
+| network-partition | 23, 17, 13 | 0 | 0 |
+| honeypot-kill | 6, 4, 6 | 0 (239 refused each time) | 0 |
+| control-plane-kill | 6, 6, 2 | 0 | 0 |
+| worker-takeover | 6, 4, 2 | 0 | 0 |
+| disk-full | 6, 4, 21 | 0, 105, 233 | 0, 117, 0 |
+| traffic-burst (10 times the rate) | 4, 4, 4 | 0 of 14,476 | 0 |
+
+`honeypot-restart` did not run: the harness called `qpot docker restart`
+with a flag that command does not take. The harness is fixed; the fault is
+exercised in the run described under "After the fix" below.
 
 | Intelligence | Count |
 |---|---|
-| login sessions completed | 52 of 58 |
-| indicators expected (one unique domain per session) | 52 |
-| found | 52 |
+| login sessions completed | 1,077 of 1,113 |
+| indicators expected (one unique domain per session) | 1,077 |
+| found | 1,077 |
 | missing | 0 |
-| **counted more than once** | **0** |
-| `nmap` commands stored | 52 of 52 |
+| counted more than once | 3 |
+| `nmap` commands stored | 1,080 for 1,077 sessions |
 | duplicate session rows | 0 |
 | events still unclassified at the end | 0 |
 
-In this run the second worker of `worker-takeover` did not take the lease
-(a fault in the harness, since fixed: it shared the frozen worker's local
-lock), so the row measures a control plane frozen past its lease and
-resumed, not a takeover by another host.
+The three indicators counted twice, and the three extra `nmap` commands,
+are the same three sessions: their events were among those stored twice
+during a `database-freeze`. The worker counted what the database held. No
+worker crash, takeover or replay counted anything twice.
 
-The six logins that did not complete were refused by Cowrie's own login
-policy, which lets a source in only after a random number of tries.
+The logins that did not complete were refused by Cowrie's own login policy,
+which lets a source in only after a random number of tries.
 
 ## What the soak found and what was changed
 
-Two defects, both found by the first short runs and both fixed before the
-run above.
+Four things. The first two were found by the first short runs and fixed
+before the run above; the other two were found by that run.
 
 **A database outage longer than 30 seconds stopped intelligence for good.**
 The intelligence worker holds a database lease that lasts 30 seconds. When
@@ -165,7 +177,7 @@ classified until someone restarted the control plane, and the only sign was
 never. Now the control plane starts a new worker when one stops: it must
 take a new lease, which the database refuses while another owner's is
 alive, and it begins from the durable checkpoint. Recovery from the same
-fault is 34 seconds. `TestWorkerIsReplacedAfterLosingItsLease` covers it.
+fault took 14 to 19 seconds in the long run. `TestWorkerIsReplacedAfterLosingItsLease` covers it.
 
 **The database ran out of memory headroom.** The database container had the
 limits meant for one honeypot: 512 MiB and half a CPU. Since swap is capped
@@ -189,6 +201,52 @@ diagnostic tables (written every few seconds, never trimmed, and the source
 of most idle CPU and disk writes) and sizes its caches and merge pools for
 the container. `TestDatabaseHasItsOwnLimits` and
 `TestClickHouseLimitsConfig` cover it.
+
+**A frozen database stored batches twice.** In the three-hour run every
+`database-freeze` left about 40 connections stored twice, and one
+`disk-full` left 117. The collector's insert was in flight when the fault
+began; it timed out and was sent again; when the fault ended the database
+completed both attempts. Both copies carried the same collection time,
+which is how they were told apart from two reads of one line. Three login
+sessions were among them, so intelligence counted their indicators twice:
+the worker was exact about a database that was not.
+
+The collector now gives every event an ID derived from its log line (a
+hash of the file and the line), instead of leaving the database to invent
+a random one per row, and the events table remembers its last 1,000 insert
+blocks and drops one that arrives again. A retried batch is now the same
+block byte for byte, and is stored once. Existing tables get the setting at
+start. `TestClickHouseStoresARetriedBatchOnce` and
+`TestVectorKeepsScannerEvidenceLive` cover the two halves.
+
+### After the fix
+
+2026-11-11, 23:00 to 23:28, same host, the working tree that became the
+commit after `74d0f52b`: the two faults that had produced duplicates, the
+database kill, and the restart fault the long run had skipped, twice over.
+
+| Fault | Recovery (s) | Accepted during | Lost | Stored twice |
+|---|---|---|---|---|
+| database-freeze | 10, 15 | 534, 552 | 0 | 0 |
+| disk-full | 29, 20 | 618, 584 | 366, 91 | 0 |
+| database-kill | 23, 29 | 588, 615 | 0 | 0 |
+| honeypot-restart | 18 | 79 (34 refused) | 0 | 0 |
+
+6,679 connections accepted, none stored twice; 149 of 149 indicators found,
+none counted twice.
+
+**A full disk loses what the honeypot cannot write.** The connections lost
+during `disk-full` were checked one by one on the kept instance: none of
+them is in Cowrie's own log or in the log backup. Cowrie reports
+`[Errno 28] No space left on device` from its JSON output and carries on
+serving without recording. Everything Cowrie did write was collected: after
+the run the collector's checkpoint was at the last byte of the log. So
+QPot's pipeline lost nothing, and the honeypot lost anywhere from none to
+60% of the connections it took while the disk was full (five episodes: 0,
+20%, 40%, 59% and 16%). QPot cannot recover what
+was never written. What it does is keep the disk from filling: storage
+limits per honeypot and disk cleanup ([disk-cleanup.md](disk-cleanup.md)),
+and `qpot doctor` fails below 2 GiB free.
 
 ## Upgrade and rollback rehearsal
 
@@ -223,10 +281,11 @@ program, and attacked again. The procedure is the one in
   took and was killed before writing its log line, is not evidence QPot
   ever had. The soak reports these as refused, or as lost during a
   `honeypot-` fault.
-- **A full disk.** With no space left a honeypot cannot write its log, and
-  the database and the collector cannot record what they have. What happens
-  then is measured by the `disk-full` fault, which the run above did not
-  reach.
+- **A full disk.** A honeypot that cannot write its log records nothing,
+  and QPot never sees what it did not record: in the soak, Cowrie lost up
+  to 60% of the connections it took while the disk was full.
+  Nothing the honeypot wrote was lost, and nothing was stored twice. See
+  the finding above.
 - **HiFi SSH session capture during a long control-plane outage.** HiFi
   sessions are recorded on each backend's container log and converted by
   the control plane. When the control plane stops, the broker turns new

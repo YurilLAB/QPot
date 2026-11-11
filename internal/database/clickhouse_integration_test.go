@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -365,4 +366,59 @@ func TestClickHouseIOCSightingsAccumulate(t *testing.T) {
 		t.Fatal(err)
 	}
 	checkIOCSightingsAccumulate(t, db, "198.51.100.90", func() {})
+}
+
+// TestClickHouseStoresARetriedBatchOnce: the collector retries a batch whose
+// first attempt timed out, and the database may have stored that attempt all
+// the same (the failure soak froze the database mid-insert and found each
+// such batch twice). A batch that carries the collector's event IDs is the
+// same block the second time and must be stored once. An events table made
+// before the setting existed gets it from InitializeSchema.
+func TestClickHouseStoresARetriedBatchOnce(t *testing.T) {
+	db := connectCH(t)
+	ch := db.(*ClickHouse)
+	ctx := context.Background()
+	count := func(marker string) uint64 {
+		t.Helper()
+		var n uint64
+		if err := ch.conn.QueryRow(ctx, `SELECT count() FROM events WHERE event_type = ?`, marker).Scan(&n); err != nil {
+			t.Fatal(err)
+		}
+		return n
+	}
+	// The batch as the collector sends it: each row with its own event ID.
+	batch := func(marker string) string {
+		return `INSERT INTO events (timestamp, honeypot, source_ip, event_type, command, event_id) VALUES
+			('2026-11-11 10:00:00.000', 'cowrie', '198.51.100.90', '` + marker + `', 'uname -a', '6f1c1d2e-0000-4000-8000-00000000000a'),
+			('2026-11-11 10:00:00.250', 'cowrie', '198.51.100.90', '` + marker + `', 'id', '6f1c1d2e-0000-4000-8000-00000000000b')`
+	}
+	send := func(query string) {
+		t.Helper()
+		if err := ch.conn.Exec(ctx, query); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// An upgraded instance: the table exists without the setting.
+	send(`ALTER TABLE events RESET SETTING non_replicated_deduplication_window`)
+	send(batch("retry-before-upgrade"))
+	send(batch("retry-before-upgrade"))
+	if got := count("retry-before-upgrade"); got != 4 {
+		t.Fatalf("without the setting a repeated batch is stored %d rows, expected 4: this test no longer shows the defect", got)
+	}
+	if err := db.InitializeSchema(ctx); err != nil {
+		t.Fatal(err)
+	}
+
+	send(batch("retry-with-ids"))
+	send(batch("retry-with-ids"))
+	send(batch("retry-with-ids"))
+	if got := count("retry-with-ids"); got != 2 {
+		t.Errorf("a batch sent three times is stored as %d rows, want 2", got)
+	}
+	// Different events are never mistaken for a retry.
+	send(strings.Replace(batch("retry-with-ids"), "00000000000a", "00000000000c", 1))
+	if got := count("retry-with-ids"); got != 4 {
+		t.Errorf("a different batch was dropped as a duplicate: %d rows, want 4", got)
+	}
 }

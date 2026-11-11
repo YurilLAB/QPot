@@ -227,6 +227,11 @@ func TestGeneratedFilesNeverCarryTheQPotID(t *testing.T) {
 			if got, want := strings.Count(vector, `.sensor_id = "`+sensor+`"`), 4; got != want {
 				t.Errorf("%s: sensor ID stamped %d times, want %d (honeypots, suricata, p0f, fatt)", db, got, want)
 			}
+			// Each transform also gives its events an ID derived from the
+			// log line, so that a retried batch is deduplicated.
+			if got := strings.Count(vector, ".event_id = event_uuid"); got != 4 {
+				t.Errorf("%s: event ID stamped in %d transforms, want 4", db, got)
+			}
 			if got := strings.Count(vector, "del(.qpot_id)"); got != 4 {
 				t.Errorf("%s: qpot_id removed in %d transforms, want 4", db, got)
 			}

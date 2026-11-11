@@ -125,7 +125,10 @@ type faultResult struct {
 	// LostDuring and MaxDelaySeconds are filled from the final accounting:
 	// accepted connections sent during the fault that never arrived, and the
 	// longest wait of one that did.
-	LostDuring      int     `json:"lost_during"`
+	LostDuring int `json:"lost_during"`
+	// TwiceDuring counts connections sent during the fault that the
+	// database holds more than once.
+	TwiceDuring     int     `json:"stored_twice_during"`
 	MaxDelaySeconds float64 `json:"max_delay_seconds"`
 	Note            string  `json:"note,omitempty"`
 	Error           string  `json:"error,omitempty"`
@@ -655,7 +658,7 @@ func (h *harness) faults() []fault {
 			}},
 		{name: "honeypot-restart", what: "the honeypot is restarted through qpot (docker restart)", hold: 5 * time.Second,
 			inject: func(ctx context.Context) error {
-				out, err := h.qpot(ctx, 5*time.Minute, "docker", "restart", "cowrie", "-i", h.opt.instance)
+				out, err := h.qpot(ctx, 5*time.Minute, "docker", "restart", h.container("cowrie"))
 				if err != nil {
 					return fmt.Errorf("qpot docker restart: %w: %s", err, tail(out, 4))
 				}
@@ -977,6 +980,7 @@ type report struct {
 	Intelligence intelReport    `json:"intelligence"`
 	delays       map[int]float64
 	lost         map[int]bool
+	twice        map[int]bool
 }
 
 type intelReport struct {
@@ -1002,7 +1006,7 @@ func (h *harness) account(ctx context.Context, until time.Time) report {
 	h.mu.Lock()
 	conns := append([]connection(nil), h.conns...)
 	h.mu.Unlock()
-	r := report{Ended: until, delays: map[int]float64{}, lost: map[int]bool{}}
+	r := report{Ended: until, delays: map[int]float64{}, lost: map[int]bool{}, twice: map[int]bool{}}
 	if len(conns) > 0 {
 		r.Started = conns[0].Sent
 	}
@@ -1051,6 +1055,7 @@ func (h *harness) account(ctx context.Context, until time.Time) report {
 		seen[n] = true
 		r.Stored++
 		if count > 1 {
+			r.twice[n] = true
 			r.Duplicated += int(count) - 1
 		}
 		d := stored.Sub(c.Sent).Seconds()
@@ -1104,6 +1109,9 @@ func (h *harness) attribute(ctx context.Context, faults []faultResult) []faultRe
 				continue
 			}
 			f.Accepted++
+			if final.twice[c.N] {
+				f.TwiceDuring++
+			}
 			if final.lost[c.N] {
 				f.LostDuring++
 			}
@@ -1192,13 +1200,13 @@ func (h *harness) write(r report) {
 	fmt.Fprintf(&b, "| Connections | Count |\n|---|---|\n| sent | %d |\n| accepted by the honeypot | %d |\n| refused (honeypot down) | %d |\n| stored, distinct | %d |\n| **lost** | **%d** |\n| **stored twice** | **%d** |\n\n",
 		r.Sent, r.Accepted, r.Refused, r.Stored, r.Lost, r.Duplicated)
 	fmt.Fprintf(&b, "Delay from connection to the collector reading it: median %.1f s, 99th percentile %.1f s, longest %.1f s.\n\n", r.DelayP50, r.DelayP99, r.DelayMax)
-	b.WriteString("| Fault | Held | Recovery | Accepted during | Refused during | Lost | Longest collection delay | Note |\n|---|---|---|---|---|---|---|---|\n")
+	b.WriteString("| Fault | Held | Recovery | Accepted during | Refused during | Lost | Stored twice | Longest collection delay | Note |\n|---|---|---|---|---|---|---|---|---|\n")
 	for _, f := range r.Faults {
 		rec := fmt.Sprintf("%.0f s", f.RecoverySeconds)
 		if f.RecoverySeconds < 0 {
 			rec = "-"
 		}
-		fmt.Fprintf(&b, "| %s | %.0f s | %s | %d | %d | %d | %.0f s | %s |\n", f.Name, f.HeldSeconds, rec, f.Accepted, f.Refused, f.LostDuring, f.MaxDelaySeconds,
+		fmt.Fprintf(&b, "| %s | %.0f s | %s | %d | %d | %d | %d | %.0f s | %s |\n", f.Name, f.HeldSeconds, rec, f.Accepted, f.Refused, f.LostDuring, f.TwiceDuring, f.MaxDelaySeconds,
 			strings.TrimSpace(f.Note+" "+f.Error))
 	}
 	i := r.Intelligence

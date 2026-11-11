@@ -123,6 +123,7 @@ machine; across a network it must go through an SSH tunnel or a TLS proxy.
 | Threat | Answer | Enforced by |
 |---|---|---|
 | Events lost while the database or collector is down | The collector acknowledges a line only once the database and the backup have it, and reads on from that mark after any restart. | `internal/soak`; [reliability.md](reliability.md) |
+| Events stored twice when an insert is retried | Each event's ID is derived from its log line, so a retried batch is the same block, and the events table drops a block it already holds. | `TestClickHouseStoresARetriedBatchOnce`; `internal/soak` |
 | Events or intelligence counted twice after a crash or a worker takeover | The intelligence worker commits each batch with its checkpoint, holds a fenced database lease, and a worker that lost the lease cannot write. | `worker_lease_test.go`, `worker_retry_test.go`; `internal/soak` |
 | Evidence discarded before it is stored | Nothing between the logs and the database drops an event for its content. Scanner traffic is tagged, not removed. | `TestScannerEventsAreNeverFiltered`, `TestVectorKeepsScannerEvidenceLive` |
 | Unrelated attackers merged into one campaign | A session is one source. Sources are linked only by a shared payload, download host or command sequence, never by one common command. Confidence reflects that evidence, not volume. | `ttp_test.go`; [intelligence.md](intelligence.md) |

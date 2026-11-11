@@ -117,18 +117,23 @@ func (ch *ClickHouse) InitializeSchema(ctx context.Context) error {
 			classified UInt8 DEFAULT 0,
 			-- Plain-language attack categories, most specific first.
 			categories Array(String) DEFAULT [],
-			-- Row identity for TagEvent; generated server-side for every
-			-- insert path (the collector never sends it).
+			-- Row identity for TagEvent. The collector sends it, derived
+			-- from the log line, so that a batch it sends twice is the same
+			-- block; rows inserted any other way get a random one.
 			event_id UUID DEFAULT generateUUIDv4()
 		) ENGINE = MergeTree()
 		PARTITION BY toYYYYMM(timestamp)
 		ORDER BY (timestamp, honeypot, source_ip)
 		TTL toDateTime(timestamp) + INTERVAL 90 DAY
-		SETTINGS index_granularity = 8192
+		SETTINGS index_granularity = 8192, non_replicated_deduplication_window = ` + eventsDeduplicationWindow + `
 	`
 
 	if err := ch.conn.Exec(ctx, eventsTable); err != nil {
 		return fmt.Errorf("failed to create events table: %w", err)
+	}
+	// A table created before the setting existed gets it too.
+	if err := ch.conn.Exec(ctx, "ALTER TABLE events MODIFY SETTING non_replicated_deduplication_window = "+eventsDeduplicationWindow); err != nil {
+		return fmt.Errorf("enable insert deduplication on events: %w", err)
 	}
 	if err := ch.ensureEventID(ctx); err != nil {
 		return err
@@ -953,6 +958,15 @@ func (ch *ClickHouse) GetPoolStats() PoolStats {
 		TotalConnections: 1,
 	}
 }
+
+// eventsDeduplicationWindow is how many of the latest insert blocks the events
+// table remembers, to drop one that arrives again. The collector retries a
+// batch whose first attempt it saw fail or time out; the database may have
+// stored that attempt all the same (it was frozen, or its disk was full, when
+// the collector gave up on it). The retry is the same block byte for byte,
+// because the collector gives each event an ID derived from its log line.
+// At one batch every few seconds, 1000 blocks cover more than an hour.
+const eventsDeduplicationWindow = "1000"
 
 // ensureEventID adds the event_id identity column to an events table created
 // before it existed, and materializes it so existing rows get a stable value

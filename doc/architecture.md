@@ -98,7 +98,10 @@ have stored the lines. While the database is away it waits, however long, and
 the lines stay in the honeypot's log. A collector that restarts or is
 recreated reads again whatever it had not delivered, and a log it has never
 seen from its start. The first time it keeps this state, QPot marks what the
-logs already hold as delivered, so nothing is sent twice.
+logs already hold as delivered, so nothing is sent twice. Every event carries
+an ID derived from its log line, and the events table drops an insert block
+it has already stored, so a batch the collector has to send again after a
+timeout is stored once.
 
 **Database.** ClickHouse by default, or TimescaleDB. It sits on an internal
 Docker network that honeypots cannot reach, and is published on the host only

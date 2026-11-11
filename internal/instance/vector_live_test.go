@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"slices"
 	"strings"
 	"testing"
@@ -328,7 +329,7 @@ func TestVectorRemapLive(t *testing.T) {
 		t.Errorf("cowrie command input not mapped to command: %+v", r)
 	}
 	if r := rows[3]; r.Honeypot != "cowrie" || r.SourceIP != "198.51.100.7" || r.SourcePort != 0 ||
-		r.Technique != nil || r.Classified != nil || r.EventID != nil || r.Username != "" || r.Command != "id" {
+		r.Technique != nil || r.Classified != nil || r.EventID == "not-a-uuid" || !eventUUID.MatchString(fmt.Sprint(r.EventID)) || r.Username != "" || r.Command != "id" {
 		t.Errorf("hostile cowrie line not sanitised: %+v", r)
 	}
 	if r := rows[4]; r.SourceIP != "0.0.0.0" {
@@ -490,6 +491,9 @@ func TestVectorEdgeConfigsValidateLive(t *testing.T) {
 	}
 }
 
+// eventUUID is the shape of the ID the collector derives from a log line.
+var eventUUID = regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`)
+
 // TestVectorKeepsScannerEvidenceLive runs honeypot lines through the two
 // transforms every event passes (add_qpot_metadata, tag_scanners) in the real
 // Vector. Before, the second one was a filter that dropped any event naming a
@@ -500,6 +504,7 @@ func TestVectorEdgeConfigsValidateLive(t *testing.T) {
 func TestVectorKeepsScannerEvidenceLive(t *testing.T) {
 	dir := t.TempDir()
 	run := vectorRunner(t, dir)
+	firstIDs := map[int]string{}
 	for _, tagging := range []bool{true, false} {
 		cfg := config.Default("vec-scan")
 		cfg.QPotID = "qp_vectorvectorvectorvecto"
@@ -571,6 +576,7 @@ func TestVectorKeepsScannerEvidenceLive(t *testing.T) {
 			Command  string            `json:"command"`
 			Metadata map[string]string `json:"metadata"`
 			SensorID string            `json:"sensor_id"`
+			EventID  string            `json:"event_id"`
 		}
 		var rows []row
 		for _, line := range bytes.Split(bytes.TrimSpace(raw), []byte("\n")) {
@@ -597,6 +603,20 @@ func TestVectorKeepsScannerEvidenceLive(t *testing.T) {
 			}
 			if r.Metadata["session"] == "" {
 				t.Errorf("tagging=%v: event %d lost its metadata: %+v", tagging, i, r.Metadata)
+			}
+		}
+		// Each line has an ID of its own, derived from the line: the same
+		// in both runs, so a batch sent twice is the same batch.
+		ids := map[string]bool{}
+		for i, r := range rows {
+			if !eventUUID.MatchString(r.EventID) || ids[r.EventID] {
+				t.Errorf("tagging=%v: event %d has ID %q (not a UUID, or shared with another line)", tagging, i, r.EventID)
+			}
+			ids[r.EventID] = true
+			if firstIDs[i] == "" {
+				firstIDs[i] = r.EventID
+			} else if firstIDs[i] != r.EventID {
+				t.Errorf("event %d got ID %s in one run and %s in another", i, firstIDs[i], r.EventID)
 			}
 		}
 		if rows[0].Command != "nmap -sV 192.0.2.10" {
