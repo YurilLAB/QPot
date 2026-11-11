@@ -291,6 +291,11 @@ func TestClickHouseEventIDUpgrade(t *testing.T) {
 	db := connectCH(t)
 	ch := db.(*ClickHouse)
 	ctx := context.Background()
+	// A table from before event_id has no index on it either, and ClickHouse
+	// refuses to drop a column an index is built on.
+	if err := ch.conn.Exec(ctx, `ALTER TABLE events DROP INDEX IF EXISTS `+eventIDIndex); err != nil {
+		t.Fatal(err)
+	}
 	if err := ch.conn.Exec(ctx, `ALTER TABLE events DROP COLUMN IF EXISTS event_id`); err != nil {
 		t.Fatal(err)
 	}
