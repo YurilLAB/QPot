@@ -227,13 +227,8 @@ func (s *Server) superviseWorker(ctx context.Context, w *intelligence.Worker) {
 		if next == nil {
 			return
 		}
-		_, last := w.Status()
-		code := ""
-		var coded *hostsetup.Error
-		if errors.As(last, &coded) && coded != nil {
-			code = coded.Code
-		}
-		slog.Info("Starting a new intelligence worker: the previous one stopped", "code", code)
+		// Why it stopped is in the stopped worker's own "paused" line.
+		slog.Info("Starting a new intelligence worker: the previous one stopped")
 		w = next
 	}
 }

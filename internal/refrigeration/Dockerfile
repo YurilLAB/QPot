@@ -1,5 +1,5 @@
 # A repository checkout and QPot's emitted minimal context use this same file.
-FROM public.ecr.aws/docker/library/golang:1.26.10-alpine@sha256:87c65a688975c0b1d4585d204874c45ca78354670e3a5f11368c5a492303d696 AS build
+FROM public.ecr.aws/docker/library/golang:1.26.11-alpine@sha256:ae52b5bc6ed045a9ed26ab03dc19327a802a9cc9aa8b27ed57f5c6b60579b0bb AS build
 WORKDIR /src
 ENV CGO_ENABLED=0 GOPROXY=off GOSUMDB=off GOTOOLCHAIN=local
 COPY go.mod ./

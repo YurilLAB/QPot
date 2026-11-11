@@ -31,6 +31,9 @@ import (
 // scrubMarker records, in the instance folder, that the backups were checked.
 const scrubMarker = ".backup-credential-scrubbed"
 
+// maxScrubID bounds what is searched for and replaced: an ID is 27 bytes.
+const maxScrubID = 64
+
 // scrubHelperTimeout bounds the helper container that rewrites backups this
 // process may not change.
 const scrubHelperTimeout = 10 * time.Minute
@@ -138,6 +141,9 @@ func scanBackups(root *os.Root, id string) (backupScan, error) {
 // fileContains reports whether the file holds needle, reading it in pieces
 // that overlap by the needle's length.
 func fileContains(root *os.Root, rel string, needle []byte) (bool, error) {
+	if len(needle) == 0 || len(needle) > maxScrubID {
+		return false, fmt.Errorf("cannot search for %d bytes", len(needle))
+	}
 	f, err := root.Open(rel)
 	if err != nil {
 		return false, err
@@ -169,8 +175,8 @@ func fileContains(root *os.Root, rel string, needle []byte) (bool, error) {
 // stands. The two have the same length, so no byte moves and the file is
 // never truncated or renamed.
 func overwriteInFile(root *os.Root, rel string, oldID, newID []byte) error {
-	if len(oldID) != len(newID) {
-		return fmt.Errorf("replacement is not the length of what it replaces")
+	if len(oldID) != len(newID) || len(oldID) == 0 || len(oldID) > maxScrubID {
+		return fmt.Errorf("replacement is not the length of what it replaces, or not an ID's length")
 	}
 	f, err := root.OpenFile(rel, os.O_RDWR, 0)
 	if err != nil {
