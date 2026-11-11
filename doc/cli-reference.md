@@ -36,6 +36,7 @@ this document stays in lock-step with the code.
 - [Canaries — `qpot canary`](#canaries--qpot-canary)
 - [Overview — `qpot overview`](#overview--qpot-overview)
 - [Disk cleanup — `qpot cleanup`](#disk-cleanup--qpot-cleanup)
+- [Engagement — `qpot engagement`](#engagement--qpot-engagement)
 - [GeoIP — `qpot geoip`](#geoip--qpot-geoip)
 - [Configuration — `qpot config`](#configuration--qpot-config)
 - [Utilities](#utilities)
@@ -94,6 +95,7 @@ qpot --version
 | `qpot canary` | Mint and manage canaries (honeytokens) — decoy artifacts that alert on monitored interactions. |
 | `qpot overview` | Host resources, 24h honeypot activity and recent events, for one or all local instances. |
 | `qpot cleanup` | Remove old captured files, logs and backup days to keep the instance within its disk limits. |
+| `qpot engagement` | Engagement metrics for an instance, or for any Cowrie JSON log, side by side. |
 | `qpot geoip` | Install or refresh the GeoIP database used for countries and the attack map. |
 | `qpot config` | Open or print the instance config file. |
 | `qpot id` | Show the QPot ID for an instance. |
@@ -843,6 +845,30 @@ something could not be removed. `--dry-run` only says what it would do. See
 qpot cleanup --dry-run
 qpot cleanup -i sensor1
 ```
+
+---
+
+## Engagement — `qpot engagement`
+
+How long visitors stay, how far they get and what they leave behind:
+sessions, a login-to-payload funnel, session length and depth, command
+diversity, the share that left after a probe, returning sources and distinct
+indicators. Every metric is defined in [effectiveness.md](effectiveness.md).
+
+```bash
+qpot engagement -i sensor1 [--since 7d] [--honeypot cowrie] [--json]
+qpot engagement -i sensor1 --honeypot cowrie --cowrie-log /data/stock/cowrie.json --label stock
+qpot engagement --cowrie-log a.json --cowrie-log b.json
+```
+
+| Flag | Default | Meaning |
+|---|---|---|
+| `-i, --instance` | none | The instance whose stored events to read. Its database must be running. |
+| `--since` | `7d` | The window: days (`7d`), weeks (`2w`) or a duration (`36h`). |
+| `--honeypot` | all | Only this honeypot's events. |
+| `--cowrie-log` | none | A Cowrie JSON log to measure as well; repeatable. With no instance it needs no Docker. |
+| `--label` | the file name | Column name for the log at the same position; repeatable. |
+| `--json` | off | Print the reports and comparisons as JSON. |
 
 ---
 

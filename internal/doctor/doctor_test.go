@@ -222,3 +222,85 @@ func TestSandboxCheckInspectsRunningOrphans(t *testing.T) {
 	}
 
 }
+
+// TestContainmentChecks: the doctor names a setting that removes containment,
+// a web UI without a login, and files that still carry the QPot ID.
+func TestContainmentChecks(t *testing.T) {
+	newCfg := func(t *testing.T) *config.Config {
+		cfg := config.Default("contain")
+		cfg.QPotID = "qp_abcdefghijklmnopqrstuvwx"
+		cfg.DataPath = t.TempDir()
+		for name, hp := range cfg.Honeypots {
+			hp.Enabled = name == "cowrie"
+			cfg.Honeypots[name] = hp
+		}
+		return cfg
+	}
+	level := func(cs []Check, name string) (string, string) {
+		for _, c := range cs {
+			if c.Name == name {
+				return c.Level, c.Code
+			}
+		}
+		return "missing", ""
+	}
+	marker := func(t *testing.T, cfg *config.Config) {
+		if err := os.WriteFile(filepath.Join(cfg.DataPath, ".backup-credential-scrubbed"), nil, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	t.Run("a healthy instance", func(t *testing.T) {
+		cfg := newCfg(t)
+		marker(t, cfg)
+		for _, c := range ContainmentChecks(cfg) {
+			if c.Level != "ok" {
+				t.Errorf("%s: %s %s (%s)", c.Name, c.Level, c.Detail, c.Code)
+			}
+		}
+		if !instance.BackupsScrubbed(cfg) {
+			t.Fatal("the marker name in this test is not the one the scrub writes")
+		}
+	})
+	t.Run("egress guard off with a sensitive honeypot", func(t *testing.T) {
+		cfg := newCfg(t)
+		hp := cfg.Honeypots["dionaea"]
+		hp.Enabled = true
+		cfg.Honeypots["dionaea"] = hp
+		cfg.Security.NetworkIsolation.AllowPrivateEgress = true
+		if l, code := level(ContainmentChecks(cfg), "containment settings"); l != "fail" || code != "QP-INST-015" {
+			t.Errorf("containment settings: %s %s", l, code)
+		}
+	})
+	t.Run("web UI without a login", func(t *testing.T) {
+		cfg := newCfg(t)
+		cfg.WebUI.QPotIDAuth = false
+		cfg.WebUI.Password = ""
+		if l, _ := level(ContainmentChecks(cfg), "web UI login"); l != "warn" {
+			t.Errorf("on loopback: %s, want warn", l)
+		}
+		cfg.WebUI.BindAddr = "0.0.0.0"
+		if l, code := level(ContainmentChecks(cfg), "web UI login"); l != "fail" || code != "QP-WEB-005" {
+			t.Errorf("on 0.0.0.0: %s %s, want fail QP-WEB-005", l, code)
+		}
+	})
+	t.Run("files an earlier version wrote", func(t *testing.T) {
+		cfg := newCfg(t)
+		if l, code := level(ContainmentChecks(cfg), "QPot ID in stored files"); l != "warn" || code != "QP-INST-016" {
+			t.Errorf("backups not checked yet: %s %s, want warn QP-INST-016", l, code)
+		}
+		marker(t, cfg)
+		if err := os.WriteFile(filepath.Join(cfg.DataPath, "vector.yaml"), []byte("# QPot ID: "+cfg.QPotID+"\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		cs := ContainmentChecks(cfg)
+		if l, code := level(cs, "QPot ID in stored files"); l != "fail" || code != "QP-INST-016" {
+			t.Errorf("old vector.yaml: %s %s, want fail QP-INST-016", l, code)
+		}
+		for _, c := range cs {
+			if strings.Contains(c.Detail, cfg.QPotID) {
+				t.Errorf("check %q prints the QPot ID", c.Name)
+			}
+		}
+	})
+}

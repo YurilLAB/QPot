@@ -32,7 +32,9 @@ It never contains the QPot ID, which is the web UI's login credential.
 
 Hooks get these environment variables:
 
-- `QPOT_ID`, `QPOT_INSTANCE`, `QPOT_TIMESTAMP`;
+- `QPOT_SENSOR_ID`, `QPOT_INSTANCE`, `QPOT_TIMESTAMP`;
+- `QPOT_ID`, the API credential, for a hook that calls the API. Use
+  `QPOT_SENSOR_ID` to label what a hook sends elsewhere;
 - `QPOT_TOTAL_EVENTS`, `QPOT_UNIQUE_IPS`, `QPOT_THRESHOLD`;
 - `QPOT_TOP_SOURCE_IP`, `QPOT_TOP_HONEYPOT`.
 

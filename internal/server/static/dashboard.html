@@ -193,7 +193,7 @@
                                 <ul class="rank-list" id="intel-iocs"></ul>
                             </div>
                             <div>
-                                <div class="stat-label">Active campaigns (TTP)</div>
+                                <div class="stat-label">Active sessions (TTP)</div>
                                 <ul class="rank-list" id="intel-ttps"></ul>
                             </div>
                         </div>
@@ -263,7 +263,7 @@
                 <div class="dash-grid">
                     <div class="dash-card stat-card"><div class="stat-label"><i class="fas fa-crosshairs"></i> Techniques seen</div><span class="stat-value" id="ti-techniques">-</span><div class="stat-sub">MITRE ATT&amp;CK</div></div>
                     <div class="dash-card stat-card"><div class="stat-label"><i class="fas fa-fingerprint"></i> IOCs</div><span class="stat-value" id="ti-iocs">-</span><div class="stat-sub">indicators extracted</div></div>
-                    <div class="dash-card stat-card"><div class="stat-label"><i class="fas fa-people-group"></i> Campaigns</div><span class="stat-value" id="ti-campaigns">-</span><div class="stat-sub">active attack sessions</div></div>
+                    <div class="dash-card stat-card"><div class="stat-label"><i class="fas fa-people-group"></i> Campaigns</div><span class="stat-value" id="ti-campaigns">-</span><div class="stat-sub" id="ti-campaigns-sub">sources linked by shared evidence</div></div>
                     <div class="dash-card stat-card"><div class="stat-label"><i class="fas fa-microchip"></i> Classifier</div><span class="stat-value" id="ti-worker">-</span><div class="stat-sub" id="ti-worker-sub"></div></div>
                 </div>
 
@@ -1377,11 +1377,11 @@
             ]);
             if (summary) {
                 $('intel-summary').textContent = [plural(summary.techniques_observed, 'technique', 'techniques'),
-                    plural(summary.iocs_total, 'IOC', 'IOCs'), plural(summary.active_sessions, 'campaign', 'campaigns')].join(' · ');
+                    plural(summary.iocs_total, 'IOC', 'IOCs'), plural(summary.active_campaigns ?? summary.active_sessions, 'campaign', 'campaigns'), plural(summary.active_sessions, 'session', 'sessions')].join(' · ');
             }
             rankList($('intel-techniques'), Array.isArray(techs) ? techs.slice(0, 12) : [], (t) => [t.technique_id, t.technique_name, fmt(t.count)], 'No techniques observed yet.');
             rankList($('intel-iocs'), Array.isArray(iocs) ? iocs.slice(0, 15) : [], (i) => [i.type, i.value, fmt(i.count)], 'No IOCs yet.');
-            rankList($('intel-ttps'), Array.isArray(ttps) ? ttps.slice(0, 12) : [], (s) => [firstIP(s), campaignText(s), fmt(s.event_count)], 'No campaigns yet.');
+            rankList($('intel-ttps'), Array.isArray(ttps) ? ttps.slice(0, 12) : [], (s) => [firstIP(s), campaignText(s), fmt(s.event_count)], 'No sessions yet.');
             return { summary, techs, iocs, ttps };
         }
 
@@ -1898,7 +1898,8 @@
             if (summary) {
                 $('ti-techniques').textContent = fmt(summary.techniques_observed);
                 $('ti-iocs').textContent = fmt(summary.iocs_total);
-                $('ti-campaigns').textContent = fmt(summary.active_sessions);
+                $('ti-campaigns').textContent = fmt(summary.active_campaigns ?? summary.active_sessions);
+                $('ti-campaigns-sub').textContent = 'across ' + plural(summary.active_sessions, 'active session', 'active sessions');
                 $('ti-worker').textContent = summary.worker_enabled ? 'On' : 'Off';
                 // offline, the classifier runs on its built-in technique list, not on nothing
                 $('ti-worker-sub').textContent = summary.attck_loaded ? 'Full ATT&CK dataset' : 'Built-in ATT&CK list (offline)';
@@ -1924,7 +1925,7 @@
                 h('td', { class: 'optional' }, String(t.tactic_name || '')), h('td', {}, fmt(t.count)))));
             const sb = $('ti-ttp-body');
             const sl = Array.isArray(ttps) ? ttps : [];
-            if (!sl.length) emptyRow(sb, 6, 'No campaigns yet.', 'fa-people-group');
+            if (!sl.length) emptyRow(sb, 6, 'No sessions yet.', 'fa-people-group');
             else sb.replaceChildren(...sl.map((s) => h('tr', {},
                 h('td', { class: 'mono-accent wrap' }, Array.isArray(s.source_ips) ? s.source_ips.map(String).join(', ') : ''),
                 h('td', {}, plural(Array.isArray(s.techniques) ? s.techniques.length : 0, 'technique', 'techniques')),

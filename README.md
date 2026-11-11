@@ -142,7 +142,8 @@ them all.
 | [Alerts and response hooks](doc/alerts.md) | Webhooks and your own commands |
 | [Clusters](doc/clustering.md) | Pairing nodes, enrollment and trust |
 | [Architecture](doc/architecture.md) | What runs where, and how data flows |
-| [Security model](doc/security.md) | Isolation, the egress guard, safe operation |
+| [Security model](doc/security.md), [Threat model](doc/threat-model.md) | Isolation, the egress guard, safe operation, and what is and is not defended |
+| [Reliability](doc/reliability.md), [Releases](doc/release.md) | Failure testing results, supported deployments, upgrade and rollback |
 | [CLI reference](doc/cli-reference.md), [Web API](doc/api.md), [Error codes](doc/setup-errors.md) | Reference |
 
 The full index is in [doc/README.md](doc/README.md).

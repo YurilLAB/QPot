@@ -31,6 +31,7 @@ import (
 	"github.com/qpot/qpot/internal/hostsetup"
 	"github.com/qpot/qpot/internal/instance"
 	"github.com/qpot/qpot/internal/intelligence"
+	"github.com/qpot/qpot/internal/server"
 	"github.com/spf13/cobra"
 	"golang.org/x/term"
 	"gopkg.in/yaml.v3"
@@ -147,6 +148,7 @@ Each QPot instance has a unique ID (qp_*) for tracking and authentication.`,
 	rootCmd.AddCommand(newDBCommand())
 	rootCmd.AddCommand(newCanaryCommand())
 	rootCmd.AddCommand(newCleanupCommand())
+	rootCmd.AddCommand(newEngagementCommand())
 
 	err := rootCmd.ExecuteContext(ctx)
 	explainCodedError(rootCmd.ErrOrStderr(), err)
@@ -185,6 +187,16 @@ func newUpCommand() *cobra.Command {
 			if err != nil {
 				return err
 			}
+			// Before any container starts: an instance whose control plane
+			// would refuse to serve must not be left half up.
+			if cfg.WebUI.Enabled {
+				if err := server.CheckExposure(cfg); err != nil {
+					return err
+				}
+			}
+			// The QPot ID is the API credential, so it is shown on a terminal
+			// only. Under systemd, or with output redirected, stdout is a log.
+			showID := isTerminal(os.Stdout)
 
 			// Pre-load ATT&CK data in background so it's ready when events arrive.
 			if cfg.Intelligence.Enabled && cfg.Intelligence.FetchATTCK {
@@ -200,7 +212,9 @@ func newUpCommand() *cobra.Command {
 			}
 
 			// Show QPot ID popup before starting
-			showQPotIDPopup(qpotID.ID, cfg.InstanceName, cfg.WebUI.Port)
+			if showID {
+				showQPotIDPopup(qpotID.ID, cfg.InstanceName, cfg.WebUI.Port)
+			}
 
 			// The containers always run detached; this process (or, with -d, a
 			// background `qpot serve`) then runs the control plane. If they are
@@ -240,9 +254,13 @@ func newUpCommand() *cobra.Command {
 			}
 
 			fmt.Printf("\n[OK] QPot instance '%s' started successfully\n", cfg.InstanceName)
-			fmt.Printf("[INFO] QPot ID: %s\n", qpotID.ID)
-			fmt.Printf("[INFO] Web UI: http://%s:%d\n", cfg.WebUI.BindAddr, cfg.WebUI.Port)
-			fmt.Println("\nUse this QPot ID to track your honeypot activity in the Web UI")
+			if showID {
+				fmt.Printf("[INFO] QPot ID: %s\n", qpotID.ID)
+			} else {
+				fmt.Printf("[INFO] QPot ID: not written to this output; show it with: qpot id -i %s\n", cfg.InstanceName)
+			}
+			fmt.Printf("[INFO] Web UI: %s\n", localBaseURL(cfg))
+			fmt.Println("\nLog in to the Web UI with the QPot ID")
 
 			if detach {
 				pid, logPath, err := backgroundServe(cfg)
@@ -427,14 +445,16 @@ func newInstanceCommand() *cobra.Command {
 			}
 
 			fmt.Println("QPot instances:")
-			fmt.Println("Name      Status     QPot ID               Ports")
-			fmt.Println("---------- ---------- --------------------- -------------")
+			// The sensor ID names an instance in its events and backups; the
+			// QPot ID is its API credential and is shown only by `qpot id`.
+			fmt.Println("Name       Status     Sensor ID                   Ports")
+			fmt.Println("---------- ---------- --------------------------- -------------")
 			for _, inst := range instances {
 				status := "stopped"
 				if inst.Running {
 					status = "running"
 				}
-				fmt.Printf("%-10s %-10s %-21s %s\n", inst.Name, status, inst.QPotID, inst.Ports)
+				fmt.Printf("%-10s %-10s %-27s %s\n", inst.Name, status, config.SensorIDFor(inst.QPotID), inst.Ports)
 			}
 			return nil
 		},

@@ -43,8 +43,29 @@ cleanup:                         # see disk-cleanup.md
 security:
   network_isolation:
     block_outbound: false        # true: honeypots open no outbound connections at all
-    allow_private_egress: false  # true: switch the egress guard off (not recommended)
+    allow_private_egress: false  # true: switch the egress guard off (emulators only; not recommended)
+
+stealth:
+  block_common_probes: true      # tag events that name a scanner (metadata.scanner)
+  blocked_probes: [nmap, masscan, zgrab, censys, shodan]
 ```
+
+`stealth.block_common_probes` no longer drops anything, despite its name.
+Until 1.0.1 an event whose text named one of `blocked_probes` was discarded
+before it was stored, so an attacker running `nmap` inside a honeypot left no
+event. Now every event is stored and classified; one that names a scanner
+gets `metadata.scanner` set to the name that matched, so a query, a dashboard
+or an alert rule can leave scanner noise out after the fact.
+
+These `security` settings are mandatory controls and cannot be switched off:
+`read_only_filesystem`, `drop_capabilities`, `no_new_privileges` and
+`network_isolation.separate_networks`. `false` is ignored with a warning. See
+[security.md](security.md) for what each one does and which settings are
+refused for which honeypots.
+
+`web_ui.qpot_id_auth: false` without both `web_ui.username` and
+`web_ui.password` leaves the API with no login. QPot allows that only on a
+loopback `web_ui.bind_addr`.
 
 ## Honeypot settings
 

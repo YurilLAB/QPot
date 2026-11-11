@@ -282,6 +282,9 @@ func (m *Manager) Start(ctx context.Context, detach bool) error {
 			return err
 		}
 	}
+	if err := checkContainment(ctx, m.config); err != nil {
+		return err
+	}
 	if err := m.initializeLocked(ctx, selection); err != nil {
 		return fmt.Errorf("failed to prepare instance for start: %w", err)
 	}
@@ -298,6 +301,12 @@ func (m *Manager) Start(ctx context.Context, detach bool) error {
 	}
 	if err := m.prepareSSHDeployment(ctx); err != nil {
 		return fmt.Errorf("prepare fresh SSH cell recordings: %w", err)
+	}
+	// Once per instance: earlier versions wrote the QPot ID into the log
+	// backups. A failure does not keep the honeypots down; qpot doctor
+	// reports the backups until a later start gets it done.
+	if err := m.scrubLogBackups(ctx); err != nil {
+		slog.Warn("Log backups still carry the QPot ID; it will be retried at the next start", "error", err)
 	}
 	// Creation must finish under the same lock as layout publication. Starting
 	// a foreground compose process and immediately unlocking would still let a
@@ -572,6 +581,9 @@ func (m *Manager) startHoneypot(ctx context.Context, name string, recreate bool)
 		if err := validateSSHRuntimeResources(ctx); err != nil {
 			return err
 		}
+	}
+	if err := checkContainment(ctx, m.config, name); err != nil {
+		return err
 	}
 
 	// Regenerate the compose file and collector config first: a honeypot

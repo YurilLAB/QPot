@@ -9,12 +9,105 @@ honeypot and away from your network, your host and your data.
 | Egress | Honeypots cannot open connections to your LAN, the Docker host, cloud metadata (`169.254.169.254`, the Azure WireServer) or any other private, loopback, link-local, CGNAT or multicast address. Replies to attackers, public destinations and DNS to the host's resolvers still work. |
 | Runtime | The requested gVisor or Kata runtime must be available and match the containers; missing or unverifiable isolation stops startup |
 | Containers | `cap_drop: ALL` with minimal add-backs, read-only root with tmpfs, no privileged containers |
-| Limits | CPU, memory, PID and file-descriptor limits per honeypot, and CPU, memory and PID limits on the database, collector and egress guard. Swap is capped at the memory limit, so a 512 MiB container cannot use more memory by swapping. `qpot doctor` warns (QP-RES-006) when Docker cannot apply a limit. |
-| Secrets | The QPot ID is never given to honeypot containers, written to logs, sent in alerts or cluster traffic, or returned by the API. The database password is random per instance. |
-| Exposure | Web UI, API and database bound to `127.0.0.1` by default |
+| Limits | CPU, memory, PID and file-descriptor limits per honeypot, and CPU, memory and PID limits on the database, collector and egress guard. Swap is capped at the memory limit, so a 512 MiB container cannot use more memory by swapping. The database gets at least 1 GiB and one CPU whatever the honeypot limit is, and a server configuration sized for that: at 512 MiB without swap ClickHouse ran at its limit and stalled. `qpot doctor` warns (QP-RES-006) when Docker cannot apply a limit. |
+| Secrets | The QPot ID is held only by the control plane, a host process. No container gets it: not the honeypots, not the database, not the collector. It is not written to logs, events or log backups, not sent in alerts or cluster traffic, and not returned by the API. Events carry a separate sensor ID. The database password is random per instance. |
+| Exposure | Web UI, API and database bound to `127.0.0.1` by default. The control plane refuses to start with no login on any other address. |
 | Web | CSP, `X-Frame-Options: DENY`, `nosniff`, constant-time login checks, the QPot ID accepted only in a header |
 | HiFi backends | No outbound network, recreated after every session, read-only host keys |
 | Downloads | The installers verify checksums and build provenance before installing anything |
+
+## Mandatory containment controls
+
+Every attacker-facing container gets these, whatever `config.yaml` says. The
+settings that used to switch them off (`security.read_only_filesystem`,
+`drop_capabilities`, `no_new_privileges`,
+`network_isolation.separate_networks`) are still read, so old files load, but
+`false` is ignored with a warning. A file that leaves the `security` section
+out gets them too.
+
+| Control | What it means |
+|---|---|
+| Read-only root | The image's filesystem cannot be changed; scratch space is tmpfs. Two exceptions: HiFi SSH backends, which are real systems thrown away after each session, and `snare` (tanner's web front end), which writes its log next to the pages its image ships. |
+| No capabilities | `cap_drop: ALL`, with a short reviewed add-back per image (`SETUID`, `SETGID`, `NET_BIND_SERVICE` and a few a specific image needs). Never `SYS_ADMIN`, `NET_ADMIN` or `SYS_PTRACE`. |
+| No new privileges | setuid binaries inside a container cannot raise privileges |
+| Its own network | One bridge per honeypot. No honeypot is on the host network, the control network or another honeypot's bridge. |
+| Resource limits | CPU, memory, PID limits, swap capped at the memory limit, a bounded restart count. A limit left at zero is replaced by the default. |
+| Nothing of the host | No privileged mode, no host PID or IPC namespace, no devices, no Docker socket, no QPot ID |
+
+`TestMandatoryContainmentCannotBeSwitchedOff` renders every honeypot with all
+four former switches off and checks each line of this table.
+
+### Honeypot classes, and what a start requires
+
+QPot sorts honeypots into two classes.
+
+- **Reviewed emulators**: `cowrie`, `conpot`, `refrigeration`. They answer
+  from a script and never run what a visitor sends.
+- **Sensitive workloads**: everything else. Real services and third-party
+  native code that parse, relay or run attacker input: HiFi SSH (`ssh-proxy`),
+  tanner's PHP sandbox, dionaea, and any honeypot QPot has not reviewed.
+
+Some containment depends on the host or on a setting, so it is checked when a
+honeypot is started, recreated or restarted. A refused start changes nothing:
+no file is written and Docker is not asked to start anything.
+
+| Requirement | Emulators | Sensitive workloads |
+|---|---|---|
+| gVisor or Kata runtime (`sandbox_mode`) | Required, unless `sandbox_fallback: docker` or `sandbox_mode: none` | Required, unless `sandbox_mode: none`. No fallback. (QP-DOCKER-010, 011, 012) |
+| Egress guard | May be switched off with `allow_private_egress: true` | Required. HiFi SSH keeps its own guard whatever the setting says; any other sensitive workload with the guard off is refused (QP-INST-015). |
+| Docker confirms it enforces CPU, memory, swap and PID limits | A doctor warning if not (QP-RES-006) | Required (QP-RES-005 for HiFi SSH, QP-RES-007 for the rest) |
+
+`sandbox_mode: none` is the one way to run a sensitive workload on Docker's
+standard runtime. It is an explicit choice, never a fallback, and the other
+two requirements still apply.
+
+`qpot doctor` shows the result as `containment settings`, `honeypot
+isolation` and `resource limits`.
+
+## Web UI and API login
+
+The management API takes the QPot ID (the default), or HTTP Basic
+authentication when `web_ui.qpot_id_auth` is `false` and both
+`web_ui.username` and `web_ui.password` are set. With `qpot_id_auth: false`
+and either of the two empty there is no login at all.
+
+| Login | `bind_addr` on loopback | any other `bind_addr` |
+|---|---|---|
+| QPot ID | starts | starts |
+| Basic | starts | starts |
+| none | starts; `qpot doctor` warns that any local user or process can manage the instance | refused (QP-WEB-005): `qpot up` stops before starting a container, `qpot serve` does not listen |
+
+An empty address, `0.0.0.0`, `::` and a host name other than `localhost`
+count as reachable from other computers. There is no setting that overrides
+the refusal. To put the UI behind a reverse proxy, keep a login on and let
+the proxy pass the header, or bind to loopback and proxy from the same host.
+
+## The QPot ID and the sensor ID
+
+The QPot ID (`qp_` and 24 characters, in `qpot.id`) is the API credential. The
+sensor ID (`qs_` and 24 characters) names the instance in events, in the
+collector's output and in log backups. It is derived from the QPot ID with a
+keyed one-way function, so it is stable for the life of the instance and
+reading it gives no access. `qpot up` prints the QPot ID only on a terminal:
+under systemd, or with output redirected, it prints where to find it instead.
+
+Versions up to 1.0.1 stamped the QPot ID itself into every event. It was not
+stored in the database, but it reached the collector's console log, each line
+of `backup/logs/<date>/<honeypot>.log`, the database's and collector's
+environment (and from there each line of their container logs) and the header
+of `vector.yaml` and `docker-compose.yml`. After an upgrade:
+
+1. Restart the instance: `qpot down -i <name>`, then `qpot up -d -i <name>`.
+   This regenerates both files, recreates the containers (their old logs go
+   with them) and rewrites the existing log backups in place, replacing the
+   QPot ID with the sensor ID. The collector is stopped for the rewrite and
+   reads on from its checkpoint afterwards, so no event is lost.
+2. Run `qpot doctor`. The line `QPot ID in stored files` must say `ok`.
+3. If log backups were copied off the host before the upgrade (a SIEM,
+   off-site storage), whoever can read those copies has the old QPot ID.
+   The ID cannot be changed without changing the instance's deception
+   identity, so delete or rewrite those copies, and keep the web UI on
+   loopback.
 
 ## Container isolation policy
 
@@ -73,7 +166,9 @@ in place.
 Two settings change it (see [configuration.md](configuration.md)):
 
 - `block_outbound: true` stops honeypots opening any outbound connection.
-- `allow_private_egress: true` switches the guard off. This is not recommended.
+- `allow_private_egress: true` switches the guard off. This is not recommended,
+  and allowed only while every enabled honeypot is a reviewed emulator
+  (cowrie, conpot, refrigeration).
 
 ## Running a sensor safely
 

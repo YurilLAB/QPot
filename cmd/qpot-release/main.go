@@ -4,7 +4,9 @@
 //	qpot-release pack -version 0.1.0 -out dist
 //	    builds qpot for every release platform and writes the archives the
 //	    installers download plus SHA256SUMS. The archives are reproducible:
-//	    the same commit gives byte-identical files.
+//	    the same commit gives byte-identical files, on any host and whatever
+//	    the output folder (see doc/release.md). It builds the checked-out
+//	    tree, so it refuses one that is not exactly the commit it names.
 //	qpot-release check-version -tag v0.1.0
 //	    checks that the installers and the Makefile name the tag's version.
 //	qpot-release verify -sums dist/SHA256SUMS dist/qpot_*
@@ -138,6 +140,24 @@ func runPack(args []string) error {
 		return err
 	}
 	*commit = resolved
+	// The build compiles the files on disk, not the commit: they must be
+	// the same thing, or the archives would name a commit they were not
+	// built from. Untracked files (the output folder, a build cache) do not
+	// enter a Go build and are not looked at.
+	head, err := gitOut(ctx, "rev-parse", "--verify", "HEAD^{commit}")
+	if err != nil {
+		return err
+	}
+	if head != *commit {
+		return fmt.Errorf("the checked-out commit is %s, not the release commit %s", head, *commit)
+	}
+	changed, err := gitOut(ctx, "status", "--porcelain", "--untracked-files=no")
+	if err != nil {
+		return err
+	}
+	if changed != "" {
+		return fmt.Errorf("the working tree differs from commit %s:\n%s", *commit, changed)
+	}
 	// The commit's time stamps everything, so a rebuild of the same commit
 	// gives the same bytes.
 	epoch, err := gitOut(ctx, "log", "-1", "--format=%ct", *commit)
@@ -179,7 +199,13 @@ func runPack(args []string) error {
 		}
 		ldflags := fmt.Sprintf("-s -w -X main.version=%s -X main.commit=%s -X main.buildDate=%s -X github.com/qpot/qpot/internal/instance.HiFiImageRevision=%s",
 			v, short, mtime.Format(time.RFC3339), *commit)
-		cmd := exec.CommandContext(ctx, "go", "build", "-trimpath", "-ldflags", ldflags, "-o", bin, "./cmd/qpot")
+		// -buildvcs=false: Go would otherwise record whether the tree has
+		// uncommitted or untracked files, and this very run creates some
+		// (the output folder, when it is inside the repository). Releases
+		// 1.0.0 and 1.0.1 were packed into ./dist, so every platform after
+		// the first carries vcs.modified=true and only a rebuild into that
+		// same folder reproduces them. The commit is embedded above.
+		cmd := exec.CommandContext(ctx, "go", "build", "-trimpath", "-buildvcs=false", "-ldflags", ldflags, "-o", bin, "./cmd/qpot")
 		cmd.Env = append(os.Environ(), "GOOS="+goos, "GOARCH="+goarch, "CGO_ENABLED=0")
 		cmd.Stdout, cmd.Stderr = os.Stderr, os.Stderr
 		fmt.Fprintf(os.Stderr, "building %s/%s\n", goos, goarch)

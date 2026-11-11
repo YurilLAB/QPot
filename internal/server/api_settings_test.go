@@ -952,7 +952,7 @@ func TestSettingsRefrigerationLegacyBackfillStaysOff(t *testing.T) {
 }
 
 func TestHiFiPreflightErrorsExplainRecoveryWithoutLeakingDiagnostics(t *testing.T) {
-	for _, code := range []string{"QP-RES-005", "QP-INST-011", "QP-INST-012", "QP-INST-013", "QP-INST-014", "QP-DOCKER-010", "QP-DOCKER-011", "QP-DOCKER-012"} {
+	for _, code := range []string{"QP-RES-005", "QP-RES-007", "QP-INST-011", "QP-INST-012", "QP-INST-013", "QP-INST-014", "QP-INST-015", "QP-DOCKER-010", "QP-DOCKER-011", "QP-DOCKER-012"} {
 		for _, operation := range []struct {
 			name, method, path, body string
 			enabled, saved           bool

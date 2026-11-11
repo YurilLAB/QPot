@@ -637,6 +637,13 @@ Exit status 0 means success; 1 is a usage error (an unknown flag).
 - Why: The Docker daemon reports that it cannot apply some cgroup limits (memory, swap, PIDs or CPU). Docker accepts such a limit and drops it, so a honeypot can use more than its limit. A kernel booted without the memory controller (Raspberry Pi OS by default), rootless Docker without cgroup delegation or a daemon outside a systemd cgroup cause this.
 - Fix: Run Docker on a Linux host with cgroup v2 and systemd (current Debian, Ubuntu, Fedora), or enable the missing controllers: on Raspberry Pi OS add cgroup_enable=memory to /boot/firmware/cmdline.txt and reboot; for rootless Docker configure systemd cgroup delegation. Restart Docker and run qpot doctor again.
 
+### QP-RES-007
+
+**Docker cannot enforce the resource limits these honeypots require.**
+
+- Why: Docker did not confirm CPU, memory, swap and PID limits, so a honeypot that handles attacker input could use the whole computer. Rootless Docker without delegated cgroups and old cgroup v1 hosts without swap accounting are the usual causes.
+- Fix: Run QPot on a Docker host with cgroup v2 (docker info shows no limit warnings). On rootless Docker, delegate the cpu, memory and pids controllers to the user. Only cowrie, conpot and refrigeration start without confirmed limits; qpot doctor shows which limits are missing.
+
 ## Services and systemd (`SVC`, exit 19)
 
 ### QP-SVC-001
@@ -696,6 +703,13 @@ Exit status 0 means success; 1 is a usage error (an unknown flag).
 
 - Why: The request is not the required JSON object, contains unknown fields, exceeds the size limit, or omits a required field.
 - Fix: Send the documented JSON object with Content-Type: application/json. Check the field names, types and body size in doc/api.md, then retry.
+
+### QP-WEB-005
+
+**The web UI and API would be reachable from other computers without a login.**
+
+- Why: web_ui.qpot_id_auth is false, no web_ui username and password are both set, and web_ui.bind_addr is not a loopback address.
+- Fix: Turn the login back on (web_ui.qpot_id_auth: true, or set both web_ui.username and web_ui.password), or set web_ui.bind_addr: 127.0.0.1 and reach the UI over an SSH tunnel. Edit the settings with: qpot config
 
 ## QPot instance and containers (`INST`, exit 21)
 
@@ -797,6 +811,20 @@ Exit status 0 means success; 1 is a usage error (an unknown flag).
 - Why: The broker session log is unreadable or is not an ordinary stable file, so the host cannot safely process reset requests.
 - Fix: Keep the broker log and generation counters. Use matching updated HiFi images and regenerate/recreate the deployment so its verified private runtime store enables host-readable broker metadata. Check the operating account and private store permissions; custom broker deployments must grant the trusted recycler read access. Do not delete, truncate or fake reset records.
 
+### QP-INST-015
+
+**These security settings are not supported for the enabled honeypots.**
+
+- Why: security.network_isolation.allow_private_egress switches the egress guard off, and a honeypot that runs or relays what an attacker sends is enabled. It could then reach your network, the Docker host and cloud metadata addresses.
+- Fix: Set security.network_isolation.allow_private_egress: false (qpot config), or turn off every honeypot other than cowrie, conpot and refrigeration (qpot honeypot disable <name>): only those three may run with the egress guard off. qpot doctor names the honeypots concerned.
+
+### QP-INST-016
+
+**Files of this instance still carry the QPot ID.**
+
+- Why: An earlier QPot version wrote the QPot ID (the API credential) into the collector's configuration and into every line of the log backups. This version does not, but the instance has not been restarted with it yet, or its backups could not be rewritten.
+- Fix: Restart the instance so its files are regenerated and its backups rewritten: qpot down -i <instance>, then qpot up -d -i <instance>. Then run qpot doctor again. If backups were copied elsewhere before this (a SIEM, off-site storage), treat the old QPot ID as disclosed to whoever can read those copies.
+
 ## Intelligence recovery and ownership (`INTEL`, exit 22)
 
 ### QP-INTEL-001
@@ -825,7 +853,7 @@ Exit status 0 means success; 1 is a usage error (an unknown flag).
 **The intelligence worker could not claim ownership.**
 
 - Why: Another worker owns the database lease or local lock, or ownership could not be verified.
-- Fix: Keep event collection running. Wait for the current owner to stop and its database lease to expire, or repair coordination access, then restart the control plane. Do not delete lease or revision records or remove a lock file held by a running process.
+- Fix: Keep event collection running. QPot tries again by itself, within a minute at most: once the current owner stops and its database lease expires, or the database answers again, a new worker takes over. If this lasts, find the other owner (another control plane on this database) or repair coordination access. Do not delete lease or revision records or remove a lock file held by a running process.
 
 ### QP-INTEL-005
 
@@ -846,7 +874,7 @@ Exit status 0 means success; 1 is a usage error (an unknown flag).
 **The intelligence worker lost its database lease.**
 
 - Why: Lease renewal failed or expired, or a successor fenced this worker. Further processing and shutdown replay must stop.
-- Fix: Restore coordination access and restart the control plane after checking the active owner. Keep the lease, revision counter and published checkpoint; the next owner recovers that exact batch. Do not force an old worker to continue.
+- Fix: Nothing to do when it clears by itself: the stopped worker is not resumed, and QPot starts a new one within a minute, which takes a new lease and recovers the exact batch from the published checkpoint. This happens after any database outage longer than the 30-second lease. If it keeps returning, check that the database and its Keeper stay reachable and whether another control plane owns the lease. Keep the lease, revision counter and published checkpoint. Do not force an old worker to continue.
 
 ### QP-INTEL-008
 

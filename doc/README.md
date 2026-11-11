@@ -34,7 +34,11 @@
 | Page | What it covers |
 |---|---|
 | [Architecture](architecture.md) | What runs where, and how an attack becomes data on the dashboard |
-| [Security model](security.md) | Isolation, the egress guard and running a sensor safely |
+| [Security model](security.md) | Mandatory containment, the login, the egress guard and running a sensor safely |
+| [Threat model](threat-model.md) | Who attacks, the trust boundaries, what answers each threat and what is not defended |
+| [Reliability](reliability.md) | The failure soak: what is lost, duplicated and how long recovery takes |
+| [Effectiveness](effectiveness.md) | Engagement metrics and comparing an instance with a stock Cowrie |
+| [Releases](release.md) | Supported deployments, upgrade, rollback and rebuilding a release |
 | [HiFi mode](ssh-hifi-proxy.md) | Real OpenSSH behind a transparent broker |
 | [SSH fingerprint comparison](fingerprint-comparison.md) | Stock Cowrie, QPot and real OpenSSH under `nmap` |
 | [Development](development.md) | Building, testing, CI and releases |

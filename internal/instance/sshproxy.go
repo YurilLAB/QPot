@@ -48,6 +48,13 @@ func (b *sshResourceInfoBuffer) Write(p []byte) (int, error) {
 // Accepted HostConfig fields alone do not establish enforcement: rootless Docker
 // without delegated cgroups can retain limits while the guest remains unbounded.
 func validateSSHRuntimeResources(ctx context.Context) error {
+	return validateRuntimeResources(ctx, "QP-RES-005")
+}
+
+// validateRuntimeResources is the same check for any workload that must not
+// start unbounded; code names the failure (QP-RES-005 for HiFi, QP-RES-007
+// for other sensitive workloads).
+func validateRuntimeResources(ctx context.Context, code string) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
@@ -62,15 +69,17 @@ func validateSSHRuntimeResources(ctx context.Context) error {
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
-		return hostsetup.E("QP-RES-005").WithWhy("Docker could not report its CPU, memory and PID cgroup capabilities.").Wrap(err)
+		return hostsetup.E(code).WithWhy("Docker could not report its CPU, memory and PID cgroup capabilities.").Wrap(err)
 	}
 	if output.overflow {
-		return hostsetup.E("QP-RES-005").WithWhy("Docker's resource capability response exceeded the size limit.")
+		return hostsetup.E(code).WithWhy("Docker's resource capability response exceeded the size limit.")
 	}
-	return validateSSHResourceInfo(output.data)
+	return validateResourceInfo(output.data, code)
 }
 
-func validateSSHResourceInfo(data []byte) error {
+func validateSSHResourceInfo(data []byte) error { return validateResourceInfo(data, "QP-RES-005") }
+
+func validateResourceInfo(data []byte, code string) error {
 	var info struct {
 		CgroupDriver string
 		MemoryLimit  *bool
@@ -79,10 +88,10 @@ func validateSSHResourceInfo(data []byte) error {
 		CPUCfsQuota  *bool
 	}
 	if len(data) > 16<<10 {
-		return hostsetup.E("QP-RES-005").WithWhy("Docker's resource capability response exceeded the size limit.")
+		return hostsetup.E(code).WithWhy("Docker's resource capability response exceeded the size limit.")
 	}
 	if err := json.Unmarshal(data, &info); err != nil {
-		return hostsetup.E("QP-RES-005").WithWhy("Docker's resource capability response was not valid typed JSON.").Wrap(err)
+		return hostsetup.E(code).WithWhy("Docker's resource capability response was not valid typed JSON.").Wrap(err)
 	}
 	var missing []string
 	if info.CgroupDriver != "systemd" && info.CgroupDriver != "cgroupfs" {
@@ -103,7 +112,7 @@ func validateSSHResourceInfo(data []byte) error {
 		}
 	}
 	if len(missing) != 0 {
-		return hostsetup.E("QP-RES-005").WithWhy("Docker did not confirm %s.", strings.Join(missing, ", "))
+		return hostsetup.E(code).WithWhy("Docker did not confirm %s.", strings.Join(missing, ", "))
 	}
 	return nil
 }

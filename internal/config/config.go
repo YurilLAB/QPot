@@ -35,7 +35,8 @@ type AlertConfig struct {
 // `cmd /C` on Windows, with the following environment variables set so
 // the command can act on the trigger:
 //
-//	QPOT_ID            - the QPot instance ID
+//	QPOT_ID            - the QPot ID: the API credential, for hooks that call the API
+//	QPOT_SENSOR_ID     - the instance's telemetry identifier; not a credential
 //	QPOT_INSTANCE      - the human-readable instance name
 //	QPOT_TOTAL_EVENTS  - events seen in the trigger window (last minute)
 //	QPOT_UNIQUE_IPS    - distinct source IPs in the trigger window
@@ -902,6 +903,11 @@ func Parse(data []byte, configPath string) (*Config, error) {
 	if cfg.Security.SandboxFallback == "" {
 		cfg.Security.SandboxFallback = "deny"
 	}
+	// The container hardening has no off switch: a file that omits it, or
+	// asks for it to be off, gets it all the same.
+	for _, msg := range cfg.enforceMandatoryContainment(data) {
+		slog.Warn("Config validation", "instance", instanceName, "warning", msg)
+	}
 	// Resolve omitted legacy global limits before checking the finite caps of
 	// an enabled HiFi cell. Explicit invalid custom overrides remain errors.
 	if err := ValidateSSHEnvironment(&cfg); err != nil {
@@ -1005,6 +1011,15 @@ func (c *Config) Validate() []string {
 	if c.Alerts.Enabled && strings.TrimSpace(c.Alerts.WebhookURL) == "" &&
 		!c.Response.Enabled {
 		warnings = append(warnings, "alerts.enabled=true but no webhook_url and no response hooks; no alerting will happen")
+	}
+
+	// The management API without a login: refused at start on any address
+	// but loopback (CheckExposure), and worth saying on loopback too, where
+	// every local user and process can then manage the instance.
+	if err := c.WebUI.CheckExposure(); err != nil {
+		warnings = append(warnings, err.Error()+"; qpot serve will refuse to start")
+	} else if c.WebUI.Enabled && c.WebUI.AuthMode() == "none" {
+		warnings = append(warnings, "the web UI and API have no login (web_ui.qpot_id_auth is false and no username and password are set); any local user or process can manage this instance")
 	}
 
 	return warnings

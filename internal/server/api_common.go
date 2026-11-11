@@ -88,7 +88,7 @@ func hiFiPreflightAPIError(err error, saved bool) (apiError, bool) {
 		return apiError{}, false
 	}
 	switch setup.Code {
-	case "QP-RES-005", "QP-INST-011", "QP-INST-012", "QP-INST-013", "QP-INST-014", "QP-DOCKER-010", "QP-DOCKER-011", "QP-DOCKER-012":
+	case "QP-RES-005", "QP-RES-007", "QP-INST-011", "QP-INST-012", "QP-INST-013", "QP-INST-014", "QP-INST-015", "QP-DOCKER-010", "QP-DOCKER-011", "QP-DOCKER-012":
 		entry := setup.Entry()
 		return apiError{Error: entry.Title + " " + entry.Fix, Code: entry.ID, Saved: saved}, true
 	default:

@@ -57,6 +57,9 @@ type sandboxDockerFixture struct {
 	List, Inspect, ComposePS string
 	StopError                bool
 	Calls                    string
+	// ResourceInfo replaces the daemon's answer about the limits it
+	// enforces; empty means it enforces them all.
+	ResourceInfo string
 }
 
 func runSandboxDockerFixture(path string, args []string) int {
@@ -89,6 +92,8 @@ func runSandboxDockerFixture(path string, args []string) int {
 			}
 			data, _ := json.Marshal(fixture.Registry)
 			fmt.Println(string(data))
+		} else if fixture.ResourceInfo != "" {
+			fmt.Println(fixture.ResourceInfo)
 		} else {
 			fmt.Println(sshSupportedResourceInfo)
 		}

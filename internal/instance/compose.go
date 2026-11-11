@@ -453,6 +453,30 @@ func composeEnvEntry(key, value string) string {
 // ClickHouse starts ~380 threads and exits on boot when it cannot create them.
 const dbMinPids = 1024
 
+// dbMinMemoryMB and dbMinCPUPercent are the least memory and CPU the database
+// container gets. The global limits are sized for one honeypot (512 MiB, half
+// a CPU by default). Measured on the pinned ClickHouse with its embedded
+// Keeper under light load: about 250 MiB of its own memory plus the hot part
+// of a 700 MB program file, so a 512 MiB limit with swap capped ran at the
+// limit within minutes, and one clickhouse-client started inside the
+// container (docker exec) tipped it into reclaim that never ended: health
+// checks timed out and queries hung. 1 GiB leaves it at about a quarter.
+const (
+	dbMinMemoryMB   = 1024
+	dbMinCPUPercent = 100.0
+)
+
+// dbLimits returns the global limits with the database's floors applied.
+func dbLimits(global config.ResourceLimits) config.ResourceLimits {
+	if global.MaxMemoryMB < dbMinMemoryMB {
+		global.MaxMemoryMB = dbMinMemoryMB
+	}
+	if global.MaxCPUPercent < dbMinCPUPercent {
+		global.MaxCPUPercent = dbMinCPUPercent
+	}
+	return global
+}
+
 // dbPidsLimit returns the pids limit for the database service: 0 (unlimited)
 // stays unlimited, anything else is raised to at least dbMinPids.
 func dbPidsLimit(globalMax int64) int64 {
@@ -495,7 +519,7 @@ func (g *ComposeGenerator) Generate() (string, error) {
 		}
 	}
 	tmpl := `# QPot Instance: {{.Config.InstanceName}}
-# QPot ID: {{.Config.QPotID}}
+# Sensor ID: {{.Config.SensorID}}
 # Auto-generated - Do not edit manually
 
 networks:
@@ -553,10 +577,6 @@ networks:
 # docker host) silently got the OLD directory - its collector read the wrong
 # logs and its database mounted someone else's data.
 
-secrets:
-  qpot_id:
-    file: {{.Config.DataPath}}/qpot.id
-
 services:
   # Database - {{.Config.Database.Type}}
   {{if eq .Config.Database.Type "clickhouse"}}database:
@@ -570,18 +590,17 @@ services:
       CLICKHOUSE_USER: {{yamlStr .Config.Database.Username}}
       CLICKHOUSE_PASSWORD: {{yamlStr .Config.Database.Password}}
       CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: 1
-      QPOT_ID: {{.Config.QPotID}}
     volumes:
       - {{.Config.GetDatabasePath}}:/var/lib/clickhouse
       - {{.Config.DataPath}}/clickhouse-config:/etc/clickhouse-server/conf.d
       - {{yamlStr (printf "%s:/etc/clickhouse-server/config.d/qpot-keeper.xml:ro" (clickhouseKeeperPath .Config))}}
-      - {{.Config.DataPath}}/qpot.id:/run/secrets/qpot_id:ro
+      - {{yamlStr (printf "%s:/etc/clickhouse-server/config.d/qpot-limits.xml:ro" (clickhouseLimitsPath .Config))}}
     ports:
       - "127.0.0.1:{{databaseHostPort}}:9000"
     networks:
       - qpot_internal
       - qpot_dbhost
-    {{template "dbsecurity" dict "Config" $.Config "GlobalLimits" $.Config.Security.ResourceLimits "Name" "database"}}
+    {{template "dbsecurity" dict "Config" $.Config "GlobalLimits" (dbLimits $.Config.Security.ResourceLimits) "Name" "database"}}
     healthcheck:
       test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:8123/ping"]
       interval: 10s
@@ -601,16 +620,14 @@ services:
       POSTGRES_DB: {{yamlStr .Config.Database.Database}}
       POSTGRES_USER: {{yamlStr .Config.Database.Username}}
       POSTGRES_PASSWORD: {{yamlStr .Config.Database.Password}}
-      QPOT_ID: {{.Config.QPotID}}
     volumes:
       - {{.Config.GetDatabasePath}}:/var/lib/postgresql/data
-      - {{.Config.DataPath}}/qpot.id:/run/secrets/qpot_id:ro
     ports:
       - "127.0.0.1:{{databaseHostPort}}:5432"
     networks:
       - qpot_internal
       - qpot_dbhost
-    {{template "dbsecurity" dict "Config" $.Config "GlobalLimits" $.Config.Security.ResourceLimits "Name" "database"}}
+    {{template "dbsecurity" dict "Config" $.Config "GlobalLimits" (dbLimits $.Config.Security.ResourceLimits) "Name" "database"}}
     healthcheck:
       test: ["CMD-SHELL", {{pgReadyCmd .Config.Database.Username .Config.Database.Database}}]
       interval: 10s
@@ -622,7 +639,10 @@ services:
       start_period: 2m
 {{end}}
 
-  # Log collector (Vector) with QPot ID tagging
+  # Log collector (Vector). It stamps events with the sensor ID, which names
+  # the instance and is not a credential. The QPot ID (the API credential) is
+  # not passed to it or to the database, in the environment or as a file:
+  # whatever a service is given ends up in its logs and backups.
   collector:
     image: {{collectorImage}}
     container_name: {{.Config.InstanceName}}_collector
@@ -640,7 +660,7 @@ services:
     # depends on the image's default config path/extension.
     command: ["--config", "/etc/vector/vector.yaml"]
     environment:
-      QPOT_ID: {{.Config.QPotID}}
+      QPOT_SENSOR_ID: {{.Config.SensorID}}
       QPOT_INSTANCE: {{.Config.InstanceName}}
     volumes:
       - {{.Config.DataPath}}/vector.yaml:/etc/vector/vector.yaml:ro
@@ -649,7 +669,6 @@ services:
 {{- range collectorMounts .Config}}
       - {{.Host}}:{{.Container}}{{if .ReadOnly}}:ro{{end}}
 {{- end}}
-      - {{.Config.DataPath}}/qpot.id:/run/secrets/qpot_id:ro
     networks:
       - qpot_internal
     cap_add:
@@ -1117,9 +1136,9 @@ services:
         window: 120s
 
     # Security hardening - Container security
-    {{if .Config.Security.NoNewPrivileges}}security_opt:
-      - no-new-privileges:true{{end}}
-    {{if .Config.Security.DropCapabilities}}cap_drop:
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
       - ALL
     cap_add:
       - CHOWN
@@ -1130,7 +1149,7 @@ services:
       # user to initialise a fresh data dir and then stops it from root; with
       # every capability dropped that kill is refused, init fails and the
       # container restarts (and is reported unhealthy) on first boot.
-      - KILL{{end}}
+      - KILL
 
     # No user override: the database image runs as its own user; forcing a
     # different uid breaks its data-directory ownership. CHOWN is required:
@@ -1154,8 +1173,8 @@ services:
       options:
         max-size: "10m"
         max-file: "3"
-        labels: "qpot.instance,qpot.id"
-        env: "QPOT_ID,QPOT_INSTANCE"
+        labels: "qpot.instance"
+        env: "QPOT_INSTANCE"
 {{end}}
 
 {{define "security"}}
@@ -1185,19 +1204,20 @@ services:
         max_attempts: {{.Config.Security.ResourceLimits.RestartAttempts}}
         window: 120s
 
-    # Security hardening - Container security
-    {{if .Config.Security.ReadOnlyFilesystem}}read_only: true{{end}}
-    {{if .Config.Security.NoNewPrivileges}}security_opt:
-      - no-new-privileges:true{{end}}
+    # Security hardening - Container security. Mandatory: no setting turns
+    # any of it off (config.MandatoryControls).
+    read_only: true
+    security_opt:
+      - no-new-privileges:true
     {{- $dep := deployFor .Name}}
-    {{if .Config.Security.DropCapabilities}}cap_drop:
+    cap_drop:
       - ALL
     {{- if not $dep.NoCapabilities}}
     cap_add:
       - SETUID
       - SETGID
       {{if or $dep.NeedsNetBind (and .HP.Port (lt .HP.Port 1024))}}- NET_BIND_SERVICE{{end}}{{range $dep.ExtraCaps}}
-      - {{.}}{{end}}{{end}}{{end}}
+      - {{.}}{{end}}{{end}}
 
     # No user override: each honeypot image already runs as its own non-root
     # user (e.g. cowrie=2000). Forcing a different uid breaks the image's file
@@ -1210,7 +1230,7 @@ services:
     # scratch mounts with any image-specific tmpfs the deployment profile
     # requires (e.g. cowrie's /tmp/cowrie), so there is never a duplicate key.
     {{- $dt := deployFor .Name}}
-    {{- $tmpfs := mergedTmpfs .Config.Security.ReadOnlyFilesystem $dt}}
+    {{- $tmpfs := mergedTmpfs true $dt}}
     {{- if $tmpfs}}
     tmpfs:
     {{- range $t := $tmpfs}}
@@ -1292,6 +1312,8 @@ services:
 		"GetHoneypotImage":       GetHoneypotImage,
 		"clickhouseImage":        func() string { return ClickHouseImage },
 		"clickhouseKeeperPath":   clickHouseKeeperPath,
+		"clickhouseLimitsPath":   clickHouseLimitsPath,
+		"dbLimits":               dbLimits,
 		"timescaleImage":         func() string { return TimescaleDBImage },
 		"collectorImage":         func() string { return CollectorImage },
 		"collectorMounts":        collectorMounts,
@@ -1449,7 +1471,7 @@ services:
 // EnabledSensors returns the Vector transform names for the T-Pot NSM sensors
 // that are enabled (Suricata IDS, p0f, fatt). These transforms map sensor logs
 // onto the shared events schema and feed the same downstream (geoip + sink) as
-// honeypot logs, bypassing the stealth probe-filter. Used by the Vector
+// honeypot logs; the scanner tag skips them. Used by the Vector
 // template to wire inputs without duplicating per-sensor branches.
 func (g *ComposeGenerator) EnabledSensors() []string {
 	var s []string
@@ -1471,10 +1493,10 @@ func (g *ComposeGenerator) HoneypotsEnabled() bool {
 	return len(g.Config.GetEnabledHoneypots()) > 0
 }
 
-// StealthInputs lists what feeds filter_stealth: enrich_geoip when GeoIP is
-// configured, else the honeypot transform (if any honeypot is enabled) plus
-// the NSM sensor transforms.
-func (g *ComposeGenerator) StealthInputs() []string {
+// ScannerTagInputs lists what feeds tag_scanners, the last transform before
+// the sinks: enrich_geoip when GeoIP is configured, else the honeypot
+// transform (if any honeypot is enabled) plus the NSM sensor transforms.
+func (g *ComposeGenerator) ScannerTagInputs() []string {
 	if g.Config.Collector.GeoIPDBPath != "" {
 		return []string{"enrich_geoip"}
 	}
@@ -1522,7 +1544,7 @@ func (g *ComposeGenerator) GenerateVectorConfig() (string, error) {
 		return idleVectorConfig, nil
 	}
 	config := `# Vector configuration for QPot
-# QPot ID: {{.Config.QPotID}}
+# Sensor ID: {{.Config.SensorID}}
 # Auto-generated
 
 data_dir: "/var/lib/vector"
@@ -1622,7 +1644,7 @@ transforms:
 
       # Parse the honeypot's JSON payload FIRST so its fields are present;
       # our own metadata is stamped afterwards so an attacker-controlled log
-      # line can never clobber qpot_id / timestamp / honeypot.
+      # line can never clobber sensor_id / timestamp / honeypot.
       is_json = false
       if starts_with(strip_whitespace(raw), "{") {
         parsed, perr = parse_json(raw)
@@ -2113,7 +2135,8 @@ transforms:
       # Stamp QPot metadata LAST. The timestamp is formatted as ClickHouse's
       # DateTime64 'basic' input format ("YYYY-MM-DD HH:MM:SS.fff"); a raw
       # RFC3339 value (with T/Z) is rejected by the JSONEachRow parser (400).
-      .qpot_id = "{{.Config.QPotID}}"
+      del(.qpot_id)
+      .sensor_id = "{{.Config.SensorID}}"
       .qpot_instance = "{{.Config.InstanceName}}"
       .timestamp = format_timestamp!(now(), "%Y-%m-%d %H:%M:%S%.3f")
 {{- end}}
@@ -2151,7 +2174,8 @@ transforms:
         "severity": to_string(.alert.severity) ?? "",
         "sensor": "suricata"
       }
-      .qpot_id = "{{.Config.QPotID}}"
+      del(.qpot_id)
+      .sensor_id = "{{.Config.SensorID}}"
       .qpot_instance = "{{.Config.InstanceName}}"
       .timestamp = format_timestamp!(now(), "%Y-%m-%d %H:%M:%S%.3f")
 {{end}}
@@ -2182,7 +2206,8 @@ transforms:
         "raw_sig": to_string(.raw_sig) ?? "",
         "sensor": "p0f"
       }
-      .qpot_id = "{{.Config.QPotID}}"
+      del(.qpot_id)
+      .sensor_id = "{{.Config.SensorID}}"
       .qpot_instance = "{{.Config.InstanceName}}"
       .timestamp = format_timestamp!(now(), "%Y-%m-%d %H:%M:%S%.3f")
 {{end}}
@@ -2216,7 +2241,8 @@ transforms:
         "hasshServer": to_string(.hasshServer) ?? "",
         "sensor": "fatt"
       }
-      .qpot_id = "{{.Config.QPotID}}"
+      del(.qpot_id)
+      .sensor_id = "{{.Config.SensorID}}"
       .qpot_instance = "{{.Config.InstanceName}}"
       .timestamp = format_timestamp!(now(), "%Y-%m-%d %H:%M:%S%.3f")
 {{end}}
@@ -2243,33 +2269,39 @@ transforms:
         }
       }
 {{end}}
-  filter_stealth:
-    type: filter
+  tag_scanners:
+    type: remap
     inputs:
       # Feeds from enrich_geoip when GeoIP is configured, else directly from
       # add_qpot_metadata (GeoIP is optional so Vector can start without an mmdb).
       # When GeoIP is off, the NSM sensor transforms join here directly; when it
       # is on, they arrive already enriched via enrich_geoip.
-{{- range $.StealthInputs}}
+{{- range $.ScannerTagInputs}}
       - {{.}}
 {{- end}}
-    condition: |
-      # Drop events whose message contains a known scanner signature (stealth).
-      # Substring match via contains() — match_any expects regexes, and
-      # contains avoids regex-escaping the operator-supplied probe strings.
-      # NSM sensor events (Suricata/p0f/fatt) are never stealth-filtered:
-      # dropping an IDS alert or a fingerprint because its JSON mentions a
-      # scanner signature would discard real sensor data.
+    source: |
+      # Mark an event that mentions a known scanner (nmap, masscan, ...) with
+      # metadata.scanner. Nothing is dropped here, ever: an attacker running
+      # "nmap -sV" inside a honeypot is evidence, and so is a scanner's own
+      # banner. Hiding scanner noise is a choice for whoever reads the stored
+      # events (the dashboard, an alert rule), made after they are stored.
+      # NSM sensor events (Suricata/p0f/fatt) are not tagged: their JSON
+      # names scanners in rule text, not in what the visitor did.
       {{- if and .Config.Stealth.BlockCommonProbes .Config.Stealth.BlockedProbes}}
       sensor = to_string(.honeypot) ?? ""
-      if sensor == "suricata" || sensor == "p0f" || sensor == "fatt" {
-        true
-      } else {
+      if sensor != "suricata" && sensor != "p0f" && sensor != "fatt" {
         msg = downcase(string(.message) ?? "")
-        !({{range $i, $probe := .Config.Stealth.BlockedProbes}}{{if $i}} || {{end}}contains(msg, {{vrlStr $probe}}){{end}})
+        scanner = ""
+        {{- range $probe := .Config.Stealth.BlockedProbes}}
+        if scanner == "" && contains(msg, downcase({{vrlStr $probe}})) { scanner = downcase({{vrlStr $probe}}) }
+        {{- end}}
+        if scanner != "" {
+          if !is_object(.metadata) { .metadata = {} }
+          .metadata.scanner = truncate(scanner, 64)
+        }
       }
       {{- else}}
-      true
+      .
       {{- end}}
 
 {{- if eq .Config.Database.Type "timescaledb"}}
@@ -2279,7 +2311,7 @@ transforms:
   pg_prepare:
     type: remap
     inputs:
-      - filter_stealth
+      - tag_scanners
     source: |
       .payload = "\\x" + encode_base16(string(.payload) ?? "")
       .timestamp = (string(.timestamp) ?? format_timestamp!(now(), "%Y-%m-%d %H:%M:%S%.3f")) + "+00"
@@ -2290,7 +2322,7 @@ sinks:
   clickhouse:
     type: clickhouse
     inputs:
-      - filter_stealth
+      - tag_scanners
     endpoint: "http://database:8123"
     # This endpoint is always the instance's internal Docker service. Docker
     # client proxy defaults must not route event batches outside that network.
@@ -2299,9 +2331,9 @@ sinks:
     database: {{yamlStr .Config.Database.Database}}
     table: events
     # The enriched event carries fields that are not columns in the events
-    # table (qpot_id, the honeypot's own eventid/session/etc.). Without this,
-    # ClickHouse rejects the whole insert on the first unknown column and all
-    # events are dropped. qpot_id is re-attached by the API at read time.
+    # table (sensor_id, the honeypot's own eventid/session/etc.). Without
+    # this, ClickHouse rejects the whole insert on the first unknown column
+    # and all events are dropped.
     skip_unknown_fields: true
     auth:
       strategy: basic
@@ -2326,7 +2358,7 @@ sinks:
     # events_ingest is an auto-updatable view of only the collector-supplied
     # columns: the sink writes NULL for every column it does not have, which
     # on the events table itself breaks id NOT NULL and every DEFAULT.
-    # Fields that are not view columns (qpot_id, the honeypot's raw keys) are
+    # Fields that are not view columns (sensor_id, the honeypot's raw keys) are
     # ignored by jsonb_populate_recordset.
     table: events_ingest
     batch:
@@ -2340,7 +2372,7 @@ sinks:
   console:
     type: console
     inputs:
-      - filter_stealth
+      - tag_scanners
     encoding:
       codec: json
       except_fields:
@@ -2351,7 +2383,7 @@ sinks:
   file_backup:
     type: file
     inputs:
-      - filter_stealth
+      - tag_scanners
     path: "/data/backup/logs/%Y/%m/%d/{{"{{"}} honeypot {{"}}"}}.log"
     encoding:
       codec: json

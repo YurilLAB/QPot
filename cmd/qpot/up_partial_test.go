@@ -30,6 +30,7 @@ func partialDocker(t *testing.T, allUp bool) string {
 	script := fmt.Sprintf(`#!/bin/sh
 echo "$*" >> %[1]s
 case "$*" in
+  info*CgroupDriver*) echo '{"CgroupDriver":"systemd","MemoryLimit":true,"SwapLimit":true,"PidsLimit":true,"CPUCfsQuota":true}' ;;
   *" ps -q"*) echo 0123456789ab ;;
   *" ps --all --format json"*|*" ps -a --format json"*)
     if [ -f %[2]s ]; then

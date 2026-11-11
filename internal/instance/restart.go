@@ -63,6 +63,9 @@ func (m *Manager) RestartHoneypot(ctx context.Context, name string) error {
 			return err
 		}
 	}
+	if err := checkContainment(ctx, m.config, name); err != nil {
+		return err
+	}
 	services := append([]string{name}, m.companionServices(name)...)
 	if err := validateSandboxCompose(m.config, m.config.GetDockerComposePath(), services, selection); err != nil {
 		return err

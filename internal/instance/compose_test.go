@@ -102,9 +102,9 @@ func TestHoneypotEnvDoesNotSelfIdentify(t *testing.T) {
 }
 
 // TestComposeDoesNotLeakCredentialToHoneypots verifies the API credential is
-// never injected into attacker-facing honeypot containers. Honeypot env vars
-// use list syntax ("- QPOT_ID=..."), while services that legitimately consume
-// it (webui) use map syntax ("QPOT_ID: ...").
+// never injected into attacker-facing honeypot containers (their env vars use
+// list syntax, "- QPOT_ID=..."), nor into the database or the collector (map
+// syntax, "QPOT_ID: ..."). Only the control plane, a host process, holds it.
 func TestComposeDoesNotLeakCredentialToHoneypots(t *testing.T) {
 	out := renderCompose(t)
 
@@ -115,9 +115,11 @@ func TestComposeDoesNotLeakCredentialToHoneypots(t *testing.T) {
 	if strings.Contains(out, "/run/secrets/qpot_id:ro\n      {{") {
 		t.Error("honeypot still mounts qpot.id")
 	}
-	// Sanity: the webui still receives the ID it actually uses.
-	if !strings.Contains(out, "QPOT_ID:") {
-		t.Error("expected QPOT_ID map-style env on webui/db/collector services")
+	// Nor does the database or the collector get it: neither uses it, and
+	// what a service is given ends up in its logs
+	// (TestGeneratedFilesNeverCarryTheQPotID).
+	if strings.Contains(out, "QPOT_ID:") {
+		t.Error("compose gives the QPot ID to a service (map-style env)")
 	}
 }
 

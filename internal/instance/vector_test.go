@@ -50,11 +50,11 @@ func TestVectorClickHouseDataPathCorrectness(t *testing.T) {
 		t.Error("vector pipeline never sets .event_type")
 	}
 	// Metadata must be stamped AFTER the JSON merge so it can't be clobbered:
-	// the qpot_id assignment must come after the merge() call.
+	// the sensor_id assignment must come after the merge() call.
 	mergeIdx := strings.Index(out, "merge(")
-	idIdx := strings.LastIndex(out, ".qpot_id =")
+	idIdx := strings.Index(out, ".sensor_id =")
 	if mergeIdx < 0 || idIdx < 0 || idIdx < mergeIdx {
-		t.Error("qpot_id/timestamp must be stamped after the JSON merge to avoid clobbering")
+		t.Error("sensor_id/timestamp must be stamped after the JSON merge to avoid clobbering")
 	}
 }
 
@@ -145,15 +145,15 @@ func TestVectorSuricataIngestion(t *testing.T) {
 			t.Errorf("vector config missing Suricata marker %q", want)
 		}
 	}
-	// With GeoIP off, Suricata events join the stealth filter directly.
-	fs := out[strings.Index(out, "filter_stealth:"):]
-	fs = fs[:strings.Index(fs, "condition:")]
+	// With GeoIP off, Suricata events join the scanner tag directly.
+	fs := out[strings.Index(out, "tag_scanners:"):]
+	fs = fs[:strings.Index(fs, "source:")]
 	if !strings.Contains(fs, "- suricata_events") {
-		t.Error("filter_stealth should take suricata_events as input when GeoIP is off")
+		t.Error("tag_scanners should take suricata_events as input when GeoIP is off")
 	}
-	// Suricata alerts must bypass the stealth probe-drop.
-	if !strings.Contains(out, `sensor == "suricata"`) {
-		t.Error("stealth filter must never drop Suricata IDS alerts")
+	// Suricata alerts name scanners in rule text: they are not tagged.
+	if !strings.Contains(out, `sensor != "suricata"`) {
+		t.Error("the scanner tag must skip Suricata IDS alerts")
 	}
 }
 
@@ -169,10 +169,10 @@ func TestVectorSuricataWithGeoIP(t *testing.T) {
 		t.Error("enrich_geoip should geo-enrich suricata_events when GeoIP is on")
 	}
 	// It must not ALSO be added directly at the filter (it arrives via geoip).
-	fs := out[strings.Index(out, "filter_stealth:"):]
-	fs = fs[:strings.Index(fs, "condition:")]
+	fs := out[strings.Index(out, "tag_scanners:"):]
+	fs = fs[:strings.Index(fs, "source:")]
 	if strings.Contains(fs, "- suricata_events") {
-		t.Error("suricata_events must not feed filter_stealth directly when GeoIP is on (double ingest)")
+		t.Error("suricata_events must not feed tag_scanners directly when GeoIP is on (double ingest)")
 	}
 }
 
@@ -190,18 +190,18 @@ func TestVectorP0fFattIngestion(t *testing.T) {
 			t.Errorf("vector config missing p0f/fatt marker %q", want)
 		}
 	}
-	// All three sensors join the stealth filter directly (GeoIP off).
-	fs := out[strings.Index(out, "filter_stealth:"):]
-	fs = fs[:strings.Index(fs, "condition:")]
+	// All three sensors join the scanner tag directly (GeoIP off).
+	fs := out[strings.Index(out, "tag_scanners:"):]
+	fs = fs[:strings.Index(fs, "source:")]
 	for _, s := range []string{"- suricata_events", "- p0f_events", "- fatt_events"} {
 		if !strings.Contains(fs, s) {
-			t.Errorf("filter_stealth missing sensor input %q (GeoIP off)", s)
+			t.Errorf("tag_scanners missing sensor input %q (GeoIP off)", s)
 		}
 	}
-	// All NSM sensors bypass the stealth probe-drop.
-	for _, s := range []string{`sensor == "suricata"`, `sensor == "p0f"`, `sensor == "fatt"`} {
+	// No NSM sensor event is tagged.
+	for _, s := range []string{`sensor != "suricata"`, `sensor != "p0f"`, `sensor != "fatt"`} {
 		if !strings.Contains(out, s) {
-			t.Errorf("stealth filter must never drop sensor %q", s)
+			t.Errorf("the scanner tag must skip sensor events (%s)", s)
 		}
 	}
 }
@@ -219,10 +219,10 @@ func TestVectorSensorsGeoIP(t *testing.T) {
 			t.Errorf("enrich_geoip missing sensor input %q", s)
 		}
 	}
-	fs := out[strings.Index(out, "filter_stealth:"):]
-	fs = fs[:strings.Index(fs, "condition:")]
+	fs := out[strings.Index(out, "tag_scanners:"):]
+	fs = fs[:strings.Index(fs, "source:")]
 	if strings.Contains(fs, "- p0f_events") || strings.Contains(fs, "- fatt_events") {
-		t.Error("sensors must not feed filter_stealth directly when GeoIP is on (double ingest)")
+		t.Error("sensors must not feed tag_scanners directly when GeoIP is on (double ingest)")
 	}
 }
 
@@ -286,7 +286,7 @@ func TestVectorGeoIPOptional(t *testing.T) {
 		t.Error("GeoIP enrichment present despite no configured DB path")
 	}
 	if !strings.Contains(out, "- add_qpot_metadata") {
-		t.Error("filter_stealth should feed from add_qpot_metadata when GeoIP is off")
+		t.Error("tag_scanners should feed from add_qpot_metadata when GeoIP is off")
 	}
 
 	// Configured: enrichment table + transform appear.
@@ -299,7 +299,7 @@ func TestVectorGeoIPOptional(t *testing.T) {
 		t.Error("GeoIP enrichment missing despite configured DB path")
 	}
 	if !strings.Contains(out2, "- enrich_geoip") {
-		t.Error("filter_stealth should feed from enrich_geoip when GeoIP is on")
+		t.Error("tag_scanners should feed from enrich_geoip when GeoIP is on")
 	}
 }
 

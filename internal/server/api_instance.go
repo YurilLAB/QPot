@@ -188,15 +188,7 @@ func (s *Server) handleInstance(w http.ResponseWriter, r *http.Request) {
 }
 
 // authMode names how the web UI authenticates.
-func (s *Server) authMode() string {
-	switch {
-	case s.config.WebUI.QPotIDAuth:
-		return "qpot-id"
-	case s.config.WebUI.Username != "" && s.config.WebUI.Password != "":
-		return "basic"
-	}
-	return "none"
-}
+func (s *Server) authMode() string { return s.config.WebUI.AuthMode() }
 
 // databaseInfo reports the database's type and whether it answers, without
 // its address or credentials.

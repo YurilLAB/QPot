@@ -3,6 +3,7 @@
 - [How events are collected](#how-events-are-collected)
 - [Databases](#databases)
 - [The intelligence worker](#the-intelligence-worker)
+- [Sessions and campaigns](#sessions-and-campaigns)
 - [Attack categories](#attack-categories)
 - [Worker recovery and health](#worker-recovery-and-health)
 - [API](#api)
@@ -53,8 +54,69 @@ to 5 minutes when it is loaded. It does three things:
   - crypto wallets, commands and user agents.
 
   Defanged indicators such as `hxxp://` or `1.2.3[.]4` are restored first.
-- **Groups campaigns**, also called TTP sessions, by shared credentials,
-  tooling, commands and targeted services rather than by IP alone.
+- **Builds TTP sessions and campaigns:** one session per attacking source,
+  and a campaign fingerprint that links sources only on strong shared
+  evidence. See [Sessions and campaigns](#sessions-and-campaigns).
+
+## Sessions and campaigns
+
+A **TTP session** is one activity episode of one source: every event from an
+IPv4 address, or from an IPv6 /64, until the source has been quiet for
+`intelligence.inactivity_window` (30 minutes by default). What the source ran
+and which honeypots it reached do not matter: its events all join the one
+session, and two sources never share a session. A source that comes back after
+its session closed starts a new session with a new `session_id`. Events
+without a usable source address go to one "unknown source" session per
+honeypot, which lists no address.
+
+A **campaign** is a set of sessions with the same `campaign_fingerprint`.
+Sessions of different sources get the same fingerprint only when they share
+strong evidence:
+
+| Evidence | What is compared |
+|---|---|
+| Payload | The SHA-256 of a file the source downloaded or uploaded (not the empty file). |
+| Download host | The host of a URL in a command, a download or a web request. Private addresses and "what is my IP" services do not count. |
+| Command sequence | The source's first five distinct shell commands, in order, identical apart from whitespace. |
+
+One common command such as `uname -a` never links two sources, and neither
+does a user agent or a credential pair. Links are transitive: if A shares a
+host with B and B shares a payload with C, all three are one campaign. The
+result does not depend on the order events arrive in. A session with no strong
+evidence is a campaign of its own.
+
+A session's `session_id` never changes. Its `campaign_fingerprint` and
+`confidence` can: when a later source turns out to share its evidence, the
+worker rewrites the stored session. A session that has already closed is not
+rewritten, so when two campaigns are found to be one, the closed sessions of
+one of them keep the fingerprint they had. The evidence of a closed session
+stays linked to its campaign while the campaign has an open session.
+
+The fingerprint is 32 hex characters (128 bits of a SHA-256). Sessions stored
+by earlier versions have 8, and are not linked to newer ones.
+
+**Confidence** says how strong the evidence is that the session's events
+belong to one campaign. It does not grow with the number of events.
+
+| Situation | Confidence |
+|---|---|
+| Unknown-source session | 0.1 |
+| One source, a cloud address (`shared_infrastructure`) | 0.3 |
+| One source | 0.5 |
+| Shares a command sequence with another source | remaining doubt × 0.5 |
+| Shares a download host with another source | remaining doubt × 0.3 |
+| Shares a payload with another source | remaining doubt × 0.2 |
+| Also shares a user agent or credential pair inside the campaign | remaining doubt × 0.8 |
+
+Doubt is 1 minus confidence, and the factors multiply. A single source that
+shares a download host scores 1 - 0.5 × 0.3 = 0.85; with a shared payload as
+well, 0.97, which is capped at 0.95. `shared_infrastructure` is true when any
+address of the session is in a known cloud range.
+
+The worker bounds what it keeps per session (32 hosts and payloads, the
+earliest seen) and in total (200,000 evidence entries, 100,000 open sessions
+after each run). At a limit the events are still counted, but new evidence is
+not recorded until sessions close, so those sources are not linked.
 
 ## Attack categories
 

@@ -232,6 +232,7 @@ func TestVectorRemapLive(t *testing.T) {
 		Classified any               `json:"classified"`
 		EventID    any               `json:"event_id"`
 		QPotID     string            `json:"qpot_id"`
+		SensorID   string            `json:"sensor_id"`
 	}
 	var rows []row
 	sc := bufio.NewScanner(f)
@@ -317,7 +318,7 @@ func TestVectorRemapLive(t *testing.T) {
 
 	r := rows[0]
 	if r.Honeypot != "cowrie" || r.EventType != "cowrie.session.connect" || r.SourceIP != "203.0.113.9" ||
-		r.SourcePort != 55632 || r.DestPort != 22 || r.Protocol != "ssh" || r.Metadata["session"] != "s1" || r.QPotID != cfg.QPotID {
+		r.SourcePort != 55632 || r.DestPort != 22 || r.Protocol != "ssh" || r.Metadata["session"] != "s1" || r.QPotID != "" || r.SensorID != cfg.SensorID() {
 		t.Errorf("cowrie connect: %+v", r)
 	}
 	if r := rows[1]; r.Username != "root" || r.Password != "123456" || r.EventType != "cowrie.login.failed" {
@@ -485,6 +486,121 @@ func TestVectorEdgeConfigsValidateLive(t *testing.T) {
 		}
 		if b, err := exec.Command(run[0], append(run[1:], "validate", "--no-environment", path)...).CombinedOutput(); err != nil {
 			t.Errorf("%s: vector validate failed: %v\n%s", name, err, b)
+		}
+	}
+}
+
+// TestVectorKeepsScannerEvidenceLive runs honeypot lines through the two
+// transforms every event passes (add_qpot_metadata, tag_scanners) in the real
+// Vector. Before, the second one was a filter that dropped any event naming a
+// scanner, on by default: an attacker running nmap inside a honeypot, or a
+// scanner's own SSH banner, never reached the database, the intelligence
+// worker or the log backup. Every line must come out, the scanner ones
+// tagged, and none may carry the QPot ID - not even one a log line brings.
+func TestVectorKeepsScannerEvidenceLive(t *testing.T) {
+	dir := t.TempDir()
+	run := vectorRunner(t, dir)
+	for _, tagging := range []bool{true, false} {
+		cfg := config.Default("vec-scan")
+		cfg.QPotID = "qp_vectorvectorvectorvecto"
+		cfg.Stealth.BlockCommonProbes = tagging
+		hp := cfg.Honeypots["cowrie"]
+		hp.Enabled = true
+		cfg.Honeypots["cowrie"] = hp
+		sb, _ := security.NewSandbox(&cfg.Security)
+		out, err := (&ComposeGenerator{Config: cfg, Sandbox: sb}).GenerateVectorConfig()
+		if err != nil {
+			t.Fatal(err)
+		}
+		var vc struct {
+			Transforms map[string]struct {
+				Source string `yaml:"source"`
+			} `yaml:"transforms"`
+		}
+		if err := yaml.Unmarshal([]byte(out), &vc); err != nil {
+			t.Fatal(err)
+		}
+		meta, tag := vc.Transforms["add_qpot_metadata"].Source, vc.Transforms["tag_scanners"].Source
+		if meta == "" || tag == "" {
+			t.Fatal("the generated config lacks add_qpot_metadata or tag_scanners")
+		}
+		outPath := filepath.Join(dir, fmt.Sprintf("out-%v.json", tagging))
+		harness := map[string]any{
+			"data_dir": dir,
+			"sources":  map[string]any{"in": map[string]any{"type": "stdin"}},
+			"transforms": map[string]any{
+				"split": map[string]any{"type": "remap", "inputs": []string{"in"},
+					"source": "parts = split(string!(.message), \"\\t\", 2)\n.file = parts[0]\n.message = parts[1]\n"},
+				"meta": map[string]any{"type": "remap", "inputs": []string{"split"}, "source": meta},
+				"tag":  map[string]any{"type": "remap", "inputs": []string{"meta"}, "source": tag},
+			},
+			"sinks": map[string]any{"out": map[string]any{"type": "file", "inputs": []string{"tag"},
+				"path": outPath, "encoding": map[string]any{"codec": "json"}}},
+		}
+		hb, err := yaml.Marshal(harness)
+		if err != nil {
+			t.Fatal(err)
+		}
+		cfgPath := filepath.Join(dir, fmt.Sprintf("scan-%v.yaml", tagging))
+		if err := os.WriteFile(cfgPath, hb, 0o644); err != nil {
+			t.Fatal(err)
+		}
+		const file = "/data/honeypots/cowrie/logs/cowrie.json\t"
+		in := strings.Join([]string{
+			file + `{"eventid":"cowrie.command.input","input":"nmap -sV 192.0.2.10","message":"CMD: nmap -sV 192.0.2.10","src_ip":"203.0.113.9","session":"s1"}`,
+			file + `{"eventid":"cowrie.client.version","version":"SSH-2.0-ZGrab ZGrab SSH Survey","message":"Remote SSH version: SSH-2.0-ZGrab ZGrab SSH Survey","src_ip":"203.0.113.10","session":"s2"}`,
+			file + `{"eventid":"cowrie.command.input","input":"masscan -p22 10.0.0.0/8 --rate 1000","message":"CMD: masscan -p22 10.0.0.0/8 --rate 1000","src_ip":"203.0.113.9","session":"s1"}`,
+			file + `{"eventid":"cowrie.command.input","input":"uname -a","message":"CMD: uname -a","src_ip":"203.0.113.9","session":"s1"}`,
+			file + `{"eventid":"cowrie.command.input","input":"id","message":"CMD: id","src_ip":"203.0.113.11","session":"s3","qpot_id":"qp_forgedforgedforgedforged","sensor_id":"qs_forgedforgedforgedforged"}`,
+		}, "\n") + "\n"
+		cmd := exec.Command(run[0], append(run[1:], "--quiet", "--config", cfgPath)...)
+		cmd.Stdin = strings.NewReader(in)
+		var stderr bytes.Buffer
+		cmd.Stderr = &stderr
+		if err := cmd.Run(); err != nil {
+			t.Fatalf("vector failed: %v\n%s", err, stderr.String())
+		}
+		raw, err := os.ReadFile(outPath)
+		if err != nil {
+			t.Fatalf("no output: %v\n%s", err, stderr.String())
+		}
+		if bytes.Contains(raw, []byte(cfg.QPotID)) || bytes.Contains(raw, []byte("qpot_id")) || bytes.Contains(raw, []byte("forged")) {
+			t.Errorf("tagging=%v: the output carries a QPot ID field or a forged identifier:\n%s", tagging, raw)
+		}
+		type row struct {
+			Command  string            `json:"command"`
+			Metadata map[string]string `json:"metadata"`
+			SensorID string            `json:"sensor_id"`
+		}
+		var rows []row
+		for _, line := range bytes.Split(bytes.TrimSpace(raw), []byte("\n")) {
+			var r row
+			if err := json.Unmarshal(line, &r); err != nil {
+				t.Fatalf("bad output line %q: %v", line, err)
+			}
+			rows = append(rows, r)
+		}
+		wantScanner := []string{"nmap", "zgrab", "masscan", "", ""}
+		if len(rows) != len(wantScanner) {
+			t.Fatalf("tagging=%v: %d of %d events came out:\n%s", tagging, len(rows), len(wantScanner), raw)
+		}
+		for i, r := range rows {
+			want := wantScanner[i]
+			if !tagging {
+				want = ""
+			}
+			if r.Metadata["scanner"] != want {
+				t.Errorf("tagging=%v: event %d (%q) has scanner tag %q, want %q", tagging, i, r.Command, r.Metadata["scanner"], want)
+			}
+			if r.SensorID != cfg.SensorID() {
+				t.Errorf("tagging=%v: event %d has sensor_id %q, want %q", tagging, i, r.SensorID, cfg.SensorID())
+			}
+			if r.Metadata["session"] == "" {
+				t.Errorf("tagging=%v: event %d lost its metadata: %+v", tagging, i, r.Metadata)
+			}
+		}
+		if rows[0].Command != "nmap -sV 192.0.2.10" {
+			t.Errorf("the nmap command is stored as %q", rows[0].Command)
 		}
 	}
 }

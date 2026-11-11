@@ -85,6 +85,9 @@ func runControlPlane(ctx context.Context, cfg *config.Config, mgr *instance.Mana
 	// to keep running headless, while a health probe of the port reached
 	// whatever else held it (typically another instance's web UI).
 	if cfg.WebUI.Enabled {
+		if err := server.CheckExposure(cfg); err != nil {
+			return err
+		}
 		if err := webPortFree(cfg); err != nil {
 			return err
 		}

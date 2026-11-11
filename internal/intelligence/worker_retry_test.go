@@ -482,7 +482,14 @@ func TestWorkerCrashPreservesBinaryIndicatorIdentity(t *testing.T) {
 			t.Fatalf("raw credential count=%d", ioc.Count)
 		}
 	}
-	if len(d.sessionRows) != 2 {
-		t.Fatalf("binary session identity changed: %d sessions", len(d.sessionRows))
+	// One source is one session, whatever its user agents and usernames: the
+	// three events, each counted once across the crash and the restores.
+	if len(d.sessionRows) != 1 {
+		t.Fatalf("one source was stored as %d sessions", len(d.sessionRows))
+	}
+	for _, s := range d.sessionRows {
+		if s.EventCount != 3 {
+			t.Fatalf("restored session counts %d events, want 3", s.EventCount)
+		}
 	}
 }

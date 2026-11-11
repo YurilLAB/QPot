@@ -67,7 +67,7 @@ func TestIntelligenceSummaryReportsWorkerLifecycleWithoutSecrets(t *testing.T) {
 				if got["worker_enabled"] != (s.worker != nil) || got["worker_status"] != wantState || got["worker_healthy"] != wantHealthy {
 					t.Fatalf("incorrect worker lifecycle: %v", got)
 				}
-				for _, field := range []string{"techniques_observed", "iocs_total", "active_sessions", "attck_loaded"} {
+				for _, field := range []string{"techniques_observed", "iocs_total", "active_sessions", "active_campaigns", "attck_loaded"} {
 					if _, ok := got[field]; !ok {
 						t.Errorf("existing API field %s missing", field)
 					}

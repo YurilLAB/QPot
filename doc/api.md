@@ -39,7 +39,10 @@ a proxy log or the browser history. Downloads (the MISP export, a file
 canary) are fetched with the header like any other request.
 
 With `web_ui.qpot_id_auth: false` and a web UI user name and password set, HTTP
-Basic authentication is used instead.
+Basic authentication is used instead. With `qpot_id_auth: false` and either of
+the two empty there is no login: the API then answers every request, and the
+control plane starts only if `web_ui.bind_addr` is a loopback address
+(QP-WEB-005 otherwise).
 
 The API listens on `127.0.0.1` by default. From another machine use an SSH
 tunnel (`ssh -L 8080:127.0.0.1:8080 <host>`).
@@ -430,7 +433,7 @@ counted by the database.
 | `GET /api/techniques` | `[{"technique_id", "technique_name", "tactic_name", "count"}]`, most first |
 | `GET /api/categories` | `[{"id", "label", "description", "count"}]`, in catalogue order; the plain-language attack categories and how many recent events carry each |
 | `GET /api/ttps?limit=` | campaign sessions (`limit` 1 to 500) |
-| `GET /api/intelligence` | `{"techniques_observed", "iocs_total", "active_sessions", "worker_enabled", "attck_loaded"}` |
+| `GET /api/intelligence` | `{"techniques_observed", "iocs_total", "active_sessions", "active_campaigns", "worker_enabled", "attck_loaded"}` |
 
 Lists ranked by a count keep one order: equal counts are ordered by name or
 address, in every database backend.

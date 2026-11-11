@@ -180,6 +180,46 @@ func sandboxCheck(ctx context.Context, cfg *config.Config, mgr ServiceStater) Ch
 	return Check{Name: name, Level: "ok", Detail: detail}
 }
 
+// ContainmentChecks reports what a setting, or files an earlier version
+// wrote, take away from the instance's containment. They need no Docker.
+func ContainmentChecks(cfg *config.Config) []Check {
+	var cs []Check
+	if err := instance.CheckContainmentSettings(cfg); err != nil {
+		var coded *hostsetup.Error
+		detail, code := firstLine(err.Error()), "QP-INST-015"
+		if errors.As(err, &coded) && coded != nil {
+			detail, code = coded.Cause(), coded.Code
+		}
+		cs = append(cs, Check{"containment settings", "fail", detail, code})
+	} else {
+		detail := fmt.Sprintf("%d mandatory controls on every honeypot; egress guard on", len(config.MandatoryControls))
+		ni := cfg.Security.NetworkIsolation
+		if ni.AllowPrivateEgress && !ni.BlockOutbound {
+			detail = fmt.Sprintf("%d mandatory controls on every honeypot; egress guard off by allow_private_egress (emulators only)", len(config.MandatoryControls))
+		}
+		cs = append(cs, Check{Name: "containment settings", Level: "ok", Detail: detail})
+	}
+	if cfg.WebUI.Enabled {
+		switch err := cfg.WebUI.CheckExposure(); {
+		case err != nil:
+			cs = append(cs, Check{"web UI login", "fail", firstLine(err.Error()), "QP-WEB-005"})
+		case cfg.WebUI.AuthMode() == "none":
+			cs = append(cs, Check{"web UI login", "warn", "no login; any local user or process can manage this instance (set web_ui.qpot_id_auth: true)", "QP-WEB-005"})
+		default:
+			cs = append(cs, Check{Name: "web UI login", Level: "ok", Detail: cfg.WebUI.AuthMode()})
+		}
+	}
+	switch {
+	case instance.GeneratedFilesCarryQPotID(cfg):
+		cs = append(cs, Check{"QPot ID in stored files", "fail", "the collector's files were written by an earlier version and contain the QPot ID", "QP-INST-016"})
+	case !instance.BackupsScrubbed(cfg):
+		cs = append(cs, Check{"QPot ID in stored files", "warn", "the log backups have not been checked for the QPot ID yet (done at the next qpot up)", "QP-INST-016"})
+	default:
+		cs = append(cs, Check{Name: "QPot ID in stored files", Level: "ok", Detail: "not in the collector's files or the log backups"})
+	}
+	return cs
+}
+
 func observedSandboxDescription(observed instance.SandboxStatus) string {
 	runtimes := make(map[string]bool)
 	for _, runtime := range observed.Services {
@@ -258,6 +298,7 @@ func HealthChecks(ctx context.Context, cfg *config.Config, mgr ServiceStater, co
 	}
 
 	cs = append(cs, sandboxCheck(ctx, cfg, mgr))
+	cs = append(cs, ContainmentChecks(cfg)...)
 
 	// The schema must exist or the collector drops every event.
 	db, err := database.New(cfg.DatabaseClient())

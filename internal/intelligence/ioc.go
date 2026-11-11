@@ -238,6 +238,52 @@ func isIPEchoHost(host string) bool {
 	return false
 }
 
+// eachLocation calls fn for every URL in text that names a place attacker
+// tooling connects to, with the URL as trimURL keeps it and its host (see
+// urlHost). "http://" alone names no location, and an IP-echo service is not
+// the attacker's. The IOC extractor and the campaign builder both read
+// locations through it, so they never disagree about what a download host is.
+func eachLocation(text string, fn func(u, host string)) {
+	for _, u := range reURL.FindAllString(text, -1) {
+		u = trimURL(u)
+		if host := urlHost(u); host != "" && !isIPEchoHost(host) {
+			fn(u, host)
+		}
+	}
+}
+
+// payloadLocationText returns the text of an event's payload that may name a
+// download location, or "": the payload itself when it is a bare URL, or the
+// decoded request target a web honeypot stored. Defanged indicators are
+// restored.
+func payloadLocationText(event *database.Event) string {
+	p := strings.TrimSpace(string(event.Payload))
+	if p == "" {
+		return ""
+	}
+	if !strings.ContainsAny(p, " \t\r\n") && reURLStart.MatchString(p) {
+		return refang(p)
+	}
+	if t := requestTarget(p); t != "" {
+		return refang(formDecode(t))
+	}
+	return ""
+}
+
+// payloadSHA256 returns the lower-case SHA-256 of a file the attacker
+// downloaded or uploaded, or "". cowrie and adbhoney record it as the
+// "shasum" of their session.file_download / file_upload events; a shasum on
+// any other event (cowrie.log.closed: the TTY recording) is not a payload.
+func payloadSHA256(event *database.Event) string {
+	if event.Metadata == nil || !(strings.Contains(event.EventType, "file_download") || strings.Contains(event.EventType, "file_upload")) {
+		return ""
+	}
+	if h := strings.ToLower(event.Metadata["shasum"]); len(h) == 64 && reSHA256.MatchString(h) {
+		return h
+	}
+	return ""
+}
+
 // reURLStart matches a payload that is itself a URL (a download location).
 var reURLStart = regexp.MustCompile(`(?i)^(?:https?|ftp)://`)
 
@@ -488,14 +534,7 @@ func (e *Extractor) Extract(event *database.Event) []*database.IOC {
 
 	// addURLs extracts URL IOCs (and their host as a domain/IP IOC) from text.
 	addURLs := func(text string) {
-		for _, u := range reURL.FindAllString(text, -1) {
-			u = trimURL(u)
-			host := urlHost(u)
-			// "http://" alone names no location; an IP-echo service is not
-			// the attacker's.
-			if host == "" || isIPEchoHost(host) {
-				continue
-			}
+		eachLocation(text, func(u, host string) {
 			add(IOCTypeURL, u)
 
 			// The host the URL connects to: an IP literal (e.g.
@@ -505,7 +544,7 @@ func (e *Extractor) Extract(event *database.Event) []*database.IOC {
 			if typ, v := hostIOC(host); typ != "" {
 				add(typ, v)
 			}
-		}
+		})
 	}
 
 	// Source IP, unless it may be forged (a reflection attack's victim).
@@ -567,22 +606,16 @@ func (e *Extractor) Extract(event *database.Event) []*database.IOC {
 	// honeypot's payload is the request target, percent-encoded: a URL
 	// smuggled into it (a command injection's download, a remote include) is
 	// read decoded, so it ends where the application would see a space.
-	if p := strings.TrimSpace(string(event.Payload)); p != "" {
-		if !strings.ContainsAny(p, " \t\r\n") && reURLStart.MatchString(p) {
-			addURLs(refang(p))
-		} else if t := requestTarget(p); t != "" {
-			addURLs(refang(formDecode(t)))
-		}
+	if text := payloadLocationText(event); text != "" {
+		addURLs(text)
 	}
 
 	// Files an attacker downloaded or uploaded (cowrie/adbhoney
 	// session.file_download / file_upload) carry the payload's SHA-256 in
 	// metadata. Other events with a shasum (cowrie.log.closed: the TTY
 	// recording) are not malware and are skipped.
-	if event.Metadata != nil && (strings.Contains(event.EventType, "file_download") || strings.Contains(event.EventType, "file_upload")) {
-		if h := strings.ToLower(event.Metadata["shasum"]); reSHA256.MatchString(h) && len(h) == 64 {
-			add(IOCTypeHash, h)
-		}
+	if h := payloadSHA256(event); h != "" {
+		add(IOCTypeHash, h)
 	}
 
 	// User agent from metadata

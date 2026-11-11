@@ -151,6 +151,7 @@ func TestResponseEnv(t *testing.T) {
 	}
 	want := map[string]string{
 		"QPOT_ID":            validTestID,
+		"QPOT_SENSOR_ID":     config.SensorIDFor(validTestID),
 		"QPOT_INSTANCE":      "edge-1",
 		"QPOT_TOTAL_EVENTS":  "42",
 		"QPOT_UNIQUE_IPS":    "7",
@@ -291,7 +292,7 @@ func FuzzResponseEnv(f *testing.F) {
 	f.Add("é—ñ", "\x00\x01", "a\tb", "::1", int64(9999), int64(7))
 
 	knownKeys := map[string]bool{
-		"QPOT_ID": true, "QPOT_INSTANCE": true, "QPOT_TOTAL_EVENTS": true,
+		"QPOT_ID": true, "QPOT_SENSOR_ID": true, "QPOT_INSTANCE": true, "QPOT_TOTAL_EVENTS": true,
 		"QPOT_UNIQUE_IPS": true, "QPOT_THRESHOLD": true, "QPOT_TIMESTAMP": true,
 		"QPOT_TOP_HONEYPOT": true, "QPOT_TOP_SOURCE_IP": true,
 	}

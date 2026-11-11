@@ -1,0 +1,53 @@
+<clickhouse>
+    <!-- QPot runs ClickHouse as a small single-node store beside honeypots,
+         inside a container memory limit with no swap. The server's defaults
+         are sized for a dedicated machine. -->
+
+    <!-- The internal diagnostic tables are written every few seconds whether
+         or not anything queries the server. Their inserts and merges were
+         most of an idle instance's CPU and disk writes, and they grow
+         without a limit. QPot reads none of them. -->
+    <metric_log remove="1"/>
+    <asynchronous_metric_log remove="1"/>
+    <trace_log remove="1"/>
+    <processors_profile_log remove="1"/>
+    <query_thread_log remove="1"/>
+    <query_views_log remove="1"/>
+    <query_metric_log remove="1"/>
+    <text_log remove="1"/>
+    <part_log remove="1"/>
+    <opentelemetry_span_log remove="1"/>
+    <asynchronous_insert_log remove="1"/>
+    <session_log remove="1"/>
+    <latency_log remove="1"/>
+    <error_log remove="1"/>
+    <background_schedule_pool_log remove="1"/>
+    <blob_storage_log remove="1"/>
+    <zookeeper_log remove="1"/>
+    <!-- Kept, for a week: what ran and what crashed. -->
+    <query_log>
+        <ttl>event_date + INTERVAL 7 DAY DELETE</ttl>
+    </query_log>
+    <crash_log>
+        <ttl>event_date + INTERVAL 30 DAY DELETE</ttl>
+    </crash_log>
+
+    <!-- Caches sized for the container, not for the host's memory. -->
+    <mark_cache_size>67108864</mark_cache_size>
+    <index_mark_cache_size>33554432</index_mark_cache_size>
+    <uncompressed_cache_size>0</uncompressed_cache_size>
+    <max_server_memory_usage_to_ram_ratio>0.75</max_server_memory_usage_to_ram_ratio>
+    <max_concurrent_queries>32</max_concurrent_queries>
+    <background_pool_size>2</background_pool_size>
+    <background_schedule_pool_size>4</background_schedule_pool_size>
+    <background_common_pool_size>2</background_common_pool_size>
+    <background_move_pool_size>1</background_move_pool_size>
+    <background_fetches_pool_size>1</background_fetches_pool_size>
+    <background_buffer_flush_schedule_pool_size>1</background_buffer_flush_schedule_pool_size>
+    <background_merges_mutations_concurrency_ratio>2</background_merges_mutations_concurrency_ratio>
+    <merge_tree>
+        <number_of_free_entries_in_pool_to_execute_mutation>1</number_of_free_entries_in_pool_to_execute_mutation>
+        <number_of_free_entries_in_pool_to_lower_max_size_of_merge>1</number_of_free_entries_in_pool_to_lower_max_size_of_merge>
+        <number_of_free_entries_in_pool_to_execute_optimize_entire_partition>1</number_of_free_entries_in_pool_to_execute_optimize_entire_partition>
+    </merge_tree>
+</clickhouse>

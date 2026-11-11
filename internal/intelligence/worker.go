@@ -82,7 +82,8 @@ func (w *Worker) LastError() error {
 
 // Status returns a consistent lifecycle/error snapshot for health reporting.
 // A retrying worker is still running and will retry on its normal cadence;
-// stopped means Run returned and requires a new control-plane start.
+// stopped means Run returned: this Worker is finished, and the control plane
+// starts a new one (which takes a new lease and reloads the checkpoint).
 func (w *Worker) Status() (state string, lastError error) {
 	w.errorMu.RLock()
 	defer w.errorMu.RUnlock()
@@ -277,6 +278,13 @@ func (w *Worker) initialize(ctx context.Context) error {
 			w.pending, w.pendingSaved = cp, true
 		} else {
 			w.flush(ctx)
+		}
+	} else if w.classifier.ttpBuilder != nil {
+		// Nothing durable yet: whatever a predecessor that lost its lease
+		// left in the shared builder was never committed, and its events
+		// will be read again. Counting on top of it would count them twice.
+		if err := w.classifier.ttpBuilder.restoreCheckpoint(nil); err != nil {
+			return err
 		}
 	}
 	w.initialized = true

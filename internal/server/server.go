@@ -12,6 +12,7 @@ import (
 	"io/fs"
 	"log/slog"
 	"mime"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -181,6 +182,62 @@ func (s *Server) newWorker(db database.Database) *intelligence.Worker {
 	return w
 }
 
+// workerRestartDelay bounds the wait before a stopped intelligence worker is
+// replaced: short at first, so a database restart costs seconds, then longer
+// while whatever stops it lasts (another node owns the work, the database is
+// still away).
+var workerRestartDelay = [2]time.Duration{5 * time.Second, time.Minute}
+
+// superviseWorker runs the intelligence worker until ctx ends.
+//
+// Worker.Run returns by itself when the worker may not do the work: it could
+// not take the database lease (another node holds it, or the database is
+// away), or it lost the lease it had (the database was out of reach for
+// longer than a lease lasts). Such a Worker is finished. It is never
+// resumed, because what it holds in memory may be behind what a successor
+// wrote; a new one is started instead, which must take a new lease - refused
+// while another owner's is alive - and begins from the durable checkpoint.
+//
+// Before this, the first lost lease ended intelligence until someone
+// restarted the control plane, and restarting the database for 30 seconds
+// was enough to lose it.
+func (s *Server) superviseWorker(ctx context.Context, w *intelligence.Worker) {
+	delay := workerRestartDelay[0]
+	for {
+		began := time.Now()
+		w.Run(ctx)
+		if ctx.Err() != nil {
+			return
+		}
+		if time.Since(began) > 2*workerRestartDelay[1] {
+			delay = workerRestartDelay[0] // it worked for a while: a new problem
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(delay):
+		}
+		delay = min(2*delay, workerRestartDelay[1])
+		s.dbMu.Lock()
+		next := s.newWorker(s.database)
+		if next != nil {
+			s.worker = next
+		}
+		s.dbMu.Unlock()
+		if next == nil {
+			return
+		}
+		_, last := w.Status()
+		code := ""
+		var coded *hostsetup.Error
+		if errors.As(last, &coded) && coded != nil {
+			code = coded.Code
+		}
+		slog.Info("Starting a new intelligence worker: the previous one stopped", "code", code)
+		w = next
+	}
+}
+
 // reconnectBackoff bounds the wait between attempts to reach a database that
 // was still not there dbStartupWait after the server started.
 var reconnectBackoff = [2]time.Duration{5 * time.Second, time.Minute}
@@ -333,6 +390,17 @@ func (s *Server) setupRoutes() {
 	s.setupAPIRoutes()
 }
 
+// CheckExposure refuses to serve the management API without a login on any
+// address but loopback (QP-WEB-005). The CLI calls it before it starts
+// containers, and Start calls it again: no path may reach Listen without it.
+func CheckExposure(cfg *config.Config) error {
+	err := cfg.WebUI.CheckExposure()
+	if err == nil {
+		return nil
+	}
+	return hostsetup.E("QP-WEB-005").WithWhy("%s.", strings.ToUpper(err.Error()[:1])+err.Error()[1:]).Wrap(err)
+}
+
 // withQPotAuth middleware checks QPot ID authentication
 func (s *Server) withQPotAuth(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
@@ -464,7 +532,10 @@ func (n noListFS) Open(name string) (fs.File, error) {
 
 // Start starts the web server and background alert polling.
 func (s *Server) Start(ctx context.Context) error {
-	addr := fmt.Sprintf("%s:%d", s.config.WebUI.BindAddr, s.config.WebUI.Port)
+	if err := CheckExposure(s.config); err != nil {
+		return err
+	}
+	addr := net.JoinHostPort(strings.Trim(s.config.WebUI.BindAddr, "[]"), strconv.Itoa(s.config.WebUI.Port))
 
 	srv := &http.Server{
 		Addr:         addr,
@@ -535,7 +606,7 @@ func (s *Server) Start(ctx context.Context) error {
 		workers.Add(1)
 		go func() {
 			defer workers.Done()
-			w.Run(ctx)
+			s.superviseWorker(ctx, w)
 		}()
 	}
 	// Waited for on the way out like the worker: an attempt to reach the
@@ -804,6 +875,7 @@ func (s *Server) runResponseHooks(ctx context.Context, stats *database.Stats) {
 func (s *Server) responseEnv(ctx context.Context, stats *database.Stats) []string {
 	env := []string{
 		"QPOT_ID=" + s.config.QPotID,
+		"QPOT_SENSOR_ID=" + s.config.SensorID(),
 		"QPOT_INSTANCE=" + s.config.InstanceName,
 		fmt.Sprintf("QPOT_TOTAL_EVENTS=%d", stats.TotalEvents),
 		fmt.Sprintf("QPOT_UNIQUE_IPS=%d", stats.UniqueIPs),
@@ -1418,9 +1490,18 @@ func (s *Server) handleIntelligenceSummary(w http.ResponseWriter, r *http.Reques
 	}
 
 	ttpBuilder, attckLoader := s.intelState()
-	activeSessions := 0
+	// A session is one source's activity; a campaign is the sessions that
+	// share strong evidence (a payload, a download host, a command
+	// sequence). Sources that share nothing are each their own campaign.
+	activeSessions, activeCampaigns := 0, 0
 	if ttpBuilder != nil {
-		activeSessions = len(ttpBuilder.GetActiveSessions())
+		sessions := ttpBuilder.GetActiveSessions()
+		activeSessions = len(sessions)
+		campaigns := make(map[string]struct{}, len(sessions))
+		for _, session := range sessions {
+			campaigns[session.CampaignFingerprint] = struct{}{}
+		}
+		activeCampaigns = len(campaigns)
 	}
 
 	attckLoaded := false
@@ -1457,6 +1538,7 @@ func (s *Server) handleIntelligenceSummary(w http.ResponseWriter, r *http.Reques
 		"techniques_observed": techniquesObserved,
 		"iocs_total":          iocsTotal,
 		"active_sessions":     activeSessions,
+		"active_campaigns":    activeCampaigns,
 		"worker_enabled":      s.intelWorker() != nil,
 		"attck_loaded":        attckLoaded,
 		"worker_status":       "disabled",
