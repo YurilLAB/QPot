@@ -19,6 +19,8 @@ type Report struct {
 	Window         Window   `json:"window"`
 	Input          Input    `json:"input"`
 	Limits         Limits   `json:"limits"`
+	// Sources describes the source addresses of the sessions.
+	Sources SourceSummary `json:"source_addresses"`
 	// Overall covers every honeypot together.
 	Overall Metrics `json:"overall"`
 	// Honeypots holds the same metrics per honeypot, by name.
@@ -26,6 +28,10 @@ type Report struct {
 	// Notes says which limits were reached and what that does to the
 	// numbers.
 	Notes []string `json:"notes,omitempty"`
+
+	// detail carries the per-session samples and the source table Compare
+	// uses. It is not part of the JSON.
+	detail *detail
 }
 
 // Window is the time of the first and of the last event used.
@@ -58,6 +64,16 @@ type Limits struct {
 	// SessionsReached is true when the session limit dropped session keys:
 	// the session figures then cover a sample.
 	SessionsReached bool `json:"session_keys_reached"`
+	// Sample is the number of sessions kept for each rank test of a
+	// comparison. SampleReached is true when a report had more: its rank
+	// tests then run on a fixed sample of that size.
+	Sample        int  `json:"rank_test_sessions"`
+	SampleReached bool `json:"rank_test_sessions_reached"`
+	// PairedSources is the number of source addresses kept for the overlap
+	// and shared-source analysis of a comparison. PairedSourcesReached is
+	// true when a report had more.
+	PairedSources        int  `json:"paired_sources"`
+	PairedSourcesReached bool `json:"paired_sources_reached"`
 }
 
 // HoneypotMetrics are the metrics of one honeypot.
@@ -77,6 +93,40 @@ type Metrics struct {
 	Returning      Returning    `json:"returning_sources"`
 	Intelligence   Intelligence `json:"intelligence"`
 	TopStems       []StemCount  `json:"top_command_stems"`
+	// Intervals are the 95% intervals of the shares and medians above, in
+	// table order. A figure whose base is too small has none.
+	Intervals []Interval `json:"intervals_95,omitempty"`
+}
+
+// Interval is the 95% confidence interval of one metric, in the metric's
+// unit.
+type Interval struct {
+	// Key is the key of the metric, as in Definitions.
+	Key  string  `json:"key"`
+	Low  float64 `json:"low"`
+	High float64 `json:"high"`
+	// N is the size of the base: sessions, or sources.
+	N int64 `json:"n"`
+	// Method is "wilson" for a share (the Wilson score interval) and
+	// "order-statistics" for a median (two order statistics chosen by
+	// binomial ranks, valid for any distribution).
+	Method string `json:"method"`
+}
+
+// Interval methods.
+const (
+	MethodWilson          = "wilson"
+	MethodOrderStatistics = "order-statistics"
+)
+
+// interval returns the interval of the metric with the given key.
+func (m *Metrics) interval(key string) *Interval {
+	for i := range m.Intervals {
+		if m.Intervals[i].Key == key {
+			return &m.Intervals[i]
+		}
+	}
+	return nil
 }
 
 // Stage is a count of sessions and its share of a base.
@@ -249,16 +299,19 @@ func (a *Aggregator) Report(label string) *Report {
 		perHP[i] = &scopeAcc{}
 	}
 	kept := int64(0)
-	for _, g := range a.groups.m {
+	db := newDetailBuilder(a)
+	for key, g := range a.groups.m {
 		kept += g.events
 		if !g.bySource {
 			overall.add(&g.one)
 			perHP[g.honeypot].add(&g.one)
+			db.add(key, 0, &g.one)
 			continue
 		}
 		for i := range g.segs {
 			overall.add(&g.segs[i])
 			perHP[g.honeypot].add(&g.segs[i])
+			db.add(key, i, &g.segs[i])
 		}
 	}
 
@@ -274,9 +327,14 @@ func (a *Aggregator) Report(label string) *Report {
 			SessionCommands: a.opt.SessionCommandLimit,
 			Sessions:        a.opt.SessionLimit,
 			SessionsReached: a.groups.over,
+			Sample:          a.opt.SampleLimit,
+			SampleReached:   db.durAll.over(),
+			PairedSources:   a.opt.SourceLimit,
 		},
 		Honeypots: make([]HoneypotMetrics, 0, len(a.hpNames)),
 	}
+	r.Sources, r.detail = db.finish()
+	r.Limits.PairedSourcesReached = r.detail.sourcesOver
 	if a.haveTime {
 		r.Window = Window{First: time.UnixMicro(a.first).UTC(), Last: time.UnixMicro(a.last).UTC()}
 	}
@@ -290,6 +348,16 @@ func (a *Aggregator) Report(label string) *Report {
 		r.Notes = append(r.Notes, fmt.Sprintf(
 			"More than %d session keys: sessions, funnel, duration, depth, left after a probe and returning sources cover a fixed sample of %d keys. Diversity and intelligence counts cover every event.",
 			a.opt.SessionLimit, a.opt.SessionLimit))
+	}
+	if r.Limits.SampleReached {
+		r.Notes = append(r.Notes, fmt.Sprintf(
+			"More than %d sessions: the rank tests of a comparison (session length, commands per session) use a fixed sample of %d sessions per row. Medians and their intervals cover every session.",
+			a.opt.SampleLimit, a.opt.SampleLimit))
+	}
+	if r.Limits.PairedSourcesReached {
+		r.Notes = append(r.Notes, fmt.Sprintf(
+			"More than %d source addresses: the source overlap and the shared-source analysis of a comparison cover a fixed sample of %d of them. The source counts cover all.",
+			a.opt.SourceLimit, a.opt.SourceLimit))
 	}
 	r.Notes = append(r.Notes, limitNotes("all honeypots", &r.Overall, a.opt)...)
 	for i := range r.Honeypots {
@@ -378,6 +446,31 @@ func metricsOf(c *scopeAcc, sets *scopeSets) Metrics {
 		CredentialPairs: distinctOf(sets.creds, c.sessions),
 		Techniques:      distinctOf(sets.techniques, c.sessions),
 	}
+
+	// The 95% intervals, in table order. The slices are ascending by now.
+	share := func(key string, count, base int64) {
+		if lo, hi, ok := wilson(count, base); ok {
+			m.Intervals = append(m.Intervals, Interval{Key: key, Low: round(lo*100, 2), High: round(hi*100, 2), N: base, Method: MethodWilson})
+		}
+	}
+	middle := func(key string, v []int64, unit float64, digits int) {
+		if lo, hi, ok := medianInterval(v); ok {
+			m.Intervals = append(m.Intervals, Interval{
+				Key: key, Low: round(float64(lo)/unit, digits), High: round(float64(hi)/unit, digits),
+				N: int64(len(v)), Method: MethodOrderStatistics,
+			})
+		}
+	}
+	share("login_attempted_pct", c.attempted, c.sessions)
+	share("logged_in_pct", c.loggedIn, c.sessions)
+	share("interactive_pct", c.interactive, c.sessions)
+	share("payload_pct", c.payload, c.sessions)
+	middle("duration_logged_in_median_s", c.durLoggedIn, 1e6, 3)
+	middle("duration_all_median_s", c.durAll, 1e6, 3)
+	middle("depth_median", c.depth, 1, 0)
+	middle("distinct_per_session_median", c.distinctPerSes, 1, 0)
+	share("left_after_probe_pct", c.left, c.interactive)
+	share("returning_sources_pct", m.Returning.Returned, m.Returning.InteractiveSources)
 	return m
 }
 

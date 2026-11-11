@@ -512,14 +512,14 @@ func randomEvents(rng *rand.Rand, n int) []Event {
 func TestReportDoesNotDependOnEventOrder(t *testing.T) {
 	limits := map[string]Options{
 		"default limits": {},
-		"limits reached": {DistinctLimit: 4, StemLimit: 3, SessionCommandLimit: 2, SessionLimit: 25},
+		"limits reached": {DistinctLimit: 4, StemLimit: 3, SessionCommandLimit: 2, SessionLimit: 25, SampleLimit: 7, SourceLimit: 5},
 	}
 	for name, opt := range limits {
 		t.Run(name, func(t *testing.T) {
 			rng := rand.New(rand.NewSource(42))
 			events := randomEvents(rng, 3000)
 			want := compute(t, opt, events...)
-			if name == "limits reached" && (!want.Limits.SessionsReached || len(want.Notes) < 4) {
+			if name == "limits reached" && (!want.Limits.SessionsReached || !want.Limits.SampleReached || !want.Limits.PairedSourcesReached || len(want.Notes) < 6) {
 				t.Fatalf("the small limits were not reached: %+v %q", want.Limits, want.Notes)
 			}
 			if want.Overall.Sessions == 0 || want.Overall.Returning.InteractiveSources == 0 || want.Overall.LeftAfterProbe.Count == 0 {

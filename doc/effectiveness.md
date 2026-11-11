@@ -6,7 +6,8 @@ same numbers from the JSON log of any Cowrie deployment, so a QPot instance
 can be set beside a simpler deployment that ran next to it.
 
 The numbers describe what visitors did. They do not say why. Read the
-section on fair comparison before reading anything into a difference.
+sections on reading a comparison and on fair comparison before reading
+anything into a difference.
 
 ## Sessions
 
@@ -149,6 +150,66 @@ Distinct counts, and each per 1000 sessions:
   not: classification is QPot's. Leave this row out of a comparison with a
   log.
 
+### Intervals
+
+A report covers the sessions that happened to arrive. Another week would
+give other sessions and slightly different numbers. A **95% interval** is a
+range around a number that allows for this: if the same deployment were
+measured many times, 95 of 100 such ranges would hold the true value.
+
+Every share and every median has one:
+
+- **Shares** (the four funnel steps, left after a probe, returning sources):
+  the Wilson score interval. It stays inside 0% to 100% and works for small
+  counts and for shares near 0% or 100%.
+- **Medians** (session duration over all sessions and over the sessions that
+  logged in, commands per interactive session, distinct commands per
+  interactive session): two of the sorted values, the `r`-th smallest and
+  the `r`-th largest. `r` is the largest rank for which fewer than `r` of
+  `n` fair coin flips come up heads with a chance of at most 2.5%. For 10
+  sessions these are the 2nd and the 9th value; for 100 sessions, the 40th
+  and the 61st. This needs no assumption about how the values are spread.
+  With fewer than 6 values there is no interval.
+
+Counts, maxima, totals, p90 values, the stem entropy and the rates per 1000
+sessions have no interval.
+
+An interval allows for chance only. It treats the sessions as independent.
+One bot that opens a thousand sessions makes the interval narrower than it
+should be.
+
+### Source addresses
+
+A report counts the distinct source addresses of its sessions, for all
+honeypots together:
+
+- An IPv4 address counts as itself.
+- An IPv6 address counts as its /64, the smallest block one host is usually
+  given. Two addresses in the same /64 are one source.
+- An IPv4 address written as IPv6 (`::ffff:203.0.113.5`) counts as the IPv4
+  address.
+
+A source is **reserved** when it cannot be a visitor from the internet:
+private (`10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`, `fc00::/7`),
+loopback, link-local, carrier-grade NAT (`100.64.0.0/10`), multicast,
+unspecified, `0.0.0.0/8`, `192.0.0.0/24`, `198.18.0.0/15`, `240.0.0.0/4`, or
+text that is not an address. Every other source is **public**. The
+documentation ranges (`192.0.2.0/24`, `198.51.100.0/24`, `203.0.113.0/24`,
+`2001:db8::/32`) count as public: real traffic cannot come from them, and
+examples and tests use them.
+
+The report gives the number of sources, how many are public and how many
+reserved, the sessions without any source address, the sessions from
+reserved sources, and the **busiest source**: the number of sessions of the
+source with the most, and its share of all sessions.
+
+Sources count as **collapsed** when one source has more than 50% of the
+sessions, or the reserved sources together have more than 50%. The logged
+address is then probably a gateway or a proxy, not the visitor. The section
+on fair comparison says how this happens.
+
+Returning sources (above) still uses each address exactly as logged.
+
 ## Limits
 
 Memory stays bounded on any input. Each limit is fixed, and the report says
@@ -160,10 +221,18 @@ when one was reached:
 | Command stems, per scope | 10000 | the kept stems keep exact counts; the others count as one stem in the entropy, which is then a lower bound |
 | Distinct commands remembered per session | 64 | the session counts as 64 |
 | Session keys: (honeypot, session id) pairs plus (honeypot, source) pairs | 2000000 | sessions, funnel, duration, depth, left after a probe and returning sources cover a fixed sample of keys; diversity and intelligence still cover every event |
+| Sessions kept for each rank test of a comparison | 100000 | the test runs on a fixed sample of that many sessions; medians and their intervals still cover every session |
+| Source addresses kept for the source overlap and the shared-source analysis of a comparison | 200000 | both cover a fixed part of the address space, the same on both sides; the source counts of each report still cover every source |
 | Cowrie log line | 1 MiB | the line is skipped and counted |
 
 A scope is one honeypot, or all honeypots together. The result does not
 depend on the order of the events, with or without a limit reached.
+
+The two samples are not picked at random and not by what a session did.
+Each session and each source gets a number computed from its key (a hash),
+and the ones with the smallest numbers are kept. The same input always
+gives the same sample. Two reports keep the same sources, so their overlap
+can still be counted.
 
 ## Running it
 
@@ -181,6 +250,22 @@ exposure or on a single session (session counts, totals, maxima) have no
 direction.
 
 `--since` takes days (`7d`), weeks (`2w`) or a duration (`36h`).
+
+Under the table come the 95% intervals of the shares and medians, and for
+each report its source addresses.
+
+### Comparing two instances
+
+`--against` names another instance on this host:
+
+```
+qpot engagement -i treat --against control --honeypot cowrie
+```
+
+Both databases must be running. Both instances are read over the same
+`--since` window and with the same `--honeypot` filter. The instance named
+by `-i` is the first report. Give `--against` more than once to compare the
+first instance with several others. `--against` needs `-i`.
 
 ### Comparing with a Cowrie log
 
@@ -213,6 +298,209 @@ event is counted and skipped; it never stops the run.
 `--json` prints the reports and, for more than one, the comparison of the
 first with each of the others.
 
+`--against` and `--cowrie-log` can be used together. The reports come in
+this order: the instance named by `-i`, the `--against` instances, the logs.
+
+## Reading a comparison
+
+With more than one report, the first report is compared with each of the
+others. The first report is side **A**. The other is side **B**. Every
+difference is B minus A.
+
+A comparison has four parts: an exposure check, intervals, verdicts, and a
+table of shared sources. Read them in that order.
+
+### The exposure check
+
+The exposure check is printed before the table. It answers one question:
+did the two sides see about the same amount of traffic over the same time?
+If not, a difference in the table comes from the exposure, not from the
+deployment.
+
+It prints, for each side:
+
+- the number of sessions;
+- the number of source addresses, and how many of them are public;
+- the first and the last event, and the time between them (the period).
+
+And for the two together:
+
+- the **session ratio** and the **source ratio**: the larger number divided
+  by the smaller;
+- the **period overlap**: the time both periods cover, as a share of the
+  combined period (from the earlier first event to the later last event);
+- the public sources seen by both sides, and the **Jaccard index**: that
+  number divided by the number of public sources seen by either side. 1
+  means both saw exactly the same sources. 0 means they share none.
+
+The check fails, and prints `NOT COMPARABLE`, when:
+
+- the session ratio is above 3;
+- the period overlap is below 80%;
+- one side has no sessions.
+
+The numbers are printed either way. After a failed check, read the table as
+a description of each side. Do not read it as the effect of the deployment.
+
+A passed check is not proof. It shows that the volume and the days match.
+It does not show that the same visitors came, or that both sides were
+reachable in the same way. The section "A fair live comparison" lists what
+must also hold.
+
+A low Jaccard index does not fail the check. Scanners pick addresses at
+random, so two honeypots next to each other often see different sources in
+a short period. A low index only means that the shared-source table rests
+on few sources.
+
+### Intervals
+
+Each share and each median has a 95% interval per side (see Intervals
+above). They are printed in their own table under the main one.
+
+A wide interval means the number is not known well: there were few sessions
+behind it. Two intervals that overlap a lot mean the two sides may well be
+the same.
+
+For a share, the comparison also gives a 95% interval for the difference B
+minus A, in percentage points (Newcombe's hybrid score interval, built from
+the two Wilson intervals). If this interval holds 0, the data fit "no
+difference". The interval also shows how large the difference may be, which
+a verdict alone does not.
+
+### Verdicts
+
+A **tested row** is a row with a direction and a test:
+
+| Rows | Test |
+|---|---|
+| Logged in, ran a command, fetched or uploaded a payload, left after a probe, returning sources | Fisher's exact test of two shares |
+| Session duration (all sessions, logged-in sessions), commands per interactive session, distinct commands per interactive session | Mann-Whitney U test, with the normal approximation, tie correction and continuity correction |
+
+A test gives a **p-value**: the chance of a difference at least this large
+if the two sides were in truth the same. A small p-value means chance is a
+poor explanation.
+
+Several rows are tested at once. With many tests, one of them looks
+unusual by chance alone. So the p-values are corrected together with
+**Holm's method**: the smallest is multiplied by the number of tested rows,
+the next by one less, and so on. The result is the **adjusted p-value**.
+With it, the chance of even one false "clear difference" in the whole table
+stays at 5% or below.
+
+Each tested row then gets a verdict:
+
+- **clear difference**: the adjusted p-value is 0.05 or less. Chance alone
+  is unlikely to give a difference this large.
+- **no clear difference**: the adjusted p-value is above 0.05. Chance could
+  have done it. This does not mean the two sides are the same. It means the
+  data cannot tell them apart. Look at the interval to see how large a
+  difference is still possible.
+- **too few to compare**: one side has fewer than 30 sessions in the base
+  of the row (for returning sources: fewer than 30 sources with an
+  interactive session). No test is made.
+
+The base of a row is what its share or median is taken over: all sessions,
+the sessions that logged in, or the interactive sessions.
+
+The verdict does not say which side is better. The sign of the difference
+and the BETTER column of the main table say that.
+
+For a median row, the table shows `B>A 62.0% of pairs` instead of an
+interval. Take every pair of one session from A and one from B. This is the
+share of pairs in which the session from B has the larger value. A tie
+counts as half. 50% means neither side tends to be larger. The Mann-Whitney
+test asks whether this share differs from 50%. So it compares the sessions
+as a whole, not only the two medians: the medians can be equal while one
+side still has clearly more long sessions.
+
+Rows without a direction (counts, totals, maxima) are not tested. The p90
+rows, the stem entropy and the rates per 1000 sessions are not tested
+either: there is no simple exact test for them here. "Attempted a login"
+has no direction, so it gets intervals and no verdict.
+
+The interval of a difference and the verdict can disagree near the border.
+The interval is for one row alone and is approximate. The verdict uses an
+exact test and allows for all tested rows. When they disagree, trust the
+verdict.
+
+### Shared sources
+
+A **shared source** is a public source that both sides saw. It is the
+strongest control there is: the same visitor met both deployments, so a
+difference in what it did is not a difference between visitors.
+
+For each shared source, five things are compared between the sides:
+
+- whether it logged in;
+- whether it ran a command;
+- whether it fetched or uploaded a payload;
+- its largest number of commands in one session;
+- its longest session.
+
+For each of the five, the table counts the shared sources that went
+**further on A**, **further on B**, and that **tied**. Then it tests whether
+"further on A" and "further on B" are balanced, with the exact sign test:
+if the deployment made no difference, each source that did not tie would
+fall on either side with the same chance. For the three yes/no measures
+this is the exact McNemar test. The five p-values are corrected with Holm's
+method, as above but separately from the main table, and each row gets the
+verdict "clear difference" or "no clear difference".
+
+Reserved sources are never paired. An address such as `10.0.0.1` on both
+sides is not the same visitor.
+
+The table is left out, with the reason printed, when:
+
+- sources have collapsed on one side (see Source addresses above): the
+  address is then not the visitor;
+- no public source was seen by both sides.
+
+### What a comparison does not prove
+
+- **A verdict is about chance, not about cause.** "Clear difference" means
+  chance is a poor explanation. It does not say the deployment caused the
+  difference. A different port, address range or week can cause it too.
+- **The tests treat sessions as independent.** One bot with a thousand
+  sessions counts as a thousand visitors. A clear difference can then come
+  from a single source. The shared-source table counts each source once, so
+  check whether it agrees.
+- **A shared source is an address, not a person.** Behind one address there
+  can be many machines, and an address can change hands. A source may also
+  act differently on its second visit, whichever side that is.
+- **Shared sources are not all visitors.** They are the ones that reached
+  both sides, often the broad scanners. What holds for them may not hold
+  for the rest.
+- **"No clear difference" is not "no difference".** With few sessions, even
+  a large difference stays unclear.
+- **Limits.** When a report says a limit was reached, the tests and the
+  overlap cover a sample, as the Limits table says.
+
+### In the JSON
+
+Each report has:
+
+| Field | Meaning |
+|---|---|
+| `source_addresses` | the source figures: `sources`, `public_sources`, `reserved_sources`, `sessions_without_source`, `sessions_from_reserved_sources`, `busiest_source_sessions`, `busiest_source_percent`, `collapsed`, `collapsed_reason` |
+| `overall.intervals_95` and `honeypots[].intervals_95` | one entry per share or median: `key` (the row), `low`, `high`, `n` (the base) and `method` (`wilson` or `order-statistics`) |
+| `limits.rank_test_sessions`, `limits.rank_test_sessions_reached` | the sample limit of the rank tests, and whether the report has more sessions |
+| `limits.paired_sources`, `limits.paired_sources_reached` | the limit on sources kept for the overlap, and whether the report has more |
+
+Each comparison has:
+
+| Field | Meaning |
+|---|---|
+| `exposure` | the exposure check: `a` and `b` (label, sessions, sources, public sources, first and last event, period in seconds), `session_ratio`, `source_ratio`, `period_overlap_seconds`, `period_overlap_percent`, `shared_sources`, `source_jaccard`, `comparable`, `problems` |
+| `exposure.sources_known` | false when a report has no source table, which happens only when a report is read back from JSON |
+| `exposure.sources_sampled`, `compared_public_sources_a`, `compared_public_sources_b` | whether a source limit was reached, and how many public sources of each side the overlap covers |
+| `deltas[]` | one entry per row. Beside the old fields: `a_interval`, `b_interval`, `difference_interval` (`low`, `high`, for shares), `a_n`, `b_n` (the bases), `test` (`fisher-exact` or `mann-whitney`), `a_sample`, `b_sample` (sessions used by the rank test), `b_larger_probability` (the share of pairs, as 0 to 1), `p_value`, `p_adjusted`, `verdict` |
+| `tested_rows` | the number of rows Holm's method was applied over |
+| `paired` | the shared sources: `shared_sources`, `skipped`, `reason`, `sampled`, and `measures[]` with `key`, `name`, `a_further`, `b_further`, `tied`, `p_value`, `p_adjusted`, `verdict` |
+| `notes` | what limits the reading of this comparison |
+
+A field of a row is left out when it does not apply: a row that is not
+tested has no `p_value` and no `verdict`.
+
 ## A fair live comparison
 
 Two deployments can only be compared when the same visitors could reach
@@ -227,37 +515,157 @@ the honeypot.
   different visitors.
 - **Same period.** Run both over the same days. Campaigns come and go; a
   week with a large campaign and a week without are not comparable.
-- **Long enough.** At least a few weeks. One campaign can dominate a short
+- **Long enough.** At least four weeks. One campaign can dominate a short
   window.
 - **Compare medians and funnels, never single sessions.** One long session
   moves a maximum or a total and says nothing about the deployment. The
   table gives maxima and totals no direction for this reason.
 - **Compare the same honeypot.** Use `--honeypot cowrie` on the instance
   when the other side is a Cowrie log.
-- **Look at the session counts first.** If one side has many times the
-  sessions of the other, their exposure differed, and the rates are not
-  comparable either.
+- **Look at the exposure check first.** If it says the sides are not
+  comparable, the rest of the table is not evidence.
 
 **Source addresses can collapse.** A honeypot behind NAT, or behind Docker's
-userland port proxy, can see every connection arrive from one address: the
-gateway's or the proxy's. Then the logged source is not the visitor. Session
-ids still separate the sessions, so the funnel, duration, depth and
-diversity stay right. But sessions formed by source address merge into a
-few long ones, and returning sources becomes meaningless: one "source"
-always returns. Check that both deployments log real, varied source
-addresses before trusting those numbers. If one side does not, compare only
-honeypots that log a session id, and ignore returning sources.
+port proxy, can see every connection arrive from one address: the gateway's
+or the proxy's. Then the logged source is not the visitor. QPot marks such
+events and `qpot doctor` reports them as "source addresses" (QP-NET-015).
+Session ids still separate the sessions, so the funnel, duration, depth and
+diversity stay right. But returning sources and the shared-source table
+mean nothing. Both sides must show "source addresses: the visitors' own" in
+`qpot doctor` before a run counts. [release.md](release.md#source-addresses)
+lists the Docker setups where this holds.
 
 Also keep in mind what each side records. A stock Cowrie with no outbound
 network access cannot fetch a payload, so its payload step stays at zero
 whatever the visitor intended; its download URLs still count.
 
+## The controlled experiment
+
+This is the procedure for the comparison that the numbers on this page are
+for: QPot's Cowrie against a simpler deployment, on real traffic, with
+everything else equal. It has two arms.
+
+| Arm | What runs | How |
+|---|---|---|
+| Treatment | QPot's Cowrie: the T-Pot image with QPot's corrected commands, state and bait | The default |
+| Control | The T-Pot image's Cowrie as shipped | `qpot honeypot set cowrie deception=stock` |
+
+Both arms are QPot instances of the same version. So the host hardening,
+the network path, the collector and the analysis are the same on both
+sides, and the only difference is what QPot adds to Cowrie. `deception=stock`
+mounts nothing of QPot's over the image's source and plants no bait. It
+exists for this purpose only.
+
+### What you need
+
+- Two hosts with one public IPv4 address each, at the same provider, in the
+  same address range, with the same size, operating system and Docker
+  version. Use addresses that have not hosted a honeypot before.
+- Docker Engine on Linux with default settings on both
+  ([release.md](release.md#source-addresses)).
+- Four weeks.
+
+Two hosts are needed because both arms must answer on port 22, and one
+address has one port 22.
+
+### Before the run
+
+Write down, before any traffic arrives, which rows decide the result. This
+page suggests three:
+
+1. "Ran a command" in the funnel: the share of sessions that became
+   interactive.
+2. "Commands per interactive session, median".
+3. "Left after a probe": lower is better.
+
+Everything else is context. A row picked after looking at the table is not
+a result.
+
+### Setting up each arm
+
+On both hosts:
+
+```bash
+qpot instance create arm
+qpot honeypot list -i arm                 # see what is enabled
+qpot honeypot disable <name> -i arm       # for each one except cowrie
+```
+
+Keep the backups for longer than the run, in `~/.qpot/instances/arm/config.yaml`:
+
+```yaml
+cleanup:
+  max_age_days: 60
+  max_backup_mb: 20000
+```
+
+On the control host only:
+
+```bash
+qpot honeypot set cowrie deception=stock -i arm
+```
+
+Then, on both hosts within the same hour:
+
+```bash
+qpot up -d -i arm
+qpot doctor -i arm
+```
+
+Check on both that Cowrie answers on port 22 (`qpot status -i arm`), and do
+not connect to either honeypot yourself again. After the first day,
+`qpot doctor -i arm` must show "source addresses: the visitors' own" on
+both.
+
+### After the run
+
+Bring the control arm's events to the treatment host. The log backups hold
+every event; `qpot db restore` loads them into an instance of their own.
+
+```bash
+# on the control host
+qpot down -i arm
+sudo tar -czf control-logs.tgz -C ~/.qpot/instances/arm/backup logs
+# copy control-logs.tgz to the treatment host, then there:
+mkdir control-logs && tar -xzf control-logs.tgz -C control-logs
+qpot instance create control
+qpot honeypot disable <name> -i control   # every honeypot: this instance only holds data
+qpot up -d -i control
+qpot db restore -i control --from control-logs/logs
+qpot engagement -i arm --against control --honeypot cowrie --since 28d
+```
+
+Read the output in the order of ["Reading a comparison"](#reading-a-comparison):
+the exposure check, then the three rows chosen beforehand with their
+verdicts, then the shared-source table. The shared-source table is the
+strongest part: it compares what the same visitor did on each arm.
+
+Record the full `--json` output with the result, so that someone else can
+check it.
+
+### What the result can and cannot say
+
+It can say that, over these four weeks, visitors who reached both arms went
+further on one than on the other, with a stated error rate.
+
+It cannot say why. It cannot say the same holds for another address range,
+another month or another service. And it compares against T-Pot's Cowrie,
+which is already a tuned deployment: a plain upstream Cowrie may differ
+more. To compare with one, run it on a third address and pass its
+`cowrie.json` with `--cowrie-log`.
+
 ## Results of the last recorded run
 
-No comparison against a stock Cowrie has been recorded: that needs both
-deployments exposed to the internet side by side for weeks, as described
-above. What has been recorded is a check of the tool itself against traffic
-whose answers are known.
+**The controlled experiment has not been run.** It needs two public
+addresses exposed for four weeks. Everything it needs is in place and has
+been checked on scripted traffic: the control arm (`deception=stock`), the
+transfer of one arm's events to the other host (`qpot db restore`), the
+exposure check, the tests and the shared-source table. There are no
+attacker numbers on this page yet, and nothing here says how well the
+deception works.
+
+What has been recorded is a check of the tool itself against traffic whose
+answers are known.
 
 2026-11-11: `qpot engagement -i <instance> --since 1d --honeypot cowrie` on
 the instance of the three-hour failure soak ([reliability.md](reliability.md)).

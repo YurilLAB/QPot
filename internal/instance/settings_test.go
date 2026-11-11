@@ -63,7 +63,7 @@ func TestValidateSettingsRefuses(t *testing.T) {
 		{"nosuch", ParseSettingArgs([]string{"a=b"}), ErrUnknownHoneypot, `unknown honeypot "nosuch" (see: qpot honeypot list)`},
 		{"<img src=x onerror=alert(1)>", ParseSettingArgs([]string{"persona=rhel-9"}), ErrUnknownHoneypot, "unknown honeypot"},
 		{"endlessh", ParseSettingArgs([]string{"a=b"}), ErrNoSettings, "endlessh has no settings to set"},
-		{"cowrie", ParseSettingArgs([]string{"persona"}), ErrInvalidSetting, `invalid setting "persona" for cowrie (allowed: bait, bait_profile, bait_target, persona, persona_rotation)`},
+		{"cowrie", ParseSettingArgs([]string{"persona"}), ErrInvalidSetting, `invalid setting "persona" for cowrie (allowed: bait, bait_profile, bait_target, deception, persona, persona_rotation)`},
 		{"cowrie", ParseSettingArgs([]string{"Persona=rhel-9"}), ErrInvalidSetting, "invalid setting"},
 		{"cowrie", ParseSettingArgs([]string{"persona=rhel-9\nx"}), ErrInvalidSetting, "persona: value must be a single line"},
 		{"cowrie", ParseSettingArgs([]string{"persona=<script>alert(1)</script>"}), ErrInvalidSetting, "persona must be one of"},

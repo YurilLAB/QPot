@@ -6,8 +6,11 @@
 //
 // It works on a stream of events, so the same numbers can be computed for a
 // QPot instance (ReadDatabase) and for the JSON log of any Cowrie deployment
-// (ReadCowrieLog) and then compared (Compare). doc/effectiveness.md defines
-// every metric.
+// (ReadCowrieLog) and then compared (Compare). A comparison states its
+// uncertainty: intervals, tests of the differences, a check that the two
+// deployments had comparable exposure, and an analysis of the sources that
+// visited both. doc/effectiveness.md defines every metric and says how to
+// read a comparison.
 //
 // The result does not depend on the order of the events, and memory stays
 // bounded on large or hostile input: every set of distinct values has a
@@ -93,6 +96,13 @@ type Options struct {
 	// SessionLimit bounds the session keys held: (honeypot, session id)
 	// pairs plus (honeypot, source) pairs. Default 2000000.
 	SessionLimit int
+	// SampleLimit bounds the sessions kept for each rank test of a
+	// comparison (session length, commands per session, distinct commands
+	// per session). Default 100000.
+	SampleLimit int
+	// SourceLimit bounds the source addresses kept for the overlap and
+	// shared-source analysis of a comparison. Default 200000.
+	SourceLimit int
 }
 
 func (o Options) withDefaults() Options {
@@ -107,6 +117,12 @@ func (o Options) withDefaults() Options {
 	}
 	if o.SessionLimit <= 0 {
 		o.SessionLimit = 2000000
+	}
+	if o.SampleLimit <= 0 {
+		o.SampleLimit = 100000
+	}
+	if o.SourceLimit <= 0 {
+		o.SourceLimit = 200000
 	}
 	return o
 }

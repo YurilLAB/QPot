@@ -12,6 +12,7 @@ import (
 	"testing"
 
 	"github.com/qpot/qpot/internal/config"
+	"github.com/qpot/qpot/internal/security"
 )
 
 // TestCowriePatchPinned: the patch layer replaces whole files of one image
@@ -249,5 +250,70 @@ func TestCowriePatchWritten(t *testing.T) {
 	plan, err := os.ReadFile(filepath.Join(cfg.DataPath, "honeypots", "cowrie", "bait", "plan.json"))
 	if err != nil || !bytes.Equal(plan, cowrieBaitJSON(cfg)) {
 		t.Errorf("bait/plan.json not written (err %v, %d bytes)", err, len(plan))
+	}
+}
+
+// deception=stock is the control arm of a comparison: the image's Cowrie as
+// shipped. Nothing of QPot's may be mounted over its source, and no bait.
+func TestCowrieStockIsTheImageAsShipped(t *testing.T) {
+	cfg := config.Default("cowrie-stock")
+	enableOnly(cfg, "cowrie")
+	overSource := func(d honeypotDeploy) (n int, bait bool) {
+		for _, v := range d.Volumes {
+			if strings.HasPrefix(v.ContainerPath, cowrieSource+"/") {
+				n++
+			}
+			if v.ContainerPath == baitPlanPath {
+				bait = true
+			}
+		}
+		return n, bait
+	}
+	// Control: the default mounts the patch layer and the bait plan.
+	if n, bait := overSource(deployProfile(cfg, "cowrie")); n != len(cowriePatchVolumes()) || !bait || !baitOn(cfg) {
+		t.Fatalf("default cowrie: %d patch mounts (want %d), bait plan %v, bait on %v", n, len(cowriePatchVolumes()), bait, baitOn(cfg))
+	}
+
+	hp := cfg.Honeypots["cowrie"]
+	hp.CustomConfig = map[string]string{cowrieDeceptionSetting: "stock"}
+	cfg.Honeypots["cowrie"] = hp
+	d := deployProfile(cfg, "cowrie")
+	if n, bait := overSource(d); n != 0 || bait {
+		t.Errorf("stock cowrie still has %d mounts over the image's source (bait plan %v)", n, bait)
+	}
+	if baitOn(cfg) {
+		t.Error("stock cowrie still counts as carrying bait")
+	}
+	have := map[string]bool{}
+	for _, v := range d.Volumes {
+		have[v.ContainerPath] = true
+	}
+	for _, need := range []string{"/home/cowrie/cowrie/etc", "/home/cowrie/cowrie/log", "/home/cowrie/cowrie/dl"} {
+		if !have[need] {
+			t.Errorf("stock cowrie lost the mount %s it needs to run and be collected", need)
+		}
+	}
+	sb, err := security.NewSandbox(&cfg.Security)
+	if err != nil {
+		t.Fatal(err)
+	}
+	compose, err := (&ComposeGenerator{Config: cfg, Sandbox: sb}).Generate()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(compose, cowrieSource+"/") || strings.Contains(compose, baitPlanPath) {
+		t.Error("the compose file of a stock instance mounts QPot files into cowrie")
+	}
+	// The same containment as any other instance.
+	for _, need := range []string{"read_only: true", "no-new-privileges", "cap_drop"} {
+		if !strings.Contains(compose, need) {
+			t.Errorf("the compose file of a stock instance lacks %q", need)
+		}
+	}
+	if err := CheckSetting("cowrie", cowrieDeceptionSetting, "stock"); err != nil {
+		t.Errorf("deception=stock is refused: %v", err)
+	}
+	if err := CheckSetting("cowrie", cowrieDeceptionSetting, "none"); err == nil {
+		t.Error("deception=none is accepted")
 	}
 }

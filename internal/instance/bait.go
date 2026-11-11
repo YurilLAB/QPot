@@ -146,12 +146,32 @@ func cowrieBaitProfile(cfg *config.Config) string {
 }
 
 // baitOn reports whether cfg plants bait in Cowrie (custom_config bait=off
-// turns it off).
+// turns it off, and so does deception=stock: the bait is planted by the
+// patch layer).
 func baitOn(cfg *config.Config) bool {
 	if hp, ok := cfg.GetHoneypotConfig("cowrie"); ok {
-		return strings.TrimSpace(hp.CustomConfig[baitSetting]) != "off"
+		return strings.TrimSpace(hp.CustomConfig[baitSetting]) != "off" && !cowrieStock(cfg)
 	}
 	return true
+}
+
+// cowrieDeceptionSetting is the cowrie custom_config key that chooses between
+// QPot's Cowrie ("qpot", the default) and the T-Pot image's Cowrie as shipped
+// ("stock": no patch layer, no bait).
+//
+// Stock exists for one purpose: the control arm of a comparison. Two
+// instances on the same host, one of each kind, show the same visitors the
+// same service through the same pipeline, and differ only in what QPot adds
+// (doc/effectiveness.md).
+const cowrieDeceptionSetting = "deception"
+
+// cowrieStock reports whether cfg runs the image's own Cowrie.
+func cowrieStock(cfg *config.Config) bool {
+	if cfg == nil {
+		return false
+	}
+	hp, ok := cfg.GetHoneypotConfig("cowrie")
+	return ok && strings.TrimSpace(hp.CustomConfig[cowrieDeceptionSetting]) == "stock"
 }
 
 // baitConfigSnapshot captures all inputs the builders read, with a fresh

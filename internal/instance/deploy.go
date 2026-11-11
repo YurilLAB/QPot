@@ -431,6 +431,22 @@ func deployProfile(cfg *config.Config, name string) honeypotDeploy {
 			}
 		}
 	case "cowrie":
+		if cowrieStock(cfg) {
+			// The image's Cowrie as shipped: nothing of QPot's is mounted
+			// over its source, and no bait plan (the patch layer reads it).
+			patched := map[string]bool{baitPlanPath: true}
+			for _, v := range cowriePatchVolumes() {
+				patched[v.ContainerPath] = true
+			}
+			var kept []deployVolume
+			for _, v := range d.Volumes {
+				if !patched[v.ContainerPath] {
+					kept = append(kept, v)
+				}
+			}
+			d.Volumes = kept
+			break
+		}
 		d.Volumes = slices.Clone(d.Volumes)
 		for i, v := range d.Volumes {
 			if v.ContainerPath == baitPlanPath {
@@ -631,8 +647,8 @@ func deployProfileFor(name string) honeypotDeploy {
 				{HostSubdir: "licenses/opkg-NOTICE.txt", File: true, ReadOnly: true, Content: cowrieOpkgNotice},
 			}, cowriePatchVolumes()...),
 			Ports:    []int{22, 23},
-			Settings: []string{"persona", "persona_rotation", baitSetting, baitProfileSetting, baitTargetSetting},
-			Values:   map[string][]string{"persona": CowriePersonaIDs(), baitSetting: {"on", "off"}, baitProfileSetting: {"ops", "industrial"}, baitTargetSetting: {"conpot", "refrigeration"}},
+			Settings: []string{"persona", "persona_rotation", baitSetting, baitProfileSetting, baitTargetSetting, cowrieDeceptionSetting},
+			Values:   map[string][]string{"persona": CowriePersonaIDs(), baitSetting: {"on", "off"}, baitProfileSetting: {"ops", "industrial"}, baitTargetSetting: {"conpot", "refrigeration"}, cowrieDeceptionSetting: {"qpot", "stock"}},
 		}
 	case "endlessh":
 		// Verified: endlessh redirects its log to /var/log/endlessh and listens

@@ -222,6 +222,7 @@ var settingHelp = map[string]string{
 	"bait":         "Plant working files with synthetic credential canaries on server personas. Empty: on.",
 	"bait_profile": "Files for an ops server or a Linux industrial support host. Industrial archives reference bait_target; they do not make Cowrie a PLC or start an engineering runtime. Server personas only. Empty: ops.",
 	"bait_target":  "Asset referenced by industrial support files: the selected Conpot device or the refrigeration controller. This does not enable the referenced service. Used with bait_profile=industrial. Empty: conpot.",
+	"deception":    "qpot: QPot's Cowrie. stock: the image's own Cowrie, with none of QPot's changes and no bait. Use stock only for the control side of a comparison. Empty: qpot.",
 	"template":     "The industrial device Conpot emulates; only its ports are published. Empty: the saved automatic device, kept across restarts and upgrades.",
 	"site_profile": "Refrigeration site: retail food cabinets or plasma cold storage. Each site keeps its own temperatures, settings and history across restarts and profile switches. Empty: retail.",
 	"environment":  "HiFi SSH environment. Standalone is one real Debian 12 server per visitor. Organization adds a PostgreSQL database and an SSH backup host, using three decoy containers per slot. State lasts for a visitor's connections and cell_hold_minutes after them, then resets before reuse. These real shells have writable container filesystems. Official releases select matching published images; development checkouts should build both current images and choose image_source=local. Empty: standalone.",
@@ -344,7 +345,7 @@ func DescribeSettings(cfg *config.Config, name string) []SettingInfo {
 	for _, key := range SettingKeys(name) {
 		v := hp.CustomConfig[key]
 		switch name + "/" + key {
-		case "conpot/template", "refrigeration/site_profile", "cowrie/bait", "cowrie/persona", "cowrie/bait_profile", "cowrie/bait_target", "ssh-proxy/environment", "ssh-proxy/image_source":
+		case "conpot/template", "refrigeration/site_profile", "cowrie/bait", "cowrie/persona", "cowrie/bait_profile", "cowrie/bait_target", "cowrie/deception", "ssh-proxy/environment", "ssh-proxy/image_source":
 			// Direct YAML accepts the same surrounding whitespace that runtime
 			// selection trims. A dropdown needs the canonical ID; an unmatched
 			// raw value would become empty and clear a valid choice on save.
@@ -413,6 +414,11 @@ func effectiveSetting(cfg *config.Config, name, key string) string {
 		return cowrieBaitProfile(cfg)
 	case "cowrie/bait_target":
 		return cowrieBaitTarget(cfg)
+	case "cowrie/deception":
+		if cowrieStock(cfg) {
+			return "stock"
+		}
+		return "qpot"
 	case "conpot/template":
 		return conpotTemplate(cfg).ID
 	case "refrigeration/site_profile":

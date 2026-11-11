@@ -289,7 +289,7 @@ func TestSettingsGet(t *testing.T) {
 	for _, si := range one.Settings {
 		keys = append(keys, si.Key)
 	}
-	if one.Name != "cowrie" || strings.Join(keys, ",") != "bait,bait_profile,bait_target,persona,persona_rotation" {
+	if one.Name != "cowrie" || strings.Join(keys, ",") != "bait,bait_profile,bait_target,deception,persona,persona_rotation" {
 		t.Fatalf("cowrie settings: %+v", one)
 	}
 
