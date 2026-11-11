@@ -22,6 +22,13 @@ import (
 // whole container that no account or session number can get round. Bytes
 // count everything written: streams, timing lines and record lines alike.
 // Sessions open when a limit is reached may still add their finish lines.
+//
+// Past a limit a session leaves no record at all, so a cell must not get
+// there while it serves a visitor: the last eighth of every limit is a
+// reserve. Once an account or the container is inside it, Full says so and
+// the follower stops the cell (Converter.Retire); what the cell still runs
+// before it stops keeps its record but no stream files, so the reserve holds
+// some 250 commands rather than 50.
 const (
 	maxUserBytes      = 64 << 20
 	maxUserFiles      = 2048
@@ -33,6 +40,15 @@ const (
 	maxCommand        = 16 << 10
 	previewBytes      = 4096
 	filesPerEntry     = 5
+
+	reserveShare       = 8
+	softUserBytes      = maxUserBytes - maxUserBytes/reserveShare
+	softUserFiles      = maxUserFiles - maxUserFiles/reserveShare
+	softContainerBytes = maxContainerBytes - maxContainerBytes/reserveShare
+	softContainerFiles = maxContainerFiles - maxContainerFiles/reserveShare
+	softAccounts       = maxAccounts - maxAccounts/reserveShare
+	softOpen           = maxOpen - maxOpen/reserveShare
+	softSessions       = maxSessions - maxSessions/reserveShare
 )
 
 // SessionEvent is one line of a command's .json record. Field names and
@@ -107,6 +123,40 @@ type Writer struct {
 	ordinals map[string]int
 	usage    map[int64]*usage
 	total    usage
+	full     string // which limit's reserve was reached first; "" while none
+}
+
+// Full names the limit this container's capture has come within the reserve
+// of, or "" while it is inside all of them. It never clears: the container's
+// capture only grows.
+func (w *Writer) Full() string { return w.full }
+
+func (w *Writer) fill(limit string) {
+	if w.full == "" {
+		w.full = limit
+	}
+}
+
+// check marks the capture full once an account (u, when known) or the
+// container is inside a limit's reserve.
+func (w *Writer) check(u *usage) {
+	switch {
+	case w.full != "":
+	case u != nil && u.files > softUserFiles:
+		w.full = "files kept for one account"
+	case u != nil && u.bytes > softUserBytes:
+		w.full = "bytes kept for one account"
+	case w.total.files > softContainerFiles:
+		w.full = "files kept for the cell"
+	case w.total.bytes > softContainerBytes:
+		w.full = "bytes kept for the cell"
+	case len(w.usage) > softAccounts:
+		w.full = "accounts with sessions"
+	case len(w.active) > softOpen || len(w.pending) > softOpen:
+		w.full = "sessions open at once"
+	case len(w.ordinals) > softSessions:
+		w.full = "sessions in the cell's life"
+	}
 }
 
 type command struct {
@@ -162,10 +212,12 @@ func (w *Writer) Apply(line []byte) error {
 		c := w.pending[key]
 		if c == nil {
 			if len(w.pending) >= maxOpen {
+				w.fill("sessions open at once")
 				return nil
 			}
 			c = &command{}
 			w.pending[key] = c
+			w.check(nil)
 		}
 		if room := maxCommand - len(c.text); room > 0 {
 			c.text = append(c.text, r.Payload[:min(len(r.Payload), room)]...)
@@ -178,6 +230,9 @@ func (w *Writer) Apply(line []byte) error {
 			c.truncated = true
 		} else if len(w.pending) < maxOpen {
 			w.pending[key] = &command{truncated: true}
+			w.check(nil)
+		} else {
+			w.fill("sessions open at once")
 		}
 		return nil
 	case KindOpen:
@@ -189,7 +244,9 @@ func (w *Writer) Apply(line []byte) error {
 	}
 	switch r.Kind {
 	case KindInput, KindOutput, KindError:
-		return w.data(e, r)
+		err := w.data(e, r)
+		w.check(e.user)
+		return err
 	case KindTruncated:
 		e.truncated = true
 	case KindExit:
@@ -199,6 +256,7 @@ func (w *Writer) Apply(line []byte) error {
 	case KindClosed:
 		err := w.finish(e, r.Millis)
 		delete(w.active, key)
+		w.check(e.user)
 		return err
 	}
 	return nil
@@ -219,15 +277,20 @@ func (w *Writer) open(key string, r Record) error {
 	u := w.usage[o.UID]
 	if len(w.active) >= maxOpen || (w.ordinals[key] == 0 && len(w.ordinals) >= maxSessions) ||
 		(u == nil && len(w.usage) >= maxAccounts) || w.total.files >= maxContainerFiles {
-		return nil // past what one container may make the host keep
+		// Past what one container may make the host keep; the reserve was
+		// reached long before, unless the follower could not stop the cell.
+		w.fill("a session past the cell's limits")
+		return nil
 	}
 	if u == nil {
 		u = &usage{}
 		w.usage[o.UID] = u
 	}
 	if u.files >= maxUserFiles || u.bytes >= maxUserBytes || w.total.bytes >= maxContainerBytes {
+		w.fill("a session past an account's limits")
 		return nil
 	}
+	defer func() { w.check(u) }()
 	w.ordinals[key]++
 	sum := sha256.Sum256([]byte(w.container + "/" + key + "/" + strconv.Itoa(w.ordinals[key])))
 	id := hex.EncodeToString(sum[:16])
@@ -269,12 +332,17 @@ func (w *Writer) open(key string, r Record) error {
 		return err
 	}
 	e.user = u
-	if u.files+filesPerEntry > maxUserFiles || w.total.files+filesPerEntry > maxContainerFiles {
-		// The record alone, which counts as one file.
+	if u.files+filesPerEntry > softUserFiles || w.total.files+filesPerEntry > softContainerFiles {
+		// Inside the reserve: the record alone, which counts as one file.
 		e.limited = true
 		e.errs = append(e.errs, "account capture limit reached")
 		u.files++
 		w.total.files++
+		if u.files+filesPerEntry > softUserFiles {
+			w.fill("files kept for one account")
+		} else {
+			w.fill("files kept for the cell")
+		}
 	} else {
 		u.files += filesPerEntry
 		w.total.files += filesPerEntry

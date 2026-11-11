@@ -2,6 +2,7 @@ package sshcapture
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -345,4 +346,66 @@ func TestAuthLogIsBounded(t *testing.T) {
 	if again, err := os.ReadFile(filepath.Join(followed, AuthLog)); err != nil || string(again) != string(got) {
 		t.Fatalf("the follower kept a different sshd log: %d bytes, %v", len(again), err)
 	}
+}
+
+// The follower stops a container whose capture comes within the reserve of a
+// limit, once, while the container still runs; a replay of a container that
+// has already stopped stops nothing.
+func TestFollowRetiresACellCloseToItsCaptureLimit(t *testing.T) {
+	capture := func(n int) [][]byte {
+		e := newEmitter(testConn)
+		for i := 0; i < n; i++ {
+			e.open(i, 0, false, 41000, fmt.Sprintf("echo %d", i))
+			e.rec(i, KindExit, 1, []byte("exit=0"))
+			e.rec(i, KindClosed, 1, nil)
+		}
+		return e.lines
+	}
+	n := softUserFiles/filesPerEntry + 40
+	run := func(t *testing.T, lines [][]byte, running bool, fail int) (retired []string, d *fakeDocker, dir string) {
+		t.Helper()
+		d = &fakeDocker{id: testContainer, running: running, capture: lines}
+		var mu, calls sync.Mutex
+		c := &Converter{Stream: d.stream, Inspect: d.inspect, Lock: mutexLock(&mu), Poll: time.Millisecond, Logger: discardLogger()}
+		c.Retire = func(_ context.Context, id string) error {
+			calls.Lock()
+			defer calls.Unlock()
+			retired = append(retired, id)
+			if len(retired) <= fail {
+				return errors.New("docker is busy")
+			}
+			d.mu.Lock()
+			d.running = false
+			d.mu.Unlock()
+			return nil
+		}
+		dir = t.TempDir()
+		if err := c.follow(context.Background(), testTarget(dir), Container{ID: testContainer, Created: testCreated, Running: running}); err != nil {
+			t.Fatal(err)
+		}
+		calls.Lock()
+		defer calls.Unlock()
+		return append([]string(nil), retired...), d, dir
+	}
+	t.Run("running", func(t *testing.T) {
+		retired, _, dir := run(t, capture(n), true, 0)
+		if len(retired) != 1 || retired[0] != testContainer {
+			t.Fatalf("stopped %v, want the container once", retired)
+		}
+		// What ran before the stop landed is all recorded.
+		if got := len(records(t, snapshot(t, dir))); got != n {
+			t.Fatalf("%d of %d commands have a record", got, n)
+		}
+	})
+	t.Run("a failed stop is tried again", func(t *testing.T) {
+		// Enough lines after the capture is full for several more batches.
+		if retired, _, _ := run(t, capture(n+400), true, 2); len(retired) != 3 {
+			t.Fatalf("stop tried %d times, want twice failing and once succeeding", len(retired))
+		}
+	})
+	t.Run("already stopped", func(t *testing.T) {
+		if retired, _, _ := run(t, capture(n), false, 0); len(retired) != 0 {
+			t.Fatalf("a stopped container's replay stopped %v", retired)
+		}
+	})
 }

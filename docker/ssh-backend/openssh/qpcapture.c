@@ -16,8 +16,8 @@
  * output, e error output, t capture truncated, x exit status, z channel freed
  * (after its last data). Milliseconds count from the channel's start. A record
  * line ends in a bare newline, while sshd ends every log line with a carriage
- * return too, so the two never parse as each other. Nothing here logs: a
- * capture that cannot be written is dropped, never reported to the session.
+ * return too, so the two never parse as each other. Nothing here logs, and
+ * nothing is reported to the session.
  *
  * The budgets count what a record costs in the container log, not just its
  * payload: its line, base64 and all, plus Docker's JSON framing of the line.
@@ -25,7 +25,15 @@
  * alone let one connection grow the log far past what it holds until the
  * host converts it. Opening a channel charges its command, its open record
  * and room for its exit, truncation and close records, so a recorded channel
- * always gets its end; a channel that no longer fits is not recorded at all.
+ * always gets its end.
+ *
+ * A session that cannot be recorded does not run. When a channel no longer
+ * fits the connection's budget, when every channel slot is taken, or when the
+ * stream stops taking records, the connection process exits and the visitor
+ * sees the connection drop, as on a host that went away. Before this, such a
+ * channel ran with no record at all: eight commands with large output used
+ * up a connection's budget, and everything after them on that connection was
+ * invisible.
  */
 
 #include "includes.h"
@@ -46,6 +54,7 @@
 #include <time.h>
 #include <unistd.h>
 
+#include "log.h"
 #include "packet.h"
 #include "channels.h"
 #include "misc.h"
@@ -110,6 +119,17 @@ qpc_find(int id)
 	return NULL;
 }
 
+/*
+ * Ends a connection whose sessions can no longer be recorded. Capture is off
+ * first, so nothing the exit frees tries to record again.
+ */
+static void
+qpc_end(void)
+{
+	qpc_fd = -1;
+	cleanup_exit(255);
+}
+
 /* Emits one record; len must not exceed QPC_RAW_CHUNK. */
 static void
 qpc_emit(struct qpc_chan *c, char kind, const u_char *data, size_t len)
@@ -141,7 +161,7 @@ qpc_emit(struct qpc_chan *c, char kind, const u_char *data, size_t len)
 		break;
 	}
 	if (n != (ssize_t)total)
-		qpc_fd = -1;	/* stream gone: stop capturing quietly */
+		qpc_end();	/* stream gone: nothing more can be recorded */
 }
 
 static void
@@ -264,9 +284,9 @@ qpcapture_open(struct ssh *ssh, int chanid, const struct passwd *pw,
 		return;
 	/*
 	 * The command chunks, the open record (whose text is at most one chunk)
-	 * and the channel's end records must fit the connection's budget, or
-	 * the channel goes unrecorded: opening channels must not grow the log
-	 * without bound.
+	 * and the channel's end records must fit the connection's budget:
+	 * opening channels must not grow the log without bound. A channel that
+	 * does not fit ends the connection instead of running unrecorded.
 	 */
 	len = command == NULL ? 0 : strlen(command);
 	cost = qpc_cost(QPC_RAW_CHUNK) + QPC_END_RESERVE +
@@ -280,14 +300,14 @@ qpcapture_open(struct ssh *ssh, int chanid, const struct passwd *pw,
 		cost += qpc_cost(chunk);
 	}
 	if (QPC_CONN_BUDGET - qpc_conn_bytes < cost)
-		return;
+		qpc_end();
 	qpc_conn_bytes += cost;
 	if ((c = qpc_find(chanid)) == NULL) {
 		for (i = 0; i < QPC_MAX_CHANS && c == NULL; i++)
 			if (!qpc_chans[i].used)
 				c = &qpc_chans[i];
 		if (c == NULL)
-			return;
+			qpc_end();
 	}
 	memset(c, 0, sizeof(*c));
 	c->used = 1;

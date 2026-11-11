@@ -513,6 +513,33 @@ timing lines and record lines alike, so a stream of single bytes cannot make
 the host keep many times the limit. Arbitrary guest files still require host
 disk quotas.
 
+**A session that cannot be recorded does not run.** Both sets of limits used
+to end recording silently while the visitor carried on: a connection whose 64
+MiB were used up (eight commands with large output are enough) ran every
+later command with no record, and so did a cell after about 410 commands from
+one account. The failure soak found the second one: the 413th command of a
+21-minute session ran and left nothing.
+
+* The backend's sshd ends the connection when a new channel no longer fits
+  the connection's budget (or when it can no longer write records at all).
+  The visitor sees the connection drop and can connect again; the new
+  connection has its own budget and is recorded.
+* The host keeps the last eighth of each of its limits as a reserve. When a
+  cell's capture reaches a reserve (after about 360 commands with their
+  streams from one account, or 56 MiB), the control plane stops that
+  container (`docker kill`). The visitor's connection ends as on a host that
+  went down, the broker has the cell recreated, and the visitor's next
+  connection gets a fresh cell. What the cell ran between reaching the
+  reserve and stopping keeps its record but no stream files; the reserve
+  holds about 250 such commands. The control plane logs "An SSH cell came
+  close to its capture limit and was stopped".
+
+What is still cut short, and says so in its record (`truncated`): one channel
+past its 8 MiB. The rest of that channel's bytes are carried but not kept, so
+in an interactive session what is typed after 8 MiB of traffic is not in the
+evidence. Ending such a channel would also end large uploads and downloads,
+which are evidence too.
+
 The conversion is a deterministic replay of a backend's container log: a
 follower converts it live while the control plane runs and replays it from the
 first line after a restart, and every path that removes a backend container
@@ -791,7 +818,9 @@ through it:
   the guest check.
 * **A capture that cannot fill the log.** `TestSSHBackendCaptureCostLive`
   sends one connection 30,000 single bytes, each echoed back before the next,
-  and then nine 7 MB outputs.
-  Every byte reaches the client, the capture lines add at most 64 MiB to the
-  container log as Docker writes it, each channel's record says it was cut
-  short, and the channels past the budget are not recorded.
+  and then 7 MB outputs until the connection ends.
+  Every byte of every command that runs reaches the client, the capture
+  lines add at most 64 MiB to the container log as Docker writes it, and
+  each channel's record says it was cut short. The command the budget has no
+  room for does not run: the connection ends, no command is left without a
+  record, and the next connection is recorded again.

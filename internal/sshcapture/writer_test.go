@@ -283,9 +283,10 @@ func TestWriterLimitsAndTruncation(t *testing.T) {
 		}
 	}
 
-	// Past the per-account file limit, commands keep their record but no streams.
+	// Inside the reserve of the per-account file limit, commands keep their
+	// record but no streams.
 	e = newEmitter(testConn)
-	n := maxUserFiles/filesPerEntry + 1
+	n := softUserFiles/filesPerEntry + 3
 	for i := 0; i < n; i++ {
 		e.open(i, 0, false, 41000, "true")
 		e.rec(i, KindOutput, 1, []byte("o"))
@@ -303,8 +304,154 @@ func TestWriterLimitsAndTruncation(t *testing.T) {
 			}
 		}
 	}
-	if limited != 1 {
-		t.Fatalf("want exactly one limited command, got %d", limited)
+	if limited != 3 {
+		t.Fatalf("want exactly three limited commands, got %d", limited)
+	}
+}
+
+// A visitor who stays in one cell and keeps running commands used to pass the
+// per-account file limit after 409 of them, and every later command then ran
+// without leaving any record (found by the HiFi capture soak: the 413th
+// command of a 21-minute session). The writer now says the capture is full
+// while there is still room, so the follower can stop the cell, and every
+// command up to the hard limit keeps at least its record.
+func TestWriterSaysFullBeforeAnyCommandGoesUnrecorded(t *testing.T) {
+	dir := t.TempDir()
+	w, err := NewWriter(dir, testContainer, testCreated, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	e := newEmitter(testConn)
+	fullAt, applied := 0, 0
+	run := func(i int) {
+		t.Helper()
+		e.open(i, 0, false, 41000, fmt.Sprintf("echo %d", i))
+		e.rec(i, KindOutput, 1, []byte("o"))
+		e.rec(i, KindExit, 1, []byte("exit=0"))
+		e.rec(i, KindClosed, 1, nil)
+		for _, l := range e.lines[applied:] {
+			if err := w.Apply(l); err != nil {
+				t.Fatal(err)
+			}
+		}
+		applied = len(e.lines)
+	}
+	const afterFull = 200 // what a visitor might still run before the cell stops
+	n := 0
+	for ; fullAt == 0 || n < fullAt+afterFull; n++ {
+		run(n)
+		if fullAt == 0 && w.Full() != "" {
+			fullAt = n + 1
+		}
+		if n > 2*maxUserFiles {
+			t.Fatal("the writer never said its capture was full")
+		}
+	}
+	if err := w.Finish(); err != nil {
+		t.Fatal(err)
+	}
+	if want := softUserFiles/filesPerEntry + 1; fullAt != want {
+		t.Errorf("full after %d commands, want %d (the first one inside the reserve)", fullAt, want)
+	}
+	if w.Full() != "files kept for one account" {
+		t.Errorf("full because of %q", w.Full())
+	}
+	have := map[string]int{}
+	for _, evs := range records(t, snapshot(t, dir)) {
+		have[evs[0].Input] = len(evs)
+	}
+	for i := 0; i < n; i++ {
+		if have[fmt.Sprintf("echo %d", i)] != 2 {
+			t.Fatalf("command %d of %d (full after %d) has %d record lines, want its start and its finish", i+1, n, fullAt, have[fmt.Sprintf("echo %d", i)])
+		}
+	}
+}
+
+// Every way a container's capture can run out is announced by Full while
+// there is still room, so nothing is refused before the cell can be stopped.
+func TestWriterSaysFullForEveryLimit(t *testing.T) {
+	big := []byte(strings.Repeat("A", maxPayload))
+	fresh := func() *Writer {
+		t.Helper()
+		w, err := NewWriter(t.TempDir(), testContainer, testCreated, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = w.Finish() }) // before the folder is removed
+		return w
+	}
+	feed := func(w *Writer, e *emitter) {
+		t.Helper()
+		for _, l := range e.lines {
+			if err := w.Apply(l); err != nil {
+				t.Fatal(err)
+			}
+		}
+		e.lines = nil
+	}
+	cases := []struct {
+		name, want string
+		prepare    func(w *Writer)
+		step       func(e *emitter, i int)
+		most       int // steps the hard limit allows
+	}{
+		{name: "bytes of one account", want: "bytes kept for one account",
+			prepare: func(w *Writer) { w.usage[7] = &usage{bytes: softUserBytes - 3*maxPayload} },
+			step: func(e *emitter, i int) {
+				e.open(i, 7, false, 41000, "x")
+				e.rec(i, KindOutput, 1, big)
+				e.rec(i, KindExit, 1, []byte("exit=0"))
+				e.rec(i, KindClosed, 1, nil)
+			}, most: 8},
+		{name: "files of the container", want: "files kept for the cell",
+			prepare: func(w *Writer) { w.total.files = softContainerFiles - 2*filesPerEntry },
+			step: func(e *emitter, i int) {
+				e.open(i, 7, false, 41000, "x")
+				e.rec(i, KindExit, 1, []byte("exit=0"))
+				e.rec(i, KindClosed, 1, nil)
+			}, most: 8},
+		{name: "bytes of the container", want: "bytes kept for the cell",
+			prepare: func(w *Writer) { w.total.bytes = softContainerBytes - 3*maxPayload },
+			step: func(e *emitter, i int) {
+				e.open(i, 7, false, 41000, "x")
+				e.rec(i, KindOutput, 1, big)
+				e.rec(i, KindExit, 1, []byte("exit=0"))
+				e.rec(i, KindClosed, 1, nil)
+			}, most: 8},
+		{name: "accounts", want: "accounts with sessions",
+			step: func(e *emitter, i int) {
+				e.open(i, 2000+i, false, 41000, "x")
+				e.rec(i, KindExit, 1, []byte("exit=0"))
+				e.rec(i, KindClosed, 1, nil)
+			}, most: maxAccounts},
+		{name: "sessions left open", want: "sessions open at once",
+			step: func(e *emitter, i int) { e.open(i, 7, false, 41000, "x") }, most: maxOpen},
+		{name: "commands without a session", want: "sessions open at once",
+			step: func(e *emitter, i int) { e.rec(i, KindCommand, 0, []byte("c")) }, most: maxOpen},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			w := fresh()
+			if c.prepare != nil {
+				c.prepare(w)
+			}
+			e := newEmitter(testConn)
+			steps := 0
+			for w.Full() == "" {
+				if steps >= c.most {
+					t.Fatalf("not full after %d steps, when the hard limit refuses the next", steps)
+				}
+				c.step(e, steps)
+				feed(w, e)
+				steps++
+			}
+			if w.Full() != c.want {
+				t.Errorf("full because of %q, want %q", w.Full(), c.want)
+			}
+			if steps > c.most-c.most/reserveShare+1 {
+				t.Errorf("full only after %d of %d steps: no reserve is left", steps, c.most)
+			}
+		})
 	}
 }
 
@@ -466,9 +613,9 @@ func TestWriterBoundsWhatAForgedStreamCanMakeTheHostKeep(t *testing.T) {
 	}
 	// Room for one more session's files, but only a little more data: the
 	// record line counts too, and the output is cut at the limit.
-	w2, dir2 := one(usage{bytes: maxContainerBytes - 1500, files: maxContainerFiles - filesPerEntry - 1})
+	w2, dir2 := one(usage{bytes: maxContainerBytes - 1500, files: softContainerFiles - filesPerEntry - 1})
 	outputs, _ := filepath.Glob(filepath.Join(dir2, "uid-5", "*.out"))
-	if w2.total.files != maxContainerFiles-1 || len(outputs) != 1 {
+	if w2.total.files != softContainerFiles-1 || len(outputs) != 1 {
 		t.Fatalf("container byte limit not applied: %+v %v", w2.total, outputs)
 	}
 	if data, _ := os.ReadFile(outputs[0]); len(data) == 0 || len(data) >= len(big) {
@@ -508,9 +655,10 @@ func TestWriterBoundsWhatAForgedStreamCanMakeTheHostKeep(t *testing.T) {
 	if kept > 4000+8<<10 { // the limit, plus the finish line of the open session
 		t.Fatalf("a single-byte PTY stream kept %d bytes against a 4000-byte allowance", kept)
 	}
-	// No room for a session's files: its record alone, one file.
-	w3, dir3 := one(usage{files: maxContainerFiles - filesPerEntry + 1})
-	if outputs, _ := filepath.Glob(filepath.Join(dir3, "uid-5", "*.out")); w3.total.files != maxContainerFiles-filesPerEntry+2 || w3.total.bytes > 4096 || len(outputs) != 0 {
+	// No room outside the reserve for a session's files: its record alone,
+	// one file.
+	w3, dir3 := one(usage{files: softContainerFiles - filesPerEntry + 1})
+	if outputs, _ := filepath.Glob(filepath.Join(dir3, "uid-5", "*.out")); w3.total.files != softContainerFiles-filesPerEntry+2 || w3.total.bytes > 4096 || len(outputs) != 0 {
 		t.Fatalf("container file limit not applied: %+v %v", w3.total, outputs)
 	}
 	// Record lines count too: sessions with long commands and no data stop

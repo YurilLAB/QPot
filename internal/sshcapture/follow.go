@@ -72,18 +72,26 @@ type Inspect func(ctx context.Context, name string) (Container, error)
 // them; it returns the release.
 type Lock func(ctx context.Context) (func(), error)
 
+// Retire stops a running container at once. The follower calls it when the
+// container's capture is inside the reserve of a limit (Writer.Full): a
+// backend that could soon run sessions without a record must stop serving.
+// Its visitor's connection ends as on a host that went down, the broker has
+// the cell recreated, and the visitor's next connection gets a fresh one.
+type Retire func(ctx context.Context, id string) error
+
 // Converter reads backend captures through Docker and writes evidence files.
 type Converter struct {
 	Stream  Stream
 	Inspect Inspect
 	Lock    Lock
+	Retire  Retire // nil: a full capture is only reported
 	Poll    time.Duration
 	Logger  *slog.Logger
 }
 
 // DockerConverter uses the docker CLI.
 func DockerConverter(lock Lock) *Converter {
-	return &Converter{Stream: dockerStream, Inspect: dockerInspect, Lock: lock, Poll: 2 * time.Second, Logger: slog.Default()}
+	return &Converter{Stream: dockerStream, Inspect: dockerInspect, Lock: lock, Retire: dockerKill, Poll: 2 * time.Second, Logger: slog.Default()}
 }
 
 // Follow converts the target's capture while its containers run, until ctx
@@ -126,6 +134,7 @@ func (c *Converter) follow(ctx context.Context, t Target, ct Container) error {
 	var out *Writer
 	var authBytes int64
 	authStarted, stale := false, false
+	full, retired, warned := "", !ct.Running, false
 	defer func() {
 		if out != nil {
 			out.Discard() // an error path: the next replay rewrites everything
@@ -161,6 +170,7 @@ func (c *Converter) follow(ctx context.Context, t Target, ct Container) error {
 				writeAuthLine(auth, l.data, &authBytes)
 			}
 		}
+		full = out.Full()
 		if last {
 			err := out.Finish()
 			out = nil
@@ -168,6 +178,33 @@ func (c *Converter) follow(ctx context.Context, t Target, ct Container) error {
 		}
 		// Hold nothing in the folder between batches: a reset archives it.
 		return out.Flush()
+	}
+	// retire stops the container once its capture is inside a reserve. A
+	// failure is tried again with the next lines the container writes.
+	retire := func() {
+		if full == "" || retired {
+			return
+		}
+		if c.Retire == nil {
+			retired = true
+			c.Logger.Warn("An SSH cell is close to its capture limit; past it, its sessions leave no record", "service", t.Service, "limit", full)
+			return
+		}
+		err := c.Retire(ctx, ct.ID)
+		if err != nil {
+			if now, ierr := c.Inspect(ctx, t.Container); ierr == nil && (now.ID != ct.ID || !now.Running) {
+				err = nil // it stopped by itself, or a reset replaced it
+			}
+		}
+		if err != nil {
+			if !warned {
+				warned = true
+				c.Logger.Error("An SSH cell is close to its capture limit and could not be stopped; past the limit its sessions leave no record", "service", t.Service, "limit", full, "error", err)
+			}
+			return
+		}
+		retired = true
+		c.Logger.Warn("An SSH cell came close to its capture limit and was stopped; its visitor's next connection gets a fresh cell", "service", t.Service, "limit", full)
 	}
 	var batch []streamLine
 	for l := range lines {
@@ -180,6 +217,7 @@ func (c *Converter) follow(ctx context.Context, t Target, ct Container) error {
 				_ = wait()
 				return err
 			}
+			retire()
 		}
 		batch = batch[:0]
 	}
@@ -331,6 +369,18 @@ func dockerStream(ctx context.Context, id string, follow bool) (io.ReadCloser, i
 		return nil, nil, nil, err
 	}
 	return stdout, stderr, cmd.Wait, nil
+}
+
+// dockerKill stops a container with SIGKILL. Docker does not restart a
+// container killed through it, whatever its restart policy.
+func dockerKill(ctx context.Context, id string) error {
+	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+	out, err := exec.CommandContext(ctx, "docker", "kill", "--", id).CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("docker kill: %w: %s", err, strings.TrimSpace(string(out)))
+	}
+	return nil
 }
 
 func dockerInspect(ctx context.Context, name string) (Container, error) {

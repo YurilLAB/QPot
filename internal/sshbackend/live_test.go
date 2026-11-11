@@ -643,8 +643,10 @@ func liveBackend(t *testing.T, users string, scene []byte) (name, keys string, h
 // holds. sshd
 // charges each record what it costs in the container log, so the log grows
 // by at most 64 MiB for the connection, Docker's framing included; each
-// channel's record says it was cut short, a channel past the budget is not
-// recorded at all, and the session itself still carries every byte.
+// channel's record says it was cut short while the session still carries
+// every byte. A channel the budget has no room for does not run: the
+// connection ends there, so no command runs without a record (it used to
+// run unrecorded), and the visitor's next connection is recorded again.
 func TestSSHBackendCaptureCostLive(t *testing.T) {
 	if os.Getenv("QPOT_TEST_SSH_BACKEND") != "1" {
 		t.Skip("set QPOT_TEST_SSH_BACKEND=1 for real backend integration")
@@ -698,20 +700,43 @@ func TestSSHBackendCaptureCostLive(t *testing.T) {
 	}
 	_ = echo.Close()
 	// Bulk out, on more channels than the connection's budget holds.
-	const bulk, channels = 7_000_000, 9
-	for i := 0; i < channels; i++ {
+	const bulk, channels = 7_000_000, 12
+	ran := 0
+	for ; ran < channels; ran++ {
 		session, err := client.NewSession()
 		if err != nil {
-			t.Fatal(err)
+			break
 		}
 		var out countWriter
 		session.Stdout = &out
-		if err := session.Run(fmt.Sprintf("head -c %d /dev/zero # bulk %d", bulk, i)); err != nil || out.n != bulk {
-			t.Fatalf("bulk %d reached the client with %d bytes: %v", i, out.n, err)
-		}
+		err = session.Run(fmt.Sprintf("head -c %d /dev/zero # bulk %d", bulk, ran))
 		_ = session.Close()
+		if err != nil {
+			if out.n != 0 {
+				t.Fatalf("bulk %d failed (%v) after sending %d bytes: a channel that cannot be recorded must not run", ran, err, out.n)
+			}
+			break
+		}
+		if out.n != bulk {
+			t.Fatalf("bulk %d reached the client with %d bytes", ran, out.n)
+		}
+	}
+	if ran == 0 || ran == channels {
+		t.Fatalf("%d of %d bulk channels ran: the connection must end when its budget has no room for another", ran, channels)
+	}
+	if session, err := client.NewSession(); err == nil {
+		_ = session.Close()
+		t.Fatal("the connection outlived its capture budget")
 	}
 	_ = client.Close()
+	// The visitor connects again: a new connection has its own budget.
+	again := backendSSH(t, name, "root", signer, host.PublicKey())
+	if session, err := again.NewSession(); err != nil {
+		t.Fatal(err)
+	} else if out, err := session.Output("echo after the budget"); err != nil || strings.TrimSpace(string(out)) != "after the budget" {
+		t.Fatalf("the next connection: %q %v", out, err)
+	}
+	_ = again.Close()
 	if output, err := backendDocker(30*time.Second, "stop", "--time", "5", name); err != nil {
 		t.Fatalf("stop backend: %v %s", err, output)
 	}
@@ -733,7 +758,8 @@ func TestSSHBackendCaptureCostLive(t *testing.T) {
 			}
 		}
 	}
-	if cost > 64<<20 || cost < 48<<20 {
+	// (The second connection's one command costs a few kilobytes.)
+	if cost > 64<<20+64<<10 || cost < 48<<20 {
 		t.Fatalf("the connection added %d bytes of capture to the log, want up to 64 MiB and near it", cost)
 	}
 
@@ -782,21 +808,22 @@ func TestSSHBackendCaptureCostLive(t *testing.T) {
 	if n := kept(single, single.InputFile); n < rounds/2 || n >= rounds {
 		t.Fatalf("kept %d of %d single bytes: the channel budget must count each record's cost", n, rounds)
 	}
-	recorded := 0
-	for i := 0; i < channels; i++ {
+	for i := 0; i < ran; i++ {
 		event, ok := finished[fmt.Sprintf("head -c %d /dev/zero # bulk %d", bulk, i)]
 		if !ok {
-			continue
+			t.Fatalf("bulk %d of %d ran without a record", i, ran)
 		}
-		recorded++
 		if n := kept(event, event.StdoutFile); !event.Truncated || n >= bulk || n > 8<<20 {
 			t.Fatalf("bulk %d kept %d bytes, truncated %v", i, n, event.Truncated)
 		}
 	}
-	if recorded == 0 || recorded == channels {
-		t.Fatalf("%d of %d bulk channels recorded: the connection's budget must end recording", recorded, channels)
+	if _, ok := finished[fmt.Sprintf("head -c %d /dev/zero # bulk %d", bulk, ran)]; ok {
+		t.Fatalf("bulk %d has a record although its connection ended before it ran", ran)
 	}
-	t.Logf("capture cost %d bytes; %d of %d bulk channels recorded", cost, recorded, channels)
+	if after, ok := finished["echo after the budget"]; !ok || after.Truncated || strings.TrimSpace(after.Stdout) != "after the budget" {
+		t.Fatalf("the next connection's command (found %v): %+v", ok, after)
+	}
+	t.Logf("capture cost %d bytes; %d bulk channels ran and were recorded before the connection ended", cost, ran)
 }
 
 // countWriter counts what is written to it.
