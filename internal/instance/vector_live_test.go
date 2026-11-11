@@ -491,8 +491,10 @@ func TestVectorEdgeConfigsValidateLive(t *testing.T) {
 	}
 }
 
-// eventUUID is the shape of the ID the collector derives from a log line.
-var eventUUID = regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`)
+// eventUUID is the shape of the ID the collector derives from a log line: a
+// version 8 UUID (RFC 9562: a hash the application defines), which a random
+// ID from the database or an older build is not.
+var eventUUID = regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-8[0-9a-f]{3}-8[0-9a-f]{3}-[0-9a-f]{12}$`)
 
 // TestVectorKeepsScannerEvidenceLive runs honeypot lines through the two
 // transforms every event passes (add_qpot_metadata, tag_scanners) in the real

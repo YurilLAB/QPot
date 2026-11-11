@@ -105,6 +105,21 @@ While the instance runs, `honeypots` lists every configured honeypot, sorted
 by name (`"status"`: `healthy`, `unhealthy`, `starting`, `stopped` or
 `disabled`). When it is stopped, `overall` is `stopped` and `honeypots` is `[]`.
 
+The reply also carries `disk_guard`, the state of the
+[disk guard](disk-cleanup.md#disk-guard):
+
+```json
+{"state": "low", "free_bytes": 104857600, "min_free_bytes": 536870912, "resume_free_bytes": 1073741824,
+ "stopped": [{"name": "cowrie", "stopped_at": "2026-11-12T10:00:05Z"}], "code": "QP-RES-008",
+ "checked_at": "2026-11-12T10:00:10Z"}
+```
+
+`state` is `ok`, `low` (below the floor: honeypots are kept stopped),
+`waiting` (above the floor, below the resume mark, with honeypots still
+stopped), `off` or `unknown` (the free space cannot be read; `free_bytes` is
+then `null`). `stopped` lists the honeypots the guard stopped and will start
+again. `code` is present while the state is `low` or anything is stopped.
+
 ### GET /api/instance
 
 Facts for an "about this instance" page:
@@ -433,7 +448,7 @@ counted by the database.
 | `GET /api/techniques` | `[{"technique_id", "technique_name", "tactic_name", "count"}]`, most first |
 | `GET /api/categories` | `[{"id", "label", "description", "count"}]`, in catalogue order; the plain-language attack categories and how many recent events carry each |
 | `GET /api/ttps?limit=` | campaign sessions (`limit` 1 to 500) |
-| `GET /api/intelligence` | `{"techniques_observed", "iocs_total", "active_sessions", "active_campaigns", "worker_enabled", "attck_loaded"}` |
+| `GET /api/intelligence` | `{"techniques_observed", "iocs_total", "active_sessions", "active_campaigns", "worker_enabled", "attck_loaded", "replays_removed"}`. `replays_removed` counts the event rows the worker deleted since the control plane started because the collector had read their log line a second time. |
 
 Lists ranked by a count keep one order: equal counts are ordered by name or
 address, in every database backend.

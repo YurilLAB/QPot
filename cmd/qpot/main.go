@@ -211,6 +211,18 @@ func newUpCommand() *cobra.Command {
 				return fmt.Errorf("failed to create instance manager: %w", err)
 			}
 
+			// A honeypot that cannot write its log still accepts connections
+			// and records nothing: while the disk is below the disk guard's
+			// floor, nothing is started (QP-RES-008). An instance that is
+			// fully up is left to its control plane's guard. Checked before
+			// the QPot ID is shown: a refused start shows nothing.
+			allUp, anyUp := mgr.AllRunning(ctx), mgr.IsRunning(ctx)
+			if !allUp {
+				if err := server.CheckDiskSpace(cfg); err != nil {
+					return err
+				}
+			}
+
 			// Show QPot ID popup before starting
 			if showID {
 				showQPotIDPopup(qpotID.ID, cfg.InstanceName, cfg.WebUI.Port)
@@ -227,7 +239,6 @@ func newUpCommand() *cobra.Command {
 			// "Fully" means every service it should run: after an unclean stop
 			// docker brings back only the containers whose restart policy says
 			// so, and attaching to those left the database and honeypots down.
-			allUp, anyUp := mgr.AllRunning(ctx), mgr.IsRunning(ctx)
 			servePID := runningServePID(cfg)
 			if servePID != 0 && allUp {
 				fmt.Printf("[OK] QPot instance '%s' is already running (control plane pid %d)\n", cfg.InstanceName, servePID)
@@ -2245,7 +2256,7 @@ func newDBCommand() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "db",
 		Short: "Database management commands",
-		Long:  "Inspect schema versions and run/rollback migrations against the configured database backend.",
+		Long:  "Inspect schema versions, run or roll back migrations, and rebuild the events from the collector's log backups.",
 	}
 
 	migrate := &cobra.Command{
@@ -2256,6 +2267,7 @@ func newDBCommand() *cobra.Command {
 	migrate.AddCommand(newDBMigrateUpCommand())
 	migrate.AddCommand(newDBMigrateDownCommand())
 	cmd.AddCommand(migrate)
+	cmd.AddCommand(newDBRestoreCommand())
 
 	return cmd
 }

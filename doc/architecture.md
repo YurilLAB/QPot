@@ -98,10 +98,18 @@ have stored the lines. While the database is away it waits, however long, and
 the lines stay in the honeypot's log. A collector that restarts or is
 recreated reads again whatever it had not delivered, and a log it has never
 seen from its start. The first time it keeps this state, QPot marks what the
-logs already hold as delivered, so nothing is sent twice. Every event carries
-an ID derived from its log line, and the events table drops an insert block
-it has already stored, so a batch the collector has to send again after a
-timeout is stored once.
+logs already hold as delivered, so nothing is sent twice.
+
+Every event carries an ID derived from its log line: the file, the byte
+offset the line starts at, and its text. One written line is one event,
+whoever reads it and however often. Three things rest on that. A batch the
+collector has to send again after a timeout is the same batch, and the
+database keeps it once. A line the collector reads a second time (it lost
+its place, or was killed at the wrong moment) arrives with the ID of the row
+already stored, and the intelligence worker deletes the second copy before
+counting anything. And the log backups carry the ID, so `qpot db restore`
+can rebuild a lost database from them without storing anything twice.
+Two equal lines in one file start at different offsets and stay two events.
 
 **Database.** ClickHouse by default, or TimescaleDB. It sits on an internal
 Docker network that honeypots cannot reach, and is published on the host only

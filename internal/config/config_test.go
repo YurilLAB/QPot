@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"runtime"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -711,5 +712,129 @@ func TestCleanupDefaults(t *testing.T) {
 	again, err := Parse(out, cfg.ConfigPath)
 	if err != nil || again.Cleanup.On() {
 		t.Errorf("off did not survive a save: %v %+v", err, again.Cleanup)
+	}
+}
+
+// TestDiskGuardSettings: the disk guard is on with its defaults in a config
+// that does not mention it (written before the guard existed), 0 turns it
+// off, set values are kept, and marks that cannot work are refused when the
+// file is read and when it is saved.
+func TestDiskGuardSettings(t *testing.T) {
+	parse := func(extra string) (*Config, error) {
+		return Parse([]byte("instance_name: x\n"+extra), filepath.Join(t.TempDir(), "config.yaml"))
+	}
+	good := []struct {
+		name, yaml  string
+		min, resume int64
+	}{
+		{"no cleanup section", "", 512, 1024},
+		{"cleanup section without the guard", "cleanup:\n  enabled: false\n  max_age_days: 7\n", 512, 1024},
+		{"both set", "cleanup:\n  min_free_mb: 2000\n  resume_free_mb: 5000\n", 2000, 5000},
+		{"only the floor, below the default resume mark", "cleanup:\n  min_free_mb: 100\n", 100, 1024},
+		{"only the floor, above the default resume mark", "cleanup:\n  min_free_mb: 4096\n", 4096, 8192},
+		{"only the floor, at the default resume mark", "cleanup:\n  min_free_mb: 1024\n", 1024, 2048},
+		{"only the resume mark", "cleanup:\n  resume_free_mb: 600\n", 512, 600},
+		{"resume one above the floor", "cleanup:\n  min_free_mb: 512\n  resume_free_mb: 513\n", 512, 513},
+		{"off", "cleanup:\n  min_free_mb: 0\n", 0, 0},
+		{"off, with a resume mark left in", "cleanup:\n  min_free_mb: 0\n  resume_free_mb: 1024\n", 0, 0},
+		{"null means unset", "cleanup:\n  min_free_mb: null\n", 512, 1024},
+		{"the largest floor", fmt.Sprintf("cleanup:\n  min_free_mb: %d\n", MaxCleanupMB/2), MaxCleanupMB / 2, MaxCleanupMB},
+	}
+	for _, c := range good {
+		t.Run(c.name, func(t *testing.T) {
+			cfg, err := parse(c.yaml)
+			if err != nil {
+				t.Fatalf("Parse: %v", err)
+			}
+			min, resume := cfg.Cleanup.DiskGuard()
+			if min != c.min || resume != c.resume {
+				t.Errorf("DiskGuard() = %d, %d, want %d, %d", min, resume, c.min, c.resume)
+			}
+			if min > 0 && resume <= min {
+				t.Errorf("resume mark %d is not above the floor %d", resume, min)
+			}
+			// The guard does not depend on the hourly cleanup being on.
+			if c.name == "cleanup section without the guard" && cfg.Cleanup.On() {
+				t.Error("cleanup.enabled: false was lost")
+			}
+			// Saved and read again, the marks are the same.
+			out, err := yaml.Marshal(cfg)
+			if err != nil {
+				t.Fatal(err)
+			}
+			again, err := Parse(out, cfg.ConfigPath)
+			if err != nil {
+				t.Fatalf("Parse of the saved config: %v", err)
+			}
+			if m2, r2 := again.Cleanup.DiskGuard(); m2 != min || r2 != resume {
+				t.Errorf("after a save: %d, %d, want %d, %d", m2, r2, min, resume)
+			}
+		})
+	}
+
+	bad := []struct{ name, yaml, want string }{
+		{"resume equal to the floor", "cleanup:\n  min_free_mb: 512\n  resume_free_mb: 512\n", "must be greater than cleanup.min_free_mb"},
+		{"resume below the floor", "cleanup:\n  min_free_mb: 2048\n  resume_free_mb: 1024\n", "must be greater than cleanup.min_free_mb"},
+		{"resume below the default floor", "cleanup:\n  resume_free_mb: 100\n", "must be greater than cleanup.min_free_mb 512"},
+		{"negative floor", "cleanup:\n  min_free_mb: -1\n", "cleanup.min_free_mb -1"},
+		{"negative resume mark", "cleanup:\n  resume_free_mb: -5\n", "cleanup.resume_free_mb -5"},
+		{"floor too large", fmt.Sprintf("cleanup:\n  min_free_mb: %d\n", MaxCleanupMB/2+1), "cleanup.min_free_mb"},
+		{"resume mark too large", fmt.Sprintf("cleanup:\n  resume_free_mb: %d\n", MaxCleanupMB+1), "cleanup.resume_free_mb"},
+		{"negative resume mark with the guard off", "cleanup:\n  min_free_mb: 0\n  resume_free_mb: -1\n", "cleanup.resume_free_mb -1"},
+		{"not a number", "cleanup:\n  min_free_mb: lots\n", "parse config file"},
+	}
+	for _, c := range bad {
+		t.Run(c.name, func(t *testing.T) {
+			cfg, err := parse(c.yaml)
+			if err == nil {
+				min, resume := cfg.Cleanup.DiskGuard()
+				t.Fatalf("Parse accepted it: floor %d, resume %d", min, resume)
+			}
+			if !strings.Contains(err.Error(), c.want) {
+				t.Errorf("error %q does not contain %q", err, c.want)
+			}
+		})
+	}
+
+	// A new instance has the guard on, written out in its config file.
+	def := Default("guard-default")
+	if def.Cleanup.MinFreeMB == nil || *def.Cleanup.MinFreeMB != DefaultDiskGuardMinFreeMB || def.Cleanup.ResumeFreeMB != DefaultDiskGuardResumeFreeMB {
+		t.Fatalf("Default: %+v", def.Cleanup)
+	}
+	// Each instance has its own floor: changing one does not change another.
+	other := Default("guard-other")
+	*other.Cleanup.MinFreeMB = 9
+	if *def.Cleanup.MinFreeMB != DefaultDiskGuardMinFreeMB {
+		t.Fatal("two default configs share one min_free_mb")
+	}
+	out, err := yaml.Marshal(def)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(out), "min_free_mb: 512") || !strings.Contains(string(out), "resume_free_mb: 1024") {
+		t.Errorf("the default config file does not show the guard's marks")
+	}
+
+	// Save refuses what Parse would refuse, and leaves the file alone.
+	dir := t.TempDir()
+	cfg := Default("guard-save")
+	cfg.DataPath, cfg.ConfigPath = dir, filepath.Join(dir, "config.yaml")
+	if err := Save(cfg); err != nil {
+		t.Fatal(err)
+	}
+	before, err := os.ReadFile(cfg.ConfigPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg.Cleanup.ResumeFreeMB = 10
+	if err := Save(cfg); err == nil || !strings.Contains(err.Error(), "must be greater than cleanup.min_free_mb") {
+		t.Fatalf("Save with a resume mark below the floor: %v", err)
+	}
+	after, err := os.ReadFile(cfg.ConfigPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(before) != string(after) {
+		t.Error("a refused save changed the config file")
 	}
 }

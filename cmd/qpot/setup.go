@@ -365,6 +365,11 @@ func runDoctor(ctx context.Context, w io.Writer, instanceName string) error {
 	}
 	if !mgr.IsRunning(ctx) {
 		cs := []check{{Name: "containers", Level: "fail", Detail: "not running (qpot up -d" + iflagFor(instanceName) + ")", Code: "QP-INST-007"}}
+		// A disk below the guard's floor is why `qpot up` refuses to start
+		// it: say so here, where the operator looks next.
+		if guard := doctor.DiskGuardCheck(cfg, hostsetup.DataFreeBytes); guard.Level != "ok" {
+			cs = append(cs, guard)
+		}
 		printChecksTo(w, "Instance "+instanceName, cs)
 		return stoppedInstanceError(instanceName, hostFailed, host, cs)
 	}

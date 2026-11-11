@@ -1395,3 +1395,72 @@ func FuzzTTPUpdate(f *testing.F) {
 		}
 	})
 }
+
+// Reviewed gap: behind Docker's port proxy every visitor arrives from one
+// address, Docker's own. Keyed by that address, all of them were one session
+// and so one campaign. The collector marks such events; the builder must keep
+// the honeypot's connections apart and must not name Docker's address as
+// anyone's source.
+func TestSharedSourceIsNotOneSession(t *testing.T) {
+	now := time.Now().UTC()
+	event := func(session string, shared bool, command string) *database.Event {
+		e := &database.Event{Honeypot: "cowrie", EventType: "cowrie.command.input", SourceIP: "172.29.4.1",
+			Command: command, Timestamp: now, Metadata: map[string]string{}}
+		if session != "" {
+			e.Metadata["session"] = session
+		}
+		if shared {
+			e.Metadata[SharedSourceKey] = "docker"
+		}
+		return e
+	}
+
+	// Control: without the mark, two visitors are one session.
+	control := NewTTPBuilder(30 * time.Minute)
+	control.Update(event("s1", false, "uname -a"))
+	control.Update(event("s2", false, "id"))
+	if got := len(control.GetActiveSessions()); got != 1 {
+		t.Fatalf("control: %d sessions for one unmarked address, want 1", got)
+	}
+
+	b := NewTTPBuilder(30 * time.Minute)
+	first, isNew := b.Update(event("s1", true, "uname -a"))
+	if !isNew {
+		t.Fatal("the first connection opened no session")
+	}
+	if again, isNew := b.Update(event("s1", true, "id")); isNew || again != first {
+		t.Fatalf("the same connection got a second session: %s then %s", first, again)
+	}
+	second, isNew := b.Update(event("s2", true, "uname -a"))
+	if !isNew || second == first {
+		t.Fatalf("another connection from the shared address joined the first session")
+	}
+	// A honeypot that names no session cannot be told apart: one bucket,
+	// and it is not an actor.
+	b.Update(event("", true, "id"))
+	b.Update(event("", true, "id"))
+
+	sessions := b.GetActiveSessions()
+	if len(sessions) != 3 {
+		t.Fatalf("%d sessions, want 3 (two connections and the bucket)", len(sessions))
+	}
+	for _, s := range sessions {
+		if len(s.SourceIPs) != 0 {
+			t.Errorf("session %s names %v as its source: that is Docker's address", s.SessionID, s.SourceIPs)
+		}
+		if s.SessionID == first || s.SessionID == second {
+			if !s.SharedInfrastructure {
+				t.Errorf("session %s does not say its source is shared", s.SessionID)
+			}
+		}
+	}
+	// A very long session ID from a honeypot cannot grow the key without
+	// bound, and still keeps its connection apart.
+	long := strings.Repeat("x", 5000)
+	if id, isNew := b.Update(event(long, true, "id")); !isNew || id == first {
+		t.Error("a long session ID did not open its own session")
+	}
+	if key, _ := sessionSource(event(long, true, "id")); len(key) > len(sharedSourcePrefix)+len("cowrie/")+maxSharedSessionID {
+		t.Errorf("session key of %d bytes", len(key))
+	}
+}

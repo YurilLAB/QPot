@@ -36,7 +36,13 @@
     <mark_cache_size>67108864</mark_cache_size>
     <index_mark_cache_size>33554432</index_mark_cache_size>
     <uncompressed_cache_size>0</uncompressed_cache_size>
-    <max_server_memory_usage_to_ram_ratio>0.75</max_server_memory_usage_to_ram_ratio>
+    <!-- The server counts its own program pages (about 500 MiB) towards
+         this limit. At 0.75 of a 1 GiB container that left it under 80 MiB
+         to work with: under load it refused inserts and lookups with
+         "memory limit exceeded" (seen in the failure soak and when
+         restoring from backups). The container's own limit, with swap
+         capped, still bounds what it can really use. -->
+    <max_server_memory_usage_to_ram_ratio>0.9</max_server_memory_usage_to_ram_ratio>
     <max_concurrent_queries>32</max_concurrent_queries>
     <background_pool_size>2</background_pool_size>
     <background_schedule_pool_size>4</background_schedule_pool_size>

@@ -10,6 +10,9 @@ measured, and where the promise ends.
 - [How each number is measured](#how-each-number-is-measured)
 - [Results of the last recorded run](#results-of-the-last-recorded-run)
 - [What the soak found and what was changed](#what-the-soak-found-and-what-was-changed)
+- [Second round: replays, low disk, restore](#second-round-replays-low-disk-restore)
+- [The HiFi capture soak](#the-hifi-capture-soak)
+- [Restore rehearsal](#restore-rehearsal)
 - [Upgrade and rollback rehearsal](#upgrade-and-rollback-rehearsal)
 - [Where the promise ends](#where-the-promise-ends)
 
@@ -53,8 +56,10 @@ QPot, and stops.
 
 The test fails if any connection is stored twice, if intelligence counts
 anything twice, if the instance does not recover from a fault within 15
-minutes, or if a fault that leaves the honeypot running loses an accepted
-connection.
+minutes, if a fault that leaves the honeypot running loses an accepted
+connection, if a second copy of any event is left in the database, if the
+database refused any query for lack of memory, or if the honeypot kept
+taking connections while the disk was below the guard's floor.
 
 ## The faults
 
@@ -70,7 +75,9 @@ connection.
 | `honeypot-restart` | The honeypot is restarted through `qpot docker restart` |
 | `control-plane-kill` | `qpot serve` (web UI, intelligence worker) is killed with SIGKILL, later started |
 | `worker-takeover` | `qpot serve` is frozen (SIGSTOP) for longer than its database lease lasts. A second intelligence worker, as another host would run, takes the lease. The first is resumed while the second still holds it, and must stand down. |
-| `disk-full` | The filesystem holding the instance is filled to the last byte, later freed |
+| `disk-full` | The filesystem holding the instance is filled to the last byte at once, later freed |
+| `disk-low` | The filesystem is filled until less than the disk guard's floor is free, later freed. The guard must close the honeypot before it loses anything |
+| `collector-amnesia` | The collector is removed and its checkpoints are deleted, so the new one reads every log from its first line: every event arrives a second time |
 | `traffic-burst` | Ten times the normal connection rate, nothing broken |
 
 ## How each number is measured
@@ -212,7 +219,8 @@ sessions were among them, so intelligence counted their indicators twice:
 the worker was exact about a database that was not.
 
 The collector now gives every event an ID derived from its log line (a
-hash of the file and the line), instead of leaving the database to invent
+hash of the file and the line; since the second round also of the line's
+place in the file, see below), instead of leaving the database to invent
 a random one per row, and the events table remembers its last 1,000 insert
 blocks and drops one that arrives again. A retried batch is now the same
 block byte for byte, and is stored once. Existing tables get the setting at
@@ -246,7 +254,271 @@ QPot's pipeline lost nothing, and the honeypot lost anywhere from none to
 20%, 40%, 59% and 16%). QPot cannot recover what
 was never written. What it does is keep the disk from filling: storage
 limits per honeypot and disk cleanup ([disk-cleanup.md](disk-cleanup.md)),
-and `qpot doctor` fails below 2 GiB free.
+and `qpot doctor` fails below 2 GiB free. The second round added a guard
+that closes the honeypots before the disk is full; see below.
+
+## Second round: replays, low disk, restore
+
+2026-11-12, same host, the working tree that became the commits after
+`4304894d`. This round went after what the first one left open: lines read
+twice, a disk that fills, and a database that has to be rebuilt.
+
+**Two equal log lines had one ID.** The ID was a hash of the file and the
+line, so two separate occurrences of the same line in one file were one
+event to the database's duplicate check. The ID now also covers the byte
+offset the line starts at, which the collector reports for every line it
+reads. Reading the same line again gives the same ID; another line with the
+same text gives another. `TestVectorEventIdentityLive` runs the real
+collector over a file with repeated lines, restarts it, deletes its
+checkpoints and rotates the file.
+
+**A line read twice was stored twice.** The duplicate check on insert only
+catches the same batch sent again. A collector that lost its checkpoints, or
+was killed between reading a line and saving its position, reads lines again
+in new batches. The intelligence worker now removes such second copies
+before it counts anything: for every unclassified event it asks whether the
+same ID is already stored, and deletes the later copy. The first copy and
+its classification stay. `collector-amnesia` measures it: the whole log
+arrives again while traffic continues.
+
+**The disk guard.** The control plane now checks free space on the data
+folder every five seconds. Below `cleanup.min_free_mb` (512 MB by default)
+it runs disk cleanup and, if that is not enough, stops the honeypots; with
+less than a quarter of that left it stops them first. They start again
+above `cleanup.resume_free_mb`. A honeypot that is closed refuses
+connections, which a visitor sees; a honeypot that is open on a full disk
+takes them and records nothing, which nobody sees.
+[disk-cleanup.md](disk-cleanup.md) has the settings.
+
+**The database refused queries for lack of memory.** With a few tens of
+thousands of events the 1 GiB database answered some inserts and lookups
+with "memory limit exceeded". ClickHouse counts its own program pages, about
+500 MiB, against the limit QPot gave it (75% of the container), which left
+it under 80 MiB to work in. The collector retried, so nothing was lost, but
+the first restore rehearsal failed on it. The limit is now 90% of the same
+1 GiB container, and the soak fails on any such refusal.
+
+**`qpot instance remove` could not remove an instance.** Files written by
+the collector and the database belong to their containers' users, so the
+removal failed with "permission denied" on Linux and left the folder. It
+now falls back to a short-lived helper container that has only the instance
+folder mounted. The soak removes its own instances this way.
+
+The longest run of this round, 04:12 to 04:54, 5 connections a second, each
+fault held for 90 seconds:
+
+| Connections | Count |
+|---|---|
+| sent | 12,659 |
+| accepted by the honeypot | 10,687 |
+| refused (honeypot closed) | 1,972 |
+| stored, distinct | 10,665 |
+| **lost** | **22**, all during `disk-full` |
+| **stored twice** | **0** |
+
+| Fault | Recovery (s) | Accepted during | Refused during | Lost | Stored twice |
+|---|---|---|---|---|---|
+| collector-amnesia | 8, 8 | 529, 529 | 0 | 0 | 0 |
+| disk-low | 20, 25 | 99, 96 | 487, 511 | 0 | 0 |
+| disk-full | 23, 62 | 111, 303 | 487, 487 | 15, 7 | 0 |
+| database-freeze | 37, 5 | 651, 492 | 0 | 0 | 0 |
+| collector-kill | 6 | 501 | 0 | 0 | 0 |
+| control-plane-kill | 6 | 505 | 0 | 0 | 0 |
+
+266 of 266 indicators found, none counted twice, no second copy of any
+event left. Two later runs on the same tree (30 and 18 minutes) gave the
+same picture: `disk-full` lost 7 and 2 connections, every other fault none;
+the worker removed 22,729 and 2,030 second copies and left none; the
+database refused no query.
+
+What the numbers say:
+
+- **Reading everything again costs nothing.** Each `collector-amnesia`
+  delivered the whole log a second time. Nothing was lost, nothing stayed
+  stored twice, and no indicator was counted twice.
+- **A disk that runs low loses nothing.** In `disk-low` the guard closed
+  Cowrie: about five in six connections during the fault were refused, and
+  every one that was accepted is in the database.
+- **A disk that is full at once still loses a little.** `disk-full` takes
+  the last byte in one step, faster than any guard can act. The guard
+  stopped Cowrie 1.3 seconds after it noticed; the 2 to 15 connections lost
+  per episode are those Cowrie took before that. Before the guard the same
+  fault lost 105 to 366.
+
+## The HiFi capture soak
+
+HiFi SSH sessions take another path to the database: the backend's sshd
+records each session on its container's log, the control plane converts
+that into evidence files in the cell's folder, a reset moves the folder into
+an archive, and the collector reads the files. `TestHiFiCapture` puts that
+path under the same kind of faults.
+
+```bash
+QPOT_SOAK=1 QPOT_SOAK_HIFI=1 QPOT_SOAK_BIN=/tmp/qpot QPOT_SOAK_DURATION=50m \
+    QPOT_SSH_BACKEND_IMAGE=<the backend image> \
+    go test ./internal/soak -run TestHiFiCapture -timeout 0 -v
+```
+
+It creates an instance with only the HiFi SSH honeypot and three cells, and
+uses the settings of the table above. The traffic is one session that stays
+open and runs a command every three seconds, and a new session every 20
+seconds that runs three commands and leaves. Every command is
+`echo <marker with a serial number>`.
+
+- **Ran in a cell.** The client got the marker back: a real shell in a cell
+  ran the command.
+- **Lost.** Ran in a cell, and no command record with that marker is in the
+  database when the run ends.
+- **Stored twice.** More than one record for a marker.
+- **Taken late.** A login the broker accepted more than 45 seconds into a
+  fault that stops the conversion. The broker must turn visitors away once
+  the conversion's heartbeat is 30 seconds old.
+
+| Fault | What is done |
+|---|---|
+| `long-stay` | One visitor runs commands in one cell without a pause, more than the cell can record. The honeypot must end the stay before a command runs without a record |
+| `capture-stop` | The control plane, which converts the recordings, is killed with SIGKILL, later started |
+| `capture-freeze` | The control plane is frozen (SIGSTOP), later resumed |
+| `collector-kill` | The collector is killed with SIGKILL, later started |
+| `database-kill` | The database is killed with SIGKILL mid-write, later started |
+| `collector-amnesia` | The collector is removed and its checkpoints deleted: it reads every record again, most of them from the archives |
+| `cell-kill` | Every cell is killed with SIGKILL with sessions inside |
+| `broker-kill` | The broker, which every session passes through, is killed |
+| `disk-full` | The filesystem holding the instance is filled to the last byte, later freed |
+
+The test fails if a command that ran in a cell is not in the database, if
+one is stored twice, if a login is taken late, or if a long stay is still
+being served after 2,100 commands.
+
+### What it found
+
+**A HiFi instance could not be started by `qpot up`.** The collector reads
+the cells' folders through mounts inside a read-only mount, and the mount
+points did not exist on the host: Docker failed with "read-only file
+system". They are now created before the containers start
+(`TestNestedCollectorMountPoints`).
+
+**A record was stored twice after a reset.** First run, 03:10 to 04:07, 14
+faults: 1,356 commands ran in a cell, all were stored, one twice. The
+event's ID covered the file's path, and a reset moves a cell's files from
+`current/` into `archive-gN-…/logs/`. A file the collector had read and then
+found again under its new path gave the same lines new IDs. The ID of a cell
+record now leaves that part of the path out
+(`TestVectorCellRecordIDSurvivesArchiveLive`).
+
+**A long stay ran commands that left no record.** Second run, 05:41 to
+06:35, 12 faults: 1,368 commands ran, 1,367 were stored. The missing one was
+the 413th command of a session that had stayed in one cell for 21 minutes.
+The host keeps at most 2,048 capture files for one account in one cell, five
+for a command with its streams; past that the conversion dropped the
+session's record and the cell went on serving. The backend's sshd had the
+same gap one level down: a connection whose 64 MiB capture budget was used
+up, which eight commands with large output do, ran every later command
+unrecorded. Both now stop serving instead:
+
+- the control plane stops a cell whose capture reaches the last eighth of a
+  limit, and what the cell runs until it has stopped keeps its record;
+- sshd ends a connection when a new command no longer fits its budget.
+
+[ssh-hifi-proxy.md](ssh-hifi-proxy.md) has the details.
+`TestWriterSaysFullBeforeAnyCommandGoesUnrecorded`,
+`TestFollowRetiresACellCloseToItsCaptureLimit` and
+`TestSSHBackendCaptureCostLive` cover them, and `long-stay` drives it in
+the soak.
+
+### Results of the last run
+
+07:26 to 08:04, the tree with all of the above, faults held for two minutes
+(`cell-kill` 20 seconds), two minutes apart.
+
+| Commands | Count |
+|---|---|
+| sent | 1,753 |
+| ran in a cell | 1,741 |
+| stored | 1,741, and one more that a killed cell had recorded without its output reaching the client |
+| **lost** | **0** |
+| **stored twice** | **0** |
+
+| Fault | Recovery (s) | Ran during | Lost | Stored twice | Logins taken / turned away | Taken late |
+|---|---|---|---|---|---|---|
+| long-stay | 9, 6 | 399, 393 | 0 | 0 | 1 / 0, 1 / 0 | 0 |
+| collector-amnesia | 15, 18 | 59, 59 | 0 | 0 | 6 / 2, 6 / 3 | 0 |
+| capture-stop | 12, 9 | 44, 47 | 0 | 0 | 1 / 5, 2 / 5 | 0 |
+| cell-kill | 9, 9 | 4, 5 | 0 | 0 | 1 / 1, 1 / 1 | 0 |
+| collector-kill | 6 | 59 | 0 | 0 | 6 / 0 | 0 |
+| disk-full | 18 | 1 | 0 | 0 | 0 / 29 | 0 |
+
+The two long stays were ended by the honeypot after 392 and 389 commands,
+and every one of them is in the database. The earlier runs covered the
+remaining faults, each twice, with no loss: `capture-freeze` (recovery 6 to
+9 s), `database-kill` (15 to 25 s) and `broker-kill` (18 to 21 s).
+
+What the numbers say:
+
+- **A session that is open when the conversion stops keeps its evidence.**
+  During `capture-stop` and `capture-freeze` the open session ran 42 to 47
+  commands. They waited in the cell's container log and were converted and
+  stored when the control plane came back.
+- **The broker turns visitors away while nothing converts.** Of the six or
+  seven logins during such a fault, one or two (those in the first 30
+  seconds) were taken and the rest refused. None was taken late.
+- **A full disk closes the HiFi honeypot.** 29 of 29 logins were refused.
+
+Two minutes is what was measured. An outage of hours with a session open
+all the while is bounded by the cell's container log (five files of 64 MiB)
+and by the cell's two-hour life, not by anything this soak ran.
+
+## Restore rehearsal
+
+`qpot db restore` fills a database from the collector's log backups
+([release.md](release.md#rebuilding-the-database-from-log-backups)).
+`TestRestoreRehearsal` rehearses the whole loss on an instance a soak left
+in place (`QPOT_SOAK_KEEP=1`): it notes every event the database holds,
+moves the database's folder away, starts an empty database, restores, lets
+the worker classify everything again, and compares event by event.
+
+```bash
+QPOT_SOAK=1 QPOT_SOAK_RESTORE=1 QPOT_SOAK_BIN=/tmp/qpot QPOT_SOAK_INSTANCE=<kept instance> \
+    go test ./internal/soak -run TestRestoreRehearsal -timeout 0 -v
+```
+
+The rehearsal of 08:24, on the instance of an 18-minute soak (collector
+killed, disk filled, checkpoints lost, database killed):
+
+| | Before | After the restore |
+|---|---|---|
+| events | 12,327 | 12,327 |
+| indicators | 456 | 456 |
+| indicator sightings | 724 | 724 |
+| events missing | | 0 |
+| events with any column changed | | 0 |
+| events that were not there before | | 0 |
+| events with another reading's time | | 114 |
+
+The backup was one file of 18,607 lines: the soak had made the collector
+read everything a second time, so 6,279 lines were later readings of events
+already restored, and were skipped; one line was unreadable. The restore
+took one second and classification under two minutes. A second restore
+stored nothing. Two earlier rehearsals, on instances with 26,971 and 14,972
+events, ended with the same events and the same indicators as before.
+
+Two things it showed:
+
+- **A restored event can carry another reading's time.** An event's time is
+  the moment the collector read its log line. The 114 events had been read
+  and written to the backup a moment before the collector was killed or the
+  disk filled, so that reading never reached the database, which got them
+  83 to 94 seconds later when the line was read again. The restore keeps
+  the first reading in the backup. Everything else about those events is
+  the same.
+- **A full disk can cut a backup line short.** The unreadable line was
+  being written when the disk filled. Its event was read again later, so
+  nothing was missing here; an event whose only backup line is cut short is
+  in the database but would not come back from a restore.
+
+The first rehearsal failed outright: the database refused the restore's
+lookups for lack of memory (see the second round above).
+
 
 ## Upgrade and rollback rehearsal
 
@@ -281,23 +553,37 @@ program, and attacked again. The procedure is the one in
   took and was killed before writing its log line, is not evidence QPot
   ever had. The soak reports these as refused, or as lost during a
   `honeypot-` fault.
-- **A full disk.** A honeypot that cannot write its log records nothing,
-  and QPot never sees what it did not record: in the soak, Cowrie lost up
-  to 60% of the connections it took while the disk was full.
-  Nothing the honeypot wrote was lost, and nothing was stored twice. See
-  the finding above.
+- **A disk that fills in one step.** The disk guard closes the honeypots
+  when free space runs low, and then nothing is lost. A disk that goes from
+  enough to nothing within the guard's five-second check still costs what
+  the honeypot took before it was stopped: 2 to 15 connections per episode
+  in the soak. Nothing the honeypot wrote was lost, and nothing was stored
+  twice.
 - **HiFi SSH session capture during a long control-plane outage.** HiFi
   sessions are recorded on each backend's container log and converted by
   the control plane. When the control plane stops, the broker turns new
-  visitors away after 30 seconds, but sessions already open continue, and a
-  visitor that keeps writing can push its own oldest unconverted records
-  out of its backend's bounded log
-  ([ssh-hifi-proxy.md](ssh-hifi-proxy.md) states the bound). The soak does
-  not drive HiFi sessions yet, so there is no measured figure for how much
-  one session can lose this way. That measurement is the next piece of
-  work here.
+  visitors away after 30 seconds, but sessions already open continue. The
+  soak measured two-minute outages with a session open: nothing lost. Over
+  hours, a visitor that keeps writing can push its own oldest unconverted
+  records out of its backend's bounded log, and can pass the cell's capture
+  limits with nobody there to stop the cell
+  ([ssh-hifi-proxy.md](ssh-hifi-proxy.md) states the bounds).
+- **One long HiFi channel.** Past 8 MiB one channel's bytes are carried but
+  not kept, and its record says so. In an interactive session that includes
+  what is typed after that point.
 - **The database itself.** QPot keeps one copy. The log backups under
-  `backup/logs/` hold every event as JSON and are the second copy; nothing
-  restores from them automatically.
-- **Many sources.** See the note on Docker's port proxy above.
-- **TimescaleDB.** The soak measures a ClickHouse instance.
+  `backup/logs/` hold every event as JSON and are the second copy;
+  `qpot db restore` rebuilds the database from them, with the limits the
+  rehearsal above measured.
+- **Many sources.** See the note on Docker's port proxy above. Events whose
+  source address is one of the instance's own Docker networks are now
+  marked, and intelligence no longer treats them as one visitor
+  ([release.md](release.md) says which setups are affected).
+- **TimescaleDB.** Both soaks measure a ClickHouse instance. For
+  TimescaleDB the duplicate check, the removal of second copies and the
+  restore are covered by integration tests against a real server, not by a
+  soak.
+- **Deception against real attackers.** Nothing on this page says whether
+  QPot's Cowrie holds real visitors longer than the stock image. The
+  controlled comparison that would is described in
+  [effectiveness.md](effectiveness.md) and has not been run.

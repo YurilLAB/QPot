@@ -30,7 +30,9 @@ import (
 
 	"github.com/qpot/qpot/internal/config"
 	"github.com/qpot/qpot/internal/database"
+	"github.com/qpot/qpot/internal/instance"
 	"github.com/qpot/qpot/internal/intelligence"
+	"github.com/qpot/qpot/internal/vectorstate"
 )
 
 // options are the run's settings, all from the environment.
@@ -154,6 +156,14 @@ type harness struct {
 	password string // the login the honeypot last accepted
 }
 
+// The disk guard's marks on the soak's small filesystem, and how much the
+// disk-low fault leaves free: below the floor, well above nothing.
+const (
+	soakGuardFloorMB  = 256
+	soakGuardResumeMB = 384
+	soakLowLeaveMB    = 96
+)
+
 // burstBase numbers the traffic-burst fault's connections above the steady
 // load's, whose numbers grow with time and so stand for "sent before".
 const burstBase = 1_000_000_000
@@ -239,6 +249,12 @@ func (h *harness) setup(ctx context.Context) {
 		replace("    sandbox_mode: gvisor\n", "    sandbox_mode: "+h.opt.sandbox+"\n")
 	}
 	replace("    worker_interval: 5m0s\n", "    worker_interval: 1m0s\n")
+	if h.opt.fillDir != "" {
+		// The disk guard's marks, sized for the small filesystem the
+		// instance lives on here (the defaults are 512 and 1024).
+		replace("    min_free_mb: 512\n", fmt.Sprintf("    min_free_mb: %d\n", soakGuardFloorMB))
+		replace("    resume_free_mb: 1024\n", fmt.Sprintf("    resume_free_mb: %d\n", soakGuardResumeMB))
+	}
 	if err := os.WriteFile(cfgPath, []byte(text), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -629,6 +645,12 @@ func (h *harness) faults() []fault {
 	var rivalDone chan struct{}
 	var stopped int
 	var filler string
+	needFill := func() string {
+		if h.opt.fillDir == "" {
+			return "QPOT_SOAK_FILL_DIR is not set (it must be a small filesystem that holds the instance)"
+		}
+		return ""
+	}
 
 	return []fault{
 		{name: "database-stop", what: "the database container is stopped cleanly, then started",
@@ -704,40 +726,41 @@ func (h *harness) faults() []fault {
 				}
 				return err
 			}},
-		{name: "disk-full", what: "the filesystem holding the instance is filled to the last byte, then freed",
-			skip: func() string {
-				if h.opt.fillDir == "" {
-					return "QPOT_SOAK_FILL_DIR is not set (it must be a small filesystem that holds the instance)"
-				}
-				return ""
-			},
+		{name: "collector-amnesia", what: "the collector is removed and its checkpoints are deleted: it reads every log again from the start",
+			inject: h.forgetCheckpoints, clear: up},
+		{name: "disk-low", what: fmt.Sprintf("the filesystem holding the instance is filled until %d MB are free, below the disk guard's floor, then freed", soakLowLeaveMB),
+			skip: needFill,
 			inject: func(context.Context) error {
 				filler = filepath.Join(h.opt.fillDir, ".soak-filler")
-				f, err := os.OpenFile(filler, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
-				if err != nil {
-					return err
-				}
-				defer f.Close()
-				block := make([]byte, 1<<20)
-				for {
-					if _, err := f.Write(block); err != nil {
-						if errors.Is(err, syscall.ENOSPC) {
-							// The last partial megabyte too.
-							for small := block[:4096]; ; {
-								if _, err := f.Write(small); err != nil {
-									break
-								}
-							}
-							return nil
-						}
-						return err
-					}
-				}
+				return fillFilesystem(filler, soakLowLeaveMB<<20)
+			},
+			clear: func(context.Context) error { return os.Remove(filler) }},
+		{name: "disk-full", what: "the filesystem holding the instance is filled to the last byte at once, then freed",
+			skip: needFill,
+			inject: func(context.Context) error {
+				filler = filepath.Join(h.opt.fillDir, ".soak-filler")
+				return fillFilesystem(filler, 0)
 			},
 			clear: func(context.Context) error { return os.Remove(filler) }},
 		{name: "traffic-burst", what: "ten times the normal rate for the hold time, nothing broken",
 			inject: func(context.Context) error { return nil }, clear: func(context.Context) error { return nil }},
 	}
+}
+
+// forgetCheckpoints removes the collector and deletes its checkpoints, so
+// that the next collector reads every log from its start.
+func (h *harness) forgetCheckpoints(ctx context.Context) error {
+	if out, err := docker(ctx, 2*time.Minute, "rm", "-f", h.container("collector")); err != nil {
+		return fmt.Errorf("docker rm: %w: %s", err, firstLine(out))
+	}
+	// The checkpoints are the container's (root's) files.
+	state := filepath.Join(h.dir, vectorstate.Dir)
+	out, err := docker(ctx, time.Minute, "run", "--rm", "--network", "none", "--user", "0:0", "--entrypoint", "/bin/sh",
+		"-v", state+":/state", instance.CollectorImage, "-c", "find /state -name checkpoints.json -exec rm -f {} + && ! find /state -name checkpoints.json | grep -q .")
+	if err != nil {
+		return fmt.Errorf("delete the collector's checkpoints: %w: %s", err, firstLine(out))
+	}
+	return nil
 }
 
 // runRivalWorker runs a second intelligence worker against the instance's
@@ -803,7 +826,7 @@ func TestSoak(t *testing.T) {
 			if pid := h.servePID(); pid != 0 {
 				_ = syscall.Kill(pid, syscall.SIGKILL)
 			}
-			_, _ = h.qpot(cctx, 5*time.Minute, "instance", "remove", opt.instance, "--force")
+			_, _ = h.qpot(cctx, 5*time.Minute, "instance", "remove", opt.instance)
 		})
 	}
 
@@ -929,6 +952,17 @@ func TestSoak(t *testing.T) {
 		if f.LostDuring > 0 && !strings.HasPrefix(f.Name, "honeypot-") && f.Name != "disk-full" {
 			t.Errorf("%s lost %d accepted connections", f.Name, f.LostDuring)
 		}
+		// Below the floor the disk guard must have closed the honeypot: a
+		// run where every connection was still taken proves nothing.
+		if f.Name == "disk-low" && f.Error == "" && f.Refused == 0 {
+			t.Errorf("disk-low: the honeypot took all %d connections; the disk guard did not stop it", f.Accepted)
+		}
+	}
+	if final.Intelligence.MemoryRefusals != 0 {
+		t.Errorf("the database refused %d queries for lack of memory", final.Intelligence.MemoryRefusals)
+	}
+	if final.Intelligence.EventRowsStoredTwice != 0 {
+		t.Errorf("%d event rows are a second copy of an observation", final.Intelligence.EventRowsStoredTwice)
 	}
 	if final.Intelligence.IOCsCountedTwice != 0 || final.Intelligence.DuplicateSessionRows != 0 {
 		t.Errorf("duplicated intelligence: %+v", final.Intelligence)
@@ -984,20 +1018,29 @@ type report struct {
 }
 
 type intelReport struct {
-	Sessions             int    `json:"login_sessions"`
-	SessionsOK           int    `json:"login_sessions_completed"`
-	IOCsExpected         int    `json:"iocs_expected"`
-	IOCsFound            int    `json:"iocs_found"`
-	IOCsMissing          int    `json:"iocs_missing"`
-	IOCsCountedTwice     int    `json:"iocs_counted_more_than_once"`
-	CommandEvents        int    `json:"command_events_stored"`
-	CommandsClassified   int    `json:"command_events_classified"`
-	ScannerCommands      int    `json:"scanner_commands_stored"`
-	ScannerCommandsWant  int    `json:"scanner_commands_expected"`
-	SessionRows          int    `json:"session_rows"`
-	DuplicateSessionRows int    `json:"duplicate_session_rows"`
-	Unclassified         int    `json:"events_unclassified_at_end"`
-	Note                 string `json:"note,omitempty"`
+	Sessions             int `json:"login_sessions"`
+	SessionsOK           int `json:"login_sessions_completed"`
+	IOCsExpected         int `json:"iocs_expected"`
+	IOCsFound            int `json:"iocs_found"`
+	IOCsMissing          int `json:"iocs_missing"`
+	IOCsCountedTwice     int `json:"iocs_counted_more_than_once"`
+	CommandEvents        int `json:"command_events_stored"`
+	CommandsClassified   int `json:"command_events_classified"`
+	ScannerCommands      int `json:"scanner_commands_stored"`
+	ScannerCommandsWant  int `json:"scanner_commands_expected"`
+	SessionRows          int `json:"session_rows"`
+	DuplicateSessionRows int `json:"duplicate_session_rows"`
+	Unclassified         int `json:"events_unclassified_at_end"`
+	// EventRowsStoredTwice counts rows of any kind that share an observation
+	// ID with another row; ReplaysRemoved is how many such rows the running
+	// control plane's worker deleted (it counts from its own start).
+	EventRowsStoredTwice int `json:"event_rows_stored_twice"`
+	ReplaysRemoved       int `json:"replays_removed_by_worker"`
+	// MemoryRefusals counts the queries the database refused because it
+	// was at its memory limit (the collector and the worker try again, so
+	// nothing is lost, but a database that does this is too small).
+	MemoryRefusals int    `json:"database_memory_refusals"`
+	Note           string `json:"note,omitempty"`
 }
 
 // account compares what the honeypot accepted up to `until` with what the
@@ -1181,6 +1224,13 @@ func (h *harness) intelligence(ctx context.Context) intelReport {
 	r.SessionRows = one(`SELECT count() FROM intelligence_sessions FINAL`)
 	r.DuplicateSessionRows = one(`SELECT toUInt64(count() - uniqExact(session_id)) FROM intelligence_sessions FINAL`)
 	r.Unclassified = one(`SELECT count() FROM events WHERE classified = 0 AND timestamp < now() - INTERVAL 3 MINUTE`)
+	r.EventRowsStoredTwice = one(`SELECT toUInt64(count() - uniqExact(event_id)) FROM events`)
+	r.MemoryRefusals = one(`SELECT count() FROM system.query_log WHERE exception_code = 241 AND type IN ('ExceptionBeforeStart', 'ExceptionWhileProcessing')`)
+	if summary, err := h.api(ctx, "/api/intelligence"); err == nil {
+		if n, ok := summary["replays_removed"].(float64); ok {
+			r.ReplaysRemoved = int(n)
+		}
+	}
 	return r
 }
 
@@ -1210,8 +1260,8 @@ func (h *harness) write(r report) {
 			strings.TrimSpace(f.Note+" "+f.Error))
 	}
 	i := r.Intelligence
-	fmt.Fprintf(&b, "\n| Intelligence | Count |\n|---|---|\n| login sessions completed | %d of %d |\n| IOCs expected (one unique domain per session) | %d |\n| found | %d |\n| missing | %d |\n| **counted more than once** | **%d** |\n| scanner commands stored | %d of %d |\n| session rows | %d |\n| **duplicate session rows** | **%d** |\n| events still unclassified | %d |\n",
-		i.SessionsOK, i.Sessions, i.IOCsExpected, i.IOCsFound, i.IOCsMissing, i.IOCsCountedTwice, i.ScannerCommands, i.ScannerCommandsWant, i.SessionRows, i.DuplicateSessionRows, i.Unclassified)
+	fmt.Fprintf(&b, "\n| Intelligence | Count |\n|---|---|\n| login sessions completed | %d of %d |\n| IOCs expected (one unique domain per session) | %d |\n| found | %d |\n| missing | %d |\n| **counted more than once** | **%d** |\n| scanner commands stored | %d of %d |\n| session rows | %d |\n| **duplicate session rows** | **%d** |\n| events still unclassified | %d |\n| **event rows that are a second copy** | **%d** |\n| second copies the worker removed (since the control plane last started) | %d |\n| queries the database refused for lack of memory | %d |\n",
+		i.SessionsOK, i.Sessions, i.IOCsExpected, i.IOCsFound, i.IOCsMissing, i.IOCsCountedTwice, i.ScannerCommands, i.ScannerCommandsWant, i.SessionRows, i.DuplicateSessionRows, i.Unclassified, i.EventRowsStoredTwice, i.ReplaysRemoved, i.MemoryRefusals)
 	if i.Note != "" {
 		fmt.Fprintf(&b, "\nNote: %s\n", i.Note)
 	}

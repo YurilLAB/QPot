@@ -15,11 +15,22 @@ func interruptProcess(p *os.Process) error { return p.Signal(os.Interrupt) }
 
 // freeBytes returns the space available to unprivileged users at path.
 func freeBytes(path string) int64 {
+	n, _ := dataFreeBytes(path)
+	return n
+}
+
+// dataFreeBytes returns the space available to unprivileged users at path
+// and whether it could be read: a full disk is 0 and true.
+func dataFreeBytes(path string) (int64, bool) {
 	var st syscall.Statfs_t
 	if err := syscall.Statfs(path, &st); err != nil {
-		return 0
+		return 0, false
 	}
-	return int64(st.Bavail) * int64(st.Bsize) // #nosec G115 -- sizes fit int64
+	n := int64(st.Bavail) * int64(st.Bsize) // #nosec G115 -- sizes fit int64
+	if n < 0 {
+		return 0, false
+	}
+	return n, true
 }
 
 // oNoFollow makes an open fail when the last element of the path is a link.

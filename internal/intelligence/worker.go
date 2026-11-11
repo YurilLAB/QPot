@@ -8,6 +8,7 @@ import (
 	"math"
 	"os"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/qpot/qpot/internal/database"
@@ -51,7 +52,17 @@ type Worker struct {
 	running       bool
 	started       bool
 	ready         bool
+	replays       atomic.Uint64
 }
+
+// ReplaysRemoved returns how many event rows this worker has deleted because
+// they were a second copy of an observation already stored: a log line the
+// collector read twice. Such a row is never counted.
+func (w *Worker) ReplaysRemoved() uint64 { return w.replays.Load() }
+
+// CarryReplaysRemoved starts this worker's count at n: a worker that replaces
+// a stopped one goes on counting where that one was.
+func (w *Worker) CarryReplaysRemoved(n uint64) { w.replays.Store(n) }
 
 const (
 	defaultWorkerInterval  = 5 * time.Minute // config.DefaultWorkerInterval
@@ -419,6 +430,31 @@ func (w *Worker) runBatch(ctx context.Context) (int, bool) {
 	if err := w.validateOwnedEvents(events); err != nil {
 		w.report(CodePreparation, "source event identity", err)
 		return 0, false
+	}
+	// A collector that lost its place reads log lines again, and they arrive
+	// as new rows with the observation ID of the rows already stored. Delete
+	// those second copies before anything is counted. This needs no
+	// write-ahead record: which copy goes is decided by the stored rows
+	// alone, so doing it twice, or after a crash, removes nothing more.
+	if remover, ok := w.db.(database.ReplayRemover); ok {
+		if err := w.checkDatabaseOwnership(ctx); err != nil {
+			w.report(CodeOwnership, "replayed events ownership", err)
+			return 0, false
+		}
+		read := len(events)
+		kept, removed, err := remover.RemoveReplayedEvents(ctx, events)
+		if err != nil {
+			w.report(CodePreparation, "remove replayed events", err)
+			return 0, false
+		}
+		if removed > 0 {
+			w.replays.Add(uint64(removed))
+			slog.Info("Removed events the collector read a second time", "rows", removed)
+		}
+		if events = kept; len(events) == 0 {
+			w.clearError()
+			return read, true
+		}
 	}
 
 	// Before preparing anything, save the previous builder state so a baseline

@@ -382,6 +382,13 @@ Exit status 0 means success; 1 is a usage error (an unknown flag).
 - Why: git checked out a different commit than the one the installer pins, so nothing was built.
 - Fix: Run the installer again. If it happens again, report it at https://github.com/YurilLAB/QPot/issues
 
+### QP-NET-015
+
+**Honeypots see Docker's address instead of the visitor's.**
+
+- Why: Some events have a source address inside the instance's own Docker networks. That address is Docker's port forwarder, and every connection it forwards arrives from it. This happens to connections made from this computer itself, and to every connection on a Docker that forwards ports without its packet-filter rules: Docker Desktop, rootless Docker, or a daemon started with iptables off. QPot marks such events, never names that address as an attacker, and keeps the honeypot's connections apart by their own session IDs, but it cannot say who connected.
+- Fix: If the events are your own tests from this computer, nothing is wrong. Otherwise run QPot on a Linux host with the standard Docker Engine (not Docker Desktop, not rootless) and leave Docker's iptables setting on, so that visitors reach the honeypots with their own address. Do not put a reverse proxy or a NAT that rewrites the source in front of the honeypot ports. qpot doctor shows the share of marked events over the last day.
+
 ## Package manager (`PKG`, exit 14)
 
 ### QP-PKG-001
@@ -643,6 +650,13 @@ Exit status 0 means success; 1 is a usage error (an unknown flag).
 
 - Why: Docker did not confirm CPU, memory, swap and PID limits, so a honeypot that handles attacker input could use the whole computer. Rootless Docker without delegated cgroups and old cgroup v1 hosts without swap accounting are the usual causes.
 - Fix: Run QPot on a Docker host with cgroup v2 (docker info shows no limit warnings). On rootless Docker, delegate the cpu, memory and pids controllers to the user. Only cowrie, conpot and refrigeration start without confirmed limits; qpot doctor shows which limits are missing.
+
+### QP-RES-008
+
+**The disk is too full to run the honeypots.**
+
+- Why: The disk that holds this instance's data has less free space than cleanup.min_free_mb (512 MB by default). A honeypot that cannot write its log still accepts connections and records nothing, so QPot keeps the honeypots stopped while the disk is this full.
+- Fix: Free space on that disk: run qpot cleanup, delete old files, or move the instance's data to a larger disk. qpot serve starts the honeypots it stopped by itself once cleanup.resume_free_mb (1024 MB by default) is free again; qpot up starts them as soon as cleanup.min_free_mb is free. While the instance runs, qpot doctor shows the free space and the honeypots that were stopped.
 
 ## Services and systemd (`SVC`, exit 19)
 

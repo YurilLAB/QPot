@@ -138,6 +138,9 @@ func (ch *ClickHouse) InitializeSchema(ctx context.Context) error {
 	if err := ch.ensureEventID(ctx); err != nil {
 		return err
 	}
+	if err := ch.ensureEventIDIndex(ctx); err != nil {
+		return err
+	}
 	if err := ch.ensureEventCategories(ctx); err != nil {
 		return err
 	}

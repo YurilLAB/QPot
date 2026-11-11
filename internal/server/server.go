@@ -221,6 +221,7 @@ func (s *Server) superviseWorker(ctx context.Context, w *intelligence.Worker) {
 		s.dbMu.Lock()
 		next := s.newWorker(s.database)
 		if next != nil {
+			next.CarryReplaysRemoved(w.ReplaysRemoved())
 			s.worker = next
 		}
 		s.dbMu.Unlock()
@@ -556,6 +557,10 @@ func (s *Server) Start(ctx context.Context) error {
 	// Keep the honeypots' logs, captured files and the collector's backup
 	// within their limits (internal/cleanup).
 	go s.cleanupLoop(ctx)
+
+	// Stop the honeypots before the disk that holds their logs is full, and
+	// start them again when there is room (diskguard.go).
+	go s.diskGuardLoop(ctx)
 
 	// The web UI is served at once. Behind it the database is reached and the
 	// ATT&CK data loaded; what needs them starts as soon as they are there.
@@ -1067,6 +1072,9 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 		"overall":   status.Overall,
 		"honeypots": honeypots,
 		"database":  s.config.Database.Type,
+		// Whether the disk guard keeps honeypots stopped because the disk
+		// is nearly full (diskguard.go).
+		"disk_guard": s.diskGuardStatus(),
 	}
 
 	s.sendJSON(w, response)
@@ -1543,6 +1551,9 @@ func (s *Server) handleIntelligenceSummary(w http.ResponseWriter, r *http.Reques
 		state, lastError := s.intelWorker().Status()
 		summary["worker_status"] = state
 		summary["worker_healthy"] = state == "running"
+		// Rows the worker deleted because the collector had read their log
+		// line a second time (since the control plane started).
+		summary["replays_removed"] = s.intelWorker().ReplaysRemoved()
 		var coded *hostsetup.Error
 		if errors.As(lastError, &coded) {
 			// Only expose catalog guidance, never the wrapped database error,

@@ -86,8 +86,33 @@ const eventsIngestViewSQL = `
 	CREATE OR REPLACE VIEW events_ingest AS
 	SELECT timestamp, honeypot, source_ip, source_port, dest_port, protocol,
 		event_type, username, password, command, payload, metadata,
-		country, city, asn
+		country, city, asn, event_id
 	FROM events
+`
+
+// eventsObservationIndexSQL allows one row per observation and time (a
+// hypertable's unique index must include the time). Rows from before
+// observation IDs have none, and NULLs never conflict.
+const eventsObservationIndexSQL = "CREATE UNIQUE INDEX IF NOT EXISTS idx_events_observation ON events (event_id, timestamp)"
+
+// eventsIngestTriggerSQL makes an insert through events_ingest skip a row
+// that is already stored. The collector sends a batch again when the first
+// attempt timed out, and the first attempt may have gone through all the
+// same: both carry the same observation ID and time, which the unique index
+// idx_events_observation refuses, and without DO NOTHING that refusal would
+// fail the whole batch for ever.
+const eventsIngestTriggerSQL = `
+	CREATE OR REPLACE FUNCTION events_ingest_store() RETURNS trigger LANGUAGE plpgsql AS $$
+	BEGIN
+		INSERT INTO events (timestamp, honeypot, source_ip, source_port, dest_port, protocol,
+			event_type, username, password, command, payload, metadata, country, city, asn, event_id)
+		VALUES (COALESCE(NEW.timestamp, NOW()), NEW.honeypot, NEW.source_ip, NEW.source_port, NEW.dest_port, NEW.protocol,
+			NEW.event_type, NEW.username, NEW.password, NEW.command, NEW.payload, NEW.metadata, NEW.country, NEW.city, NEW.asn, NEW.event_id)
+		ON CONFLICT DO NOTHING;
+		RETURN NEW;
+	END $$;
+	CREATE OR REPLACE TRIGGER events_ingest_store INSTEAD OF INSERT ON events_ingest
+		FOR EACH ROW EXECUTE FUNCTION events_ingest_store();
 `
 
 func (ts *TimescaleDB) InitializeSchema(ctx context.Context) error {
@@ -151,6 +176,9 @@ func (ts *TimescaleDB) InitializeSchema(ctx context.Context) error {
 	if _, err := ts.pool.Exec(ctx, eventsIngestViewSQL); err != nil {
 		return fmt.Errorf("failed to create events_ingest view: %w", err)
 	}
+	if _, err := ts.pool.Exec(ctx, eventsIngestTriggerSQL); err != nil {
+		return fmt.Errorf("failed to create events_ingest trigger: %w", err)
+	}
 
 	// Create indexes
 	indexes := []string{
@@ -158,6 +186,7 @@ func (ts *TimescaleDB) InitializeSchema(ctx context.Context) error {
 		"CREATE INDEX IF NOT EXISTS idx_events_source_ip ON events (source_ip, timestamp DESC)",
 		"CREATE INDEX IF NOT EXISTS idx_events_country ON events (country, timestamp DESC)",
 		"CREATE INDEX IF NOT EXISTS idx_events_event_type ON events (event_type, timestamp DESC)",
+		eventsObservationIndexSQL,
 	}
 
 	for _, idx := range indexes {
@@ -240,6 +269,11 @@ func (ts *TimescaleDB) InsertEvents(ctx context.Context, events []*Event) error 
 func (ts *TimescaleDB) ensureEventColumns(ctx context.Context) error {
 	if _, err := ts.pool.Exec(ctx, `ALTER TABLE events ADD COLUMN IF NOT EXISTS categories TEXT[] DEFAULT '{}'`); err != nil {
 		return fmt.Errorf("add events.categories: %w", err)
+	}
+	// The collector's observation ID (see observation.go). No default: a row
+	// stored before it existed has none.
+	if _, err := ts.pool.Exec(ctx, `ALTER TABLE events ADD COLUMN IF NOT EXISTS event_id UUID`); err != nil {
+		return fmt.Errorf("add events.event_id: %w", err)
 	}
 	return nil
 }

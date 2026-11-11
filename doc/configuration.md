@@ -39,6 +39,8 @@ cleanup:                         # see disk-cleanup.md
   max_age_days: 30               # captured files, rotated logs and backup days
   max_log_mb: 256                # empty a collected log above this
   max_backup_mb: 2048            # the collector's backup folder
+  min_free_mb: 512               # disk guard: stop the honeypots below this much free disk space; 0 = off
+  resume_free_mb: 1024           # disk guard: start them again at this much; must be greater than min_free_mb
 
 security:
   network_isolation:
@@ -78,10 +80,16 @@ qpot honeypot set cowrie persona_rotation=30
 qpot honeypot set cowrie bait=off
 qpot honeypot set cowrie persona=debian-bookworm bait_profile=industrial
 qpot honeypot set cowrie bait_target=refrigeration
+qpot honeypot set cowrie deception=stock      # control arm of a comparison only
 qpot honeypot set refrigeration site_profile=plasma
 qpot honeypot profiles conpot
 qpot honeypot set conpot template=plc_modbus
 ```
+
+`deception=stock` runs the T-Pot image's Cowrie as shipped: nothing of
+QPot's is mounted over its source and no bait is planted. It is the control
+arm of the experiment in [effectiveness.md](effectiveness.md#the-controlled-experiment)
+and has no other use. The default is `deception=qpot`.
 
 Unknown keys and values outside their allowed range are refused with a plain
 explanation. A running honeypot is then recreated in a new container, so the
@@ -106,7 +114,7 @@ change the in-memory profile or partially overwrite the earlier settings.
 |---|---|---|
 | `alerts`, `response` | Webhook alerts and response hooks | [alerts.md](alerts.md) |
 | `canary` | Canaries, including the address their beacon links use | [canary.md](canary.md) |
-| `cleanup` | How long captured files, logs and backups are kept, and their size limits | [disk-cleanup.md](disk-cleanup.md) |
+| `cleanup` | How long captured files, logs and backups are kept, their size limits, and the disk guard that stops the honeypots before the disk is full | [disk-cleanup.md](disk-cleanup.md) |
 | `collector` | Extra sensor ingest and the GeoIP database | [intelligence.md](intelligence.md) |
 | `web_ui` | Address, port and login | [web-ui.md](web-ui.md) |
 

@@ -326,3 +326,22 @@ func FreeBytes(path string) int64 {
 		path = parent
 	}
 }
+
+// DataFreeBytes returns the free space for unprivileged users on the disk
+// that holds the folder path or, if it does not exist yet, its nearest
+// existing parent. The second result is false when the space could not be
+// read; a full disk is 0 and true. Unlike FreeBytes it also measures on
+// Windows: an instance's data folder is an ordinary folder there.
+func DataFreeBytes(path string) (int64, bool) {
+	// A path has at most a few thousand elements; the walk ends at the root.
+	for {
+		if _, err := os.Stat(path); err == nil {
+			return dataFreeBytes(path)
+		}
+		parent := filepath.Dir(path)
+		if parent == path {
+			return 0, false
+		}
+		path = parent
+	}
+}

@@ -159,7 +159,26 @@ const emptySHA256 = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b785
 const (
 	unknownSourcePrefix = "unknown:"
 	legacyPrefix        = "legacy:"
+	// sharedSourcePrefix names the session of one honeypot connection whose
+	// source address is not the visitor's (see SharedSource).
+	sharedSourcePrefix = "shared:"
 )
+
+// SharedSourceKey is the metadata key the collector sets on an event whose
+// source address is inside one of the instance's own Docker networks: the
+// address of Docker's port proxy or bridge, which every visitor Docker
+// forwarded that way arrives from (a connection from the host itself, a
+// Docker without its packet-filter rules, rootless Docker, Docker Desktop).
+// Such an address says nothing about who connected.
+const SharedSourceKey = database.SharedSourceKey
+
+// maxSharedSessionID bounds the honeypot's own session ID in a session key.
+const maxSharedSessionID = 64
+
+// SharedSource reports whether the event's source address is a shared one.
+func SharedSource(event *database.Event) bool {
+	return event != nil && event.Metadata[SharedSourceKey] != ""
+}
 
 // hash128 returns the first 128 bits of the SHA-256 of the parts under a
 // domain, as 32 hex characters. The domain and each part are written as
@@ -185,7 +204,21 @@ func hash128(domain string, parts ...string) string {
 // usable address (empty, unparseable, or the collector's 0.0.0.0 / ::
 // placeholder) goes to one "unknown source" session per honeypot, and known is
 // false: that session is a bucket, not an actor.
+//
+// A shared source address (SharedSource) is not a source at all: every
+// visitor would land in one session, and one campaign. Such an event is keyed
+// by the honeypot's own session ID, which separates the connections, or goes
+// to the unknown bucket when the honeypot gives none.
 func sessionSource(event *database.Event) (key string, known bool) {
+	if SharedSource(event) {
+		if id := event.Metadata["session"]; id != "" {
+			if len(id) > maxSharedSessionID {
+				id = id[:maxSharedSessionID]
+			}
+			return sharedSourcePrefix + event.Honeypot + "/" + id, true
+		}
+		return unknownSourcePrefix + event.Honeypot, false
+	}
 	if a, err := netip.ParseAddr(event.SourceIP); err == nil {
 		a = a.Unmap().WithZone("")
 		switch {
@@ -548,14 +581,20 @@ func (b *TTPBuilder) Update(event *database.Event) (sessionID string, isNew bool
 		addUnique(&s.session.KillChainStages, event.KillChainStage)
 	}
 	if known {
-		// The list stays sorted and holds the maxSessionIPs smallest
-		// addresses, so a repeat sighting costs a binary search and the result
-		// does not depend on arrival order.
-		s.session.SourceIPs, _ = addSmallest(s.session.SourceIPs, event.SourceIP, maxSessionIPs, true)
-		// Any shared address makes the session shared, whichever event shows
-		// it first.
-		if isSharedInfrastructure(event.SourceIP) {
+		if SharedSource(event) {
+			// Docker's address is no one's: it is not listed as the
+			// session's source, and the session says its source is shared.
 			s.session.SharedInfrastructure = true
+		} else {
+			// The list stays sorted and holds the maxSessionIPs smallest
+			// addresses, so a repeat sighting costs a binary search and the
+			// result does not depend on arrival order.
+			s.session.SourceIPs, _ = addSmallest(s.session.SourceIPs, event.SourceIP, maxSessionIPs, true)
+			// Any shared address makes the session shared, whichever event
+			// shows it first.
+			if isSharedInfrastructure(event.SourceIP) {
+				s.session.SharedInfrastructure = true
+			}
 		}
 		b.observe(s, event, ts)
 	}

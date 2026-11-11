@@ -304,3 +304,25 @@ func TestContainmentChecks(t *testing.T) {
 		}
 	})
 }
+
+func TestSourceAddressCheck(t *testing.T) {
+	if c := SourceAddressCheck(0, 0); c != nil {
+		t.Errorf("no events: %+v, want no line", c)
+	}
+	if c := SourceAddressCheck(0, 4200); c == nil || c.Level != "ok" || !strings.Contains(c.Detail, "4200 events") {
+		t.Errorf("no shared source: %+v", c)
+	}
+	c := SourceAddressCheck(4200, 4200)
+	if c == nil || c.Level != "warn" || c.Code != "QP-NET-015" || !strings.Contains(c.Detail, "100% of the last day's events (4200 of 4200)") {
+		t.Errorf("every source shared: %+v", c)
+	}
+	// A handful of the operator's own tests is still said, without a
+	// rounded "0%".
+	c = SourceAddressCheck(3, 4200)
+	if c == nil || c.Level != "warn" || strings.Contains(c.Detail, "0%") || !strings.Contains(c.Detail, "3 of the last day's 4200 events") {
+		t.Errorf("a few shared sources: %+v", c)
+	}
+	if hostsetup.E("QP-NET-015").Remedy() == "" {
+		t.Error("QP-NET-015 has no remedy in the catalog")
+	}
+}

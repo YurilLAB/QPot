@@ -23,10 +23,28 @@ known to break, but nobody has run it end to end. Please report results for
 | Linux x86-64, other distributions | **CI** for the program, **expected** for the stack | The program is run inside Alpine 3.20, Debian 12, Ubuntu 22.04, Fedora 40, Rocky 9 and openSUSE Leap 15.6. `qpot setup` installs Docker on Debian, Ubuntu, Raspberry Pi OS, Fedora, CentOS Stream, Rocky, AlmaLinux, RHEL, openSUSE and Arch; its plans are unit-tested, not run on each. |
 | Debian-family Linux under WSL2 | **By hand**, 2026-11-11 | Docker Engine 26.1.5; the upgrade rehearsal and the failure soak ran here. |
 | Linux arm64, arm | **Expected** | Cross-compiled in CI, never run. The T-Pot honeypot images are multi-architecture. |
-| Windows 11 with Docker Desktop | **By hand**, 2026-11-11 | Docker Desktop 4.99, `sandbox_mode: none`. CI runs the installer and the Windows-specific tests on Windows; the full test suite is run there by hand before a release. |
-| macOS with Docker Desktop | **Expected** | Built in CI, never run. |
+| Windows 11 with Docker Desktop | **By hand**, 2026-11-11 | Docker Desktop 4.99, `sandbox_mode: none`. CI runs the installer and the Windows-specific tests on Windows; the full test suite is run there by hand before a release. For trying QPot out, not for collecting: see "Source addresses" below. |
+| macOS with Docker Desktop | **Expected** | Built in CI, never run. The same limit on source addresses applies. |
 | Podman | **Not supported** | Refused with QP-DOCKER-004. |
 | Docker Engine older than 20.10, Compose v1 | **Not supported** | Refused by setup and doctor. |
+
+### Source addresses
+
+A honeypot can only record who connected if the connection reaches it with
+the visitor's address. That depends on how Docker forwards the port.
+
+| Docker | Honeypots see | Status |
+|---|---|---|
+| Docker Engine on Linux, default settings | The visitor's address | **Supported** for collecting |
+| The same, for connections made from the host itself | Docker's address | Expected: your own tests look like one visitor |
+| Docker Desktop (Windows, macOS) | Docker's address for every visitor | **Not supported** for collecting |
+| Rootless Docker, or a daemon with `iptables: false` | Docker's address for every visitor | **Not supported** for collecting |
+| A reverse proxy or source NAT in front of the honeypot ports | The proxy's address | **Not supported** for collecting |
+
+Where honeypots see Docker's address, QPot marks the events, does not
+attribute them to a source, and keeps connections apart by the honeypot's
+own session IDs. Everything else works. `qpot doctor` reports the share of
+marked events as "source addresses" (QP-NET-015).
 
 ### Container runtime
 
@@ -42,7 +60,7 @@ known to break, but nobody has run it end to end. Please report results for
 | `database.type` | Status | Notes |
 |---|---|---|
 | `clickhouse` (default) | **CI**, and the soak | Image pinned by digest. |
-| `timescaledb` | **CI** | Schema, ingest view and worker lease are tested against the pinned image; the soak has not been run on it. |
+| `timescaledb` | **CI**, and **by hand** 2026-11-12 | Schema, ingest view and worker lease are tested against the pinned image. Storing a repeated batch once, removing a line read twice, and restoring from backups were run by hand on a real hypertable. The soak has not been run on it. |
 | `elasticsearch` | **Legacy** | A client for an existing cluster. QPot does not run one, and the collector does not write to it. |
 
 ### Honeypots
@@ -104,7 +122,8 @@ What changes shape between versions, and in which direction it is safe:
 | State | Forward (upgrade) | Backward (old program on new state) |
 |---|---|---|
 | `config.yaml` | Old files load. New settings get safe defaults. | Unknown settings are ignored. |
-| Database tables | Created or extended at start; never dropped. | Extra tables and columns are ignored. |
+| Database tables | Created or extended at start; never dropped. The events table gets an index on the event ID (ClickHouse) or an event ID column, a unique index and an insert trigger (TimescaleDB). | Extra tables, columns and indexes are ignored. |
+| Event IDs | Events stored by 1.0.1 or earlier keep the random ID they have. New events get an ID derived from their log line. Only new IDs are used to find a line stored twice. | Readable. |
 | Intelligence checkpoint (in the database) | Older formats are read and carried until their sessions end. | **Not readable** when its format number is newer: the old worker reports an error and does not classify. |
 | Collector checkpoints | Kept. | Kept. |
 | Log backups | 1.0.1 and earlier: rewritten once to remove the QPot ID. | Readable. |
@@ -134,6 +153,52 @@ the previous version is attacked, backed up, upgraded, attacked, rolled
 back and attacked again, and the database must hold every connection
 exactly once at each stage. The last rehearsal is recorded in
 [reliability.md](reliability.md#upgrade-and-rollback-rehearsal).
+
+## Rebuilding the database from log backups
+
+Use this when the database is lost or damaged and there is no backup of the
+instance folder to restore: a deleted or corrupted database volume, a disk
+that failed under it, a database emptied by mistake.
+
+The collector writes every event twice: to the database, and as one JSON
+object per line to `backup/logs/YYYY/MM/DD/<honeypot>.log` in the instance
+folder. `qpot db restore` puts those lines back into the database.
+
+1. **Stop the instance:** `qpot down -i <name>`.
+2. **If the database is damaged, move it away** (keep it until the restore
+   has been checked):
+
+   ```bash
+   sudo mv ~/.qpot/instances/<name>/db ~/.qpot/instances/<name>/db.damaged
+   ```
+3. **Start the instance:** `qpot up -d -i <name>`. It creates an empty
+   database. The honeypots collect again from here on.
+4. **See what the backups hold:** `qpot db restore -i <name> --dry-run`.
+5. **Restore:** `qpot db restore -i <name>`. It prints one line per backup
+   file. It can be stopped and run again; what is stored is skipped. Because
+   the collector has been storing new events since step 3, the database is
+   no longer empty when you run it a second time: add `--merge` then.
+6. **Wait for classification.** The control plane classifies the restored
+   events in the background, oldest first, and rebuilds indicators and
+   sessions. `qpot overview -i <name>` shows the counts grow.
+
+What comes back, and what does not:
+
+| | |
+|---|---|
+| Events | Every event of the days the backups hold, with its original time and ID. |
+| Indicators, sessions, ATT&CK tags | Rebuilt by classifying the restored events. Sessions are rebuilt in one pass, so a session that was split by a quiet period before may be joined differently. |
+| Canary trips | Found again when a restored event carries a planted value. Alerts and hooks for them fire again. |
+| Days older than the backups | Gone. Disk cleanup removes backup days by age (`cleanup.max_age_days`) and when the backup folder exceeds `cleanup.max_backup_mb` (2 GB by default). Raise both if the backups are your only second copy. |
+| Captured files, TTY recordings | Not in the database: they stay in the honeypots' folders. |
+
+The same command fills gaps. If events are missing from a database that is
+otherwise intact (for example the ones captured between an upgrade and a
+rollback), run `qpot db restore -i <name> --merge --from <folder of copied
+backups>`. Only the missing events are added.
+
+The last rehearsal is recorded in
+[reliability.md](reliability.md#database-restore-rehearsal).
 
 ## Rebuilding a release yourself
 

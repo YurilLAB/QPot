@@ -69,6 +69,24 @@ its session closed starts a new session with a new `session_id`. Events
 without a usable source address go to one "unknown source" session per
 honeypot, which lists no address.
 
+**When the address is Docker's, not the visitor's.** Docker forwards some
+connections from its own address: those made from the host itself, and all
+of them on Docker Desktop, rootless Docker or a daemon without its
+packet-filter rules. The collector marks every event whose source lies
+inside one of the instance's own Docker networks (`metadata.source_shared`).
+Such an address is not a source. Keyed by it, every visitor would be one
+session and one campaign. Instead:
+
+- a marked event that carries the honeypot's own session ID (Cowrie and the
+  HiFi proxy give one) belongs to the session of that one connection;
+- a marked event without one goes to the honeypot's "unknown source"
+  session;
+- the session lists no source address and has `shared_infrastructure` set;
+- the address is never recorded as an indicator.
+
+`qpot doctor` shows how many of the last day's events were marked. See
+[release.md](release.md#source-addresses) for where this happens.
+
 A **campaign** is a set of sessions with the same `campaign_fingerprint`.
 Sessions of different sources get the same fingerprint only when they share
 strong evidence:

@@ -26,6 +26,7 @@ import (
 
 	"github.com/qpot/qpot/internal/config"
 	"github.com/qpot/qpot/internal/database"
+	"github.com/qpot/qpot/internal/diskguard"
 	"github.com/qpot/qpot/internal/hostsetup"
 	"github.com/qpot/qpot/internal/instance"
 )
@@ -220,6 +221,60 @@ func ContainmentChecks(cfg *config.Config) []Check {
 	return cs
 }
 
+// dataFreeBytes reads the free space of the disk that holds a folder for
+// HealthChecks; tests replace it.
+var dataFreeBytes = hostsetup.DataFreeBytes
+
+// DiskGuardCheck reports the disk guard (see doc/disk-cleanup.md): the free
+// space on the disk that holds the instance's honeypot logs against the
+// guard's floor, and the honeypots the guard keeps stopped. free reads a
+// folder's free space and whether it could be read (hostsetup.DataFreeBytes).
+// It needs no Docker.
+func DiskGuardCheck(cfg *config.Config, free func(string) (int64, bool)) Check {
+	const name = "disk guard"
+	minMB, resumeMB := cfg.Cleanup.DiskGuard()
+	t := diskguard.FromMB(minMB, resumeMB)
+	// A damaged state file lists nothing: the guard ignores it too.
+	state, stateErr := diskguard.LoadState(diskguard.Path(cfg.DataPath))
+	held := ""
+	if state.Held() {
+		held = strings.Join(state.Names(), ", ")
+	}
+	if !t.On() {
+		detail := "off (cleanup.min_free_mb is 0): honeypots keep running when the disk fills up"
+		if held != "" {
+			return Check{name, "warn", detail + "; still stopped by it: " + held + " (qpot serve starts them)", "QP-RES-008"}
+		}
+		return Check{Name: name, Level: "ok", Detail: detail}
+	}
+	folder := filepath.Join(cfg.DataPath, "honeypots")
+	n, known := free(folder)
+	if !known {
+		return Check{name, "warn", "the free space of " + cfg.DataPath + " cannot be read, so the guard does not stop honeypots when the disk fills up", "QP-RES-008"}
+	}
+	freeMB := n >> 20
+	switch diskguard.Describe(t, diskguard.Reading{Free: n, Known: true}, state.Held()) {
+	case diskguard.Low:
+		detail := fmt.Sprintf("%d MB free in %s, below the %d MB floor: honeypots are kept stopped", freeMB, cfg.DataPath, minMB)
+		if held != "" {
+			detail += " (stopped by the guard: " + held + ")"
+		}
+		return Check{name, "fail", detail, "QP-RES-008"}
+	case diskguard.Waiting:
+		if n >= t.ResumeFree {
+			return Check{name, "warn", fmt.Sprintf("%d MB free in %s; still stopped by the guard: %s (qpot serve starts them; if they stay stopped, see its log)",
+				freeMB, cfg.DataPath, held), "QP-RES-008"}
+		}
+		return Check{name, "warn", fmt.Sprintf("%d MB free in %s; %s stay stopped until %d MB are free (qpot serve starts them then)",
+			freeMB, cfg.DataPath, held, resumeMB), "QP-RES-008"}
+	}
+	detail := fmt.Sprintf("%d MB free in %s (honeypots stop below %d MB)", freeMB, cfg.DataPath, minMB)
+	if stateErr != nil {
+		return Check{name, "warn", detail + "; its state file is damaged and is ignored", "QP-RES-008"}
+	}
+	return Check{Name: name, Level: "ok", Detail: detail}
+}
+
 func observedSandboxDescription(observed instance.SandboxStatus) string {
 	runtimes := make(map[string]bool)
 	for _, runtime := range observed.Services {
@@ -252,6 +307,9 @@ func HealthChecks(ctx context.Context, cfg *config.Config, mgr ServiceStater, co
 	if c := GeoIPCheck(cfg); c.Name != "" {
 		cs = append(cs, c)
 	}
+	// Next: a nearly full disk is why the disk guard keeps honeypots stopped.
+	cs = append(cs, DiskGuardCheck(cfg, dataFreeBytes))
+	guarded, _ := diskguard.LoadState(diskguard.Path(cfg.DataPath))
 	states, err := mgr.ServiceStates(ctx)
 	if err != nil {
 		return append(cs, Check{"containers", "fail", firstLine(err.Error()), "QP-INST-007"})
@@ -283,6 +341,11 @@ func HealthChecks(ctx context.Context, cfg *config.Config, mgr ServiceStater, co
 	svcCheck("collector", "collector")
 	for _, hp := range cfg.GetEnabledHoneypots() {
 		svcCheck("honeypot "+hp, hp)
+		// One the disk guard stopped is down on purpose: say so, with the
+		// code that explains it, instead of "exited".
+		if st, ok := states[hp]; guarded.Has(hp) && (!ok || st.State != "running") {
+			cs[len(cs)-1] = Check{"honeypot " + hp, "fail", "stopped by the disk guard: the disk is nearly full", "QP-RES-008"}
+		}
 		// Images without a shell carry no in-container healthcheck, so
 		// "running" says nothing about whether they serve: probe their
 		// published TCP ports from the host instead.
@@ -302,11 +365,17 @@ func HealthChecks(ctx context.Context, cfg *config.Config, mgr ServiceStater, co
 
 	// The schema must exist or the collector drops every event.
 	db, err := database.New(cfg.DatabaseClient())
+	var sources *Check
 	if err == nil {
 		dctx, cancel := context.WithTimeout(ctx, 10*time.Second)
 		err = db.Connect(dctx)
 		if err == nil {
 			_, err = db.GetStats(dctx, time.Now().Add(-time.Hour))
+			if counter, ok := db.(database.SharedSourceCounter); ok && err == nil {
+				if shared, total, cerr := counter.CountSharedSources(dctx, time.Now().Add(-24*time.Hour)); cerr == nil {
+					sources = SourceAddressCheck(shared, total)
+				}
+			}
 			_ = db.Close()
 		}
 		cancel()
@@ -315,6 +384,9 @@ func HealthChecks(ctx context.Context, cfg *config.Config, mgr ServiceStater, co
 		cs = append(cs, Check{"database schema", "fail", "not ready: " + firstLine(err.Error()), "QP-INST-005"})
 	} else {
 		cs = append(cs, Check{Name: "database schema", Level: "ok", Detail: "events table present"})
+	}
+	if sources != nil {
+		cs = append(cs, *sources)
 	}
 
 	if controlPlanePID != nil {
@@ -329,6 +401,27 @@ func HealthChecks(ctx context.Context, cfg *config.Config, mgr ServiceStater, co
 		cs = append(cs, WebUICheck(ctx, cfg))
 	}
 	return cs
+}
+
+// SourceAddressCheck reports whether the honeypots see their visitors' own
+// addresses. shared is how many of the last day's total events came from one
+// of Docker's addresses instead (the collector marks them): connections from
+// this host, or every connection on a Docker that forwards ports without its
+// packet-filter rules. nil when there is nothing to judge by.
+func SourceAddressCheck(shared, total int64) *Check {
+	const name = "source addresses"
+	switch {
+	case total <= 0:
+		return nil
+	case shared == 0:
+		return &Check{Name: name, Level: "ok", Detail: fmt.Sprintf("the visitors' own (%d events in the last day)", total)}
+	}
+	percent := float64(shared) * 100 / float64(total)
+	detail := fmt.Sprintf("%.0f%% of the last day's events (%d of %d) arrived from Docker's own address, not the visitor's", percent, shared, total)
+	if percent < 1 {
+		detail = fmt.Sprintf("%d of the last day's %d events arrived from Docker's own address, not the visitor's", shared, total)
+	}
+	return &Check{name, "warn", detail, "QP-NET-015"}
 }
 
 // WebUICheck confirms the web UI answering on the configured port is THIS

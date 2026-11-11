@@ -197,6 +197,17 @@ type CleanupConfig struct {
 	// MaxBackupMB bounds the collector's backup folder; its oldest days go
 	// first. Default 2048.
 	MaxBackupMB int64 `yaml:"max_backup_mb"`
+	// MinFreeMB is the disk guard's floor: while the disk that holds the
+	// honeypots' logs has less free space than this, qpot serve keeps the
+	// honeypots stopped and qpot up does not start them (a honeypot that
+	// cannot write its log still accepts connections and records nothing).
+	// Unset means 512; 0 turns the guard off. It works whether Enabled is
+	// on or off.
+	MinFreeMB *int64 `yaml:"min_free_mb,omitempty"`
+	// ResumeFreeMB: qpot serve starts the honeypots the guard stopped once
+	// this much is free again. It must be greater than MinFreeMB. Unset
+	// means 1024, or twice MinFreeMB when that is more.
+	ResumeFreeMB int64 `yaml:"resume_free_mb,omitempty"`
 }
 
 // Cleanup defaults and the bounds the web UI and config accept.
@@ -206,10 +217,49 @@ const (
 	DefaultCleanupMaxBackupMB = 2048
 	MaxCleanupAgeDays         = 3650
 	MaxCleanupMB              = 1 << 24 // 16 TiB in MB
+	// DefaultDiskGuardMinFreeMB and DefaultDiskGuardResumeFreeMB are the
+	// disk guard's floor and resume mark (cleanup.min_free_mb and
+	// cleanup.resume_free_mb).
+	DefaultDiskGuardMinFreeMB    = 512
+	DefaultDiskGuardResumeFreeMB = 1024
 )
 
 // On reports whether automatic cleanup runs.
 func (c CleanupConfig) On() bool { return c.Enabled == nil || *c.Enabled }
+
+// DiskGuard returns the disk guard's floor and resume mark in MB, with the
+// defaults filled in. Both are 0 when the guard is off (min_free_mb: 0).
+func (c CleanupConfig) DiskGuard() (minFreeMB, resumeFreeMB int64) {
+	minFreeMB = DefaultDiskGuardMinFreeMB
+	if c.MinFreeMB != nil {
+		minFreeMB = *c.MinFreeMB
+	}
+	if minFreeMB <= 0 {
+		return 0, 0
+	}
+	resumeFreeMB = c.ResumeFreeMB
+	if resumeFreeMB <= 0 {
+		resumeFreeMB = max(DefaultDiskGuardResumeFreeMB, 2*minFreeMB)
+	}
+	return minFreeMB, resumeFreeMB
+}
+
+// ValidateDiskGuard refuses disk guard settings that cannot work: a value
+// below 0 or above MaxCleanupMB, or a resume mark that is not above the
+// floor (the guard would stop and start the honeypots in turn).
+func (c CleanupConfig) ValidateDiskGuard() error {
+	if c.MinFreeMB != nil && (*c.MinFreeMB < 0 || *c.MinFreeMB > MaxCleanupMB/2) {
+		return fmt.Errorf("cleanup.min_free_mb %d: use 0 (off) to %d", *c.MinFreeMB, MaxCleanupMB/2)
+	}
+	if c.ResumeFreeMB < 0 || c.ResumeFreeMB > MaxCleanupMB {
+		return fmt.Errorf("cleanup.resume_free_mb %d: use 1 to %d, or leave it out", c.ResumeFreeMB, MaxCleanupMB)
+	}
+	minFreeMB, _ := c.DiskGuard()
+	if minFreeMB > 0 && c.ResumeFreeMB != 0 && c.ResumeFreeMB <= minFreeMB {
+		return fmt.Errorf("cleanup.resume_free_mb %d must be greater than cleanup.min_free_mb %d", c.ResumeFreeMB, minFreeMB)
+	}
+	return nil
+}
 
 // clamp fills unset or out-of-range values with the defaults.
 func (c *CleanupConfig) clamp() {
@@ -468,6 +518,7 @@ func userHomeOrFallback() string {
 // the returned Config always has an absolute, usable DataPath rather
 // than relative paths under "/.qpot/...".
 func Default(instanceName string) *Config {
+	minFreeMB := int64(DefaultDiskGuardMinFreeMB)
 	homeDir := userHomeOrFallback()
 	dataPath := filepath.Join(homeDir, ".qpot", "instances", instanceName)
 	configPath := filepath.Join(dataPath, "config.yaml")
@@ -729,9 +780,11 @@ func Default(instanceName string) *Config {
 			MaxTrips: 500,
 		},
 		Cleanup: CleanupConfig{
-			MaxAgeDays:  DefaultCleanupMaxAgeDays,
-			MaxLogMB:    DefaultCleanupMaxLogMB,
-			MaxBackupMB: DefaultCleanupMaxBackupMB,
+			MaxAgeDays:   DefaultCleanupMaxAgeDays,
+			MaxLogMB:     DefaultCleanupMaxLogMB,
+			MaxBackupMB:  DefaultCleanupMaxBackupMB,
+			MinFreeMB:    &minFreeMB,
+			ResumeFreeMB: DefaultDiskGuardResumeFreeMB,
 		},
 	}
 }
@@ -867,6 +920,11 @@ func Parse(data []byte, configPath string) (*Config, error) {
 		cfg.Intelligence.InactivityWindow = 30 * time.Minute
 	}
 	cfg.Cleanup.clamp()
+	// The disk guard's two marks are not clamped: a resume mark at or below
+	// the floor is a mistake to report, not one to guess a fix for.
+	if err := cfg.Cleanup.ValidateDiskGuard(); err != nil {
+		return nil, fmt.Errorf("invalid config file %s: %w", configPath, err)
+	}
 
 	// Clamp the global resource limits the same way. yaml.Unmarshal leaves any
 	// omitted field at its zero value, so a hand-written or older config that
@@ -1046,6 +1104,10 @@ func Save(cfg *Config) error {
 	}
 	if err := ValidateSSHEnvironment(&pending); err != nil {
 		return fmt.Errorf("invalid SSH environment: %w", err)
+	}
+	// A file Parse would refuse must not be written.
+	if err := pending.Cleanup.ValidateDiskGuard(); err != nil {
+		return fmt.Errorf("invalid disk guard settings: %w", err)
 	}
 	if err := pending.resolveDeviceProfiles(true); err != nil {
 		return fmt.Errorf("invalid device profile: %w", err)

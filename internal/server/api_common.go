@@ -59,6 +59,9 @@ type apiState struct {
 
 	// cleanup is the storage cleanup runs' state (api_cleanup.go).
 	cleanup cleanupState
+
+	// diskGuard is the disk guard's state (diskguard.go).
+	diskGuard diskGuardState
 }
 
 // apiError is the JSON body of an error answer.

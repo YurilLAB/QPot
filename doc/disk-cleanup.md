@@ -11,6 +11,9 @@ A busy honeypot fills a disk with these. `qpot serve` therefore cleans up two
 minutes after it starts and every hour after that. The Overview tab shows the
 last run and the settings, and `qpot cleanup` runs it by hand.
 
+If the disk still gets nearly full, the [disk guard](#disk-guard) stops the
+honeypots until there is room again.
+
 ## What a run does
 
 For each honeypot's folder (`<instance>/honeypots/<name>`):
@@ -88,6 +91,136 @@ cleanup:
 The Overview tab's **Disk cleanup** card changes the same settings. They apply
 from the next run, without a restart. A manual run (the card's **Clean up
 now**, or `qpot cleanup`) also works while the hourly run is off.
+
+## Disk guard
+
+Cleanup keeps the instance's own files small. It cannot stop a disk from
+filling up for another reason: the database grows, or another program writes
+to the same disk.
+
+A honeypot on a full disk is worse than a stopped one. It still accepts
+connections, but it cannot write its log. What attackers do in that time is
+recorded nowhere. So a honeypot that cannot record must not accept.
+
+`qpot serve` therefore watches the free space of the disk that holds the
+instance's data folder. It looks every 5 seconds.
+
+1. **Below `min_free_mb` (512 MB): cleanup first.** The guard runs the cleanup
+   described above once and looks at the disk again. It waits at most one
+   minute for it. If automatic cleanup is off (`enabled: false`), this step
+   removes nothing.
+2. **Still below: the honeypots stop.** The guard stops every honeypot that
+   runs. A stopped honeypot's port is closed, so nobody can connect. The
+   database, the collector, the egress guard and `qpot serve` keep running,
+   so events already written are still stored.
+3. **While the disk stays below `min_free_mb`**, a honeypot that someone
+   starts again is stopped again within seconds. Cleanup is tried again every
+   10 minutes.
+4. **At `resume_free_mb` (1024 MB) or more: the honeypots start.** The guard
+   starts the honeypots it stopped, and only those. They go through the same
+   checks as any other start.
+
+**When the disk is almost completely full** (less than a quarter of
+`min_free_mb` free, 128 MB by default), steps 1 and 2 change places: the
+honeypots stop first and cleanup runs afterwards. At that point a honeypot
+can no longer write its log, and a minute of cleanup would be a minute of
+connections recorded nowhere.
+
+Between the two marks nothing changes. A disk that moves up and down around
+one mark does not stop and start the honeypots in turn.
+
+### What the guard starts again
+
+The guard writes the honeypots it stopped to `disk-guard.json` in the
+instance's data folder. A restarted `qpot serve` reads the file and starts
+exactly those when there is room.
+
+It never starts a honeypot that it did not stop:
+
+- A honeypot you stopped or turned off before the guard acted is not in the
+  file.
+- A honeypot you turn off while the guard holds it stays stopped.
+- A honeypot that someone starts again between the two marks is taken off the
+  list. If you stop it afterwards, it stays stopped.
+- If the file is damaged, the guard ignores it and starts nothing because of
+  it.
+- If the whole instance is down when there is room again, the guard starts
+  nothing. The next `qpot up` starts everything.
+
+If a honeypot does not start, the guard tries again later: after 1 minute,
+then 2, 4 and 8, then every 10 minutes.
+
+### `qpot up`
+
+`qpot up` does not start containers while the disk is below `min_free_mb`. It
+ends with error `QP-RES-008` and says how much space is free. Free some space
+and run it again. It only checks `min_free_mb`, not `resume_free_mb`: you
+asked for the start yourself.
+
+An instance whose containers all run already is not refused. `qpot up` then
+only starts the control plane, and its guard does the rest.
+
+### Seeing what the guard does
+
+- `qpot doctor` has a `disk guard` line. It shows the free space and the
+  honeypots the guard keeps stopped. A honeypot the guard stopped is reported
+  with `QP-RES-008`.
+- `GET /api/status` has a `disk_guard` field:
+
+  ```json
+  "disk_guard": {
+    "state": "low",
+    "free_bytes": 104857600,
+    "min_free_bytes": 536870912,
+    "resume_free_bytes": 1073741824,
+    "stopped": [{"name": "cowrie", "stopped_at": "2026-11-12T10:00:05Z"}],
+    "code": "QP-RES-008",
+    "checked_at": "2026-11-12T10:00:10Z"
+  }
+  ```
+
+  `state` is one of:
+
+  | State | Meaning |
+  |---|---|
+  | `ok` | There is room. The guard holds nothing. |
+  | `low` | The disk is below `min_free_mb`. Honeypots are kept stopped. |
+  | `waiting` | The disk is back above `min_free_mb`. The honeypots in `stopped` start at `resume_free_mb`. |
+  | `off` | The guard is turned off. |
+  | `unknown` | The free space cannot be read. `free_bytes` is `null`. The guard does nothing. |
+
+  `code` is only there while the state is `low` or `stopped` is not empty.
+- The log of `qpot serve` has a warning for every honeypot the guard stops
+  and for every one it starts again.
+
+### Settings
+
+```yaml
+cleanup:
+  min_free_mb: 512      # stop the honeypots below this much free space; 0 turns the guard off
+  resume_free_mb: 1024  # start them again at this much; must be greater than min_free_mb
+```
+
+Both are in MB. They apply within seconds, without a restart. The guard works
+whether the hourly cleanup (`enabled`) is on or off.
+
+A config file written before the guard existed has neither key. The guard is
+then on with 512 and 1024. If you set only `min_free_mb`, `resume_free_mb` is
+1024, or twice `min_free_mb` when that is more.
+
+A `resume_free_mb` that is not greater than `min_free_mb` is a mistake. QPot
+then refuses to read the config file and names the two values.
+
+### Limits
+
+- The guard is part of `qpot serve`. If `qpot serve` does not run, nothing
+  stops the honeypots. `qpot up` still refuses to start them on a full disk.
+- The guard reads one disk: the one that holds `<instance>/honeypots`. It does
+  not see a database kept on another disk.
+- Honeypots are stopped one after another. Each stop can take up to about 10
+  seconds, so an instance with many honeypots needs a few minutes.
+- The guard needs Docker to answer. While Docker does not, it changes nothing
+  and logs an error.
 
 ## Safety
 

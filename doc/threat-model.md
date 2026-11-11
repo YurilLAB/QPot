@@ -123,10 +123,15 @@ machine; across a network it must go through an SSH tunnel or a TLS proxy.
 | Threat | Answer | Enforced by |
 |---|---|---|
 | Events lost while the database or collector is down | The collector acknowledges a line only once the database and the backup have it, and reads on from that mark after any restart. | `internal/soak`; [reliability.md](reliability.md) |
-| Events stored twice when an insert is retried | Each event's ID is derived from its log line, so a retried batch is the same block, and the events table drops a block it already holds. | `TestClickHouseStoresARetriedBatchOnce`; `internal/soak` |
+| Events stored twice when an insert is retried | Each event's ID is derived from the file, the byte offset and the text of its log line, so a retried batch is the same batch. ClickHouse drops a block it already holds; on TimescaleDB a unique index on ID and time refuses the second copy. | `TestClickHouseStoresARetriedBatchOnce`, `TestPGIngestStoresARetriedBatchOnce`, `TestPGHypertableStoresARetriedBatchOnce`; `internal/soak` |
+| A log line read twice is counted as two events | A collector that lost its checkpoints, or was killed between delivering a batch and noting it, reads lines again. They arrive with the ID of the rows already stored. The intelligence worker deletes such a second copy before it counts anything, and never the only copy. | `TestVectorEventIdentityLive`, `FuzzPlanReplays`, `TestClickHouseRemovesReplayedEvents`, `TestWorkerDoesNotCountAReplayedEvent`; the soak's `collector-amnesia` fault |
+| Two separate visits that wrote the same line are counted as one | The ID includes the byte offset the line starts at, so equal lines in one file are different events. | `TestVectorEventIdentityLive` |
+| A honeypot accepts connections it cannot record | The disk guard stops every honeypot before the disk is full and starts them again when there is room; `qpot up` refuses to start on a disk below the floor (QP-RES-008). | `internal/diskguard`, `internal/server/diskguard_test.go`; the soak's `disk-low` fault |
+| The database is lost | The collector's log backups hold every event with its ID. `qpot db restore` rebuilds the events from them, storing nothing twice, and the worker rebuilds indicators and sessions. | `TestRestoreBackups`, `TestClickHouseRestoreEvents`, `TestPGRestoreEvents`; [release.md](release.md#rebuilding-the-database-from-log-backups) |
 | Events or intelligence counted twice after a crash or a worker takeover | The intelligence worker commits each batch with its checkpoint, holds a fenced database lease, and a worker that lost the lease cannot write. | `worker_lease_test.go`, `worker_retry_test.go`; `internal/soak` |
 | Evidence discarded before it is stored | Nothing between the logs and the database drops an event for its content. Scanner traffic is tagged, not removed. | `TestScannerEventsAreNeverFiltered`, `TestVectorKeepsScannerEvidenceLive` |
 | Unrelated attackers merged into one campaign | A session is one source. Sources are linked only by a shared payload, download host or command sequence, never by one common command. Confidence reflects that evidence, not volume. | `ttp_test.go`; [intelligence.md](intelligence.md) |
+| Every visitor appears as one source | Where Docker forwards connections from its own address, the collector marks the events. They are never attributed to that address: a session is then one honeypot connection, by the honeypot's own session ID. `qpot doctor` reports the share of marked events (QP-NET-015). | `TestVectorMarksSharedSourceLive`, `TestSharedSourceIsNotOneSession`, `TestSourceAddressCheck` |
 
 ### Cluster and supply chain (boundaries B5, B6)
 
@@ -164,6 +169,17 @@ Stated plainly, so nobody relies on it:
 - **Truth of what a compromised honeypot logs.** QPot records which honeypot
   wrote a line and when, and keeps a guest from writing QPot's own fields.
   It cannot tell whether the honeypot software itself was made to lie.
+- **Who connected, where Docker hides it.** On Docker Desktop, rootless
+  Docker, a daemon without its packet-filter rules, or behind a proxy that
+  rewrites the source, every visitor arrives from one address. QPot says so
+  and attributes nothing; it cannot recover the real address. See
+  [release.md](release.md#source-addresses).
+- **A disk filled faster than the guard looks.** The disk guard reads the
+  free space every five seconds and acts at a floor of 512 MB by default. If
+  something else fills the last 512 MB within those seconds, a honeypot can
+  accept connections it cannot log until the guard has stopped it.
+- **Evidence older than the log backups, once the database is gone.**
+  Restoring rebuilds only the days the backups still hold.
 
 ## Assumptions
 

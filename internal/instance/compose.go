@@ -1512,6 +1512,22 @@ func (g *ComposeGenerator) pipelineInputs() []string {
 	return append(in, g.EnabledSensors()...)
 }
 
+// OwnSubnets lists the subnets of the instance's own Docker networks, sorted.
+// A honeypot that logs a source address inside one of them was reached
+// through Docker's port proxy or bridge, not straight from the visitor.
+func (g *ComposeGenerator) OwnSubnets() []string {
+	seen := map[string]bool{}
+	var out []string
+	for _, subnet := range g.buildSubnetMap() {
+		if _, _, err := net.ParseCIDR(subnet); err == nil && !seen[subnet] {
+			seen[subnet] = true
+			out = append(out, subnet)
+		}
+	}
+	sort.Strings(out)
+	return out
+}
+
 // GeoIPInputs lists what feeds enrich_geoip.
 func (g *ComposeGenerator) GeoIPInputs() []string { return g.pipelineInputs() }
 
@@ -1582,6 +1598,7 @@ sources:
 {{if eq $name "ssh-proxy"}}      - "/data/honeypots/ssh-proxy/logs/cells/**"
 {{end}}
     read_from: beginning
+    offset_key: qpot_offset
     # The default fingerprint (the first line's checksum) names each log in
     # the checkpoints disk cleanup reads (internal/cleanup): keep it.
     multiline:
@@ -1597,6 +1614,7 @@ sources:
       - "/data/honeypots/ssh-proxy/logs/cells/*/current/**/*.json"
       - "/data/honeypots/ssh-proxy/logs/cells/*/archive-g*/logs/**/*.json"
     read_from: beginning
+    offset_key: qpot_offset
 {{end}}
 {{- if .Config.Collector.IngestSuricata}}
   # T-Pot's Suricata network IDS writes one EVE JSON object per line. Harmless
@@ -1607,6 +1625,7 @@ sources:
       - "/data/suricata/log/eve.json"
       - "/data/suricata/log/*.json"
     read_from: beginning
+    offset_key: qpot_offset
 {{- end}}
 {{- if .Config.Collector.IngestP0f}}
   # p0f passive OS fingerprinting (one JSON object per line).
@@ -1615,6 +1634,7 @@ sources:
     include:
       - "/data/p0f/log/p0f.json"
     read_from: beginning
+    offset_key: qpot_offset
 {{- end}}
 {{- if .Config.Collector.IngestFatt}}
   # fatt network fingerprinting (JA3/HASSH; one JSON object per line).
@@ -1624,6 +1644,7 @@ sources:
       - "/data/fatt/log/fatt.log"
       - "/data/fatt/log/*.json"
     read_from: beginning
+    offset_key: qpot_offset
 {{- end}}
 
 transforms:
@@ -1641,15 +1662,28 @@ transforms:
       # the per-event honeypot attribution below.
       src_file = string(.file) ?? ""
       raw = string(.message) ?? ""
-      # This event's identity: a hash of where the line came from and what it
-      # says, written as a UUID. The same line always gets the same ID, so a
-      # batch the sink has to send twice is the same batch byte for byte, and
-      # the database's insert deduplication stores it once. (Without it the
-      # database gave each row a random ID, and a retried batch - its first
-      # attempt had timed out while the database was frozen or its disk full,
-      # and went through all the same - was stored twice.)
-      eid = sha2((string(.file) ?? "") + "\n" + (string(.message) ?? ""), variant: "SHA-256")
-      event_uuid = slice!(eid, 0, 8) + "-" + slice!(eid, 8, 12) + "-" + slice!(eid, 12, 16) + "-" + slice!(eid, 16, 20) + "-" + slice!(eid, 20, 32)
+      # This event's identity: a hash of the file the line came from, the
+      # byte offset it starts at and what it says, written as a UUID
+      # (version 8). One written line is one observation: reading it again
+      # gives the same ID, so a batch sent twice is stored once and a line
+      # read twice can be told from a second visit; two equal lines in one
+      # file start at different offsets and get an ID each. (An ID from the
+      # file and the text alone made two such lines one event.)
+      #
+      # A HiFi cell's record file is moved from its "current" folder into an
+      # archive folder when the cell is reset. It is the same file with the
+      # same lines, so the folder it happens to be in is left out of the ID:
+      # a line read once before the move and once after it (the collector
+      # was killed in between, before it had noted the first reading) is
+      # then one observation, not two.
+      id_file = src_file
+      im, ierr = parse_regex(src_file, r'^(?P<cell>/data/honeypots/ssh-proxy/logs/cells/[^/]+)/(?:current|archive-g[0-9]+-[A-Za-z0-9_-]+/logs)/(?P<rest>.*)$')
+      if ierr == null {
+        id_file = (string(im.cell) ?? "") + "/" + (string(im.rest) ?? "")
+      }
+      eid = sha2(id_file + "\n" + (to_string(.qpot_offset) ?? "") + "\n" + (string(.message) ?? ""), variant: "SHA-256")
+      del(.qpot_offset)
+      event_uuid = slice!(eid, 0, 8) + "-" + slice!(eid, 8, 12) + "-8" + slice!(eid, 13, 16) + "-8" + slice!(eid, 17, 20) + "-" + slice!(eid, 20, 32)
 
       # Parse the honeypot's JSON payload FIRST so its fields are present;
       # our own metadata is stamped afterwards so an attacker-controlled log
@@ -2124,6 +2158,15 @@ transforms:
           }
         }
       }
+      # A source address inside one of this instance's own Docker networks is
+      # not a visitor's: it is Docker's port proxy or bridge, and every
+      # connection Docker forwards that way (from the host itself, or on a
+      # Docker without its packet-filter rules: rootless, Docker Desktop)
+      # arrives from it. Say so on the event, so nothing downstream takes the
+      # address for one attacker (see intelligence.SharedSourceKey).
+      {{- range $.OwnSubnets}}
+      if ip_cidr_contains({{vrlStr .}}, sip) ?? false { md.source_shared = "docker" }
+      {{- end}}
       .metadata = md
 
       # Classification is the intelligence worker's job, and event_id is set
@@ -2159,15 +2202,16 @@ transforms:
     inputs:
       - suricata_eve
     source: |
-      # This event's identity: a hash of where the line came from and what it
-      # says, written as a UUID. The same line always gets the same ID, so a
-      # batch the sink has to send twice is the same batch byte for byte, and
-      # the database's insert deduplication stores it once. (Without it the
-      # database gave each row a random ID, and a retried batch - its first
-      # attempt had timed out while the database was frozen or its disk full,
-      # and went through all the same - was stored twice.)
-      eid = sha2((string(.file) ?? "") + "\n" + (string(.message) ?? ""), variant: "SHA-256")
-      event_uuid = slice!(eid, 0, 8) + "-" + slice!(eid, 8, 12) + "-" + slice!(eid, 12, 16) + "-" + slice!(eid, 16, 20) + "-" + slice!(eid, 20, 32)
+      # This event's identity: a hash of the file the line came from, the
+      # byte offset it starts at and what it says, written as a UUID
+      # (version 8). One written line is one observation: reading it again
+      # gives the same ID, so a batch sent twice is stored once and a line
+      # read twice can be told from a second visit; two equal lines in one
+      # file start at different offsets and get an ID each. (An ID from the
+      # file and the text alone made two such lines one event.)
+      eid = sha2((string(.file) ?? "") + "\n" + (to_string(.qpot_offset) ?? "") + "\n" + (string(.message) ?? ""), variant: "SHA-256")
+      del(.qpot_offset)
+      event_uuid = slice!(eid, 0, 8) + "-" + slice!(eid, 8, 12) + "-8" + slice!(eid, 13, 16) + "-8" + slice!(eid, 17, 20) + "-" + slice!(eid, 20, 32)
       if is_string(.message) && starts_with(strip_whitespace(string!(.message)), "{") {
         parsed, perr = parse_json(string!(.message))
         if perr == null {
@@ -2207,15 +2251,16 @@ transforms:
     inputs:
       - p0f_log
     source: |
-      # This event's identity: a hash of where the line came from and what it
-      # says, written as a UUID. The same line always gets the same ID, so a
-      # batch the sink has to send twice is the same batch byte for byte, and
-      # the database's insert deduplication stores it once. (Without it the
-      # database gave each row a random ID, and a retried batch - its first
-      # attempt had timed out while the database was frozen or its disk full,
-      # and went through all the same - was stored twice.)
-      eid = sha2((string(.file) ?? "") + "\n" + (string(.message) ?? ""), variant: "SHA-256")
-      event_uuid = slice!(eid, 0, 8) + "-" + slice!(eid, 8, 12) + "-" + slice!(eid, 12, 16) + "-" + slice!(eid, 16, 20) + "-" + slice!(eid, 20, 32)
+      # This event's identity: a hash of the file the line came from, the
+      # byte offset it starts at and what it says, written as a UUID
+      # (version 8). One written line is one observation: reading it again
+      # gives the same ID, so a batch sent twice is stored once and a line
+      # read twice can be told from a second visit; two equal lines in one
+      # file start at different offsets and get an ID each. (An ID from the
+      # file and the text alone made two such lines one event.)
+      eid = sha2((string(.file) ?? "") + "\n" + (to_string(.qpot_offset) ?? "") + "\n" + (string(.message) ?? ""), variant: "SHA-256")
+      del(.qpot_offset)
+      event_uuid = slice!(eid, 0, 8) + "-" + slice!(eid, 8, 12) + "-8" + slice!(eid, 13, 16) + "-8" + slice!(eid, 17, 20) + "-" + slice!(eid, 20, 32)
       if is_string(.message) && starts_with(strip_whitespace(string!(.message)), "{") {
         parsed, perr = parse_json(string!(.message))
         if perr == null {
@@ -2249,15 +2294,16 @@ transforms:
     inputs:
       - fatt_log
     source: |
-      # This event's identity: a hash of where the line came from and what it
-      # says, written as a UUID. The same line always gets the same ID, so a
-      # batch the sink has to send twice is the same batch byte for byte, and
-      # the database's insert deduplication stores it once. (Without it the
-      # database gave each row a random ID, and a retried batch - its first
-      # attempt had timed out while the database was frozen or its disk full,
-      # and went through all the same - was stored twice.)
-      eid = sha2((string(.file) ?? "") + "\n" + (string(.message) ?? ""), variant: "SHA-256")
-      event_uuid = slice!(eid, 0, 8) + "-" + slice!(eid, 8, 12) + "-" + slice!(eid, 12, 16) + "-" + slice!(eid, 16, 20) + "-" + slice!(eid, 20, 32)
+      # This event's identity: a hash of the file the line came from, the
+      # byte offset it starts at and what it says, written as a UUID
+      # (version 8). One written line is one observation: reading it again
+      # gives the same ID, so a batch sent twice is stored once and a line
+      # read twice can be told from a second visit; two equal lines in one
+      # file start at different offsets and get an ID each. (An ID from the
+      # file and the text alone made two such lines one event.)
+      eid = sha2((string(.file) ?? "") + "\n" + (to_string(.qpot_offset) ?? "") + "\n" + (string(.message) ?? ""), variant: "SHA-256")
+      del(.qpot_offset)
+      event_uuid = slice!(eid, 0, 8) + "-" + slice!(eid, 8, 12) + "-8" + slice!(eid, 13, 16) + "-8" + slice!(eid, 17, 20) + "-" + slice!(eid, 20, 32)
       if is_string(.message) && starts_with(strip_whitespace(string!(.message)), "{") {
         parsed, perr = parse_json(string!(.message))
         if perr == null {
@@ -2517,6 +2563,36 @@ type collectorMount struct {
 	// Dir is set when Host is a folder QPot must create before starting:
 	// Docker would create a missing one owned by root.
 	Dir bool
+}
+
+// nestedMountPoint is where one collector mount lands inside another: the
+// outer mount's host folder and the path below it.
+type nestedMountPoint struct {
+	OuterHost, Rel string
+}
+
+// nestedMountPoints finds the collector mounts whose container path lies
+// inside another collector mount. The outer mount is read-only inside the
+// container, so the container runtime cannot create the inner mount's mount
+// point there ("read-only file system", and the collector never starts): the
+// folder has to exist in the outer mount's host folder beforehand. With HiFi
+// the cells' record folders are mounted inside /data/honeypots this way.
+func nestedMountPoints(mounts []collectorMount) []nestedMountPoint {
+	var out []nestedMountPoint
+	for _, inner := range mounts {
+		best := -1
+		for i, outer := range mounts {
+			if strings.HasPrefix(inner.Container, outer.Container+"/") &&
+				(best < 0 || len(outer.Container) > len(mounts[best].Container)) {
+				best = i
+			}
+		}
+		if best >= 0 {
+			out = append(out, nestedMountPoint{OuterHost: mounts[best].Host,
+				Rel: strings.TrimPrefix(inner.Container, mounts[best].Container+"/")})
+		}
+	}
+	return out
 }
 
 // collectorMounts lists the instance folders the collector reads, read-only,

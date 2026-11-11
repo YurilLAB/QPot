@@ -90,7 +90,7 @@ qpot --version
 | `qpot honeypot` | Enable, disable, list and configure honeypots within an instance. |
 | `qpot logs` | View logs from one honeypot or all honeypots. |
 | `qpot docker` | Inspect and manage the underlying Docker containers. |
-| `qpot db` | Inspect schema versions and run/roll back migrations. |
+| `qpot db` | Inspect schema versions, run or roll back migrations, rebuild the events from log backups. |
 | `qpot cluster` | Pair multiple nodes into a managed group (aliases: `group`, `pair`, `networking`). |
 | `qpot canary` | Mint and manage canaries (honeytokens) — decoy artifacts that alert on monitored interactions. |
 | `qpot overview` | Host resources, 24h honeypot activity and recent events, for one or all local instances. |
@@ -295,6 +295,13 @@ qpot instance remove production
 
 > Instance names are validated: they must be filesystem- and Docker-safe
 > (no path separators or characters that could escape the instance directory).
+
+`remove` stops the instance and deletes its folder, the database and the
+log backups included. Some of those files belong to the containers' users
+and cannot be deleted by the user who runs `qpot`. For those, `remove`
+starts a short-lived helper container that has only the instance's folder
+mounted and deletes them as root. If Docker is not running, it tells you
+which folder to remove as root yourself.
 
 ---
 
@@ -501,6 +508,42 @@ config, opens a connection, and compares the recorded schema version against the
 embedded migration set. `up` applies migrations in order inside the backend's
 transactional semantics; `down` reverses exactly one. The connection is always
 closed cleanly, even on error.
+
+### Rebuild the events from log backups: `qpot db restore`
+
+```text
+qpot db restore [-i instance] [--from folder] [--dry-run] [--merge] [--json]
+```
+
+| Flag | Description |
+|------|-------------|
+| `-i, --instance` | Instance whose database is filled. It must be up (`qpot up -d`). |
+| `--from` | Folder of log backups to read. Default: the instance's `backup/logs`. |
+| `--dry-run` | Read and compare only. Prints how many events are missing; stores nothing. |
+| `--merge` | Allow a database that already holds events: add only the missing ones. |
+| `--json` | Print the result as JSON. |
+
+```bash
+qpot db restore -i sensor1 --dry-run     # what is missing?
+qpot db restore -i sensor1               # fill an empty database
+qpot db restore -i sensor1 --merge --from /mnt/copy/backup/logs
+```
+
+The collector writes every event to `backup/logs/YYYY/MM/DD/<honeypot>.log`
+as well as to the database. `restore` reads those files, oldest day first,
+and stores each event the database does not hold, with the event's own time
+and ID. An event that is already stored is skipped, so the command can be
+stopped and run again, and a backup that holds a line twice restores it once.
+
+Restored events are not classified. The control plane (`qpot serve`)
+classifies them in the background and rebuilds indicators and sessions from
+them. Without `--merge` the command refuses a database that already holds
+events: indicators counted for those events before would be counted again.
+
+Only the days the backups still hold can be restored. Disk cleanup removes
+backup days by age and size ([disk-cleanup.md](disk-cleanup.md)). ClickHouse
+and TimescaleDB only. The full procedure is in
+[release.md](release.md#rebuilding-the-database-from-log-backups).
 
 ---
 
@@ -857,6 +900,7 @@ indicators. Every metric is defined in [effectiveness.md](effectiveness.md).
 
 ```bash
 qpot engagement -i sensor1 [--since 7d] [--honeypot cowrie] [--json]
+qpot engagement -i treat --against control --honeypot cowrie
 qpot engagement -i sensor1 --honeypot cowrie --cowrie-log /data/stock/cowrie.json --label stock
 qpot engagement --cowrie-log a.json --cowrie-log b.json
 ```
@@ -864,11 +908,22 @@ qpot engagement --cowrie-log a.json --cowrie-log b.json
 | Flag | Default | Meaning |
 |---|---|---|
 | `-i, --instance` | none | The instance whose stored events to read. Its database must be running. |
+| `--against` | none | Another instance to measure and compare with the one named by `-i`; repeatable. It must exist and its database must be running. It is read over the same `--since` window with the same `--honeypot` filter. Needs `-i`. |
 | `--since` | `7d` | The window: days (`7d`), weeks (`2w`) or a duration (`36h`). |
-| `--honeypot` | all | Only this honeypot's events. |
+| `--honeypot` | all | Only this honeypot's events, for every instance. |
 | `--cowrie-log` | none | A Cowrie JSON log to measure as well; repeatable. With no instance it needs no Docker. |
 | `--label` | the file name | Column name for the log at the same position; repeatable. |
 | `--json` | off | Print the reports and comparisons as JSON. |
+
+Reports come in this order: the instance named by `-i`, the `--against`
+instances, the logs. With more than one report, the first is compared with
+each of the others. A comparison prints an exposure check before the table
+(sessions, source addresses and period of each side, and the sources both
+saw), and after it the 95% intervals, a verdict for each tested difference
+("clear difference", "no clear difference" or "too few to compare") and a
+table of the sources that visited both sides.
+[effectiveness.md](effectiveness.md#reading-a-comparison) explains each
+part and what it does not prove.
 
 ---
 

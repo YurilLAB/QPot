@@ -905,6 +905,14 @@ func (m *Manager) generateServiceConfigs() error {
 			return fmt.Errorf("failed to create collector folder %s: %w", cm.Host, err)
 		}
 	}
+	// A mount inside another mount needs its mount point to exist already
+	// (see nestedMountPoints). Created below the outer folder without
+	// following a link out of it.
+	for _, np := range nestedMountPoints(mounts) {
+		if err := ensureContainerDirIn(filepath.FromSlash(np.OuterHost), np.Rel, 0o750); err != nil {
+			return fmt.Errorf("failed to create the collector's mount point %s in %s: %w", np.Rel, np.OuterHost, err)
+		}
+	}
 	if firstState {
 		sources, err := CollectorSources(m.config)
 		if err != nil {
@@ -1194,8 +1202,22 @@ func Remove(ctx context.Context, name string) error {
 	// Windows cannot delete a file a handle holds open, and the lock file is
 	// in dir. Delete everything else while still holding the lock, then
 	// release it and remove what is left.
-	if err := removeAllBut(dir, sshCellsLockName, sshFoldersLockName); err != nil {
-		return fmt.Errorf("failed to remove data directory: %w", err)
+	keep := []string{sshCellsLockName, sshFoldersLockName}
+	if err := removeAllBut(dir, keep...); err != nil {
+		// The database's, the collector's and some honeypots' files belong
+		// to their containers' users, root among them: on Linux the user who
+		// runs qpot cannot delete them. A root helper container can. (Found
+		// when a lab instance could not be removed: "permission denied" on
+		// the collector's backup of the first day.)
+		if !errors.Is(err, fs.ErrPermission) {
+			return fmt.Errorf("failed to remove data directory: %w", err)
+		}
+		if herr := removeHelper(ctx, dir, keep); herr != nil {
+			return fmt.Errorf("failed to remove data directory: %w (files of the containers' users are left; the helper container that removes them failed: %v). Remove %s as root", err, herr, dir)
+		}
+		if err := removeAllBut(dir, keep...); err != nil {
+			return fmt.Errorf("failed to remove data directory: %w", err)
+		}
 	}
 	_ = cellLock.Close()
 	if err := os.RemoveAll(dir); err != nil {
@@ -1203,6 +1225,43 @@ func Remove(ctx context.Context, name string) error {
 	}
 
 	slog.Info("Instance removed", "name", name)
+	return nil
+}
+
+// removeHelperScript deletes everything directly in /i except the names it
+// is given as arguments (QPot's own lock files, held open by the caller).
+// rm never follows a link out of the mounted folder.
+const removeHelperScript = `skip=""
+for k in "$@"; do skip="$skip ! -name $k"; done
+find /i -mindepth 1 -maxdepth 1 $skip -exec rm -rf -- {} +`
+
+// removeHelper deletes the contents of an instance's own directory as root
+// in a throwaway container, with only that directory mounted; a variable so
+// tests can stand in. It uses the collector's image, which an instance that
+// ever ran has, and never pulls one.
+var removeHelper = func(ctx context.Context, dir string, keep []string) error {
+	if !filepath.IsAbs(dir) || strings.ContainsAny(dir, ",\n\x00") {
+		return fmt.Errorf("folder %q cannot be mounted", dir)
+	}
+	for _, k := range keep {
+		if k == "" || strings.ContainsAny(k, " \t\n/'\"$`\\*?[") {
+			return fmt.Errorf("unexpected name to keep: %q", k)
+		}
+	}
+	ctx, cancel := context.WithTimeout(ctx, 10*time.Minute)
+	defer cancel()
+	if out, err := exec.CommandContext(ctx, "docker", "image", "inspect", "--format", "{{.Id}}", CollectorImage).CombinedOutput(); err != nil {
+		return fmt.Errorf("the collector image is not on this host: %s", firstLineOf(out))
+	}
+	args := append([]string{"run", "--rm", "--network", "none", "--read-only", "--pull", "never",
+		"--cap-drop", "ALL", "--cap-add", "DAC_OVERRIDE", "--cap-add", "FOWNER",
+		"--security-opt", "no-new-privileges", "--pids-limit", "32", "--memory", "128m",
+		"--user", "0:0", "--mount", "type=bind,source=" + dir + ",target=/i",
+		"--entrypoint", "sh", CollectorImage, "-c", removeHelperScript, "sh"}, keep...)
+	out, err := exec.CommandContext(ctx, "docker", args...).CombinedOutput() // #nosec G204 -- fixed program and image; dir and keep are checked above
+	if err != nil {
+		return fmt.Errorf("%w: %s", err, firstLineOf(out))
+	}
 	return nil
 }
 
