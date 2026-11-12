@@ -137,9 +137,12 @@ events:
 - **Cowrie holds what it could not write.** On a full disk the Cowrie image
   loses events while it goes on serving: its log write fails and the event
   is dropped, or (with the rotating log file) a line is cut short. QPot's
-  Cowrie keeps such events in memory (up to 100,000 events or 64 MB),
-  finishes the line it was writing when there is room again, and writes the
-  rest in order. In a test on a 256 kB filesystem that was filled and freed,
+  Cowrie keeps such events in memory (up to 100,000 events or 64 MB) and
+  writes them in order when there is room again. A line the disk took only
+  part of is ended where it broke and written again whole: the collector
+  drops the piece, which is not JSON, and never sees a line arrive in two
+  parts (it would give that line another identity than when it reads the
+  file again, and the event would be stored twice). In a test on a 256 kB filesystem that was filled and freed,
   the image's own code kept 62 of 261 events with the rotating log file and
   raised an error for 197 of them with the plain one; QPot's kept all 261
   with either.

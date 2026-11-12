@@ -157,6 +157,12 @@ numbers = [n for n in numbers if n != 999]
 result["numbers_in_order"] = numbers == list(range(302))
 result["count"] = len(numbers)
 result["unreadable"] = unreadable
+# A line the disk took part of is left as it is and written again whole, so
+# the log may hold the starts of event lines; nothing else may be unreadable.
+known = [json.dumps({"eventid": "cowrie.session.connect", "n": n, "pad": "x" * 100}, separators=(",", ":")) for n in list(range(302)) + [999]]
+planted = '{"eventid":"torn","n":"to'
+result["planted_torn_line"] = planted in unreadable
+result["unreadable_unknown"] = [u for u in unreadable if u != planted and not any(k != u and k.startswith(u) for k in known)]
 result["legacy_keys_removed"] = b"log_x" not in b"".join(lines) and b'"system"' not in b"".join(lines)
 print(json.dumps(result))
 `
@@ -240,27 +246,23 @@ func TestCowrieJSONLogSurvivesAFullDiskLive(t *testing.T) {
 		if took, _ := res["gave_up_seconds"].(float64); took < 0.4 || took > 3 {
 			t.Errorf("%s: on a disk that stayed full stopping took %v s, want about the 0.5 s it was given", logtype, res["gave_up_seconds"])
 		}
-		if waiting, _ := res["waiting_when_gave_up"].(float64); waiting < 10 {
-			t.Errorf("%s: %v events waited when it gave up on a disk that stayed full; the disk was not full", logtype, res["waiting_when_gave_up"])
+		// What waited then is the spill file's (spill_holds_lines and
+		// stuck_kept above): the stopped plugin keeps none of it, so an
+		// event that still arrives cannot write those lines as well.
+		if waiting, _ := res["waiting_when_gave_up"].(float64); waiting != 0 {
+			t.Errorf("%s: %v events still waited in the stopped plugin after it had written them to its spill file", logtype, res["waiting_when_gave_up"])
 		}
-		// The unreadable lines are the torn one the harness planted and,
-		// when the disk took part of it, the start of the event written to a
-		// disk that stayed full: each ended by a newline, so that the next
-		// event has a line of its own.
-		lines, _ := res["unreadable"].([]any)
-		planted := false
-		for _, line := range lines {
-			text, _ := line.(string)
-			switch {
-			case text == `{"eventid":"torn","n":"to` && !planted:
-				planted = true
-			case text != "" && strings.HasPrefix(`{"eventid":"cowrie.session.connect","n":999,"pad":"`+strings.Repeat("x", 100)+`"}`, text):
-			default:
-				t.Errorf("%s: unreadable line %q is neither the planted torn line nor the start of the event a full disk cut", logtype, text)
-			}
+		// The unreadable lines are the torn one the harness planted and
+		// the starts of event lines the disk took part of, each ended by a
+		// newline so that the whole line that follows has a line of its own.
+		if res["planted_torn_line"] != true {
+			t.Errorf("%s: the torn line planted in the log is not there as a line of its own: %v", logtype, res["unreadable"])
 		}
-		if !planted || len(lines) > 2 {
-			t.Errorf("%s: unreadable lines: %v, want the planted torn line and at most one cut event", logtype, lines)
+		if unknown, _ := res["unreadable_unknown"].([]any); len(unknown) != 0 {
+			t.Errorf("%s: unreadable lines that are not the start of an event: %v", logtype, unknown)
+		}
+		if lines, _ := res["unreadable"].([]any); len(lines) > 8 {
+			t.Errorf("%s: %d unreadable lines; a full disk cuts a line now and then, not this often: %v", logtype, len(lines), lines)
 		}
 
 		// Negative control: the image's own plugin on the same full disk

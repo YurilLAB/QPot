@@ -9,10 +9,13 @@
 # line was cut short (measured by QPot's failure soak: up to 60% of the
 # connections taken while the disk was full left no line). For both kinds of
 # file, lines are now queued in memory, written whole, and kept until the
-# disk has taken them: a line the disk had no room for is finished when there
-# is room again. Lines that still wait when Cowrie is stopped on a full disk
-# are written into a small file that has its blocks already, and go into the
-# log at the next start. See doc/disk-cleanup.md.
+# disk has taken them. A line the disk took only part of is ended there and
+# written again, whole, when there is room: the collector tells lines apart
+# by where they start, and a line it reads in two pieces gets another place
+# than the same line read at once (found by the failure soak: one connection
+# in 46,000 was stored twice). Lines that still wait when Cowrie is stopped
+# on a full disk are written into a small file that has its blocks, and go
+# into the log at the next start. See doc/disk-cleanup.md.
 
 from __future__ import annotations
 
@@ -67,7 +70,7 @@ class Output(cowrie.core.output.Output):
 
         self.qpot_pending = collections.deque()
         self.qpot_pending_bytes = 0
-        self.qpot_offset = 0  # bytes of the first pending line already on disk
+        self.qpot_torn = False  # the log ends in part of a line
         self.qpot_dropped = 0
         self.qpot_waiting = False  # the disk refused a write; said once
         self.qpot_retry = None
@@ -155,8 +158,6 @@ class Output(cowrie.core.output.Output):
         """
         data, taken = b"", 0
         for line in self.qpot_pending:
-            if line == b"\n":
-                continue  # the end of a torn line: the next start sees that itself
             if len(data) + len(line) + 1 > QPOT_SPILL_BYTES:
                 break
             data += line
@@ -192,16 +193,15 @@ class Output(cowrie.core.output.Output):
     def qpot_end_torn_line(self):
         """
         A log that ends in part of a line (Cowrie was stopped while the disk
-        was full) gets its newline, so the next event starts a line of its own.
+        was full) gets its newline before the next line, so that one starts
+        a line of its own.
         """
         try:
             with open(self.qpot_path, "rb") as f:
                 size = f.seek(0, 2)
                 if size > 0:
                     f.seek(size - 1)
-                    if f.read(1) != b"\n":
-                        self.qpot_pending.append(b"\n")
-                        self.qpot_pending_bytes += 1
+                    self.qpot_torn = f.read(1) != b"\n"
         except OSError:
             pass
 
@@ -217,11 +217,19 @@ class Output(cowrie.core.output.Output):
             time.sleep(0.1)
             self.qpot_drain(retry=False)
         if self.qpot_pending:
+            waiting = len(self.qpot_pending)
             kept = self.qpot_save_spill()
+            # What the spill file holds is the next start's to write. An
+            # event that still arrives now must not find these lines waiting
+            # and write them as well, nor mark the file empty.
+            for _ in range(kept):
+                self.qpot_pending_bytes -= len(self.qpot_pending.popleft())
+            if kept:
+                self.qpot_spill_held = False
             self._log.error(
                 "jsonlog: stopping with {n} events the disk did not take; "
                 "{kept} are kept for the next start",
-                n=len(self.qpot_pending),
+                n=waiting,
                 kept=kept,
             )
         if self.outfile:
@@ -259,25 +267,27 @@ class Output(cowrie.core.output.Output):
     def qpot_drain(self, retry=True):
         """
         Write what waits, whole lines in order. Stops at the first write the
-        disk refuses and tries again shortly; a line it took part of is
-        continued, never started again.
+        disk refuses and tries again shortly. A line it took part of stays
+        as it is, ended by a newline, and the whole line follows it.
         """
         out = self.outfile
         try:
             while self.qpot_pending:
                 data = self.qpot_pending[0]
-                if self.qpot_rotating and self.qpot_offset == 0 and out.shouldRotate():
+                if self.qpot_torn:
+                    if self.qpot_file().write(b"\n") != 1:
+                        raise OSError(errno.ENOSPC, "no space left on device")
+                    self.qpot_torn = False
+                if self.qpot_rotating and out.shouldRotate():
                     # Between lines only: a line is never split across files.
                     out.flush()
                     out.rotate()
-                while self.qpot_offset < len(data):
-                    n = self.qpot_file().write(data[self.qpot_offset :])
-                    if not n:
-                        raise OSError(errno.ENOSPC, "no space left on device")
-                    self.qpot_offset += n
+                n = self.qpot_file().write(data)
+                if n != len(data):
+                    self.qpot_torn = bool(n)
+                    raise OSError(errno.ENOSPC, "no space left on device")
                 self.qpot_pending.popleft()
                 self.qpot_pending_bytes -= len(data)
-                self.qpot_offset = 0
                 if self.qpot_rotating:
                     out.lastDate = max(out.lastDate, out.toDate())
         except OSError as e:
