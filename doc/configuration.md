@@ -41,6 +41,7 @@ cleanup:                         # see disk-cleanup.md
   max_backup_mb: 2048            # the collector's backup folder
   min_free_mb: 512               # disk guard: stop the honeypots below this much free disk space; 0 = off
   resume_free_mb: 1024           # disk guard: start them again at this much; must be greater than min_free_mb
+  reserve_mb: 64                 # disk guard: a file it frees when the disk is full; 0 = none
 
 security:
   network_isolation:

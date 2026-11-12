@@ -208,6 +208,13 @@ type CleanupConfig struct {
 	// this much is free again. It must be greater than MinFreeMB. Unset
 	// means 1024, or twice MinFreeMB when that is more.
 	ResumeFreeMB int64 `yaml:"resume_free_mb,omitempty"`
+	// ReserveMB is the disk guard's reserve: a file of this size that qpot
+	// serve keeps on the disk that holds the honeypots' logs and deletes the
+	// moment that disk runs low. A disk that fills at once leaves a honeypot
+	// unable to write its log until it is stopped; the freed reserve lets it
+	// write again within a second. Unset means 64, or half of MinFreeMB when
+	// that is less; 0 keeps none. It must be smaller than MinFreeMB.
+	ReserveMB *int64 `yaml:"reserve_mb,omitempty"`
 }
 
 // Cleanup defaults and the bounds the web UI and config accept.
@@ -222,6 +229,9 @@ const (
 	// cleanup.resume_free_mb).
 	DefaultDiskGuardMinFreeMB    = 512
 	DefaultDiskGuardResumeFreeMB = 1024
+	// DefaultDiskGuardReserveMB is the disk guard's reserve
+	// (cleanup.reserve_mb).
+	DefaultDiskGuardReserveMB = 64
 )
 
 // On reports whether automatic cleanup runs.
@@ -244,9 +254,23 @@ func (c CleanupConfig) DiskGuard() (minFreeMB, resumeFreeMB int64) {
 	return minFreeMB, resumeFreeMB
 }
 
+// DiskGuardReserveMB returns the size of the disk guard's reserve in MB: 0
+// when the guard is off or the reserve is turned off.
+func (c CleanupConfig) DiskGuardReserveMB() int64 {
+	minFreeMB, _ := c.DiskGuard()
+	if minFreeMB <= 0 {
+		return 0
+	}
+	if c.ReserveMB != nil {
+		return max(*c.ReserveMB, 0)
+	}
+	return min(DefaultDiskGuardReserveMB, minFreeMB/2)
+}
+
 // ValidateDiskGuard refuses disk guard settings that cannot work: a value
-// below 0 or above MaxCleanupMB, or a resume mark that is not above the
-// floor (the guard would stop and start the honeypots in turn).
+// below 0 or above MaxCleanupMB, a resume mark that is not above the floor
+// (the guard would stop and start the honeypots in turn), or a reserve that
+// is not smaller than the floor (freeing it would hide a disk that is low).
 func (c CleanupConfig) ValidateDiskGuard() error {
 	if c.MinFreeMB != nil && (*c.MinFreeMB < 0 || *c.MinFreeMB > MaxCleanupMB/2) {
 		return fmt.Errorf("cleanup.min_free_mb %d: use 0 (off) to %d", *c.MinFreeMB, MaxCleanupMB/2)
@@ -257,6 +281,9 @@ func (c CleanupConfig) ValidateDiskGuard() error {
 	minFreeMB, _ := c.DiskGuard()
 	if minFreeMB > 0 && c.ResumeFreeMB != 0 && c.ResumeFreeMB <= minFreeMB {
 		return fmt.Errorf("cleanup.resume_free_mb %d must be greater than cleanup.min_free_mb %d", c.ResumeFreeMB, minFreeMB)
+	}
+	if c.ReserveMB != nil && (*c.ReserveMB < 0 || (minFreeMB > 0 && *c.ReserveMB >= minFreeMB)) {
+		return fmt.Errorf("cleanup.reserve_mb %d: use 0 (none) to less than cleanup.min_free_mb %d", *c.ReserveMB, minFreeMB)
 	}
 	return nil
 }

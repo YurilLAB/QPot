@@ -103,7 +103,8 @@ connections, but it cannot write its log. What attackers do in that time is
 recorded nowhere. So a honeypot that cannot record must not accept.
 
 `qpot serve` therefore watches the free space of the disk that holds the
-instance's data folder. It looks every 5 seconds.
+instance's data folder. It reads the free space every second and acts the
+moment it falls below `min_free_mb`.
 
 1. **Below `min_free_mb` (512 MB): cleanup first.** The guard runs the cleanup
    described above once and looks at the disk again. It waits at most one
@@ -125,6 +126,56 @@ instance's data folder. It looks every 5 seconds.
 honeypots stop first and cleanup runs afterwards. At that point a honeypot
 can no longer write its log, and a minute of cleanup would be a minute of
 connections recorded nowhere.
+
+### A disk that fills at once
+
+A disk can go from enough to nothing between two looks, for example when
+another program writes a large file. Four things keep that from costing
+events:
+
+- **The watch.** One second is the longest a full disk goes unnoticed.
+- **Cowrie holds what it could not write.** On a full disk the Cowrie image
+  loses events while it goes on serving: its log write fails and the event
+  is dropped, or (with the rotating log file) a line is cut short. QPot's
+  Cowrie keeps such events in memory (up to 100,000 events or 64 MB),
+  finishes the line it was writing when there is room again, and writes the
+  rest in order. In a test on a 256 kB filesystem that was filled and freed,
+  the image's own code kept 62 of 261 events with the rotating log file and
+  raised an error for 197 of them with the plain one; QPot's kept all 261
+  with either.
+- **The reserve.** The guard keeps a file of `reserve_mb` (64 MB) on the
+  same disk, named `.disk-guard-reserve` in `<instance>/honeypots`, and
+  deletes it when the disk is full, so that what Cowrie holds can be
+  written. It waits for the disk to be full and to have stopped filling
+  (under 16 MB free on two looks 150 ms apart, the second no lower): room
+  freed while something is still filling the disk is filled with the rest.
+  The guard watches for that moment while it runs cleanup and stops the
+  honeypots, which is when it comes. Once the honeypots are stopped it frees
+  the reserve in any case, for the collector and the database, which still
+  have to store what was logged. It writes the file again when the honeypots
+  run and there is room for it above `resume_free_mb`.
+- **Cowrie's own spare file.** The freed reserve is anybody's: the database
+  can take it before Cowrie does. So Cowrie also keeps one megabyte of its
+  own, `qpot-jsonlog.spill` in its `etc` folder, written in full when it
+  starts. A Cowrie that is stopped while events still wait gives the disk
+  two seconds and then writes them into that file, which needs no new disk
+  space. The next start puts them into the log before anything new.
+
+The first version of this (in the tree before 2026-11-12, never released)
+freed the reserve as soon as the disk was low, and did not have the spare
+file. The failure soak filled the disk at once 14 times against it and lost
+4 connections of 7,276: each time the guard had seen 120 to 170 MB left,
+freed 64 more, and the writer took them too; Cowrie was stopped a second
+later with two to five events it could not write. See
+[reliability.md](reliability.md#abrupt-disk-exhaustion).
+
+What can still be lost: events of a Cowrie that is killed instead of stopped
+while it holds events (they are in memory only), more than a megabyte of
+them at one stop, and events on a filesystem that needs new space to
+overwrite a file (btrfs, ZFS). The other honeypots run T-Pot's images
+unchanged: what they cannot write while the disk is full is lost, for the
+second or so until they are stopped. Cowrie run as the comparison arm
+(`deception=stock`) behaves like the image.
 
 Between the two marks nothing changes. A disk that moves up and down around
 one mark does not stop and start the honeypots in turn.
@@ -173,6 +224,7 @@ only starts the control plane, and its guard does the rest.
     "free_bytes": 104857600,
     "min_free_bytes": 536870912,
     "resume_free_bytes": 1073741824,
+    "reserve_bytes": 0,
     "stopped": [{"name": "cowrie", "stopped_at": "2026-11-12T10:00:05Z"}],
     "code": "QP-RES-008",
     "checked_at": "2026-11-12T10:00:10Z"
@@ -190,6 +242,8 @@ only starts the control plane, and its guard does the rest.
   | `unknown` | The free space cannot be read. `free_bytes` is `null`. The guard does nothing. |
 
   `code` is only there while the state is `low` or `stopped` is not empty.
+  `reserve_bytes` is the size of the reserve file the guard holds now: 0
+  when it keeps none or has freed it.
 - The log of `qpot serve` has a warning for every honeypot the guard stops
   and for every one it starts again.
 
@@ -199,14 +253,17 @@ only starts the control plane, and its guard does the rest.
 cleanup:
   min_free_mb: 512      # stop the honeypots below this much free space; 0 turns the guard off
   resume_free_mb: 1024  # start them again at this much; must be greater than min_free_mb
+  reserve_mb: 64        # the file the guard frees when the disk is full; 0 keeps none; must be less than min_free_mb
 ```
 
-Both are in MB. They apply within seconds, without a restart. The guard works
-whether the hourly cleanup (`enabled`) is on or off.
+All three are in MB. They apply within seconds, without a restart. The guard
+works whether the hourly cleanup (`enabled`) is on or off.
 
-A config file written before the guard existed has neither key. The guard is
-then on with 512 and 1024. If you set only `min_free_mb`, `resume_free_mb` is
-1024, or twice `min_free_mb` when that is more.
+A config file written before the guard existed has none of these keys. The
+guard is then on with 512 and 1024 and keeps a reserve of 64 MB. If you set
+only `min_free_mb`, `resume_free_mb` is 1024, or twice `min_free_mb` when that
+is more, and the reserve is 64 MB, or half of `min_free_mb` when that is less.
+The reserve is extra: it is not part of the free space the two marks count.
 
 A `resume_free_mb` that is not greater than `min_free_mb` is a mistake. QPot
 then refuses to read the config file and names the two values.

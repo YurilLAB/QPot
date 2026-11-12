@@ -177,6 +177,10 @@ var (
 	cowriePermissionsPy []byte
 	//go:embed honeypotfiles/cowrie/sudo.py
 	cowrieSudoPy []byte
+	// The image's JSON log output with one change: a line the disk had no
+	// room for is kept and finished later instead of being cut or lost.
+	//go:embed honeypotfiles/cowrie/jsonlog.py
+	cowrieJSONLogPy []byte
 )
 
 // cowrieSource is where the image keeps Cowrie's Python package.
@@ -209,6 +213,7 @@ func cowriePatchVolumes() []deployVolume {
 		file("opkg_assets.zip", "commands/opkg_assets.zip", cowrieOpkgAssets),
 		file("qpot_permissions.py", "core/qpot_permissions.py", cowriePermissionsPy),
 		file("sudo.py", "commands/sudo.py", cowrieSudoPy),
+		file("jsonlog.py", "output/jsonlog.py", cowrieJSONLogPy),
 	}
 }
 

@@ -2,8 +2,12 @@ package server
 
 import (
 	"context"
+	"crypto/rand"
 	"errors"
+	"io"
+	"io/fs"
 	"log/slog"
+	"os"
 	"path/filepath"
 	"sort"
 	"sync"
@@ -25,8 +29,24 @@ import (
 // diskguard.Machine's; this file reads the disk and reaches the containers.
 
 const (
-	// diskGuardEvery is how often the guard reads the disk.
+	// diskGuardEvery is how often the guard takes a full look: the config,
+	// the disk, the containers when needed.
 	diskGuardEvery = 5 * time.Second
+	// diskGuardWatchEvery is how often it reads the free space in between,
+	// which costs one system call. A disk that falls below the floor is
+	// acted on at that moment instead of up to diskGuardEvery later (found
+	// by filling a disk at once: the honeypot took connections it could not
+	// record for as long as the guard had not looked).
+	diskGuardWatchEvery = time.Second
+	// diskGuardReserveName is the reserve file in the folder the guard
+	// watches.
+	diskGuardReserveName = ".disk-guard-reserve"
+	// diskGuardFullBytes is "nothing left": with less free, a honeypot's
+	// next log line may not fit.
+	diskGuardFullBytes = 16 << 20
+	// diskGuardSettleEvery is how far apart the two looks are that tell a
+	// disk that is full from one that is still being filled.
+	diskGuardSettleEvery = 150 * time.Millisecond
 	// diskGuardCleanupTimeout bounds the cleanup the guard waits for before
 	// it stops the honeypots.
 	diskGuardCleanupTimeout = time.Minute
@@ -98,9 +118,20 @@ type diskGuardState struct {
 	// free replaces diskFreeBytes (tests).
 	free func(path string) (int64, bool)
 
-	// mu guards view, which GET /api/status reads.
+	// mu guards view, which GET /api/status reads, and watch.
 	mu   sync.Mutex
 	view *diskGuardView
+	// watch is what the look in between full ticks needs, as the last full
+	// tick left it.
+	watch diskGuardWatch
+}
+
+// diskGuardWatch is what the guard's quick look goes by.
+type diskGuardWatch struct {
+	at      time.Time // the last full tick
+	folder  string
+	minFree int64
+	held    bool // honeypots are stopped already: nothing is urgent
 }
 
 // diskGuardStopped is one honeypot the guard keeps stopped.
@@ -125,6 +156,9 @@ type diskGuardView struct {
 	Stopped []diskGuardStopped `json:"stopped"`
 	// Code is the error code that explains a stop (while low or waiting).
 	Code string `json:"code,omitempty"`
+	// ReserveBytes is the size of the reserve file the guard holds now: 0
+	// when it keeps none, or has freed it because the disk ran low.
+	ReserveBytes int64 `json:"reserve_bytes"`
 	// CheckedAt is when the guard last read the disk.
 	CheckedAt time.Time `json:"checked_at"`
 }
@@ -158,18 +192,141 @@ func CheckDiskSpace(cfg *config.Config) error {
 		free>>20, cfg.DataPath, t.MinFree>>20)
 }
 
-// diskGuardLoop runs the guard at once and then every diskGuardEvery.
+// diskGuardLoop runs the guard at once, then every diskGuardEvery, and at
+// once when a look in between finds the disk below the floor.
 func (s *Server) diskGuardLoop(ctx context.Context) {
-	t := time.NewTicker(diskGuardEvery)
+	t := time.NewTicker(diskGuardWatchEvery)
 	defer t.Stop()
 	for {
-		s.diskGuardTick(ctx, time.Now())
+		if now := time.Now(); s.diskGuardDue(now) {
+			s.diskGuardTick(ctx, now)
+		}
 		select {
 		case <-ctx.Done():
 			return
 		case <-t.C:
 		}
 	}
+}
+
+// diskGuardDue reports whether a full tick is due: none has run yet, the
+// last one is diskGuardEvery old, or the disk has fallen below the floor
+// since.
+func (s *Server) diskGuardDue(now time.Time) bool {
+	g := &s.api.diskGuard
+	g.mu.Lock()
+	w := g.watch
+	g.mu.Unlock()
+	if w.at.IsZero() || now.Sub(w.at) >= diskGuardEvery || now.Before(w.at) {
+		return true
+	}
+	if w.held || w.minFree <= 0 || w.folder == "" {
+		return false
+	}
+	free := g.free
+	if free == nil {
+		free = diskFreeBytes
+	}
+	n, known := free(w.folder)
+	return known && n >= 0 && n < w.minFree
+}
+
+// watchDiskReserve frees the reserve file at the moment it helps, and
+// returns a function that ends the watch and waits for it.
+//
+// The reserve is room for the lines a honeypot still has to write when the
+// disk is full: Cowrie holds them in memory and writes them as it stops.
+// Freed while something is still filling the disk, it is filled with the
+// rest (found by the failure soak: the guard saw 127 MB left, freed its 64 MB
+// at once, the writer took them too, and Cowrie stopped a second later with
+// three lines it could not write). So the watch waits until the disk is full
+// and has stopped filling: under diskGuardFullBytes free on two looks in a
+// row, the second no lower than the first. A writer that never stops takes
+// the reserve as well; nothing can keep room from it.
+func watchDiskReserve(ctx context.Context, free func(string) (int64, bool), folder, reserve string) (stop func()) {
+	ctx, cancel := context.WithCancel(ctx)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		t := time.NewTicker(diskGuardSettleEvery)
+		defer t.Stop()
+		last := int64(-1)
+		for {
+			if n, known := free(folder); known && n >= 0 && n < diskGuardFullBytes {
+				if last >= 0 && n >= last {
+					if freed := releaseDiskReserve(reserve); freed > 0 {
+						slog.Warn("Disk guard: the disk is full; freed its reserve so the honeypots can write what they hold while they stop",
+							"reserve_mb", freed>>20, "free_mb", n>>20, "code", diskGuardCode)
+					}
+					return
+				}
+				last = n
+			} else {
+				last = -1
+			}
+			select {
+			case <-ctx.Done():
+				return
+			case <-t.C:
+			}
+		}
+	}()
+	return func() { cancel(); <-done }
+}
+
+// diskGuardReservePath is the reserve file of cfg's guard.
+func diskGuardReservePath(cfg *config.Config) string {
+	return filepath.Join(diskGuardFolder(cfg), diskGuardReserveName)
+}
+
+// releaseDiskReserve deletes the reserve file and returns how many bytes
+// that freed (0 when there was none).
+func releaseDiskReserve(path string) int64 {
+	info, err := os.Lstat(path)
+	if err != nil || !info.Mode().IsRegular() {
+		return 0
+	}
+	if os.Remove(path) != nil {
+		return 0
+	}
+	return info.Size()
+}
+
+// diskReserveSize is the size of the reserve file now.
+func diskReserveSize(path string) int64 {
+	info, err := os.Lstat(path)
+	if err != nil || !info.Mode().IsRegular() {
+		return 0
+	}
+	return info.Size()
+}
+
+// keepDiskReserve brings the reserve file to size bytes: it writes it when
+// it is missing or of another size, and removes it when size is 0. The bytes
+// are random, so no filesystem stores them as nothing.
+func keepDiskReserve(path string, size int64) error {
+	if have := diskReserveSize(path); have == size {
+		return nil
+	}
+	if err := os.Remove(path); err != nil && !errors.Is(err, fs.ErrNotExist) {
+		return err
+	}
+	if size <= 0 {
+		return nil
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o750); err != nil {
+		return err
+	}
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600) // #nosec G304 -- a fixed name in the instance's own data folder
+	if err != nil {
+		return err
+	}
+	_, err = io.CopyN(f, rand.Reader, size)
+	err = errors.Join(err, f.Sync(), f.Close())
+	if err != nil {
+		_ = os.Remove(path)
+	}
+	return err
 }
 
 // read is one look at the disk that holds cfg's honeypot logs.
@@ -249,6 +406,17 @@ func (s *Server) diskGuardTick(ctx context.Context, now time.Time) {
 	t := diskGuardThresholds(cfg)
 	r := g.read(cfg)
 	action := g.machine.Next(now, t, r, g.state.Held())
+	reservePath, reserveSize := diskGuardReservePath(cfg), cfg.Cleanup.DiskGuardReserveMB()<<20
+	endReserveWatch := func() {}
+	if (action == diskguard.Cleanup || action == diskguard.Stop) && diskReserveSize(reservePath) > 0 {
+		// While the guard cleans up and stops the honeypots, which takes
+		// seconds, the reserve goes the moment the disk is full.
+		free := g.free
+		if free == nil {
+			free = diskFreeBytes
+		}
+		endReserveWatch = watchDiskReserve(ctx, free, diskGuardFolder(cfg), reservePath)
+	}
 	stoppedFirst := false
 	if action == diskguard.Cleanup {
 		if stoppedFirst = diskGuardUrgent(t, r); stoppedFirst {
@@ -282,7 +450,28 @@ func (s *Server) diskGuardTick(ctx context.Context, now time.Time) {
 			s.diskGuardReconcile(ctx, cfg, now)
 		}
 	}
+	endReserveWatch()
+	if g.state.Held() {
+		// No honeypot writes any more. What they logged still has to reach
+		// the database, which needs room as well.
+		if freed := releaseDiskReserve(reservePath); freed > 0 {
+			slog.Warn("Disk guard: the honeypots are stopped; freed its reserve for the collector and the database",
+				"reserve_mb", freed>>20, "free_mb", r.Free>>20, "code", diskGuardCode)
+		}
+	}
 	g.save(path, now)
+
+	// The reserve is kept only while there is room for it above the resume
+	// mark and nothing is stopped; setting it to 0 removes it.
+	switch {
+	case !t.On() || reserveSize <= 0:
+		_ = keepDiskReserve(reservePath, 0)
+	case !g.state.Held() && r.Known && diskReserveSize(reservePath) != reserveSize &&
+		r.Free >= max(t.ResumeFree, t.MinFree)+reserveSize:
+		if err := keepDiskReserve(reservePath, reserveSize); err != nil && g.warnNow("reserve", now) {
+			slog.Warn("Disk guard: its reserve file could not be written; a disk that fills at once has no room to spare", "error", err)
+		}
+	}
 
 	cond := diskguard.Describe(t, r, g.state.Held())
 	if cond != g.condition {
@@ -293,8 +482,14 @@ func (s *Server) diskGuardTick(ctx context.Context, now time.Time) {
 		g.condition = cond
 	}
 	v := newDiskGuardView(t, r, g.state, now)
+	v.ReserveBytes = diskReserveSize(reservePath)
+	w := diskGuardWatch{at: now, folder: diskGuardFolder(cfg), held: g.state.Held()}
+	if t.On() {
+		w.minFree = t.MinFree
+	}
 	g.mu.Lock()
 	g.view = &v
+	g.watch = w
 	g.mu.Unlock()
 }
 

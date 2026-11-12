@@ -949,7 +949,9 @@ func TestSoak(t *testing.T) {
 		if f.RecoverySeconds < 0 && !strings.HasPrefix(f.Note, "skipped") {
 			t.Errorf("%s: %s", f.Name, f.Note)
 		}
-		if f.LostDuring > 0 && !strings.HasPrefix(f.Name, "honeypot-") && f.Name != "disk-full" {
+		// A full disk is no exception any more: Cowrie holds what it could
+		// not write, and the disk guard frees its reserve within a second.
+		if f.LostDuring > 0 && !strings.HasPrefix(f.Name, "honeypot-") {
 			t.Errorf("%s lost %d accepted connections", f.Name, f.LostDuring)
 		}
 		// Below the floor the disk guard must have closed the honeypot: a

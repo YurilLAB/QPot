@@ -1,6 +1,7 @@
 package server
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -161,6 +162,10 @@ func newGuardTest(t *testing.T, name string, states map[string]string, prep func
 			h.Enabled = guardEnabled[hp]
 			cfg.Honeypots[hp] = h
 		}
+		// No reserve file unless a test asks for one: the default is 64 MB
+		// of random bytes per test.
+		none := int64(0)
+		cfg.Cleanup.ReserveMB = &none
 		if prep != nil {
 			prep(cfg)
 		}
@@ -838,7 +843,7 @@ func TestStatusCarriesDiskGuard(t *testing.T) {
 		return out
 	}
 	dg := read()
-	if want := []string{"checked_at", "free_bytes", "min_free_bytes", "resume_free_bytes", "state", "stopped"}; !reflect.DeepEqual(keys(dg), want) {
+	if want := []string{"checked_at", "free_bytes", "min_free_bytes", "reserve_bytes", "resume_free_bytes", "state", "stopped"}; !reflect.DeepEqual(keys(dg), want) {
 		t.Fatalf("disk_guard keys %v, want %v", keys(dg), want)
 	}
 	if dg["state"] != "ok" || dg["min_free_bytes"] != float64(512*guardMB) || dg["resume_free_bytes"] != float64(1024*guardMB) {
@@ -851,7 +856,7 @@ func TestStatusCarriesDiskGuard(t *testing.T) {
 	g.setFree(100)
 	g.tick()
 	dg = read()
-	if want := []string{"checked_at", "code", "free_bytes", "min_free_bytes", "resume_free_bytes", "state", "stopped"}; !reflect.DeepEqual(keys(dg), want) {
+	if want := []string{"checked_at", "code", "free_bytes", "min_free_bytes", "reserve_bytes", "resume_free_bytes", "state", "stopped"}; !reflect.DeepEqual(keys(dg), want) {
 		t.Fatalf("disk_guard keys %v, want %v", keys(dg), want)
 	}
 	if dg["state"] != "low" || dg["code"] != "QP-RES-008" || dg["free_bytes"] != float64(100*guardMB) {
@@ -946,5 +951,246 @@ func TestDiskGuardFullDiskStopsBeforeCleanup(t *testing.T) {
 	}
 	if diskGuardUrgent(diskguard.FromMB(0, 0), diskguard.Reading{Free: 0, Known: true}) {
 		t.Error("a guard that is off is never urgent")
+	}
+}
+
+// The guard keeps a reserve file while there is room for it and frees it
+// first when the disk runs low, before cleanup and before any honeypot is
+// stopped: a honeypot that could not write its log can again at once.
+func TestDiskGuardReserve(t *testing.T) {
+	g := newGuardTest(t, "guard-reserve", allRunning(), func(cfg *config.Config) {
+		one := int64(1)
+		cfg.Cleanup.ReserveMB = &one
+	})
+	reserve := diskGuardReservePath(g.cfg)
+	size := func() int64 { return diskReserveSize(reserve) }
+
+	// Not enough room above the resume mark for it: none is written.
+	g.setFree(1024)
+	g.tick()
+	if size() != 0 {
+		t.Fatalf("a reserve of %d bytes was written with exactly the resume mark free", size())
+	}
+	g.setFree(50000)
+	g.tick()
+	if size() != guardMB {
+		t.Fatalf("reserve file is %d bytes, want %d", size(), guardMB)
+	}
+	if v := g.s.diskGuardStatus(); v.ReserveBytes != guardMB || v.State != "ok" {
+		t.Fatalf("status with a reserve: %+v", v)
+	}
+	data, err := os.ReadFile(reserve)
+	if err != nil || bytes.Count(data, []byte{0}) > len(data)/8 {
+		t.Fatalf("the reserve must hold bytes no filesystem stores as nothing: %v, %d zero bytes of %d", err, bytes.Count(data, []byte{0}), len(data))
+	}
+	g.wantCalls("plenty of room", nil, nil)
+
+	// The disk runs low and is not full: a honeypot can still write, so the
+	// reserve is kept for the moment it cannot, and goes once the honeypots
+	// are stopped, for the collector and the database.
+	var reserveAtStop int64 = -1
+	g.runner.onStop = func() {
+		if reserveAtStop < 0 {
+			reserveAtStop = size()
+		}
+	}
+	g.setFree(100)
+	g.tick()
+	g.wantCalls("low", []string{"cowrie", "dionaea", "endlessh"}, nil)
+	if reserveAtStop != guardMB || size() != 0 {
+		t.Fatalf("the reserve was %d bytes when the first honeypot was stopped and is %d now; want it kept until they are stopped, then freed", reserveAtStop, size())
+	}
+	if v := g.s.diskGuardStatus(); v.ReserveBytes != 0 {
+		t.Fatalf("status while low: %+v", v)
+	}
+	// Between the marks nothing is started and no reserve is written.
+	g.setFree(800)
+	g.tick()
+	if size() != 0 {
+		t.Fatal("a reserve was written while honeypots are stopped")
+	}
+	// Room again: the honeypots start and the reserve comes back.
+	g.setFree(50000)
+	g.tick()
+	g.wantCalls("room again", nil, []string{"cowrie", "dionaea", "endlessh"})
+	g.tick()
+	if size() != guardMB {
+		t.Fatalf("reserve after recovery is %d bytes, want %d", size(), guardMB)
+	}
+
+	// Turned off in the config: the file goes.
+	none := int64(0)
+	g.cfg.Cleanup.ReserveMB = &none
+	if err := config.Save(g.cfg); err != nil {
+		t.Fatal(err)
+	}
+	g.tick()
+	if size() != 0 {
+		t.Fatal("the reserve file stayed after cleanup.reserve_mb was set to 0")
+	}
+}
+
+// The reserve is for the lines a honeypot holds when the disk is full. Freed
+// while something still fills the disk, the writer takes it too: the guard
+// frees it when the disk is full and has stopped filling, and it does so
+// while it is busy stopping the honeypots, which is when they write.
+func TestDiskGuardReserveWaitsForAFullDisk(t *testing.T) {
+	g := newGuardTest(t, "guard-reserve-full", allRunning(), func(cfg *config.Config) {
+		one := int64(1)
+		cfg.Cleanup.ReserveMB = &one
+	})
+	reserve := diskGuardReservePath(g.cfg)
+	g.tick()
+	if diskReserveSize(reserve) != guardMB {
+		t.Fatal("no reserve after the first tick")
+	}
+
+	// Low, and still filling: every look finds less than the one before,
+	// down to nothing, where it stays. The first honeypot takes as long to
+	// stop as Cowrie does when it waits for room.
+	looks := 0
+	g.mu.Lock()
+	g.freeFn = func() int64 {
+		looks++
+		return max(0, 15-int64(looks))
+	}
+	g.mu.Unlock()
+	looksWhenFreed, freedDuringStop := 0, false
+	g.runner.onStop = func() {
+		if looksWhenFreed != 0 {
+			return
+		}
+		for deadline := time.Now().Add(10 * time.Second); time.Now().Before(deadline); time.Sleep(10 * time.Millisecond) {
+			if diskReserveSize(reserve) == 0 {
+				g.mu.Lock()
+				looksWhenFreed, freedDuringStop = looks, true
+				g.mu.Unlock()
+				return
+			}
+		}
+		looksWhenFreed = -1
+	}
+	g.tick()
+	g.wantCalls("filling", []string{"cowrie", "dionaea", "endlessh"}, nil)
+	if !freedDuringStop {
+		t.Fatal("the reserve was not freed while the honeypots were being stopped on a full disk")
+	}
+	// 15 looks find the disk still filling (14 MB down to 0); the reserve
+	// may go at the second look that finds it full, not before.
+	if looksWhenFreed < 16 {
+		t.Fatalf("the reserve was freed at look %d, while the disk was still being filled", looksWhenFreed)
+	}
+}
+
+// watchDiskReserve by itself: nothing while there is room, nothing while the
+// free space falls or cannot be read, the reserve when the disk stays full.
+func TestWatchDiskReserve(t *testing.T) {
+	dir := t.TempDir()
+	reserve := filepath.Join(dir, diskGuardReserveName)
+	write := func() {
+		t.Helper()
+		if err := keepDiskReserve(reserve, 4096); err != nil {
+			t.Fatal(err)
+		}
+	}
+	var mu sync.Mutex
+	free, known := int64(1<<30), true
+	set := func(n int64, k bool) { mu.Lock(); free, known = n, k; mu.Unlock() }
+	read := func(string) (int64, bool) { mu.Lock(); defer mu.Unlock(); return free, known }
+	wait := 4 * diskGuardSettleEvery
+
+	write()
+	stop := watchDiskReserve(context.Background(), read, dir, reserve)
+	time.Sleep(wait)
+	if diskReserveSize(reserve) == 0 {
+		t.Fatal("freed with a gigabyte of room")
+	}
+	set(diskGuardFullBytes, true) // exactly the mark is not below it
+	time.Sleep(wait)
+	if diskReserveSize(reserve) == 0 {
+		t.Fatal("freed at the mark, not below it")
+	}
+	set(0, false)
+	time.Sleep(wait)
+	if diskReserveSize(reserve) == 0 {
+		t.Fatal("freed when the free space could not be read")
+	}
+	set(0, true)
+	for deadline := time.Now().Add(5 * time.Second); diskReserveSize(reserve) != 0; time.Sleep(10 * time.Millisecond) {
+		if time.Now().After(deadline) {
+			t.Fatal("not freed on a disk that stays full")
+		}
+	}
+	stop()
+
+	// Ending the watch ends it: a disk that fills afterwards frees nothing.
+	write()
+	set(1<<30, true)
+	stop = watchDiskReserve(context.Background(), read, dir, reserve)
+	stop()
+	set(0, true)
+	time.Sleep(wait)
+	if diskReserveSize(reserve) == 0 {
+		t.Fatal("freed after the watch was ended")
+	}
+}
+
+// Between two full ticks the guard only reads the free space. A disk that
+// falls below the floor makes the next full tick due at once; the reserve is
+// that tick's to free.
+func TestDiskGuardWatch(t *testing.T) {
+	g := newGuardTest(t, "guard-watch", allRunning(), func(cfg *config.Config) {
+		one := int64(1)
+		cfg.Cleanup.ReserveMB = &one
+	})
+	reserve := diskGuardReservePath(g.cfg)
+	if !g.s.diskGuardDue(g.now) {
+		t.Fatal("no full tick was due before the first one")
+	}
+	g.tick()
+	if diskReserveSize(reserve) != guardMB {
+		t.Fatal("no reserve after the first tick")
+	}
+	soon := g.now.Add(diskGuardWatchEvery)
+	if g.s.diskGuardDue(soon) {
+		t.Fatal("a full tick is due a second after the last, with plenty of room")
+	}
+	// Unknown free space is no reason to act.
+	g.mu.Lock()
+	g.known = false
+	g.mu.Unlock()
+	g.setFree(0)
+	if g.s.diskGuardDue(soon) {
+		t.Fatal("an unreadable disk made a tick due")
+	}
+	g.mu.Lock()
+	g.known = true
+	g.mu.Unlock()
+
+	// Below the floor, not yet urgent: a tick is due, the reserve is the
+	// tick's to free.
+	g.setFree(300)
+	if !g.s.diskGuardDue(soon) || diskReserveSize(reserve) != guardMB {
+		t.Fatalf("300 MB free: due and reserve kept expected; reserve is %d bytes", diskReserveSize(reserve))
+	}
+	// Hardly anything left: a tick is due, and it frees the reserve.
+	g.setFree(0)
+	if !g.s.diskGuardDue(soon) {
+		t.Fatal("a full disk did not make a tick due")
+	}
+	g.now = soon.Add(-diskGuardEvery) // tick() adds it back
+	g.tick()
+	g.wantCalls("full", []string{"cowrie", "dionaea", "endlessh"}, nil)
+	if diskReserveSize(reserve) != 0 {
+		t.Fatal("the reserve was not freed by the tick that found the disk full")
+	}
+
+	// With the honeypots stopped nothing is urgent: the next look waits for
+	// the ordinary interval.
+	if g.s.diskGuardDue(g.now.Add(diskGuardWatchEvery)) {
+		t.Fatal("a tick is due every second while the honeypots are already stopped")
+	}
+	if !g.s.diskGuardDue(g.now.Add(diskGuardEvery)) {
+		t.Fatal("no tick due after the ordinary interval")
 	}
 }

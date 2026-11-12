@@ -838,3 +838,35 @@ func TestDiskGuardSettings(t *testing.T) {
 		t.Error("a refused save changed the config file")
 	}
 }
+
+func TestDiskGuardReserve(t *testing.T) {
+	mb := func(n int64) *int64 { return &n }
+	for _, c := range []struct {
+		name          string
+		cleanup       CleanupConfig
+		want          int64
+		refuseContain string
+	}{
+		{name: "defaults", cleanup: CleanupConfig{}, want: 64},
+		{name: "small floor", cleanup: CleanupConfig{MinFreeMB: mb(100)}, want: 50},
+		{name: "guard off", cleanup: CleanupConfig{MinFreeMB: mb(0)}, want: 0},
+		{name: "none", cleanup: CleanupConfig{ReserveMB: mb(0)}, want: 0},
+		{name: "set", cleanup: CleanupConfig{ReserveMB: mb(200)}, want: 200},
+		{name: "as large as the floor", cleanup: CleanupConfig{ReserveMB: mb(512)}, refuseContain: "cleanup.reserve_mb 512"},
+		{name: "negative", cleanup: CleanupConfig{ReserveMB: mb(-1)}, refuseContain: "cleanup.reserve_mb -1"},
+	} {
+		err := c.cleanup.ValidateDiskGuard()
+		if c.refuseContain != "" {
+			if err == nil || !strings.Contains(err.Error(), c.refuseContain) {
+				t.Errorf("%s: ValidateDiskGuard = %v, want a refusal naming %q", c.name, err, c.refuseContain)
+			}
+			continue
+		}
+		if err != nil {
+			t.Errorf("%s: ValidateDiskGuard = %v", c.name, err)
+		}
+		if got := c.cleanup.DiskGuardReserveMB(); got != c.want {
+			t.Errorf("%s: reserve %d MB, want %d", c.name, got, c.want)
+		}
+	}
+}

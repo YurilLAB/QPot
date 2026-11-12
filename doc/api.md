@@ -110,7 +110,7 @@ The reply also carries `disk_guard`, the state of the
 
 ```json
 {"state": "low", "free_bytes": 104857600, "min_free_bytes": 536870912, "resume_free_bytes": 1073741824,
- "stopped": [{"name": "cowrie", "stopped_at": "2026-11-12T10:00:05Z"}], "code": "QP-RES-008",
+ "reserve_bytes": 0, "stopped": [{"name": "cowrie", "stopped_at": "2026-11-12T10:00:05Z"}], "code": "QP-RES-008",
  "checked_at": "2026-11-12T10:00:10Z"}
 ```
 
@@ -119,6 +119,8 @@ The reply also carries `disk_guard`, the state of the
 stopped), `off` or `unknown` (the free space cannot be read; `free_bytes` is
 then `null`). `stopped` lists the honeypots the guard stopped and will start
 again. `code` is present while the state is `low` or anything is stopped.
+`reserve_bytes` is the size of the reserve file the guard holds now (0 when
+it keeps none or has freed it).
 
 ### GET /api/instance
 
