@@ -215,14 +215,117 @@ negative, fragmented-frame and restart tests therefore complement the profile
 picker. These checks establish selected behavior, not complete vendor firmware
 conformance or compatibility with every engineering tool.
 
+Conpot's Modbus server closes a connection at once when a client sends the
+five bytes `quit.`, which no PLC does and which is easy to try. QPot's
+mounted server treats them as the start of a frame header like any other
+bytes.
+
 The existing Modbus register map remains compatible with earlier QPot versions;
 its unusual raw wire addresses are not presented as a verified M340 process map.
-Beckhoff OPC UA values are static; its build date, state dynamics and advertised
-internal endpoints still need product-specific comparison. IEC 104/DNP3 session
+The Beckhoff OPC UA server's build date and advertised internal endpoints
+still need product-specific comparison. IEC 104/DNP3 session
 and point tests do not implement a complete station, select/operate process or
 programming environment. Standard ports may be remapped by Docker/NAT. The
 support-host exports use device ports and distinct private asset references, not
 the deployment's published endpoints.
+
+### One site per instance
+
+The image draws addresses, MACs and serial numbers per install. Other things
+a visitor reads were the same on every install, and so named the image:
+
+| Profile | The same everywhere | Now per instance |
+|---|---|---|
+| Substation RTU | SNMP name `DE-BER01`, location `BER01, T2E`, contact `Corporate IT`, facility `BER01 Substation` | One station code for all four (for example `BRK23-RTU3`, `BRK23, T2E`, `BRK23 Substation`) and a contact |
+| Substation RTU, DNP3 | Two binary inputs reading off and on, two analog inputs reading 25 and 100 | The site's own four values. They do not move while the instance runs. |
+| ICCP server | Domain `BER01_ICC` and points named `BER01_…` | The same kind of station code |
+| Server BMC | System name `DoE` | A host name such as `node16-ipmi` |
+| Smart meter | Reporting server `pwr_ctrl_mgmt01.int.local` at `10.232.15.242` | A server name and a private address |
+| Building controller | Location `Technikzentrale` | A plant room name |
+
+QPot replaces them after the image has rendered the profile, from a seed it
+keeps beside the image's own identity (`qpot_site.json` in the honeypot's
+state folder), so a restart or a new container keeps the site. Each value the
+image is known to carry must be found where it is expected: if one is not,
+the image has changed and the honeypot does not start with unreviewed values.
+`TestConpotSiteIdentity` and the live profile test cover it.
+
+Left as the image has them, because they are what the real product reports
+on every unit: the Modicon's vendor, product code and revision, the DNP3
+product code, and the TwinCAT runtime's device name.
+
+### The tank gauge
+
+The image's tank gauge (`guardian_ast`, a Veeder-Root TLS-350) is the most
+written-about honeypot there is, and the image's code shows every published
+sign: replies without the SOH and ETX bytes a gauge frames them with, a date
+like `11/12/2026 10:15` where a gauge prints `NOV 12, 2026 10:15 AM`, readings
+drawn at random when it starts that never change afterwards, a temperature
+compensated volume unrelated to temperature, an ullage unrelated to volume,
+one tank always in high water alarm, and an error for every command but
+five.
+
+QPot replaces that server (a read-only mount over the image's file, tied to
+its hash). What it does instead:
+
+- **One model of the site gives every report its numbers.** Each tank has a
+  size and a shape. Fuel is sold through the day and less at night, a
+  delivery refills a tank that runs low and appears in the delivery report,
+  ullage is what is left of the tank, height follows from volume and the
+  tank's diameter, and temperature compensated volume from volume and
+  temperature. The model depends only on the instance's seed and the clock:
+  two looks an hour apart differ as a real site's do, and a restart changes
+  nothing.
+- **Reports are laid out as a gauge lays them out.** The inventory report
+  reproduces a published capture of a real gauge column for column
+  (`TestConpotTankGaugeLooksLikeAGauge` rebuilds that capture's row and date
+  line byte for byte). The delivery, leak test, shift, status and label
+  reports follow the wording of the vendor's serial interface manual.
+- **Per instance:** the station's name and street, three or four tanks and
+  their products, sizes and sales, and a clock a few minutes off. The header
+  names no town, because QPot does not know where the sensor is hosted and a
+  header must not contradict it.
+- **A label a visitor sets stays set**, across connections and restarts, as
+  on a real gauge. The image forgot it when the connection closed.
+- **A command the gauge does not know** gets `9999FF1B` between SOH and ETX.
+  Tank numbers work (`I20102` is tank 2), and so does the software revision
+  report scanners ask for (`I90200`).
+
+What is not verified against a real gauge: the line ends (carriage return and
+line feed are assumed; no public capture shows the bytes), the exact column
+positions of the reports taken from the manual, whose samples are typeset,
+and commands outside inventory, delivery, leak test, shift, status, labels
+and software revision, which get the not-understood reply. Units are US
+gallons, inches and degrees Fahrenheit, as on the captures; a metric site is
+not offered.
+
+### The PLC's process values
+
+The image's Beckhoff profile has four OPC UA variables, and on every install
+they read 21.4 degrees, 3.82 bar, pump running, batch 1187, for as long as
+the container runs. A PLC's program writes its variables on every cycle.
+
+QPot mounts the image's OPC UA server with one change (read-only, tied to
+the file's hash): the four variables come from a small model of a batch
+process. A pump runs for part of every batch, the pressure follows the pump
+within seconds, the temperature follows both slowly and moves a little over
+the day, and the batch counter counts batches since the plant was
+commissioned. What a batch lasts (18 to 55 minutes), how long the pump runs,
+the pressures, the temperature and the commissioning date are drawn from the
+instance's seed. The readings depend only on the seed and the clock, so a
+restart continues them, and they are written once a second with their time:
+a value a visitor writes is replaced by the next cycle, as a running program
+would replace it. The batch counter is a 32-bit integer, as TwinCAT's is,
+where the image served 64 bits.
+
+`TestConpotOPCUAProcess` checks the model (nothing jumps, the pressure
+follows the pump, 300 seeds give 300 plants, none reads the image's values)
+and the live profile test reads the variables from the running image twice,
+writes one in between and expects the program's value back.
+
+What this is not: a TwinCAT address space. A real server shows the PLC's
+whole symbol tree, its types and its device state; this one shows one folder
+with four variables.
 
 The building controller's BACnet Who-Is and Who-Has discovery respects paired,
 inclusive device-instance limits. Out-of-range or incomplete discovery ranges

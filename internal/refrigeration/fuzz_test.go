@@ -178,7 +178,7 @@ func FuzzControllerStateSequence(f *testing.F) {
 				case 6:
 					cmd.Attrs = append(cmd.Attrs, attr("action", "read_dyn_list_info"), attr("device_id", "084B8020_015B"))
 				}
-				out, code, changed, _ := s.dispatch(cmd, auth, "127.0.0.1", 8080)
+				out, code, changed, _ := s.dispatch(cmd, auth)
 				if (code != 0 || !changed) && !reflect.DeepEqual(before, s.plant) {
 					t.Fatal("rejected/read-only request mutated shared plant")
 				}

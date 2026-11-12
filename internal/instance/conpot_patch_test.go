@@ -32,13 +32,25 @@ func TestConpotModbusPatchPinned(t *testing.T) {
                         if not chunk:
                             break
                         request += chunk
-                        if request.strip().lower() == b"quit.":
-                            break
 `)
 	if bytes.Count(conpotModbusServerPy, patchedBlock) != 1 {
 		t.Fatal("Conpot patch does not contain exactly one bounded header accumulator")
 	}
 	restored := bytes.Replace(conpotModbusServerPy, patchedBlock, originalBlock, 1)
+	// Upstream closes the connection on the five bytes "quit."; the patch
+	// has a comment where that was.
+	quitNote := []byte(`                # QPot: upstream hangs up at once on the five bytes "quit.".
+                # No PLC does; they are the start of a header like any other.
+`)
+	quitBlock := []byte(`                if request.strip().lower() == b"quit.":
+                    logger.info("Modbus client quit. (%s)", session.id)
+                    session.log_event(event_type="CONNECTION_QUIT")
+                    break
+`)
+	if bytes.Count(restored, quitNote) != 1 || bytes.Contains(conpotModbusServerPy, []byte("CONNECTION_QUIT")) {
+		t.Fatal("Conpot patch still closes on \"quit.\" or does not say where upstream did")
+	}
+	restored = bytes.Replace(restored, quitNote, quitBlock, 1)
 	deadlineBlock := []byte(`                        remaining_timeout = frame_deadline - time.monotonic()
                         if remaining_timeout <= 0:
                             break
@@ -213,5 +225,39 @@ func TestConpotModbusPatchMounts(t *testing.T) {
 		if !strings.Contains(svc, line) {
 			t.Fatalf("generated Compose does not mount the Modbus patch read-only: want %q", strings.TrimSpace(line))
 		}
+	}
+}
+
+// TestConpotTankGaugeMounts: only the tank gauge profile gets the replacement
+// server, mounted read-only over the image's module.
+func TestConpotTankGaugeMounts(t *testing.T) {
+	want := conpotGuardianASTPatchVolume()
+	if len(conpotGuardianASTOriginalSHA256) != 64 || len(want.Content) == 0 {
+		t.Fatal("the tank gauge server or the hash of the file it replaces is missing")
+	}
+	for _, id := range ConpotTemplateIDs() {
+		cfg := conpotConfig("qp_gauge_patch_mount", id)
+		found := false
+		for _, mount := range deployProfile(cfg, "conpot").Volumes {
+			if mount.ContainerPath != want.ContainerPath {
+				continue
+			}
+			found = true
+			if !mount.File || !mount.ReadOnly || !bytes.Equal(mount.Content, want.Content) {
+				t.Fatalf("%s: the tank gauge server is not a populated read-only file", id)
+			}
+		}
+		if found != (id == "guardian_ast") {
+			t.Fatalf("%s: tank gauge server mounted=%v", id, found)
+		}
+	}
+	cfg := conpotConfig("qp_gauge_patch_compose", "guardian_ast")
+	svc, _, _ := publishedPorts(t, cfg, "conpot")
+	line := "/honeypots/conpot/" + want.HostSubdir + ":" + want.ContainerPath + ":ro\n"
+	if !strings.Contains(svc, line) {
+		t.Fatalf("generated Compose does not mount the tank gauge server read-only: want %q", strings.TrimSpace(line))
+	}
+	if bytes.Contains(want.Content, []byte("\r")) {
+		t.Error("the tank gauge server has CR bytes")
 	}
 }

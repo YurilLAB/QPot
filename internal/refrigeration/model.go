@@ -32,6 +32,24 @@ type Identity struct {
 	MAC       string `json:"mac"`
 }
 
+// unitPort is the web port a unit reports for itself: the one it listens on
+// as shipped, whatever port a visitor reached it through.
+const unitPort = 80
+
+// LANAddress is the address the unit reports as its own in unit discovery: a
+// private address on the site's network, the same for the life of the
+// identity. A controller behind a router knows this address, not the public
+// one a visitor used, and never the address of the container it runs in here
+// (that used to be reported: a Docker bridge address and port 8080).
+func (i Identity) LANAddress() string {
+	sum := sha256.Sum256([]byte("refrigeration-lan-v1\x00" + i.Serial + "\x00" + i.MAC))
+	host := 10 + int(sum[2])%240 // 10 to 249: not the network, a gateway or broadcast
+	if sum[0]%3 == 0 {
+		return fmt.Sprintf("10.%d.%d.%d", sum[1], sum[3], host)
+	}
+	return fmt.Sprintf("192.168.%d.%d", sum[1], host)
+}
+
 // MaintenanceCredential derives a decoy archive credential. It never accesses
 // real credentials or a remote service; the control plane registers the same
 // value as a canary. The runtime seed must be an independently derived value.

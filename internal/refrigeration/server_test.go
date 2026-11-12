@@ -160,6 +160,20 @@ func TestProtocolDiscoveryAuthAndSelectors(t *testing.T) {
 	if units.child("total").Text != "1" || len(units.child("store_name").Text) > 16 || units.child("unit_name").Text != raw.child("unit_name").Text {
 		t.Fatal("incoherent unit discovery")
 	}
+	// The unit names its own address on the site's network and its own web
+	// port, never where this process happens to listen (in a container: a
+	// Docker bridge address and port 8080, which gave the honeypot away).
+	unit := units.child("unit")
+	ip := net.ParseIP(unit.child("ip").Text)
+	if ip == nil || !ip.IsPrivate() || ip.IsLoopback() || unit.child("port").Text != "80" {
+		t.Fatalf("the unit reports itself at %q port %q", unit.child("ip").Text, unit.child("port").Text)
+	}
+	if _, docker, _ := net.ParseCIDR("172.16.0.0/12"); docker.Contains(ip) {
+		t.Fatalf("the unit reports an address in Docker's range: %s", ip)
+	}
+	if again := decoded(t, callXML(t, s, `<cmd action="read_units"/>`, c, false, nil), 0).child("unit").child("ip").Text; again != unit.child("ip").Text {
+		t.Fatalf("the unit's address changed between two questions: %s then %s", unit.child("ip").Text, again)
+	}
 	catalog := decoded(t, callXML(t, s, `<cmd action="read_parm_info" device_id="084B8020_015B" num_only="1"/>`, c, false, nil), 0).child("parms")
 	if catalog.value("count") != "6" || len(catalog.all("parm")) != 6 {
 		t.Fatal("wrong finite parameter catalog")

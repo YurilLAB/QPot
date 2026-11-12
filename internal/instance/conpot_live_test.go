@@ -46,6 +46,11 @@ print(actual)`
 		{conpotModbusPatchVolume().ContainerPath, conpotModbusOriginalSHA256},
 		{conpotModbusSlavePatchVolume().ContainerPath, conpotSlaveOriginalSHA256},
 		{conpotBACnetPatchVolume().ContainerPath, conpotBACnetOriginalSHA256},
+		{conpotGuardianASTPatchVolume().ContainerPath, conpotGuardianASTOriginalSHA256},
+		{conpotOPCUAPatchVolume().ContainerPath, conpotOPCUAOriginalSHA256},
+		// What the site step calls, and the spec whose values it replaces.
+		{"/opt/tpot/tpot_templates.py", conpotTemplatesPyOriginalSHA256},
+		{"/opt/tpot/templates.toml", conpotTemplatesSpecOriginalSHA256},
 	} {
 		if output, err := conpotLiveDocker(time.Minute, "run", "--rm", "--network", "none", "--read-only",
 			"--cap-drop", "ALL", "--cap-add", "NET_BIND_SERVICE", "--security-opt", "no-new-privileges:true",
@@ -62,6 +67,7 @@ print(actual)`
 		{"IEC104", conpotLiveRTUProbe},
 		{"beckhoff_cx", conpotLiveBeckhoffProbe},
 		{"building_automation", conpotLiveBACnetProbe},
+		{"guardian_ast", conpotLiveTankGaugeProbe},
 	} {
 		t.Run(test.id, func(t *testing.T) {
 			// Sequential subtests bound VFS disk usage and keep ownership of every
@@ -234,9 +240,19 @@ func conpotLiveSnapshot(t *testing.T, name, template string) string {
 root=pathlib.Path("/tmp/conpot/templates")/sys.argv[1]
 files={str(p.relative_to(root)):hashlib.sha256(p.read_bytes()).hexdigest() for p in sorted(root.rglob("*.toml"))}
 assert files, "no rendered protocol configuration"
+# Values that are the same on every install of the image name the image.
+rendered="".join(p.read_text() for p in sorted(root.rglob("*.toml")))
+for shared in ("BER01","Corporate IT",'"DoE"',"pwr_ctrl_mgmt01","10.232.15.242","Technikzentrale"):
+ assert shared not in rendered, "the image's own "+shared+" is still in the rendered profile"
+site=pathlib.Path("/var/lib/conpot/qpot_site.json")
+assert site.is_file(), "the site's seed was not kept"
+files["site"]=json.loads(site.read_text())["seed"]
 identity=pathlib.Path("/var/lib/conpot")/(sys.argv[1]+".json")
-if sys.argv[1] != "plc_modbus": assert identity.is_file(), "persistent identity missing"
+if sys.argv[1] not in ("plc_modbus","guardian_ast"): assert identity.is_file(), "persistent identity missing"
 files["identity"]=hashlib.sha256(identity.read_bytes()).hexdigest() if identity.is_file() else None
+if sys.argv[1]=="guardian_ast":
+ gauge=json.loads((pathlib.Path("/var/lib/conpot")/"qpot_gauge.json").read_text())
+ files["gauge"]=[gauge["seed"],gauge["anchor"],gauge["labels"]]
 print(json.dumps(files,sort_keys=True))`
 	output, err := conpotLiveDocker(15*time.Second, "exec", name, "python3", "-c", code, template)
 	if err != nil {
@@ -359,8 +375,15 @@ maximum_pdu=bytes.fromhex("2b0e0100")+b"\x00"*249
 assert len(maximum_pdu)==253
 assert request(maximum_pdu,41)==b"\xab\x03"
 assert request(read)==expected,"maximum frame damaged the listener"
+# Conpot's own server hangs up at once on the five bytes "quit.", which no
+# PLC does. Here they are the start of a header like any other five bytes:
+# nothing comes back, and the connection ends when the header's time is up.
 with socket.create_connection(("127.0.0.1",502),timeout=3) as s:
- s.settimeout(3);s.sendall(b"qu");time.sleep(0.02);s.sendall(b"it.");closed(s)
+ s.settimeout(2);s.sendall(b"qu");time.sleep(0.02);s.sendall(b"it.")
+ try: early=s.recv(1)
+ except socket.timeout: early=None
+ assert early is None,"closed or answered on quit: %r"%(early,)
+ s.settimeout(7);closed(s)
 with socket.create_connection(("127.0.0.1",502),timeout=3) as s:
  s.settimeout(7);s.sendall(frame(read,50)[:3]);closed(s)
 assert request(read)==expected, "header timeout damaged the listener"
@@ -424,9 +447,14 @@ with socket.create_connection(("127.0.0.1",20000),timeout=3) as s:
  s.sendall(header+crc(header)+payload+crc(payload));control,body=read_link(s)
  assert control&0x0f==4 and len(body)>=5 and body[0]&0xc0==0xc0,body.hex()
  assert body[1]&0x0f==0 and body[2]==0x81,body.hex()
- # Pinned template: binary inputs false/true and signed analog values25/100.
- objects=bytes([1,2,0,0,1,1,0x81,30,1,0,0,1])+b"\x01"+struct.pack("<i",25)+b"\x01"+struct.pack("<i",100)
- assert body[5:]==objects,body.hex()
+ # Two binary inputs and two signed analog values: this site's, as its
+ # rendered profile has them, and not the 25 and 100 every install had.
+ import tomllib
+ points=tomllib.load(open("/tmp/conpot/templates/IEC104/dnp3.toml","rb"))["dnp3"]
+ binary=[p["value"] for p in points["binary_inputs"]];analog=[p["value"] for p in points["analog_inputs"]]
+ assert len(binary)==2 and len(analog)==2 and analog!=[25,100],points
+ objects=bytes([1,2,0,0,1,1|(0x80 if binary[0] else 0),1|(0x80 if binary[1] else 0),30,1,0,0,1])+b"\x01"+struct.pack("<i",analog[0])+b"\x01"+struct.pack("<i",analog[1])
+ assert body[5:]==objects,(body.hex(),objects.hex())
 print("IEC104 STARTDT/TESTFR, Siemens SNMP identification and known-address DNP3 class-zero values, addresses and CRCs")
 `
 
@@ -440,16 +468,37 @@ header=target+struct.pack("<H",851)+b"\x01"*6+struct.pack("<HHHIII",32905,1,4,0,
 assert b"Plc30 App" in tcp(48898,b"\0\0"+struct.pack("<I",len(header))+header)
 import asyncio
 from asyncua import Client
+from asyncua import ua
 async def browse():
  async with Client("opc.tcp://127.0.0.1:4840/") as client:
-  values={}
+  nodes={}
   for node in await client.nodes.objects.get_children():
    if (await node.read_browse_name()).Name=="PLC1":
     for variable in await node.get_children():
-     values[(await variable.read_browse_name()).Name]=await variable.read_value()
-  assert values=={"MAIN.fTemperature":21.4,"MAIN.fPressure":3.82,"MAIN.bPumpRunning":True,"MAIN.nBatchId":1187},values
+     nodes[(await variable.read_browse_name()).Name]=variable
+  assert sorted(nodes)==["MAIN.bPumpRunning","MAIN.fPressure","MAIN.fTemperature","MAIN.nBatchId"],sorted(nodes)
+  async def read():
+   return {name:await node.read_data_value() for name,node in nodes.items()}
+  first=await read()
+  values={name:data.Value.Value for name,data in first.items()}
+  # A plant of this install: none of the image's own readings.
+  assert values["MAIN.fTemperature"]!=21.4 and values["MAIN.fPressure"]!=3.82 and values["MAIN.nBatchId"]!=1187,values
+  assert 23<values["MAIN.fTemperature"]<61 and 0<values["MAIN.fPressure"]<6 and values["MAIN.nBatchId"]>5000,values
+  assert first["MAIN.nBatchId"].Value.VariantType==ua.VariantType.Int32,first["MAIN.nBatchId"].Value.VariantType
+  assert first["MAIN.fPressure"].Value.VariantType==ua.VariantType.Double and first["MAIN.bPumpRunning"].Value.VariantType==ua.VariantType.Boolean
+  # The program writes its variables on every cycle: a client's write does
+  # not stay, and the readings and their times move.
+  await nodes["MAIN.fPressure"].write_value(ua.DataValue(ua.Variant(99.5,ua.VariantType.Double)))
+  await asyncio.sleep(2.6)
+  second=await read()
+  for name in ("MAIN.fPressure","MAIN.fTemperature"):
+   assert second[name].Value.Value!=first[name].Value.Value,(name,first[name].Value.Value)
+   assert abs(second[name].Value.Value-first[name].Value.Value)<1.5,(name,first[name].Value.Value,second[name].Value.Value)
+   assert second[name].SourceTimestamp>first[name].SourceTimestamp,(name,first[name].SourceTimestamp,second[name].SourceTimestamp)
+  assert second["MAIN.nBatchId"].Value.Value-values["MAIN.nBatchId"] in (0,1)
+  return values
 asyncio.run(browse())
-print("OPC UA handshake and process variable reads, ADS device identification")
+print("OPC UA handshake, process variables of this install that move and are rewritten after a client's write, ADS device identification")
 `
 
 // conpotLiveBACnetProbe uses independent BACnet/IP encoding/decoding, rather
@@ -529,4 +578,56 @@ for service in (8,7):
  # Silence must result from selection semantics, not a crashed listener.
  exchange(service,None,None,True)
 print(json.dumps({"BACnet":"Who-Is/I-Am and Who-Has/I-Have","instance":instance,"range":"inclusive/paired/22-bit","recovery":True}))
+`
+
+// conpotLiveTankGaugeProbe talks to the tank gauge as a scanner does and
+// checks what published honeypot checks look at: the framing, the date line,
+// the layout and coherence of the inventory, a gauge's answer to a command
+// it does not know, and a label that stays set.
+const conpotLiveTankGaugeProbe = `
+import re
+def ask(command,more=b"\n"):
+ with socket.create_connection(("127.0.0.1",10001),timeout=5) as s:
+  s.settimeout(5);s.sendall(b"\x01"+command+more);data=b""
+  while not data.endswith(b"\x03"):
+   chunk=s.recv(8192)
+   assert chunk, ("closed before ETX",command,data)
+   data+=chunk
+  return data
+reply=ask(b"I20100")
+assert reply[:1]==b"\x01" and reply.count(b"\x01")==1 and reply.count(b"\x03")==1, reply[:40]
+lines=reply[1:-1].decode("ascii").split("\r\n")
+assert lines[1]=="I20100", lines[:3]
+assert re.match(r"^(JAN|FEB|MAR|APR|MAY|JUN|JUL|AUG|SEP|OCT|NOV|DEC) [ 123]\d, 20\d\d [ 1]\d:[0-5]\d (AM|PM)$",lines[2]), lines[2]
+assert "/" not in lines[2], "a numeric date is how the image's own gauge is recognised"
+assert lines[9]=="IN-TANK INVENTORY" and lines[11]=="TANK PRODUCT             VOLUME TC VOLUME   ULLAGE   HEIGHT    WATER     TEMP", lines[9:12]
+rows=[l for l in lines[12:] if l.strip()]
+assert 2<=len(rows)<=6, rows
+for row in rows:
+ assert len(row)==77 and re.match(r"^ {2}\d {2}.{20} *\d+ +\d+ +\d+ +\d+\.\d\d +\d+\.\d\d +\d+\.\d\d$",row), row
+ volume,tc,ullage=int(row[25:31]),int(row[31:41]),int(row[41:50])
+ height,water,temp=float(row[50:59]),float(row[59:68]),float(row[68:77])
+ assert 3000<volume+ullage<16000 and 0<height<121 and 0<=water<2 and 35<temp<90, row
+ # TC volume follows from volume and temperature, gasoline or diesel.
+ assert any(abs(tc-volume*(1+k*(60-temp)))<=2 for k in (0.0007,0.00045)), row
+assert ask(b"I20100").split(b"\r\n")[12:]==reply.split(b"\r\n")[12:], "two looks a moment apart differ"
+one=ask(b"I20101")
+assert one.count(b"\r\n  1  ")==1 and b"\r\n  2  " not in one, one
+assert ask(b"I30100")==b"\x019999FF1B\x03" and ask(b"I20109")==b"\x019999FF1B\x03" and ask(b"ZZZZZZ")==b"\x019999FF1B\x03"
+for command,must in ((b"I20200",b"DELIVERY REPORT"),(b"I20300",b"TEST STATUS"),(b"I20400",b"SHIFT 1 STARTING VALUES"),(b"I20500",b"STATUS"),(b"I90200",b"SOFTWARE REVISION LEVEL")):
+ answer=ask(command)
+ assert answer[:1]==b"\x01" and must in answer, (command,answer[:80])
+assert b"HIGH WATER ALARM" not in ask(b"I20500")
+labelled=ask(b"S60202",b"PREMIUM LIVE\n")
+assert b"PRODUCT LABEL" in labelled and b"PREMIUM LIVE" in labelled, labelled
+assert b"\r\n  2  PREMIUM LIVE " in ask(b"I20100")
+# Noise before a command is ignored, as on a serial line.
+with socket.create_connection(("127.0.0.1",10001),timeout=5) as s:
+ s.settimeout(5);s.sendall(b"GET / HTTP/1.0\r\n\r\n");time.sleep(0.3);s.sendall(b"\x01I20500\n");data=b""
+ while not data.endswith(b"\x03"):
+  chunk=s.recv(8192)
+  assert chunk, data
+  data+=chunk
+ assert data[:1]==b"\x01" and b"STATUS" in data, data[:60]
+print("tank gauge:",len(rows),"tanks,",lines[2])
 `

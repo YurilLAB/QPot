@@ -255,7 +255,31 @@ done
 `
 
 func conpotStartScript() string {
-	return conpotProxySetup + `exec python3 /opt/tpot/tpot_templates.py render "$CONPOT_TEMPLATE"`
+	return conpotProxySetup + `exec python3 ` + conpotSitePath + ` "$CONPOT_TEMPLATE"`
+}
+
+// conpotSitePath is where conpotSitePy is mounted in the container.
+const conpotSitePath = "/opt/qpot/site_identity.py"
+
+// The image's entrypoint (tpot_templates.py) and its profile spec, which
+// conpotSitePy calls and whose values it replaces: checked against the image
+// by the live test before anything is mounted.
+const (
+	conpotTemplatesPyOriginalSHA256   = "70455c98ec5ea02f3aea04251bcd7f966150040c7941526b6b9e6b71dc20847b"
+	conpotTemplatesSpecOriginalSHA256 = "de251cecb2984221bba391c67f37f5399c13cbd82d145c5db193740581934205"
+)
+
+// conpotSitePy starts Conpot as the image's entrypoint does, and gives the
+// rendered profile a site of its own first: the station, contact, host and
+// room names that are the same on every install of the image (and so name
+// it) are replaced by values drawn from a seed kept in /var/lib/conpot.
+//
+//go:embed honeypotfiles/conpot/site_identity.py
+var conpotSitePy []byte
+
+func conpotSiteVolume() deployVolume {
+	return deployVolume{HostSubdir: "patch/site_identity.py", ContainerPath: conpotSitePath,
+		File: true, ReadOnly: true, Content: conpotSitePy}
 }
 
 // Conpot's protocol patches come from this exact image release and source files.
@@ -267,6 +291,10 @@ const (
 	conpotModbusOriginalSHA256 = "e189928a7dc3b3970393b70d50c1ee19e0221742ccf92700bffa412a2dab1218"
 	conpotSlaveOriginalSHA256  = "2da36e02c8bf4dd06886f2c5bc224ed53bcac1c380a4f28816a1c779b9c161f0"
 	conpotBACnetOriginalSHA256 = "d56e2b7da061129cddf1b763fda49299cfa92831c6ef52ee3ef96356253ffd98"
+	// The tank gauge server is replaced whole, not edited: this is the file
+	// it stands in for.
+	conpotGuardianASTOriginalSHA256 = "15c1d0d54fb0c41890c652c5716ad6c39ab1500a9a0adf564ac50ceed8187efc"
+	conpotOPCUAOriginalSHA256       = "6ff93684019c5c3d75547b5f61dce93431dff371e526807dc07df7b5503769d1"
 )
 
 // conpotModbusServerPy reads segmented MBAP frames within one timeout budget.
@@ -303,6 +331,37 @@ func conpotBACnetPatchVolume() deployVolume {
 	return deployVolume{HostSubdir: "patch/bacnet_app.py",
 		ContainerPath: conpotSource + "/protocols/bacnet/bacnet_app.py",
 		File:          true, ReadOnly: true, Content: conpotBACnetAppPy}
+}
+
+// conpotGuardianASTPy is the tank gauge (Veeder-Root TLS-350) server. The
+// image's own is recognised by several published checks: replies without
+// SOH and ETX, a numeric date, readings drawn at random at start that never
+// change, and an error for all but five commands. This one frames and lays
+// out its reports as the vendor's manual and a published capture of a real
+// gauge show, and takes every number from one model of the site, seeded per
+// instance and moved by the clock.
+//
+//go:embed honeypotfiles/conpot/guardian_ast_server.py
+var conpotGuardianASTPy []byte
+
+func conpotGuardianASTPatchVolume() deployVolume {
+	return deployVolume{HostSubdir: "patch/guardian_ast_server.py",
+		ContainerPath: conpotSource + "/protocols/guardian_ast/guardian_ast_server.py",
+		File:          true, ReadOnly: true, Content: conpotGuardianASTPy}
+}
+
+// conpotOPCUAServerPy is the image's OPC UA server with the Beckhoff
+// profile's four variables written by a model of a batch process instead of
+// standing at the template's values for ever. The numbers are drawn from the
+// site's seed, which the start step passes on, and follow the clock.
+//
+//go:embed honeypotfiles/conpot/opcua_server.py
+var conpotOPCUAServerPy []byte
+
+func conpotOPCUAPatchVolume() deployVolume {
+	return deployVolume{HostSubdir: "patch/opcua_server.py",
+		ContainerPath: conpotSource + "/protocols/opcua/opcua_server.py",
+		File:          true, ReadOnly: true, Content: conpotOPCUAServerPy}
 }
 
 // honeypotDeploy is the deployment profile for one honeypot image.
@@ -418,10 +477,15 @@ func deployProfile(cfg *config.Config, name string) honeypotDeploy {
 		d.UDPPorts = slices.Clone(t.UDP)
 		d.Env = maps.Clone(d.Env)
 		d.Env["CONPOT_TEMPLATE"] = t.ID
+		d.Volumes = append(slices.Clone(d.Volumes), conpotSiteVolume())
 		if t.ID == "plc_modbus" {
-			d.Volumes = append(slices.Clone(d.Volumes), conpotModbusPatchVolume(), conpotModbusSlavePatchVolume())
+			d.Volumes = append(d.Volumes, conpotModbusPatchVolume(), conpotModbusSlavePatchVolume())
 		} else if t.ID == "building_automation" {
-			d.Volumes = append(slices.Clone(d.Volumes), conpotBACnetPatchVolume())
+			d.Volumes = append(d.Volumes, conpotBACnetPatchVolume())
+		} else if t.ID == "guardian_ast" {
+			d.Volumes = append(d.Volumes, conpotGuardianASTPatchVolume())
+		} else if t.ID == "beckhoff_cx" {
+			d.Volumes = append(d.Volumes, conpotOPCUAPatchVolume())
 		}
 	case "adbhoney":
 		d.Volumes = slices.Clone(d.Volumes)

@@ -288,7 +288,7 @@ func TestConpotProxyEnvironment(t *testing.T) {
 	}
 	cfg := conpotConfig("qp_proxylaunch", "plc_modbus")
 	svc, _, _ := publishedPorts(t, cfg, "conpot")
-	if !strings.Contains(svc, "tpot_templates.py render") || !strings.Contains(svc, "unset") {
+	if !strings.Contains(svc, conpotSitePath) || !strings.Contains(svc, "unset") {
 		t.Fatal("Conpot image launcher does not normalize duplicate proxy settings")
 	}
 }

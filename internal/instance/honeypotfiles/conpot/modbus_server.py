@@ -116,8 +116,6 @@ class ModbusServer(object):
                         if not chunk:
                             break
                         request += chunk
-                        if request.strip().lower() == b"quit.":
-                            break
                 except socket.timeout:
                     raise
                 except Exception as exc:
@@ -131,10 +129,8 @@ class ModbusServer(object):
                     logger.info("Modbus client disconnected. (%s)", session.id)
                     session.log_event(event_type="CONNECTION_LOST")
                     break
-                if request.strip().lower() == b"quit.":
-                    logger.info("Modbus client quit. (%s)", session.id)
-                    session.log_event(event_type="CONNECTION_QUIT")
-                    break
+                # QPot: upstream hangs up at once on the five bytes "quit.".
+                # No PLC does; they are the start of a header like any other.
                 if len(request) < 7:
                     logger.info(
                         "Modbus client provided data %s but invalid.", session.id

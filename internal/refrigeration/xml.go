@@ -9,7 +9,6 @@ import (
 	"fmt"
 	"io"
 	"mime"
-	"net"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -316,8 +315,7 @@ func (s *Server) handleXML(w http.ResponseWriter, r *http.Request) {
 	}
 	old := clonePlant(s.plant)
 	advanced := s.plant.advance(s.now())
-	localIP, localPort := s.localEndpoint(r)
-	result, code, changed, node := s.dispatch(cmd, auth, localIP, localPort)
+	result, code, changed, node := s.dispatch(cmd, auth)
 	limited := false
 	if code == 0 && changed && !s.writes.take(s.clock()) {
 		// Over the write budget: the change is undone and nothing is saved.
@@ -464,7 +462,7 @@ func writeAction(action string) bool {
 	return false
 }
 
-func (s *Server) dispatch(cmd xmlElement, auth session, localIP string, localPort int) (xmlElement, int, bool, int) {
+func (s *Server) dispatch(cmd xmlElement, auth session) (xmlElement, int, bool, int) {
 	action := cmd.value("action")
 	fail := func(code int, node int) (xmlElement, int, bool, int) {
 		return response(action, code), code, false, node
@@ -482,7 +480,7 @@ func (s *Server) dispatch(cmd xmlElement, auth session, localIP string, localPor
 	switch action {
 	case "read_units":
 		i := s.plant.Identity
-		out.Children = []xmlElement{element("total", "1"), element("store_name", i.StoreName), element("unit_name", i.UnitName), element("storeId1", i.Serial[:8]), element("storeId2", i.Serial[len(i.Serial)-8:]), element("software", Firmware), element("macaddr", i.MAC), children("unit", element("addr", "1"), element("ip", localIP), element("port", strconv.Itoa(localPort)))}
+		out.Children = []xmlElement{element("total", "1"), element("store_name", i.StoreName), element("unit_name", i.UnitName), element("storeId1", i.Serial[:8]), element("storeId2", i.Serial[len(i.Serial)-8:]), element("software", Firmware), element("macaddr", i.MAC), children("unit", element("addr", "1"), element("ip", i.LANAddress()), element("port", strconv.Itoa(unitPort)))}
 	case "read_parm_info":
 		if cmd.value("device_id") != "084B8020_015B" {
 			return fail(37, 0)
@@ -744,28 +742,6 @@ func (s *Server) requestDevice(e xmlElement) (*device, int) {
 
 func deviceAttrs(node int) []xml.Attr {
 	return []xml.Attr{attr("nodetype", "16"), attr("node", strconv.Itoa(node)), attr("mod", "0"), attr("point", "0")}
-}
-
-func (s *Server) localEndpoint(r *http.Request) (string, int) {
-	address := s.cfg.ListenAddr
-	if local, ok := r.Context().Value(http.LocalAddrContextKey).(net.Addr); ok {
-		address = local.String()
-	}
-	host, port, err := net.SplitHostPort(address)
-	if err != nil {
-		return "127.0.0.1", 8080
-	}
-	if host == "" || host == "0.0.0.0" {
-		host = "127.0.0.1"
-	}
-	if host == "::" {
-		host = "::1"
-	}
-	n, err := strconv.Atoi(port)
-	if err != nil || n < 1 {
-		n = 8080
-	}
-	return host, n
 }
 
 func findParameter(d device, e xmlElement) (parameter, bool) {
