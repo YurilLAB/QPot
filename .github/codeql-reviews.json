@@ -19,7 +19,7 @@
           "sha256": "543e4109c1786fd5bc8441003af67352cfff949aa1fc2934538fd2da580b3514"
         },
         "internal/instance/compose.go": {
-          "sha256": "19a3c3cc2922acceebf9834651ddb08d160d688f1726f6021ecb3b38e0f76d90"
+          "sha256": "969dc6381980a2e70cce0f873d74dfccdaed6118a1a9fd598037a13683964423"
         },
         "internal/instance/refrigeration.go": {
           "sha256": "6019107c9d99ffd1de5d7a04c824d31d51fe8581f6c8205ca3205c99615df1f3"
@@ -58,7 +58,7 @@
           "sha256": "543e4109c1786fd5bc8441003af67352cfff949aa1fc2934538fd2da580b3514"
         },
         "internal/instance/compose.go": {
-          "sha256": "19a3c3cc2922acceebf9834651ddb08d160d688f1726f6021ecb3b38e0f76d90"
+          "sha256": "969dc6381980a2e70cce0f873d74dfccdaed6118a1a9fd598037a13683964423"
         },
         "internal/instance/refrigeration.go": {
           "sha256": "6019107c9d99ffd1de5d7a04c824d31d51fe8581f6c8205ca3205c99615df1f3"
@@ -229,7 +229,7 @@
           "sha256": "543e4109c1786fd5bc8441003af67352cfff949aa1fc2934538fd2da580b3514"
         },
         "internal/instance/compose.go": {
-          "sha256": "19a3c3cc2922acceebf9834651ddb08d160d688f1726f6021ecb3b38e0f76d90"
+          "sha256": "969dc6381980a2e70cce0f873d74dfccdaed6118a1a9fd598037a13683964423"
         },
         "internal/instance/refrigeration.go": {
           "sha256": "6019107c9d99ffd1de5d7a04c824d31d51fe8581f6c8205ca3205c99615df1f3"
@@ -1450,6 +1450,6 @@
       "uri": "internal/server/server.go"
     }
   ],
-  "sourceCatalogSHA256": "6294128b2ebd0607005b9b13ad2ffcda80e2fba73689f216d9cc4314992d3fc7",
+  "sourceCatalogSHA256": "8ce2c291fe9a0b9a8c6a0f8ad28b7b0690312bd1982a59b7e9ac45036d3d4fcf",
   "version": 2
 }
