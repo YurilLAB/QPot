@@ -266,7 +266,7 @@ func TestCollectorAndCleanupWithRealDocker(t *testing.T) {
 	}
 	for _, src := range sources {
 		if src.Name == source {
-			n, err := vectorstate.Seed(data, src, time.Now())
+			n, err := vectorstate.Seed(data, src, time.Now(), nil)
 			if err != nil || n != 1 {
 				t.Fatalf("seed: %d %v", n, err)
 			}

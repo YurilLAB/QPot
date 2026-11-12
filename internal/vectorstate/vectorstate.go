@@ -12,6 +12,7 @@ package vectorstate
 
 import (
 	"bufio"
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -22,6 +23,7 @@ import (
 	"path"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"time"
 )
 
@@ -54,6 +56,32 @@ type Source struct {
 	HostDir string
 	Read    func(rel string) bool
 }
+
+// LogFile is one log in a source's folder, as a Privileged reader reports it.
+type LogFile struct {
+	Rel  string // slash path below the source's folder
+	Size int64
+	// FirstLine is the log's first line with its newline; nil while it has
+	// no whole first line within MaxLine.
+	FirstLine []byte
+}
+
+// Privileged lists the logs in dir that read selects, with their sizes and
+// first lines, for a process that may not read them itself: on Linux a
+// honeypot's log belongs to its container's user, and a QPot run by an
+// ordinary user in the docker group cannot open it. It need only look at
+// files named *.log or *.json, which is all any source reads.
+type Privileged func(dir string, read func(rel string) bool) ([]LogFile, error)
+
+// FirstLinesScript is a shell script that prints, one output line per file
+// named in its arguments, the file's first line in hex (nothing for a file it
+// cannot read), reading no more of it than the collector's longest line.
+var FirstLinesScript = `for f; do
+  if [ -f "$f" ] && [ ! -L "$f" ]; then
+    head -c ` + strconv.Itoa(MaxLine+1) + ` -- "$f" | head -n 1 | od -A n -v -t x1 | tr -d ' \n'
+  fi
+  echo
+done`
 
 // Delivered maps a log's fingerprint to how far the collector has delivered
 // it; -1 marks a fingerprint two checkpoints share.
@@ -149,12 +177,19 @@ func crc64ECMA182(b []byte) uint64 {
 // collector reads a log it has no checkpoint for from its start, so without
 // this, a collector that gained its kept state (an older QPot kept none)
 // would deliver all those lines again. A source with state is left alone.
-func Seed(dataPath string, src Source, now time.Time) (int, error) {
+//
+// When this process may not read a log or a folder there, privileged reads
+// the whole source instead. Without one that is an error, and nothing is
+// written: skipping such a log silently made the collector send all of it
+// again (found by the upgrade rehearsal from 1.0.1, run as an ordinary user:
+// every event the old version had stored was stored a second time).
+func Seed(dataPath string, src Source, now time.Time, privileged Privileged) (int, error) {
 	cp := checkpointsPath(dataPath, src.Name)
 	if _, err := os.Lstat(cp); !errors.Is(err, fs.ErrNotExist) {
 		return 0, err
 	}
 	sizes, logs := map[uint64]int64{}, map[uint64]int{}
+	denied := false
 	sourceDir := filepath.Join(dataPath, filepath.FromSlash(src.Dir))
 	if src.HostDir != "" {
 		if !filepath.IsAbs(src.HostDir) || filepath.Clean(src.HostDir) != src.HostDir {
@@ -163,11 +198,30 @@ func Seed(dataPath string, src Source, now time.Time) (int, error) {
 		sourceDir = src.HostDir
 	}
 	if root, err := os.OpenRoot(sourceDir); err == nil {
-		walk(root, ".", 0, src.Read, func(size int64, fp uint64) {
+		walk(root, ".", 0, src.Read, &denied, func(size int64, fp uint64) {
 			sizes[fp] = size
 			logs[fp]++
 		})
 		root.Close()
+	} else if errors.Is(err, fs.ErrPermission) {
+		denied = true
+	}
+	if denied {
+		if privileged == nil {
+			return 0, fmt.Errorf("collector state: this user may not read the logs in %s, so they cannot be marked as already collected", sourceDir)
+		}
+		files, err := privileged(sourceDir, src.Read)
+		if err != nil {
+			return 0, fmt.Errorf("collector state: read the logs in %s: %w", sourceDir, err)
+		}
+		clear(sizes)
+		clear(logs)
+		for _, f := range files {
+			if fp, ok := Fingerprint(bytes.NewReader(f.FirstLine)); ok && f.Size >= int64(len(f.FirstLine)) {
+				sizes[fp] = f.Size
+				logs[fp]++
+			}
+		}
 	}
 	doc := checkpointsDoc{Version: "1", Checkpoints: []checkpoint{}}
 	for _, fp := range slices.Sorted(maps.Keys(sizes)) {
@@ -211,13 +265,17 @@ func Seed(dataPath string, src Source, now time.Time) (int, error) {
 }
 
 // walk calls found with the size and fingerprint of each regular file under
-// dir that read selects, never following a symlink.
-func walk(root *os.Root, dir string, depth int, read func(string) bool, found func(int64, uint64)) {
+// dir that read selects, never following a symlink. It sets denied when a
+// folder or a selected file may not be read by this process.
+func walk(root *os.Root, dir string, depth int, read func(string) bool, denied *bool, found func(int64, uint64)) {
 	if depth > maxDepth {
 		return
 	}
 	d, err := root.Open(dir)
 	if err != nil {
+		if errors.Is(err, fs.ErrPermission) {
+			*denied = true
+		}
 		return
 	}
 	ents, _ := d.ReadDir(maxFiles)
@@ -229,10 +287,13 @@ func walk(root *os.Root, dir string, depth int, read func(string) bool, found fu
 		}
 		switch t := e.Type(); {
 		case t.IsDir():
-			walk(root, rel, depth+1, read, found)
+			walk(root, rel, depth+1, read, denied, found)
 		case t.IsRegular() && read(rel):
 			f, err := root.OpenFile(rel, os.O_RDONLY|noFollow, 0)
 			if err != nil {
+				if errors.Is(err, fs.ErrPermission) {
+					*denied = true
+				}
 				continue
 			}
 			fi, err := f.Stat()

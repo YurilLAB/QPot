@@ -1,6 +1,7 @@
 package vectorstate
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -96,7 +97,7 @@ func TestSeed(t *testing.T) {
 	src := Source{Name: HoneypotSource("cowrie"), Dir: "honeypots/cowrie/logs", Read: func(rel string) bool {
 		return !strings.HasPrefix(rel, "tty/") && (strings.HasSuffix(rel, ".json") || strings.HasSuffix(rel, ".log"))
 	}}
-	n, err := Seed(data, src, time.Now())
+	n, err := Seed(data, src, time.Now(), nil)
 	if err != nil || n != 1 {
 		t.Fatalf("Seed = %d %v, want 1 log", n, err)
 	}
@@ -113,7 +114,7 @@ func TestSeed(t *testing.T) {
 		t.Fatal(err)
 	}
 	writeFile(t, filepath.Join(logs, "copy.json"), "{\"b\":1}\n")
-	if n, err := Seed(data, src, time.Now()); err != nil || n != 3 || Load(data, src.Name)[fp("{\"a\":1}\n")] != 16 {
+	if n, err := Seed(data, src, time.Now(), nil); err != nil || n != 3 || Load(data, src.Name)[fp("{\"a\":1}\n")] != 16 {
 		t.Fatalf("control: Seed = %d %v, %v", n, err, Load(data, src.Name))
 	}
 	if _, ok := d[fp("secret\n")]; ok {
@@ -121,7 +122,7 @@ func TestSeed(t *testing.T) {
 	}
 	before, _ := os.ReadFile(filepath.Join(data, Dir, src.Name, "checkpoints.json"))
 	writeFile(t, filepath.Join(logs, "new.json"), "{\"new\":1}\n")
-	if n, err := Seed(data, src, time.Now()); err != nil || n != 0 {
+	if n, err := Seed(data, src, time.Now(), nil); err != nil || n != 0 {
 		t.Fatalf("second Seed = %d %v", n, err)
 	}
 	after, _ := os.ReadFile(filepath.Join(data, Dir, src.Name, "checkpoints.json"))
@@ -129,10 +130,70 @@ func TestSeed(t *testing.T) {
 		t.Error("a source with state was seeded again")
 	}
 	// A source with no logs yet gets empty state.
-	if n, err := Seed(data, Source{Name: "p0f_log", Dir: "p0f/log", Read: func(string) bool { return true }}, time.Now()); err != nil || n != 0 {
+	if n, err := Seed(data, Source{Name: "p0f_log", Dir: "p0f/log", Read: func(string) bool { return true }}, time.Now(), nil); err != nil || n != 0 {
 		t.Fatalf("empty source: %d %v", n, err)
 	}
 	if d := Load(data, "p0f_log"); d == nil || len(d) != 0 {
 		t.Errorf("empty source state: %v", d)
+	}
+}
+
+// A log that belongs to a container's user cannot be opened by an ordinary
+// user running QPot. Seeding used to skip it without a word, so the collector
+// read it from its start and every event in it was stored a second time
+// (found by the upgrade rehearsal from 1.0.1). Now the privileged reader is
+// asked for the whole source, and without one nothing is written.
+func TestSeedReadsWhatThisUserMayNot(t *testing.T) {
+	if runtime.GOOS == "windows" || os.Geteuid() == 0 {
+		t.Skip("needs a file this process may not read")
+	}
+	data := t.TempDir()
+	logs := filepath.Join(data, "honeypots", "cowrie", "logs")
+	const mine, theirs = "{\"mine\":1}\n{\"mine\":2}\n", "{\"theirs\":1}\n{\"theirs\":2}\n{\"theirs\":3}\n"
+	writeFile(t, filepath.Join(logs, "readable.json"), mine)
+	writeFile(t, filepath.Join(logs, "cowrie.json"), theirs)
+	if err := os.Chmod(filepath.Join(logs, "cowrie.json"), 0); err != nil {
+		t.Fatal(err)
+	}
+	src := Source{Name: HoneypotSource("cowrie"), Dir: "honeypots/cowrie/logs", Read: func(rel string) bool { return strings.HasSuffix(rel, ".json") }}
+	fp := func(line string) uint64 { v, _ := Fingerprint(strings.NewReader(line)); return v }
+
+	if n, err := Seed(data, src, time.Now(), nil); err == nil {
+		t.Fatalf("Seed without a privileged reader = %d, want an error: a skipped log is sent again in full", n)
+	}
+	if Load(data, src.Name) != nil {
+		t.Fatal("state was written although a log could not be read")
+	}
+
+	var asked []string
+	reader := func(dir string, read func(string) bool) ([]LogFile, error) {
+		asked = append(asked, dir)
+		if !read("cowrie.json") || read("cowrie.txt") {
+			t.Error("the reader was not given the source's own filter")
+		}
+		return []LogFile{
+			{Rel: "readable.json", Size: int64(len(mine)), FirstLine: []byte("{\"mine\":1}\n")},
+			{Rel: "cowrie.json", Size: int64(len(theirs)), FirstLine: []byte("{\"theirs\":1}\n")},
+			{Rel: "started.json", Size: 5, FirstLine: nil},                            // no whole line yet
+			{Rel: "odd.json", Size: 3, FirstLine: []byte("{\"longer than it\":1}\n")}, // shrank since it was listed
+		}, nil
+	}
+	n, err := Seed(data, src, time.Now(), reader)
+	if err != nil || n != 2 {
+		t.Fatalf("Seed = %d %v, want both logs", n, err)
+	}
+	if len(asked) != 1 || asked[0] != logs {
+		t.Errorf("the reader was asked for %v, want the source's folder once", asked)
+	}
+	d := Load(data, src.Name)
+	if d[fp(theirs)] != int64(len(theirs)) || d[fp(mine)] != int64(len(mine)) || len(d) != 2 {
+		t.Errorf("seeded %v", d)
+	}
+
+	// A reader that fails leaves no state behind, so the next start tries again.
+	other := Source{Name: "other_logs", Dir: "honeypots/cowrie/logs", Read: src.Read}
+	failing := func(string, func(string) bool) ([]LogFile, error) { return nil, errors.New("no docker") }
+	if _, err := Seed(data, other, time.Now(), failing); err == nil || Load(data, other.Name) != nil {
+		t.Errorf("a failed reader: err %v, state %v", err, Load(data, other.Name))
 	}
 }

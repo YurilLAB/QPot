@@ -57,12 +57,7 @@ exit "$rc"`
 // firstLinesScript prints, one output line per file named in its arguments,
 // the file's first line in hex (nothing for a file it cannot read), reading
 // no more of it than the collector's longest line.
-var firstLinesScript = `for f; do
-  if [ -f "$f" ] && [ ! -L "$f" ]; then
-    head -c ` + strconv.Itoa(vectorstate.MaxLine+1) + ` -- "$f" | head -n 1 | od -A n -v -t x1 | tr -d ' \n'
-  fi
-  echo
-done`
+var firstLinesScript = vectorstate.FirstLinesScript
 
 // DockerHelper does it in a short-lived container that mounts only dir, with
 // no network, a read-only root and every capability dropped but the two that

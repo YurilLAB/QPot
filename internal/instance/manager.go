@@ -925,9 +925,9 @@ func (m *Manager) generateServiceConfigs() error {
 			if src.Name == SSHBackendLogSource {
 				continue
 			}
-			n, err := vectorstate.Seed(m.config.DataPath, src, time.Now())
+			n, err := vectorstate.Seed(m.config.DataPath, src, time.Now(), collectorLogReader)
 			if err != nil {
-				return fmt.Errorf("failed to seed the collector's state: %w", err)
+				return fmt.Errorf("the logs this instance already holds could not be marked as collected, and without that the collector would send them all again: %w", err)
 			}
 			if n > 0 {
 				slog.Info("Collector starts after what the logs already hold", "source", src.Name, "logs", n)
