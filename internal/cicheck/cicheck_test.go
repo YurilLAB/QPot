@@ -1629,7 +1629,7 @@ fi
 					_, traceErr := os.Stat(trace)
 					shouldRun := scenario.omit == "" && scenario.name != "list command failure"
 					if (traceErr == nil) != shouldRun {
-						t.Fatal("required-test inventory did not control whether the native gate ran")
+						t.Fatalf("required-test inventory did not control whether the native gate ran (exit %d, trace: %v): %s", code, traceErr, output)
 					}
 				})
 			}

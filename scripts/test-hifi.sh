@@ -50,7 +50,7 @@ test_packages=(./internal/instance ./internal/sshbackend)
 # must instead prevent publication, including accidental future renames.
 listed=$(go test "${test_packages[@]}" -list "$test_pattern")
 for required in TestSSHOrganizationLive TestSSHOrganizationDatabaseLive TestSSHOrganizationServicesLive TestSSHCollectorPrivateLogsLive TestSSHBackendLive TestSSHStoreNativeMountMetadataLive TestSSHStickyCellLive TestSSHBackendCaptureCostLive; do
-  if ! printf '%s\n' "$listed" | grep -Fxq "$required"; then
+  if ! grep -Fxq "$required" <<<"$listed"; then
     echo "required HiFi test is missing: $required" >&2
     exit 1
   fi

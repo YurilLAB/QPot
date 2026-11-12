@@ -71,7 +71,10 @@ qpot --version
 qpot --help >/dev/null
 qpot honeypot list >/dev/null
 qpot instance create smoke >/dev/null
-qpot instance list | grep -q smoke
+# Not a pipe into grep -q: grep leaves at its first match, and under pipefail a
+# writer cut off by that fails the line.
+instances=$(qpot instance list)
+grep -q smoke <<<"$instances"
 # setup recognises the distribution: a dry run prints its Docker install plan
 # (exit 0), or says the distribution needs a manual install (QP-HOST-003,
 # exit 11). Exit 13 means the container had no network for the repository

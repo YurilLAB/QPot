@@ -299,7 +299,7 @@ source_build() {
   mapfile -t e < <(source_env)
   run_install missing-sums QPOT_NO_SETUP=1 "${e[@]}"
   installed && grep -q 'Built QPot from source' "$case_dir/output.log" &&
-    "$case_dir/home/.local/bin/qpot" --version | grep -q 'built from source'
+    grep -q 'built from source' <<<"$("$case_dir/home/.local/bin/qpot" --version)"
 }
 
 source_commit_unknown() {
