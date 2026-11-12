@@ -1089,7 +1089,7 @@ func TestWatchDiskReserve(t *testing.T) {
 	reserve := filepath.Join(dir, diskGuardReserveName)
 	write := func() {
 		t.Helper()
-		if err := keepDiskReserve(reserve, 4096); err != nil {
+		if err := keepDiskReserve(context.Background(), reserve, 4096); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -1132,6 +1132,23 @@ func TestWatchDiskReserve(t *testing.T) {
 	time.Sleep(wait)
 	if diskReserveSize(reserve) == 0 {
 		t.Fatal("freed after the watch was ended")
+	}
+}
+
+// A server that is stopping does not finish a reserve file it had begun, and
+// leaves none behind.
+func TestKeepDiskReserveEndsWithItsContext(t *testing.T) {
+	reserve := filepath.Join(t.TempDir(), diskGuardReserveName)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := keepDiskReserve(ctx, reserve, 8<<20); !errors.Is(err, context.Canceled) {
+		t.Fatalf("a cancelled write returned %v", err)
+	}
+	if diskReserveSize(reserve) != 0 {
+		t.Fatal("a cancelled write left a reserve file")
+	}
+	if err := keepDiskReserve(context.Background(), reserve, 3<<20+5); err != nil || diskReserveSize(reserve) != 3<<20+5 {
+		t.Fatalf("a reserve of 3 MiB and 5 bytes: %v, %d bytes", err, diskReserveSize(reserve))
 	}
 }
 

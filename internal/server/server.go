@@ -562,8 +562,10 @@ func (s *Server) Start(ctx context.Context) error {
 	go s.cleanupLoop(ctx)
 
 	// Stop the honeypots before the disk that holds their logs is full, and
-	// start them again when there is room (diskguard.go).
-	go s.diskGuardLoop(ctx)
+	// start them again when there is room (diskguard.go). A stopped server
+	// waits for the guard: it may be writing its reserve file.
+	guardDone := make(chan struct{})
+	go func() { defer close(guardDone); s.diskGuardLoop(ctx) }()
 
 	// The web UI is served at once. Behind it the database is reached and the
 	// ATT&CK data loaded; what needs them starts as soon as they are there.
@@ -647,6 +649,7 @@ func (s *Server) Start(ctx context.Context) error {
 		stopped = true
 		startMu.Unlock()
 		workers.Wait()
+		<-guardDone
 	}
 	return err
 }

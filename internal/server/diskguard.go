@@ -303,8 +303,9 @@ func diskReserveSize(path string) int64 {
 
 // keepDiskReserve brings the reserve file to size bytes: it writes it when
 // it is missing or of another size, and removes it when size is 0. The bytes
-// are random, so no filesystem stores them as nothing.
-func keepDiskReserve(path string, size int64) error {
+// are random, so no filesystem stores them as nothing. A cancelled ctx ends
+// the writing and leaves no file.
+func keepDiskReserve(ctx context.Context, path string, size int64) error {
 	if have := diskReserveSize(path); have == size {
 		return nil
 	}
@@ -321,7 +322,14 @@ func keepDiskReserve(path string, size int64) error {
 	if err != nil {
 		return err
 	}
-	_, err = io.CopyN(f, rand.Reader, size)
+	for left := size; left > 0 && err == nil; {
+		if err = ctx.Err(); err != nil {
+			break
+		}
+		n := min(left, 1<<20)
+		_, err = io.CopyN(f, rand.Reader, n)
+		left -= n
+	}
 	err = errors.Join(err, f.Sync(), f.Close())
 	if err != nil {
 		_ = os.Remove(path)
@@ -465,10 +473,10 @@ func (s *Server) diskGuardTick(ctx context.Context, now time.Time) {
 	// mark and nothing is stopped; setting it to 0 removes it.
 	switch {
 	case !t.On() || reserveSize <= 0:
-		_ = keepDiskReserve(reservePath, 0)
+		_ = keepDiskReserve(ctx, reservePath, 0)
 	case !g.state.Held() && r.Known && diskReserveSize(reservePath) != reserveSize &&
 		r.Free >= max(t.ResumeFree, t.MinFree)+reserveSize:
-		if err := keepDiskReserve(reservePath, reserveSize); err != nil && g.warnNow("reserve", now) {
+		if err := keepDiskReserve(ctx, reservePath, reserveSize); err != nil && ctx.Err() == nil && g.warnNow("reserve", now) {
 			slog.Warn("Disk guard: its reserve file could not be written; a disk that fills at once has no room to spare", "error", err)
 		}
 	}
