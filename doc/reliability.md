@@ -15,6 +15,7 @@ measured, and where the promise ends.
 - [Restore rehearsal](#restore-rehearsal)
 - [The 1.1.2 release run](#the-112-release-run)
 - [Upgrade and rollback rehearsal](#upgrade-and-rollback-rehearsal)
+- [Third round: a disk that fills at once, long HiFi outages, a large database](#third-round-a-disk-that-fills-at-once-long-hifi-outages-a-large-database)
 - [Where the promise ends](#where-the-promise-ends)
 
 ## The failure soak
@@ -386,10 +387,15 @@ seconds that runs three commands and leaves. Every command is
 | `cell-kill` | Every cell is killed with SIGKILL with sessions inside |
 | `broker-kill` | The broker, which every session passes through, is killed |
 | `disk-full` | The filesystem holding the instance is filled to the last byte, later freed |
+| `long-outage` | The control plane is killed and, while it is down, one visitor runs commands in one cell until the honeypot ends the connection. Nobody converts the recordings or stops the cell: every command must wait in the cell's own log and be recorded once the control plane is back |
+| `hours-outage` | The control plane is killed and stays down for `QPOT_SOAK_HIFI_OUTAGE`, longer than a cell lives, with a session open. Skipped when that is not set (the third round used `2h15m`) |
 
 The test fails if a command that ran in a cell is not in the database, if
 one is stored twice, if a login is taken late, or if a long stay is still
-being served after 2,100 commands.
+being served after 12,000 commands (where sshd would end it anyway; it was
+2,100 until the [third round](#hifi-capture-through-a-long-outage)). It
+counts once the worker has removed the rows a `collector-amnesia` made the
+collector send again, and waits up to 90 minutes for that.
 
 ### What it found
 
@@ -465,9 +471,10 @@ What the numbers say:
   seconds) were taken and the rest refused. None was taken late.
 - **A full disk closes the HiFi honeypot.** 29 of 29 logins were refused.
 
-Two minutes is what was measured. An outage of hours with a session open
-all the while is bounded by the cell's container log (five files of 64 MiB)
-and by the cell's two-hour life, not by anything this soak ran.
+Two minutes is what this run measured. An outage of 2 h 15 min with a
+session open all the while, and outages in which one visitor uses all a
+connection can carry, were run in the
+[third round](#hifi-capture-through-a-long-outage).
 
 ## Restore rehearsal
 
@@ -645,6 +652,326 @@ when it cannot mark a log: sending everything again silently is worse than
 stopping. `TestSeedReadsWhatThisUserMayNot` and `TestCollectorLogReaderLive`
 cover it; the table above is the run after the fix.
 
+## Third round: a disk that fills at once, long HiFi outages, a large database
+
+2026-11-12 into the 13th, after 1.1.2. Same host as the runs above; every
+instance on an ext4 filesystem of its own. Three things the earlier rounds
+had left open were tested until they stopped failing, and each found
+faults the short runs had not.
+
+### Abrupt disk exhaustion
+
+The fault: the filesystem that holds the instance is filled to the last
+byte at once (one megabyte at a time, as fast as the disk takes it) while
+connections keep arriving at 5 a second, held for 45 to 60 seconds and
+freed. A connection the honeypot accepted must still be stored. Four
+versions of the protection were run against it:
+
+| Version | Fills | Accepted | Lost | What the kept instance showed |
+|---|---|---|---|---|
+| A. Cowrie holds lines it cannot write; the guard frees a reserve file when the disk is low | 12 | 6,729 | 2 | Cowrie's log said `Event sink Output failed: No space left on device`: the holding was not in use |
+| B. The same, in use | 14 | 7,276 | 4 | `stopping with N events the disk did not take`, the reserve already gone |
+| C. The reserve is freed when the disk is full and no longer filling; a stopping Cowrie waits for room | 8 | 2,784 | 1 | The reserve was freed at the right moment and the wait still found no room |
+| D. A stopping Cowrie writes what waits into a file of its own that has its blocks | 8 | 2,557 | 0 | |
+
+What each step found:
+
+- **A: the protection was not running.** The patched log writer queued
+  lines only for Cowrie's rotating log file. An instance's Cowrie is
+  configured with the plain one, and for that kind the patch had kept the
+  image's code, which raises on a full disk and drops the event. The live
+  test that should have caught it set the rotating kind itself. The writer
+  now queues for both, and the test runs both (the image's own code on the
+  same disk: 197 of 261 writes raised with the plain file, 62 of 261 events
+  kept with the rotating one).
+- **B: the reserve was freed too early.** The guard saw 120 to 170 MB left,
+  which is below its floor, and freed its 64 MB at once. The writer that
+  was filling the disk took those too. Cowrie was stopped a second later,
+  wrote what it held once, found the disk full and exited with two to five
+  events in memory. The guard now frees the reserve when the disk is full
+  and has stopped filling (two looks 150 ms apart under 16 MB, the second
+  no lower), and it watches for that while it stops the honeypots. Cowrie
+  waits two seconds for room when it stops.
+- **C: the reserve is anybody's.** In one fill of eight the reserve was
+  freed while Cowrie waited, and Cowrie still found no room for six
+  seconds: something else on the full disk (the database and the collector
+  had work waiting too) took it first. Cowrie therefore keeps one megabyte
+  of its own, written in full when it starts; what still waits when it
+  stops is written into that file, which needs no new space, and goes into
+  the log at the next start.
+
+D was then run for hours, and the disk had one more fault to show (a line
+written in two pieces): see [the extended run](#the-extended-run).
+[disk-cleanup.md](disk-cleanup.md#a-disk-that-fills-at-once) describes the
+mechanism and what it cannot do.
+
+### HiFi capture through a long outage
+
+Two faults were added to the HiFi soak. `long-outage`: the control plane is
+killed and one visitor runs commands in one cell without a pause until sshd
+ends the connection at its 64 MiB (17,340 commands in every run).
+`hours-outage`: the control plane stays down for `QPOT_SOAK_HIFI_OUTAGE`
+(2 h 15 min, longer than a cell lives) with a session open.
+
+With the control plane down nobody stops a cell that passes its capture
+limits, and until this round its commands past them left no record. They
+now keep a short one (who, when, the command, exit status, the first 4 kB
+of input and output) in one file per account. The soak found three faults
+in the first version of that:
+
+- **Every such record stored twice.** One run stored 10,418 commands twice
+  (21,585 in another). The kept instance's file held 54,747 lines where
+  about 34,000 belonged. A cell reset drains the cell's log into the folder
+  before it archives it; the drain wrote the file one synced line at a
+  time, did not finish 17,000 commands in its two minutes, and was stopped
+  half-way. The follower then went on with its next batch, remembering
+  the file as it had been before the drain, and appended what the drain
+  had written. The writer now reads the file again, from where it last
+  looked, whenever another writer may have been there (after every batch),
+  and syncs once per batch. `TestWriterOverflowWithADrainInBetween` fails
+  without that; the fuzz target has the same step.
+- **Recovery after such an outage took 135 to 161 seconds**, most of it the
+  one synced line at a time. It now takes 39 to 55 seconds.
+- **The long stay was measured on a RAM disk.** `long-stay` expected the
+  follower to stop a cell before 2,100 commands. On a filesystem that
+  really syncs every file, a visitor running 160 commands a second is
+  1,600 to 2,500 commands in by the time the follower has read the 360
+  that a cell keeps in full and stopped the cell. Nothing is lost (the
+  later ones get short records), so the test now requires that the
+  follower ends the stay before sshd would (12,000 commands).
+
+After the fix, three `long-outage` faults in a row: 52,152 commands run,
+none lost, none stored twice.
+
+### The database at 25 million events
+
+`TestDatabaseBench` (`QPOT_SOAK=1 QPOT_BENCH=1`, sizes in
+`QPOT_BENCH_SIZES`) creates an instance as the soak does and, for each
+size, fills the events table with classified history spread over 60 days
+(one indicator per 40 events, one session per 100), then measures for five
+minutes while everything that touches the database runs at once: live
+traffic at 5 connections a second, the collector, the intelligence worker,
+and two dashboards asking every ten seconds for what an open dashboard
+asks. ClickHouse under QPot's own limits (1 GiB, one CPU).
+
+Both columns are from the same host, run one after the other with nothing
+else running: 1.1.2 as released, and after this round's changes. API
+times are the 95th percentile in milliseconds.
+
+| | 1 M | 5 M | 10 M | 25 M |
+|---|---|---|---|---|
+| Events table on disk | 122 MB | 522 MB | 961 MB | 2.2 GB |
+| `/api/intelligence`, 1.1.2 | 275 | 783 | 1,112 | 3,067 |
+| after | 66 | 161 | 292 | 539 |
+| `/api/iocs?limit=15`, 1.1.2 | 143 | 547 | 965 | 2,554 |
+| after | 71 | 167 | 293 | 628 |
+| `/api/ttps?limit=50`, 1.1.2 | 139 | 347 | 667 | 1,745 |
+| after | 63 | 73 | 206 | 425 |
+| `/api/techniques`, 1.1.2 | 276 | 569 | 861 | 1,633 |
+| after | 64 | 70 | 106 | 319 |
+| `/api/stats`, 1.1.2 | 232 | 352 | 663 | 1,632 |
+| after | 156 | 183 | 334 | 730 |
+| `/api/events?limit=50`, 1.1.2 | 35 | 40 | 65 | 42 |
+| after | 13 | 14 | 92 | 29 |
+| Database CPU held back by its limit, 1.1.2 | 7% | 16% | 22% | 60% |
+| after | 4% | 6% | 7% | 19% |
+| Events waiting for classification, most, 1.1.2 | 964 | 889 | 880 | 3,101 |
+| after | 892 | 964 | 883 | 2,210 |
+| Live connections lost / stored twice | 0 / 0 | 0 / 0 | 0 / 0 | 0 / 0 |
+| Queries refused for lack of memory | 0 | 0 | 0 | 0 |
+
+Loading history ran at 66,000 to 190,000 rows a second through the same
+limits. No call failed at any size in either version.
+
+What grew with the table in 1.1.2, and what was changed:
+
+- **Indicators and sessions.** The dashboard asks for the newest 15
+  indicators and 50 sessions. Each answer read every column of every
+  indicator or session ever stored, twice (once to leave out what an older
+  table also holds), and sorted them: 1.8 s and 136 MB per call at 625,000
+  indicators. A page is now chosen from keys and times alone and only its
+  rows are read in full; the older tables are left out of the query when
+  they are empty. 0.43 s and 9 MB.
+- **Summary counts.** `/api/intelligence` loaded 10,000 indicators to count
+  them and 5,000 events to count their techniques; `/api/techniques` and
+  `/api/categories` loaded 10,000 events each, payloads and all. ClickHouse
+  now counts, from the columns that matter. The indicator total is exact
+  where it was capped at 10,000.
+- **The worker's replay check.** For every batch the worker asks which
+  event IDs already have a classified row. The events table is ordered by
+  time, and its ID index cannot rule out a few hundred IDs at once, so the
+  question read the whole table: 24 of 25 million rows, 2.0 s, per batch
+  of 500. The IDs of classified events are now also kept in a small table
+  ordered by ID. A database from an earlier version gets that table filled
+  in the background at the worker's first batch.
+
+What still grows, and was left:
+
+- **Tagging.** The worker marks events classified with mutations of 250
+  events each, and a mutation rewrites the changed columns of every part it
+  touches: about 2 s each at 1 M events, 4 to 5 s at 25 M. That is the
+  ceiling on classification: about 55 events a second at 25 M on the one
+  CPU the database has. Live traffic in the benchmark was 15 events a
+  second.
+- **Unique visitors of the last 24 hours** (`/api/stats`) is an exact
+  count over that day's events: 0.43 s at 450,000 events a day.
+- **Every batch writes the worker's whole session state** (all open
+  sessions, 37 to 59 MB at 15,000 to 20,000 of them). Not measured here:
+  the benchmark's traffic comes from one address.
+- The benchmark is ClickHouse only, one sensor, 25 million events (about
+  three days of a busy sensor at 100 events a second, or the 90 days the
+  events table keeps at 3 a second).
+
+### The extended run
+
+Commit `d3928ecb`, 18:34 to 21:49 (3 h 15 min). 5 connections a second,
+each fault held for 90 seconds with two minutes between. Eighteen faults
+per round, five of them the full disk; three rounds bar the last two
+faults.
+
+| Connections | Count |
+|---|---|
+| sent | 66,687 |
+| accepted by the honeypot | 56,964 |
+| refused (honeypot closed or restarting) | 9,723 |
+| stored, distinct | 56,964 |
+| **lost** | **0** |
+| **stored twice** | **1** |
+
+Collection delay: median 0.2 s, 99th percentile 93.2 s, longest 139.1 s.
+
+| Fault | Times | Recovery (s) | Accepted during | Refused during | Lost | Stored twice |
+|---|---|---|---|---|---|---|
+| disk-full | 14 | 16 to 25 | 1,237 | 7,124 | 0 | 1 |
+| disk-low | 3 | 23, 25, 26 | 279 | 1,536 | 0 | 0 |
+| database-stop | 3 | 14, 11, 17 | 1,786 | 0 | 0 | 0 |
+| database-kill | 3 | 18, 27, 28 | 1,782 | 0 | 0 | 0 |
+| database-freeze | 3 | 14, 2, 7 | 1,517 | 0 | 0 | 0 |
+| collector-kill | 3 | 6, 6, 6 | 1,507 | 0 | 0 | 0 |
+| collector-recreate | 3 | 4, 4, 4 | 1,517 | 0 | 0 | 0 |
+| collector-amnesia | 3 | 13, 27, 44 | 1,885 | 0 | 0 | 0 |
+| network-partition | 3 | 14, 21, 6 | 1,603 | 0 | 0 | 0 |
+| honeypot-kill | 3 | 6, 6, 4 | 495 | 925 | 0 | 0 |
+| honeypot-restart | 3 | 18, 19, 19 | 288 | 138 | 0 | 0 |
+| control-plane-kill | 3 | 4, 4, 2 | 1,475 | 0 | 0 | 0 |
+| worker-takeover | 3 | 2, 2, 2 | 1,502 | 0 | 0 | 0 |
+| traffic-burst (10 times the rate) | 2 | 4, 4 | 9,065 | 0 | 0 | 0 |
+
+1,219 of 1,219 indicators found, none counted twice, no second copy of any
+event left (the worker removed 183,965), no query refused for lack of
+memory. Recovery from a database outage, 36 to 54 seconds in the release
+run, is 11 to 28: a worker that lost its lease is now replaced after 15
+seconds at most instead of 60.
+
+Nothing was lost in fourteen full disks. The run still failed, on the one
+connection stored twice, and that was one more thing a full disk does:
+
+- **A line written in two pieces.** When the disk filled, 223 bytes of one
+  log line fitted and the rest did not; Cowrie's patched writer wrote the
+  rest a second later, in place. The collector had read the first piece
+  meanwhile. It gives every line an identity made of its file, the place
+  it starts at and its text, and for this line it took the place where the
+  second piece started. 38 minutes later the `collector-amnesia` fault made
+  it read the log again, the line whole this time, at its true place: a
+  second identity, so a second row that nothing recognised as a copy.
+  (Both identities were recomputed from the kept log to be sure.) Cowrie's
+  writer no longer continues a line: what the disk took is ended with a
+  newline, which the collector drops as not being JSON, and the whole line
+  is written after it. `TestCowrieJSONLogEndsAHalfWrittenLine`.
+
+The HiFi soak ran beside it on the same commit for 3 h 15 min, with the
+control plane down for 2 h 15 min in the middle (`hours-outage`):
+
+| Fault | Held (s) | Recovery (s) | Commands during | Lost | Stored twice |
+|---|---|---|---|---|---|
+| long-stay | 15 | 9 | 732 | 0 | 0 |
+| long-outage | 137 | 18 | 17,376 | 0 | 0 |
+| capture-stop | 122 | 6 | 47 | 0 | 0 |
+| collector-amnesia | 137 | 18 | 59 | 0 | 0 |
+| cell-kill | 35 | 18 | 8 | 0 | 0 |
+| disk-full | 124 | 21 | 1 | 0 | 0 |
+| hours-outage | 8,102 | 24 | 2,359 | 0 | 0 |
+| long-stay | 17 | 6 | 1,072 | 0 | 0 |
+| long-outage | 109 | not within 15 min | 17,379 | | 0 |
+
+During the 2 h 15 min the broker turned away 608 logins and the sessions
+already open ran 2,359 commands; all of them were stored, once, within 24
+seconds of the control plane's return. The last fault did not recover, and
+the run failed on it:
+
+- **The collector takes 2 kB of a file per round.** After the last outage
+  every record was converted and on disk, the database was idle, and the
+  collector delivered three lines a second: 15 minutes later it had 24,171
+  of 39,579 commands. Vector reads its files in turn, by default 2,048
+  bytes of each, and by then it had 3,004 HiFi record files to go round
+  (every command with its streams is a file). On the kept instance the
+  same collector delivered 523 lines a second with that limit at one
+  megabyte, and the backlog was in within a minute. The limit is now one
+  megabyte for every log the collector reads. The first outage of the same
+  run, with few files, had recovered in 18 seconds.
+
+### The two fixes, run again
+
+The full matrix above ran on `d3928ecb`. The two fixes it led to were then
+run on their own (`51f4119d`), each against the sequence it had failed on.
+
+Disk, 22:06 to 23:23: four full disks and then the collector losing its
+place, six times over, 5 connections a second, each fault held for a
+minute with a minute between.
+
+| Connections | Count |
+|---|---|
+| sent | 22,129 |
+| accepted by the honeypot | 13,581 |
+| refused (honeypot closed) | 8,548 |
+| stored, distinct | 13,581 |
+| **lost** | **0** |
+| **stored twice** | **0** |
+
+| Fault | Times | Recovery (s) | Accepted during | Lost | Stored twice |
+|---|---|---|---|---|---|
+| disk-full | 24 | 20 to 47 | 2,395 | 0 | 0 |
+| collector-amnesia | 6 | 6 to 12 | 2,334 | 0 | 0 |
+
+No second copy of any event was left (the worker removed 151,223). Three
+times Cowrie was stopped holding events the disk had not taken (2, 4 and 5
+of them): each time they went into its spare file and into the log at the
+next start. Whether a line was cut in two in this run was not counted; the
+unit test and the live test cut one on purpose.
+
+HiFi, 23:28 to 01:04: six `long-outage` faults with `long-stay`,
+`collector-amnesia` and `capture-stop` between them, two minutes apart.
+
+| Commands | Count |
+|---|---|
+| sent | 106,613 |
+| ran in a cell | 106,599 |
+| stored | 106,599, and one more whose output never reached the client |
+| **lost** | **0** |
+| **stored twice** | **0** |
+
+| Fault | Times | Recovery (s) | Commands during | Lost | Stored twice |
+|---|---|---|---|---|---|
+| long-outage | 6 | 27, 34, 37, 37, 50, 50 | 104,269 | 0 | 0 |
+| long-stay | 2 | 9, 13 | 1,340 | 0 | 0 |
+| collector-amnesia | 2 | 25, 32 | 118 | 0 | 0 |
+| capture-stop | 1 | 6 | 44 | 0 | 0 |
+
+By the end the collector had 4,112 record files to go round, more than
+the 3,004 at which the extended run stopped recovering, and the sixth
+outage recovered in 50 seconds.
+
+The first attempt at this run showed a fault in the test and gave one
+number worth having. Its last fault was `collector-amnesia` with 108,000
+commands stored. The collector sent 216,000 rows again within five
+minutes, under the identities they already had, and the test counted a
+minute later, before the worker had come to them. The test now waits for
+the worker. It removes such rows once it has classified what is older: in
+the run above every copy was gone 47 minutes after the last session (22
+minutes of classifying what the last outages had left, then 213,000 copies
+in 23 minutes). Until then a list of events shows such a row twice;
+indicators and sessions count it once.
+
 ## Where the promise ends
 
 - **Before the honeypot logs it.** A connection the honeypot never took, or
@@ -652,20 +979,46 @@ cover it; the table above is the run after the fix.
   ever had. The soak reports these as refused, or as lost during a
   `honeypot-` fault.
 - **A disk that fills in one step.** The disk guard closes the honeypots
-  when free space runs low, and then nothing is lost. A disk that goes from
-  enough to nothing within the guard's five-second check still costs what
-  the honeypot took before it was stopped: 2 to 15 connections per episode
-  in the soak. Nothing the honeypot wrote was lost, and nothing was stored
-  twice.
+  when free space runs low, and then nothing is lost. For a disk that goes
+  from enough to nothing between two looks, Cowrie now holds what it cannot
+  write: no connection was lost in the full disks of the third round's last
+  runs, where earlier runs lost 2 to 15 per episode. What can still
+  be lost: what a Cowrie holds in memory when it is killed instead of
+  stopped, more than a megabyte of it at one stop, and anything on a
+  filesystem that needs new space to overwrite a file (btrfs, ZFS). The
+  other honeypots run T-Pot's images unchanged and lose what they cannot
+  write for the second or so until the guard stops them; the soak's traffic
+  is Cowrie's.
+- **A log line that reaches the disk in two pieces.** The collector gives
+  such a line one identity when it reads it live and another when it reads
+  the file again, and the event is then stored twice. Cowrie under QPot no
+  longer writes a line that way. A honeypot on T-Pot's own image can, on a
+  full disk; it shows only if the collector later loses its place
+  (`collector-amnesia`) or the logs are restored.
 - **HiFi SSH session capture during a long control-plane outage.** HiFi
   sessions are recorded on each backend's container log and converted by
   the control plane. When the control plane stops, the broker turns new
   visitors away after 30 seconds, but sessions already open continue. The
-  soak measured two-minute outages with a session open: nothing lost. Over
-  hours, a visitor that keeps writing can push its own oldest unconverted
-  records out of its backend's bounded log, and can pass the cell's capture
-  limits with nobody there to stop the cell
+  third round measured 2 h 15 min with a session open, and outages in which
+  one visitor ran commands until sshd ended the connection: nothing lost,
+  nothing stored twice. What bounds it is the backend's container log (five
+  files of 64 MiB for a cell, four of them always whole). One source's
+  three connections fit in it; more connections into one cell that each
+  use their 64 MiB within one outage push the oldest unconverted records
+  out before anyone reads them, and that was not run. A command past a
+  cell's capture limits keeps
+  the first 4 kB of its input and output, not all of it
   ([ssh-hifi-proxy.md](ssh-hifi-proxy.md) states the bounds).
+- **Rows sent again wait for the worker.** When the collector loses its
+  place it sends every log again. Those rows carry the identities they
+  already had and the worker removes them, after it has classified what is
+  older: 47 minutes for 213,000 rows in the third round. Until then the
+  events table holds them twice.
+- **A large database.** Measured to 25 million events on ClickHouse with
+  one sensor. Past that, and with many sensors or many addresses at once,
+  nothing here is measured. Classification is bounded by the database's one
+  CPU (about 55 events a second at 25 million events); traffic above that
+  is stored at once and classified late.
 - **One long HiFi channel.** Past 8 MiB one channel's bytes are carried but
   not kept, and its record says so. In an interactive session that includes
   what is typed after that point.

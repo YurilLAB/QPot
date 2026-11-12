@@ -142,10 +142,10 @@ events:
   part of is ended where it broke and written again whole: the collector
   drops the piece, which is not JSON, and never sees a line arrive in two
   parts (it would give that line another identity than when it reads the
-  file again, and the event would be stored twice). In a test on a 256 kB filesystem that was filled and freed,
-  the image's own code kept 62 of 261 events with the rotating log file and
-  raised an error for 197 of them with the plain one; QPot's kept all 261
-  with either.
+  file again, and the event would be stored twice). In a test on a 256 kB
+  filesystem that was filled and freed, the image's own code kept 62 of 261
+  events with the rotating log file and raised an error for 197 of them
+  with the plain one; QPot's kept all 261 with either.
 - **The reserve.** The guard keeps a file of `reserve_mb` (64 MB) on the
   same disk, named `.disk-guard-reserve` in `<instance>/honeypots`, and
   deletes it when the disk is full, so that what Cowrie holds can be

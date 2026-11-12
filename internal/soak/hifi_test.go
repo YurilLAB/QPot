@@ -103,9 +103,25 @@ type hifiReport struct {
 	LostNumbers       []int `json:"lost_numbers,omitempty"`
 	// TwiceRows describes every row of a command that is stored more than
 	// once: when it was sent, and each row's time, ID and where it came from.
-	TwiceRows []string    `json:"stored_twice_rows,omitempty"`
-	Faults    []hifiFault `json:"faults"`
+	TwiceRows []string `json:"stored_twice_rows,omitempty"`
+	// CopiesClearedSeconds is how long after the last session the worker
+	// had removed every row the collector sent a second time (a
+	// collector-amnesia fault sends all of them again). SecondCopiesLeft
+	// is how many it had not removed when the wait ended.
+	CopiesClearedSeconds float64     `json:"second_copies_cleared_seconds"`
+	SecondCopiesLeft     int         `json:"second_copies_left"`
+	Faults               []hifiFault `json:"faults"`
 }
+
+// replayWaitMost is how long the run waits, after its last session, for the
+// worker to remove the rows a collector-amnesia fault sent again. Until
+// then such a row is a copy the worker has yet to look at, not a command
+// stored twice.
+const replayWaitMost = 90 * time.Minute
+
+// describeMost is how many commands stored more than once are listed row by
+// row. Each costs a query over the events table.
+const describeMost = 20
 
 type hifiHarness struct {
 	*harness
@@ -771,9 +787,11 @@ func TestHiFiCapture(t *testing.T) {
 	h.logf("sessions stopped; waiting for the last recordings")
 	h.settleHiFi(ctx, end, 10*time.Minute, false)
 	time.Sleep(time.Minute)
+	cleared, left := h.secondCopiesCleared(ctx, end, replayWaitMost)
 
 	final := h.accountHiFi(ctx, end, results)
 	final.Started, final.Ended = started, end
+	final.CopiesClearedSeconds, final.SecondCopiesLeft = cleared, left
 	final.Options = map[string]any{"duration": opt.duration.String(), "gap": opt.gap.String(), "hold": opt.hold.String(),
 		"sandbox_mode": opt.sandbox, "cells": hifiBackends, "binary": filepath.Base(opt.bin)}
 	if out, err := h.qpot(ctx, time.Minute, "--version"); err == nil {
@@ -783,6 +801,9 @@ func TestHiFiCapture(t *testing.T) {
 
 	if final.StoredTwice != 0 {
 		t.Errorf("%d commands are stored more than once", final.StoredTwice)
+	}
+	if final.SecondCopiesLeft != 0 {
+		t.Errorf("%d rows the collector sent again were still there %s after the last session", final.SecondCopiesLeft, replayWaitMost)
 	}
 	if final.Lost != 0 {
 		t.Errorf("%d commands that ran in a cell never reached the database: %v", final.Lost, final.LostNumbers)
@@ -843,7 +864,9 @@ func (h *hifiHarness) accountHiFi(ctx context.Context, until time.Time, faults [
 			if f != nil {
 				f.StoredTwice++
 			}
-			r.TwiceRows = append(r.TwiceRows, h.describe(ctx, c)...)
+			if r.StoredTwice <= describeMost {
+				r.TwiceRows = append(r.TwiceRows, h.describe(ctx, c)...)
+			}
 		}
 		if c.Executed {
 			r.Executed++
@@ -885,6 +908,41 @@ func (h *hifiHarness) accountHiFi(ctx context.Context, until time.Time, faults [
 	return r
 }
 
+// secondCopiesCleared waits until no event row shares its ID with another:
+// the collector sends a record again after it lost its place, and the
+// worker removes that copy when it comes to it. It returns how long after
+// `end` that was, and how many copies were left when `limit` passed.
+func (h *hifiHarness) secondCopiesCleared(ctx context.Context, end time.Time, limit time.Duration) (float64, int) {
+	var (
+		copies  uint64
+		lastLog time.Time
+	)
+	for start := time.Now(); ; {
+		qctx, cancel := context.WithTimeout(ctx, time.Minute)
+		err := h.db.QueryRow(qctx, `SELECT toUInt64(count() - uniqExact(event_id)) FROM events`).Scan(&copies)
+		cancel()
+		if err == nil && copies == 0 {
+			return time.Since(end).Seconds(), 0
+		}
+		if time.Since(start) >= limit {
+			return time.Since(end).Seconds(), int(copies)
+		}
+		if time.Since(lastLog) >= 2*time.Minute {
+			lastLog = time.Now()
+			if err != nil {
+				h.logf("  counting second copies: %s", firstLine(err.Error()))
+			} else {
+				h.logf("  %d rows are copies the worker has yet to remove", copies)
+			}
+		}
+		select {
+		case <-ctx.Done():
+			return time.Since(end).Seconds(), int(copies)
+		case <-time.After(10 * time.Second):
+		}
+	}
+}
+
 // describe lists the rows the database holds for one command.
 func (h *hifiHarness) describe(ctx context.Context, c hifiCommand) []string {
 	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
@@ -916,6 +974,8 @@ func (h *hifiHarness) writeHiFi(r hifiReport) {
 	fmt.Fprintf(&b, "%s to %s. Options: %v\n\n", r.Started.Format(time.RFC3339), r.Ended.Format(time.RFC3339), r.Options)
 	fmt.Fprintf(&b, "Commands sent %d, ran in a cell %d, stored %d, lost %d, stored twice %d, stored without the client seeing output %d. Logins %d, taken %d.\n\n",
 		r.Sent, r.Executed, r.Stored, r.Lost, r.StoredTwice, r.NotExecutedStored, r.Logins, r.Admitted)
+	fmt.Fprintf(&b, "The worker had removed every row the collector sent again %.0f s after the last session; %d were left.\n\n",
+		r.CopiesClearedSeconds, r.SecondCopiesLeft)
 	b.WriteString("| Fault | Held (s) | Recovery (s) | Ran during | Lost | Stored twice | Logins taken / turned away | Taken late | Longest collection delay (s) | Note |\n|---|---|---|---|---|---|---|---|---|---|\n")
 	for _, f := range r.Faults {
 		fmt.Fprintf(&b, "| %s | %.0f | %.0f | %d | %d | %d | %d / %d | %d | %.0f | %s %s |\n", f.Name, f.HeldSeconds, f.RecoverySeconds,

@@ -198,7 +198,7 @@ rollback), run `qpot db restore -i <name> --merge --from <folder of copied
 backups>`. Only the missing events are added.
 
 The last rehearsal is recorded in
-[reliability.md](reliability.md#database-restore-rehearsal).
+[reliability.md](reliability.md#restore-rehearsal).
 
 ## Rebuilding a release yourself
 
