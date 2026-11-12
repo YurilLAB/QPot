@@ -125,7 +125,7 @@ What changes shape between versions, and in which direction it is safe:
 | Database tables | Created or extended at start; never dropped. The events table gets an index on the event ID (ClickHouse) or an event ID column, a unique index and an insert trigger (TimescaleDB). | Extra tables, columns and indexes are ignored. |
 | Event IDs | Events stored by 1.0.1 or earlier keep the random ID they have. New events get an ID derived from their log line. Only new IDs are used to find a line stored twice. | Readable. |
 | Intelligence checkpoint (in the database) | Older formats are read and carried until their sessions end. | **Not readable** when its format number is newer: the old worker reports an error and does not classify. |
-| Collector checkpoints | Kept. | Kept. |
+| Collector checkpoints | Kept. 1.0.1 and earlier kept none in the instance: at the first start every log found is marked as collected up to its end, so nothing is sent twice. | Kept. |
 | Log backups | 1.0.1 and earlier: rewritten once to remove the QPot ID. | Readable. |
 
 ## Rolling back

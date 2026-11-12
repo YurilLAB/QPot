@@ -13,6 +13,7 @@ measured, and where the promise ends.
 - [Second round: replays, low disk, restore](#second-round-replays-low-disk-restore)
 - [The HiFi capture soak](#the-hifi-capture-soak)
 - [Restore rehearsal](#restore-rehearsal)
+- [The 1.1.2 release run](#the-112-release-run)
 - [Upgrade and rollback rehearsal](#upgrade-and-rollback-rehearsal)
 - [Where the promise ends](#where-the-promise-ends)
 
@@ -520,6 +521,68 @@ The first rehearsal failed outright: the database refused the restore's
 lookups for lack of memory (see the second round above).
 
 
+## The 1.1.2 release run
+
+2026-11-12, 12:26 to 13:28, the tree that was tagged 1.1.2. Every fault of
+the table above once, the two database faults twice, 5 connections a second,
+each fault held for 90 seconds with two minutes between. The instance was on
+a 4 GB ext4 filesystem of its own.
+
+| Connections | Count |
+|---|---|
+| sent | 22,788 |
+| accepted by the honeypot | 21,441 |
+| refused (honeypot closed or restarting) | 1,347 |
+| stored, distinct | 21,441 |
+| **lost** | **0** |
+| **stored twice** | **0** |
+
+Collection delay: median 0.2 s, 99th percentile 84.8 s, longest 105.3 s.
+
+| Fault | Recovery (s) | Accepted during | Refused during | Lost | Stored twice |
+|---|---|---|---|---|---|
+| database-stop | 45, 36 | 746, 706 | 0 | 0 | 0 |
+| database-kill | 53, 54 | 738, 744 | 0 | 0 | 0 |
+| database-freeze | 2 | 477 | 0 | 0 | 0 |
+| collector-kill | 6 | 501 | 0 | 0 | 0 |
+| collector-recreate | 4 | 504 | 0 | 0 | 0 |
+| network-partition | 4 | 486 | 0 | 0 | 0 |
+| honeypot-kill | 6 | 172 | 304 | 0 | 0 |
+| honeypot-restart | 18 | 100 | 41 | 0 | 0 |
+| control-plane-kill | 4 | 495 | 0 | 0 | 0 |
+| worker-takeover | 2 | 501 | 0 | 0 | 0 |
+| collector-amnesia | 10 | 539 | 0 | 0 | 0 |
+| disk-low | 23 | 111 | 491 | 0 | 0 |
+| disk-full | 27 | 120 | 511 | 0 | 0 |
+| traffic-burst (10 times the rate) | 4 | 4,535 | 0 | 0 | 0 |
+
+434 of 434 indicators found, none counted twice, no second copy of any event
+left (the worker removed 37,967), no query refused for lack of memory.
+
+Three things to read these numbers with:
+
+- **Database outages took 36 to 54 seconds to recover from**, against 14 to
+  29 in the three-hour run. The database itself was back within seconds each
+  time. What takes the rest is intelligence: a worker that lost its lease is
+  replaced after a wait that doubles up to one minute while the database is
+  away, so recovery depends on where that wait stands when the database
+  returns. Nothing is lost meanwhile; events are classified later.
+- **The full disk lost nothing here, and did lose connections on a RAM
+  disk.** The same matrix had run two hours earlier with the instance on a
+  RAM disk, which fills within a second: 8 connections were lost during
+  `disk-full` there (11 in a third run). The ext4 filesystem took a few
+  seconds to fill, long enough for the disk guard to close Cowrie first.
+  How fast a disk can fill decides this, not the guard alone.
+- **The RAM disk also explained the memory refusals of the second round.**
+  That earlier run refused one query for lack of memory, and a third run
+  two. Both were the worker's checkpoint being written during the traffic
+  burst, and both were retried. The cause was the test bed: on a RAM disk
+  every byte the database writes to its own files is charged to its
+  container's memory limit (375 MB of the 1 GiB by the end of a run), and
+  ClickHouse lowers its own allowance to match. On a disk those pages are
+  ordinary file cache. The soak now runs on a disk filesystem; the memory
+  setting changed in the second round stays, since it costs nothing.
+
 ## Upgrade and rollback rehearsal
 
 2026-11-11, same host. An instance was started on the previous commit
@@ -546,6 +609,41 @@ program, and attacked again. The procedure is the one in
 | | connections after the refusals and a restart stored once | 150, 0 duplicates |
 | Rollback | database after restoring the backup | the 60 connections it held, 0 duplicates |
 | | previous version collects again | 90, 0 duplicates |
+
+### From 1.0.1 to 1.1.2
+
+2026-11-12, same host, the released 1.0.1 and the tree that was tagged
+1.1.2, both run by an ordinary user in the `docker` group. The same
+procedure.
+
+| Stage | Check | Result |
+|---|---|---|
+| 1.0.1 | 60 connections stored once | 60, 0 duplicates |
+| | scanner banners stored | 0 of 5: dropped by its filter |
+| | backup lines carrying the QPot ID | 190 |
+| Upgrade | connections across the upgrade stored once | 120, 0 duplicates |
+| | old backup lines rewritten to the sensor ID, file sizes unchanged | 190 of 190 |
+| | generated files, container environments, mounts and logs carrying the QPot ID | 0 |
+| | scanner banners stored and tagged `nmap` | 5 of 5 |
+| Refusals | no login on `0.0.0.0`: `qpot up` and `qpot serve` | refused with QP-WEB-005, no container started |
+| | egress guard off with dionaea enabled: `qpot up` | refused with QP-INST-015, no container started |
+| | connections after the refusals and a restart stored once | 150, 0 duplicates |
+| Rollback | database after restoring the backup under 1.0.1 | the 60 connections it held, 0 duplicates |
+| | 1.0.1 collects again | 90, 0 duplicates |
+
+**What this rehearsal found.** Its first run stored the 60 connections of
+1.0.1 a second time after the upgrade. 1.0.1 kept the collector's reading
+positions inside its container, so an upgraded instance has none, and QPot
+marks the logs it finds as already collected before the new collector
+starts. Cowrie's log belongs to the container's user, though, and a QPot run
+by an ordinary user could not read it: that log was skipped without a word,
+and the collector read it from its first line. (The rehearsal of the day
+before started from a later build, which already kept positions in the
+instance, and could not see this.) QPot now reads such logs through a
+short-lived, read-only helper container, and does not start the instance
+when it cannot mark a log: sending everything again silently is worse than
+stopping. `TestSeedReadsWhatThisUserMayNot` and `TestCollectorLogReaderLive`
+cover it; the table above is the run after the fix.
 
 ## Where the promise ends
 

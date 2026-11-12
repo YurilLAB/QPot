@@ -25,7 +25,7 @@
 
 $ErrorActionPreference = "Stop"
 
-$QPOT_VERSION = "1.0.1"
+$QPOT_VERSION = "1.1.2"
 $QPOT_REPO = "https://github.com/YurilLAB/QPot"
 $QPOT_GH_REPO = "YurilLAB/QPot"
 # The one commit the installer builds when no release is published: a main
