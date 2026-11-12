@@ -185,8 +185,11 @@ func (s *Server) newWorker(db database.Database) *intelligence.Worker {
 // workerRestartDelay bounds the wait before a stopped intelligence worker is
 // replaced: short at first, so a database restart costs seconds, then longer
 // while whatever stops it lasts (another node owns the work, the database is
-// still away).
-var workerRestartDelay = [2]time.Duration{5 * time.Second, time.Minute}
+// still away). The longest wait is what recovery can take after the database
+// is back: at a minute, the failure soak measured 45 to 63 seconds from a
+// database's return to intelligence running again. A try costs a handful of
+// small queries.
+var workerRestartDelay = [2]time.Duration{5 * time.Second, 15 * time.Second}
 
 // superviseWorker runs the intelligence worker until ctx ends.
 //
@@ -1266,6 +1269,14 @@ func (s *Server) handleIOC(w http.ResponseWriter, r *http.Request) {
 	s.sendJSON(w, response)
 }
 
+// recentSample is how many of the newest events /api/techniques and
+// /api/categories count over, and summarySample how many the intelligence
+// summary looks at for the number of techniques seen.
+const (
+	recentSample  = 10000
+	summarySample = 5000
+)
+
 // handleTechniques returns unique ATT&CK techniques observed in classified events.
 func (s *Server) handleTechniques(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
@@ -1278,19 +1289,31 @@ func (s *Server) handleTechniques(w http.ResponseWriter, r *http.Request) {
 	}
 
 	ctx := r.Context()
-	// Fetch recent events and aggregate technique counts client-side.
-	filter := database.EventFilter{Limit: 10000}
-	events, err := s.db().GetEvents(ctx, filter)
-	if err != nil {
-		s.sendInternalError(w, "get events failed", err)
-		return
-	}
-
 	type techEntry struct {
 		TechniqueID   string `json:"technique_id"`
 		TechniqueName string `json:"technique_name"`
 		TacticName    string `json:"tactic_name"`
 		Count         int    `json:"count"`
+	}
+	// A store that counts for itself reads three columns of the sample; the
+	// others return the events, payloads and all, to be counted here.
+	if summarizer, ok := s.db().(database.RecentSummarizer); ok {
+		counted, err := summarizer.RecentTechniques(ctx, recentSample)
+		if err != nil {
+			s.sendInternalError(w, "count techniques failed", err)
+			return
+		}
+		result := make([]*techEntry, 0, len(counted))
+		for _, c := range counted {
+			result = append(result, &techEntry{c.TechniqueID, c.TechniqueName, c.TacticName, c.Count})
+		}
+		s.sendJSON(w, result)
+		return
+	}
+	events, err := s.db().GetEvents(ctx, database.EventFilter{Limit: recentSample})
+	if err != nil {
+		s.sendInternalError(w, "get events failed", err)
+		return
 	}
 
 	counts := make(map[string]*techEntry)
@@ -1339,15 +1362,24 @@ func (s *Server) handleCategories(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// The same recent sample /api/techniques counts.
-	events, err := s.db().GetEvents(r.Context(), database.EventFilter{Limit: 10000})
-	if err != nil {
-		s.sendInternalError(w, "get events failed", err)
-		return
-	}
 	counts := map[string]int{}
-	for _, ev := range events {
-		for _, c := range ev.Categories {
-			counts[c]++
+	if summarizer, ok := s.db().(database.RecentSummarizer); ok {
+		counted, err := summarizer.RecentCategories(r.Context(), recentSample)
+		if err != nil {
+			s.sendInternalError(w, "count categories failed", err)
+			return
+		}
+		counts = counted
+	} else {
+		events, err := s.db().GetEvents(r.Context(), database.EventFilter{Limit: recentSample})
+		if err != nil {
+			s.sendInternalError(w, "get events failed", err)
+			return
+		}
+		for _, ev := range events {
+			for _, c := range ev.Categories {
+				counts[c]++
+			}
 		}
 	}
 	type categoryEntry struct {
@@ -1517,10 +1549,13 @@ func (s *Server) handleIntelligenceSummary(w http.ResponseWriter, r *http.Reques
 
 	if s.db() != nil {
 		ctx := r.Context()
-		// Sample up to 5000 recent events to count distinct observed techniques.
-		// This is an approximation that avoids loading the full event table.
-		events, err := s.db().GetEvents(ctx, database.EventFilter{Limit: 5000})
-		if err == nil {
+		// Distinct techniques among the newest 5000 events: a sample, so
+		// that the whole events table is not read.
+		if summarizer, ok := s.db().(database.RecentSummarizer); ok {
+			if counted, err := summarizer.RecentTechniques(ctx, summarySample); err == nil {
+				techniquesObserved = len(counted)
+			}
+		} else if events, err := s.db().GetEvents(ctx, database.EventFilter{Limit: summarySample}); err == nil {
 			seen := make(map[string]bool)
 			for _, ev := range events {
 				if ev.TechniqueID != "" {
@@ -1530,9 +1565,13 @@ func (s *Server) handleIntelligenceSummary(w http.ResponseWriter, r *http.Reques
 			techniquesObserved = len(seen)
 		}
 
-		// Approximate IOC count using a larger sample.
-		iocs, err := s.db().GetIOCs(ctx, database.IOCFilter{Limit: 10000})
-		if err == nil {
+		// Every indicator, from a store that can count them; from the
+		// others what a read of at most 10000 returns.
+		if counter, ok := s.db().(database.IOCCounter); ok {
+			if n, err := counter.CountIOCs(ctx); err == nil {
+				iocsTotal = int(n)
+			}
+		} else if iocs, err := s.db().GetIOCs(ctx, database.IOCFilter{Limit: 10000}); err == nil {
 			iocsTotal = len(iocs)
 		}
 	}

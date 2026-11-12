@@ -121,10 +121,13 @@ func (b *countingBatch) Append(v ...any) error {
 	if b.counts == nil {
 		b.counts = map[string]int64{}
 	}
-	b.counts[v[1].(string)+":"+v[2].(string)] = v[8].(int64)
+	if len(v) > 8 { // an indicator row; other batches (observation IDs) are only counted
+		b.counts[v[1].(string)+":"+v[2].(string)] = v[8].(int64)
+	}
 	return nil
 }
-func (b *countingBatch) Send() error { b.sent = true; return nil }
+func (b *countingBatch) Send() error  { b.sent = true; return nil }
+func (b *countingBatch) Abort() error { return nil }
 
 // Split into several SELECTs, every stored sighting must still be folded in
 // exactly once: a value read by two chunks would be counted twice. The same

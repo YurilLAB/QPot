@@ -450,7 +450,7 @@ counted by the database.
 | `GET /api/techniques` | `[{"technique_id", "technique_name", "tactic_name", "count"}]`, most first |
 | `GET /api/categories` | `[{"id", "label", "description", "count"}]`, in catalogue order; the plain-language attack categories and how many recent events carry each |
 | `GET /api/ttps?limit=` | campaign sessions (`limit` 1 to 500) |
-| `GET /api/intelligence` | `{"techniques_observed", "iocs_total", "active_sessions", "active_campaigns", "worker_enabled", "attck_loaded", "replays_removed"}`. `replays_removed` counts the event rows the worker deleted since the control plane started because the collector had read their log line a second time. |
+| `GET /api/intelligence` | `{"techniques_observed", "iocs_total", "active_sessions", "active_campaigns", "worker_enabled", "attck_loaded", "replays_removed"}`. `iocs_total` is every indicator stored (with TimescaleDB or Elasticsearch: at most 10000), `techniques_observed` the number of techniques among the newest 5000 events. `replays_removed` counts the event rows the worker deleted since the control plane started because the collector had read their log line a second time. |
 
 Lists ranked by a count keep one order: equal counts are ordered by name or
 address, in every database backend.

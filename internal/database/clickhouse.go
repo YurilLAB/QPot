@@ -18,6 +18,9 @@ import (
 type ClickHouse struct {
 	config *config.DatabaseConfig
 	conn   driver.Conn
+	// ids is the state of the set of classified observation IDs (see
+	// clickhouse_observation.go).
+	ids classifiedIDs
 }
 
 // NewClickHouse creates a new ClickHouse database instance
@@ -139,6 +142,9 @@ func (ch *ClickHouse) InitializeSchema(ctx context.Context) error {
 		return err
 	}
 	if err := ch.ensureEventIDIndex(ctx); err != nil {
+		return err
+	}
+	if err := ch.ensureClassifiedIDs(ctx); err != nil {
 		return err
 	}
 	if err := ch.ensureEventCategories(ctx); err != nil {
@@ -1171,7 +1177,9 @@ func (ch *ClickHouse) tagIntelligenceEvents(ctx context.Context, events []*Event
 			return fmt.Errorf("tag events: %w", err)
 		}
 	}
-	return nil
+	// After the rows are marked, never before: an ID in the set whose row is
+	// not classified yet would make that row look like a second copy.
+	return ch.recordClassifiedIDs(ctx, withID)
 }
 
 // InsertIOC inserts or updates an IOC record using ClickHouse REPLACE semantics.
@@ -1304,7 +1312,11 @@ func (ch *ClickHouse) GetIOCs(ctx context.Context, filter IOCFilter) ([]*IOC, er
 		return nil, fmt.Errorf("not connected")
 	}
 
-	query := "SELECT id, type, value, honeypot, source_ip, technique_id, first_seen, last_seen, count, metadata FROM (SELECT id, type, value, honeypot, source_ip, technique_id, first_seen, last_seen, count, metadata FROM intelligence_iocs FINAL UNION ALL SELECT id, type, value, honeypot, source_ip, technique_id, first_seen, last_seen, count, metadata FROM iocs FINAL WHERE (type,value,honeypot) NOT IN (SELECT type,value,honeypot FROM intelligence_iocs FINAL)) WHERE 1=1"
+	legacy, err := ch.hasRows(ctx, "iocs")
+	if err != nil {
+		return nil, fmt.Errorf("failed to query iocs: %w", err)
+	}
+	query := " WHERE 1=1"
 	var args []interface{}
 
 	if len(filter.intelligenceKeys) > 0 {
@@ -1340,12 +1352,26 @@ func (ch *ClickHouse) GetIOCs(ctx context.Context, filter IOCFilter) ([]*IOC, er
 		query += " AND last_seen <= ?"
 		args = append(args, filter.EndTime)
 	}
-	query += " ORDER BY last_seen DESC, type, value, honeypot"
+	const order = " ORDER BY last_seen DESC, type, value, honeypot"
+	page := ""
 	if filter.Limit > 0 {
-		query += fmt.Sprintf(" LIMIT %d", filter.Limit)
+		page = fmt.Sprintf(" LIMIT %d", filter.Limit)
 		if filter.Offset > 0 {
-			query += fmt.Sprintf(" OFFSET %d", filter.Offset)
+			page += fmt.Sprintf(" OFFSET %d", filter.Offset)
 		}
+	}
+	if page != "" && len(filter.intelligenceKeys) == 0 {
+		// A page: choose its indicators from their keys and times, then
+		// read those rows only (see clickhouse_reads.go). The choice is
+		// named once per table it restricts, with its arguments.
+		keys := "(SELECT type, value, honeypot FROM " + iocSource(iocPageColumns, legacy, "") + query + order + page + ")"
+		chosen := args
+		if legacy {
+			chosen = append(append([]interface{}{}, args...), args...)
+		}
+		query, args = "SELECT "+iocColumns+" FROM "+iocSource(iocColumns, legacy, keys)+order, chosen
+	} else {
+		query = "SELECT " + iocColumns + " FROM " + iocSource(iocColumns, legacy, "") + query + order + page
 	}
 
 	rows, err := ch.conn.Query(ctx, query, args...)
@@ -1407,15 +1433,19 @@ func (ch *ClickHouse) GetTTPSessions(ctx context.Context, limit int) ([]*TTPSess
 		return nil, fmt.Errorf("not connected")
 	}
 
-	query := `
-		SELECT session_id, campaign_fingerprint, source_ips,
-		       shared_infrastructure, kill_chain_stages, techniques,
-		       ioc_ids, event_count, first_seen, last_seen, confidence
-		FROM (SELECT session_id, campaign_fingerprint, source_ips, shared_infrastructure, kill_chain_stages, techniques, ioc_ids, event_count, first_seen, last_seen, confidence FROM intelligence_sessions FINAL UNION ALL SELECT session_id, campaign_fingerprint, source_ips, shared_infrastructure, kill_chain_stages, techniques, ioc_ids, event_count, first_seen, last_seen, confidence FROM ttp_sessions FINAL WHERE session_id NOT IN (SELECT session_id FROM intelligence_sessions FINAL))
-		ORDER BY last_seen DESC
-	`
+	legacy, err := ch.hasRows(ctx, "ttp_sessions")
+	if err != nil {
+		return nil, fmt.Errorf("failed to query ttp_sessions: %w", err)
+	}
+	// Newest first; sessions of the same moment by ID, so that a page is
+	// the same page each time it is asked for.
+	const order = " ORDER BY last_seen DESC, session_id"
+	query := "SELECT " + sessionColumns + " FROM " + sessionSource(sessionColumns, legacy, "") + order
 	if limit > 0 {
-		query += fmt.Sprintf(" LIMIT %d", limit)
+		// A page: choose its sessions from their IDs and times, then read
+		// those rows only (see clickhouse_reads.go).
+		keys := fmt.Sprintf("(SELECT session_id FROM %s%s LIMIT %d)", sessionSource(sessionPageColumns, legacy, ""), order, limit)
+		query = "SELECT " + sessionColumns + " FROM " + sessionSource(sessionColumns, legacy, keys) + order
 	}
 
 	rows, err := ch.conn.Query(ctx, query)

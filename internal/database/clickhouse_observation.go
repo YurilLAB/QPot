@@ -4,7 +4,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"strconv"
+	"sync"
 	"time"
 
 	"github.com/ClickHouse/clickhouse-go/v2"
@@ -42,14 +44,148 @@ func (ch *ClickHouse) ensureEventIDIndex(ctx context.Context) error {
 	return nil
 }
 
+// The set of classified observation IDs.
+//
+// The worker asks, for every batch of new events, which of their IDs already
+// have a classified row: those events are second copies. Asked of the events
+// table, that reads the whole table, because the table is ordered by time
+// and its ID index cannot say no to a few hundred IDs at once (measured: 24
+// of 25 million rows read, 2.3 s, for each batch of 500). The IDs the worker
+// has classified are therefore kept a second time in a small table ordered
+// by ID, where the same question reads a few hundred short ranges.
+//
+// The set says "classified" only after the events row does (tagging writes
+// the row first), so a row can never be taken for a second copy of itself.
+// An ID missing from the set costs one event counted twice if the collector
+// replays it; an ID wrongly in the set would cost the event. A database
+// filled by an earlier version has classified rows and no set: the worker's
+// first lookup starts a copy of their IDs in the background and uses the
+// events table until that is done.
+const (
+	classifiedIDsTable = "classified_event_ids"
+	// classifiedIDsReady is the row whose presence says the IDs of every
+	// row classified before the set existed are in it.
+	classifiedIDsReady = "00000000-0000-0000-0000-000000000000"
+	// classifiedIDsRetry is how long a failed copy waits before the next.
+	classifiedIDsRetry = time.Minute
+)
+
+// classifiedIDs is what one connection knows about the set.
+type classifiedIDs struct {
+	mu      sync.Mutex
+	ready   bool
+	copying bool
+	next    time.Time // no copy is started before this
+}
+
+// ensureClassifiedIDs creates the set. Its rows outlive the events they name
+// by a few days (events are kept 90 days from their time, IDs 100 days from
+// their classification), so a replay of an event that still exists is found.
+func (ch *ClickHouse) ensureClassifiedIDs(ctx context.Context) error {
+	if err := ch.conn.Exec(ctx, `
+		CREATE TABLE IF NOT EXISTS `+classifiedIDsTable+` (
+			event_id UUID,
+			seen DateTime DEFAULT now()
+		) ENGINE = ReplacingMergeTree
+		ORDER BY event_id
+		TTL seen + INTERVAL 100 DAY
+		SETTINGS index_granularity = 256
+	`); err != nil {
+		return fmt.Errorf("create the set of classified observation IDs: %w", err)
+	}
+	return nil
+}
+
+// recordClassifiedIDs adds the IDs of events that were just marked
+// classified. Adding an ID twice changes nothing.
+func (ch *ClickHouse) recordClassifiedIDs(ctx context.Context, events []*Event) error {
+	if len(events) == 0 {
+		return nil
+	}
+	batch, err := ch.conn.PrepareBatch(ctx, "INSERT INTO "+classifiedIDsTable+" (event_id)")
+	if err != nil {
+		return fmt.Errorf("record classified observation IDs: %w", err)
+	}
+	defer batch.Abort()
+	for _, e := range events {
+		if err := batch.Append(e.ID); err != nil {
+			return fmt.Errorf("record classified observation IDs: %w", err)
+		}
+	}
+	if err := batch.Send(); err != nil {
+		return fmt.Errorf("record classified observation IDs: %w", err)
+	}
+	return nil
+}
+
+// classifiedIDsUsable reports whether the set holds every classified ID. When
+// it does not, a copy of the IDs of the rows classified so far is started in
+// the background (one at a time, and not more often than classifiedIDsRetry).
+func (ch *ClickHouse) classifiedIDsUsable(ctx context.Context) bool {
+	ch.ids.mu.Lock()
+	defer ch.ids.mu.Unlock()
+	if ch.ids.ready {
+		return true
+	}
+	var n uint64
+	if err := ch.conn.QueryRow(ctx, "SELECT count() FROM "+classifiedIDsTable+" WHERE event_id = toUUID(?)", classifiedIDsReady).Scan(&n); err != nil {
+		return false
+	}
+	if n > 0 {
+		ch.ids.ready = true
+		return true
+	}
+	if !ch.ids.copying && !time.Now().Before(ch.ids.next) {
+		ch.ids.copying = true
+		go ch.copyClassifiedIDs()
+	}
+	return false
+}
+
+// copyClassifiedIDs fills the set from the events table and then marks it
+// complete. Rows the worker classifies meanwhile are added by the worker,
+// so the copy only has to cover what was classified before it began.
+func (ch *ClickHouse) copyClassifiedIDs() {
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Hour)
+	defer cancel()
+	err := ch.fillClassifiedIDs(ctx)
+	ch.ids.mu.Lock()
+	ch.ids.copying = false
+	if err != nil {
+		ch.ids.next = time.Now().Add(classifiedIDsRetry)
+	}
+	ch.ids.mu.Unlock()
+	if err != nil {
+		slog.Warn("The IDs of classified events were not copied; lookups read the events table until they are", "error", err)
+	}
+}
+
+func (ch *ClickHouse) fillClassifiedIDs(ctx context.Context) error {
+	start := time.Now()
+	// One thread: the copy shares the database's one CPU with the collector.
+	sctx := clickhouse.Context(ctx, clickhouse.WithSettings(clickhouse.Settings{"max_threads": 1, "max_insert_threads": 1}))
+	if err := ch.conn.Exec(sctx, "INSERT INTO "+classifiedIDsTable+" (event_id, seen) SELECT event_id, toDateTime(timestamp) FROM events WHERE classified = 1"); err != nil {
+		return err
+	}
+	// The marker outlives every other row.
+	if err := ch.conn.Exec(ctx, "INSERT INTO "+classifiedIDsTable+" (event_id, seen) VALUES (toUUID(?), toDateTime('2100-01-01 00:00:00'))", classifiedIDsReady); err != nil {
+		return err
+	}
+	slog.Info("Copied the IDs of classified events", "seconds", int(time.Since(start).Seconds()))
+	return nil
+}
+
 // storedObservations returns which of ids have a row in events; with
 // classifiedOnly, a classified row.
 func (ch *ClickHouse) storedObservations(ctx context.Context, ids []string, classifiedOnly bool) (map[string]bool, error) {
 	found := make(map[string]bool)
+	fromSet := classifiedOnly && ch.classifiedIDsUsable(ctx)
 	for start := 0; start < len(ids); start += observationChunk {
 		end := min(start+observationChunk, len(ids))
 		query := "SELECT DISTINCT toString(event_id) FROM events WHERE event_id IN (SELECT toUUID(arrayJoin(?)))"
-		if classifiedOnly {
+		if fromSet {
+			query = "SELECT DISTINCT toString(event_id) FROM " + classifiedIDsTable + " WHERE event_id IN (SELECT toUUID(arrayJoin(?)))"
+		} else if classifiedOnly {
 			query += " AND classified = 1"
 		}
 		rows, err := ch.conn.Query(ctx, query, ids[start:end])

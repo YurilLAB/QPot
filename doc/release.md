@@ -122,7 +122,7 @@ What changes shape between versions, and in which direction it is safe:
 | State | Forward (upgrade) | Backward (old program on new state) |
 |---|---|---|
 | `config.yaml` | Old files load. New settings get safe defaults. | Unknown settings are ignored. |
-| Database tables | Created or extended at start; never dropped. The events table gets an index on the event ID (ClickHouse) or an event ID column, a unique index and an insert trigger (TimescaleDB). | Extra tables, columns and indexes are ignored. |
+| Database tables | Created or extended at start; never dropped. The events table gets an index on the event ID (ClickHouse) or an event ID column, a unique index and an insert trigger (TimescaleDB). ClickHouse also gets a table of the IDs of classified events (`classified_event_ids`); for a database an earlier version filled, the worker copies them in the background at its first batch and reads the events table until that is done. | Extra tables, columns and indexes are ignored. |
 | Event IDs | Events stored by 1.0.1 or earlier keep the random ID they have. New events get an ID derived from their log line. Only new IDs are used to find a line stored twice. | Readable. |
 | Intelligence checkpoint (in the database) | Older formats are read and carried until their sessions end. | **Not readable** when its format number is newer: the old worker reports an error and does not classify. |
 | Collector checkpoints | Kept. 1.0.1 and earlier kept none in the instance: at the first start every log found is marked as collected up to its end, so nothing is sent twice. | Kept. |
@@ -233,7 +233,9 @@ go run ./cmd/qpot-release pack -version 1.0.1 -out dist
 
 That was checked on 2026-11-11: 1.0.1 rebuilt from its tag on Windows 11 and
 on Linux gave the published `SHA256SUMS` exactly. Later releases build with
-`-buildvcs=false` and do not depend on where the output goes.
+`-buildvcs=false` and do not depend on where the output goes: 1.1.2,
+rebuilt from its tag on Windows 11 on 2026-11-12 into a folder outside the
+repository, gave the published `SHA256SUMS` exactly.
 
 ## Cutting a release
 

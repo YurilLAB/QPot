@@ -498,6 +498,18 @@ func (c *intelligenceQuerySizeConn) Query(_ context.Context, query string, args 
 	c.args = append(c.args, append([]any(nil), args...))
 	return &storedRows{}, nil
 }
+
+// QueryRow answers the one count a read makes first (is the legacy table
+// empty): it is.
+func (c *intelligenceQuerySizeConn) QueryRow(context.Context, string, ...any) driver.Row {
+	return zeroCountRow{}
+}
+
+type zeroCountRow struct{ driver.Row }
+
+func (zeroCountRow) Scan(dest ...any) error { *dest[0].(*uint64) = 0; return nil }
+func (zeroCountRow) Err() error             { return nil }
+
 func TestIntelligenceClickHouseExactReadsBoundQuotedKeys(t *testing.T) {
 	conn := &intelligenceQuerySizeConn{}
 	db := &ClickHouse{conn: conn}
