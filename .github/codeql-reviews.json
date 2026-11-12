@@ -25,16 +25,16 @@
           "sha256": "6019107c9d99ffd1de5d7a04c824d31d51fe8581f6c8205ca3205c99615df1f3"
         },
         "internal/refrigeration/model.go": {
-          "sha256": "9bf974a88a6fa2599b4bcc4d5fbceb3bedbd42425d12e16b7dc53d60faf6eeb9"
+          "sha256": "ef44c38987d15ec53fa62572eee395c6bcc70246c561422a16593637814f6fd6"
         },
         "internal/refrigeration/server.go": {
           "sha256": "b5f91097ba014797a8936e2048fb77a005fa10b715db1040f7950f0065f8ab2c"
         },
         "internal/refrigeration/server_test.go": {
-          "sha256": "96f25269b07173f1aaf7518a4428e7de28255547ed3aefc69933ca8a4aa6386d"
+          "sha256": "0d94b71263b79e38745a1da1a6795ea5abd2476b27105ef8c7a558184e807683"
         },
         "internal/refrigeration/xml.go": {
-          "sha256": "cf4e225b322b1e4fbc0224204235fa386be80fcb3b4fcd3df90b5cd102b57f04"
+          "sha256": "90b8afc008006dd4201d07850dc9f7d01df7be6f646dcab984739e9b738b71b7"
         }
       },
       "uri": "internal/refrigeration/server.go"
@@ -42,7 +42,7 @@
     {
       "disposition": "intentional-decoy",
       "justification": "SMSESSION belongs only to the synthetic refrigeration HTTP device emulator. Its opaque, expiring virtual-plant session does not authenticate to the QPot control plane or real infrastructure. Plain HTTP is the intended legacy persona protocol; Secure would prevent the HTTP browser session and logout flow. HttpOnly, SameSite Strict, bounded lifetime, forged-session rejection and cross-origin refusal remain tested. Only these exact emulator findings and referenced source bytes are reviewed.",
-      "resultSHA256": "914f8fa5355d1c3436a35ad047594e6ecb25697bb87d4eafd81a42f5d8dd2e0b",
+      "resultSHA256": "a342dbd7ed42849bba3b382c60d37649b5019face0e5214f3df921cf974c4ec8",
       "ruleId": "go/cookie-secure-not-set",
       "sourceSHA256": {
         "cmd/qpot-refrigeration/main.go": {
@@ -64,16 +64,16 @@
           "sha256": "6019107c9d99ffd1de5d7a04c824d31d51fe8581f6c8205ca3205c99615df1f3"
         },
         "internal/refrigeration/model.go": {
-          "sha256": "9bf974a88a6fa2599b4bcc4d5fbceb3bedbd42425d12e16b7dc53d60faf6eeb9"
+          "sha256": "ef44c38987d15ec53fa62572eee395c6bcc70246c561422a16593637814f6fd6"
         },
         "internal/refrigeration/server.go": {
           "sha256": "b5f91097ba014797a8936e2048fb77a005fa10b715db1040f7950f0065f8ab2c"
         },
         "internal/refrigeration/server_test.go": {
-          "sha256": "96f25269b07173f1aaf7518a4428e7de28255547ed3aefc69933ca8a4aa6386d"
+          "sha256": "0d94b71263b79e38745a1da1a6795ea5abd2476b27105ef8c7a558184e807683"
         },
         "internal/refrigeration/xml.go": {
-          "sha256": "cf4e225b322b1e4fbc0224204235fa386be80fcb3b4fcd3df90b5cd102b57f04"
+          "sha256": "90b8afc008006dd4201d07850dc9f7d01df7be6f646dcab984739e9b738b71b7"
         }
       },
       "uri": "internal/refrigeration/xml.go"
@@ -166,7 +166,7 @@
           "sha256": "26542243ad5ef13eb6770a215020311b7f09eb7fb18a3b18fbeb853c1284f12c"
         },
         "internal/database/intelligence_store_test.go": {
-          "sha256": "604035bceeb3e645cd561a0aeb675517a6da15f9e8309ccdf2927c2e6ee2a9df"
+          "sha256": "b6bf9c181c570304fe4615b755ede70ef7649cceedc66fa9115c91e4a7a97371"
         },
         "internal/intelligence/classifier.go": {
           "sha256": "a8e6b5a9978368e555201deb861124509fb5be3cbe7c9c723b2447465f2fe044"
@@ -235,16 +235,16 @@
           "sha256": "6019107c9d99ffd1de5d7a04c824d31d51fe8581f6c8205ca3205c99615df1f3"
         },
         "internal/refrigeration/model.go": {
-          "sha256": "9bf974a88a6fa2599b4bcc4d5fbceb3bedbd42425d12e16b7dc53d60faf6eeb9"
+          "sha256": "ef44c38987d15ec53fa62572eee395c6bcc70246c561422a16593637814f6fd6"
         },
         "internal/refrigeration/server.go": {
           "sha256": "b5f91097ba014797a8936e2048fb77a005fa10b715db1040f7950f0065f8ab2c"
         },
         "internal/refrigeration/server_test.go": {
-          "sha256": "96f25269b07173f1aaf7518a4428e7de28255547ed3aefc69933ca8a4aa6386d"
+          "sha256": "0d94b71263b79e38745a1da1a6795ea5abd2476b27105ef8c7a558184e807683"
         },
         "internal/refrigeration/xml.go": {
-          "sha256": "cf4e225b322b1e4fbc0224204235fa386be80fcb3b4fcd3df90b5cd102b57f04"
+          "sha256": "90b8afc008006dd4201d07850dc9f7d01df7be6f646dcab984739e9b738b71b7"
         }
       },
       "uri": "internal/refrigeration/server.go"
@@ -283,10 +283,10 @@
           "sha256": "b047580f626e55257aa97061f49bc5e4bb5ed9f5cd20bcf032d577e10f14c828"
         },
         "internal/config/config.go": {
-          "sha256": "089979db0720b0d7eeddecec1dc0fbeaab54570206629cf003d79d0b076b1a2b"
+          "sha256": "b4d4d4da6df750ec213d058986885ca869c6a39acd950486eeff70c21b608eb2"
         },
         "internal/instance/deploy.go": {
-          "sha256": "b26582ff768cabf2f6a64d97b15500e62fdd8784a1d87775535332a52e9621a6"
+          "sha256": "d50cb6da24af056e5c1ac49937e06ca10322556923c3b4614b634b12b8f47d3a"
         },
         "internal/instance/manager.go": {
           "sha256": "0ce614050c0e3a90302c3b8f637e6e7eba7a4aac606eaad53a7356418c69ed5c"
@@ -325,10 +325,10 @@
           "sha256": "b047580f626e55257aa97061f49bc5e4bb5ed9f5cd20bcf032d577e10f14c828"
         },
         "internal/config/config.go": {
-          "sha256": "089979db0720b0d7eeddecec1dc0fbeaab54570206629cf003d79d0b076b1a2b"
+          "sha256": "b4d4d4da6df750ec213d058986885ca869c6a39acd950486eeff70c21b608eb2"
         },
         "internal/instance/deploy.go": {
-          "sha256": "b26582ff768cabf2f6a64d97b15500e62fdd8784a1d87775535332a52e9621a6"
+          "sha256": "d50cb6da24af056e5c1ac49937e06ca10322556923c3b4614b634b12b8f47d3a"
         },
         "internal/instance/manager.go": {
           "sha256": "0ce614050c0e3a90302c3b8f637e6e7eba7a4aac606eaad53a7356418c69ed5c"
@@ -651,7 +651,7 @@
     {
       "disposition": "false-positive",
       "justification": "The reported data reaches structured slog attribute values, with constant attribute keys. Logging messages are literals, except sendInternalError whose production context callers all pass literals. QPot installs the standard JSONHandler; setup temporarily uses TextHandler. These handlers quote CR, LF and control characters, so arbitrary attribute values remain one record. Actual Go 1.26.11 controls preserve values and prevent forged records. Both handler configuration sources and this trace are pinned.",
-      "resultSHA256": "aeadf2599e26e3763163a84b74998a4deb5fdba51459cfaf5e76213ccf2d152a",
+      "resultSHA256": "a97b9ff72a9e14a8c6e79c9845abafd42ffc3ace8bb03e507e02e1f4b0c7a6fc",
       "ruleId": "go/log-injection",
       "sourceSHA256": {
         "cmd/qpot/main.go": {
@@ -694,7 +694,7 @@
           "sha256": "c5dbc8276b246a9fb0502cf1e41791c6d81c44624c0fcf968c3fe77c55abb80a"
         },
         "internal/server/server.go": {
-          "sha256": "f69185354586751b4dcb510a730c9332c7268046cb58432d1cb0e8b8f04e9179"
+          "sha256": "d79f6b9cdb71592d1e2f89e859ad6b8b93442ed4648f2ae2d96b1b12db59ad08"
         }
       },
       "uri": "internal/server/server.go"
@@ -1146,7 +1146,7 @@
     {
       "disposition": "false-positive",
       "justification": "The reported data reaches structured slog attribute values, with constant attribute keys. Logging messages are literals, except sendInternalError whose production context callers all pass literals. QPot installs the standard JSONHandler; setup temporarily uses TextHandler. These handlers quote CR, LF and control characters, so arbitrary attribute values remain one record. Actual Go 1.26.11 controls preserve values and prevent forged records. Both handler configuration sources and this trace are pinned.",
-      "resultSHA256": "7d3f7fbeba9d93112160d5fbc98ab8b5ded93f448bd2b451db3885b0c0660f49",
+      "resultSHA256": "d30a606c757727d5eee81fb9f1991d2fccc945c9838c06292aa0142d88b651e5",
       "ruleId": "go/log-injection",
       "sourceSHA256": {
         "cmd/qpot/main.go": {
@@ -1162,7 +1162,7 @@
           "sha256": "b047580f626e55257aa97061f49bc5e4bb5ed9f5cd20bcf032d577e10f14c828"
         },
         "internal/config/config.go": {
-          "sha256": "089979db0720b0d7eeddecec1dc0fbeaab54570206629cf003d79d0b076b1a2b"
+          "sha256": "b4d4d4da6df750ec213d058986885ca869c6a39acd950486eeff70c21b608eb2"
         },
         "internal/server/api_cleanup.go": {
           "sha256": "f30adc9b3c782d581ea29d303bb47e7d9c39150473f6ba62a560111c3ca7846c"
@@ -1192,7 +1192,7 @@
           "sha256": "b047580f626e55257aa97061f49bc5e4bb5ed9f5cd20bcf032d577e10f14c828"
         },
         "internal/config/config.go": {
-          "sha256": "089979db0720b0d7eeddecec1dc0fbeaab54570206629cf003d79d0b076b1a2b"
+          "sha256": "b4d4d4da6df750ec213d058986885ca869c6a39acd950486eeff70c21b608eb2"
         },
         "internal/server/api_cleanup.go": {
           "sha256": "f30adc9b3c782d581ea29d303bb47e7d9c39150473f6ba62a560111c3ca7846c"
@@ -1222,7 +1222,7 @@
           "sha256": "b047580f626e55257aa97061f49bc5e4bb5ed9f5cd20bcf032d577e10f14c828"
         },
         "internal/config/config.go": {
-          "sha256": "089979db0720b0d7eeddecec1dc0fbeaab54570206629cf003d79d0b076b1a2b"
+          "sha256": "b4d4d4da6df750ec213d058986885ca869c6a39acd950486eeff70c21b608eb2"
         },
         "internal/server/api_cleanup.go": {
           "sha256": "f30adc9b3c782d581ea29d303bb47e7d9c39150473f6ba62a560111c3ca7846c"
@@ -1252,7 +1252,7 @@
           "sha256": "b047580f626e55257aa97061f49bc5e4bb5ed9f5cd20bcf032d577e10f14c828"
         },
         "internal/config/config.go": {
-          "sha256": "089979db0720b0d7eeddecec1dc0fbeaab54570206629cf003d79d0b076b1a2b"
+          "sha256": "b4d4d4da6df750ec213d058986885ca869c6a39acd950486eeff70c21b608eb2"
         },
         "internal/server/api_cleanup.go": {
           "sha256": "f30adc9b3c782d581ea29d303bb47e7d9c39150473f6ba62a560111c3ca7846c"
@@ -1350,7 +1350,7 @@
     {
       "disposition": "false-positive",
       "justification": "The reported data reaches structured slog attribute values, with constant attribute keys. Logging messages are literals, except sendInternalError whose production context callers all pass literals. QPot installs the standard JSONHandler; setup temporarily uses TextHandler. These handlers quote CR, LF and control characters, so arbitrary attribute values remain one record. Actual Go 1.26.11 controls preserve values and prevent forged records. Both handler configuration sources and this trace are pinned.",
-      "resultSHA256": "154a0962296e637efb24a2d14478d04e90354dcadc21c41bcac9f23ce954bdc0",
+      "resultSHA256": "a906e2887e8b03a5c259284643ab970faf3d09809e32f216bad8e918cef358ff",
       "ruleId": "go/log-injection",
       "sourceSHA256": {
         "cmd/qpot/main.go": {
@@ -1393,7 +1393,7 @@
           "sha256": "c5dbc8276b246a9fb0502cf1e41791c6d81c44624c0fcf968c3fe77c55abb80a"
         },
         "internal/server/server.go": {
-          "sha256": "f69185354586751b4dcb510a730c9332c7268046cb58432d1cb0e8b8f04e9179"
+          "sha256": "d79f6b9cdb71592d1e2f89e859ad6b8b93442ed4648f2ae2d96b1b12db59ad08"
         }
       },
       "uri": "internal/server/server.go"
@@ -1401,7 +1401,7 @@
     {
       "disposition": "false-positive",
       "justification": "The reported data reaches structured slog attribute values, with constant attribute keys. Logging messages are literals, except sendInternalError whose production context callers all pass literals. QPot installs the standard JSONHandler; setup temporarily uses TextHandler. These handlers quote CR, LF and control characters, so arbitrary attribute values remain one record. Actual Go 1.26.11 controls preserve values and prevent forged records. Both handler configuration sources and this trace are pinned.",
-      "resultSHA256": "2a768054fb62a1ec37b9f74318d3e823961f9747149059210b05a99942727798",
+      "resultSHA256": "665412b293f62009ab140870a710865e32d66402320d0a64056c89bac167ef5b",
       "ruleId": "go/log-injection",
       "sourceSHA256": {
         "cmd/qpot/main.go": {
@@ -1444,12 +1444,12 @@
           "sha256": "c5dbc8276b246a9fb0502cf1e41791c6d81c44624c0fcf968c3fe77c55abb80a"
         },
         "internal/server/server.go": {
-          "sha256": "f69185354586751b4dcb510a730c9332c7268046cb58432d1cb0e8b8f04e9179"
+          "sha256": "d79f6b9cdb71592d1e2f89e859ad6b8b93442ed4648f2ae2d96b1b12db59ad08"
         }
       },
       "uri": "internal/server/server.go"
     }
   ],
-  "sourceCatalogSHA256": "0c52d4bf3728aa0e6e3f70cad2e25ed5dc6ca2fd701bc4bc3216dc4ee76857db",
+  "sourceCatalogSHA256": "6294128b2ebd0607005b9b13ad2ffcda80e2fba73689f216d9cc4314992d3fc7",
   "version": 2
 }
