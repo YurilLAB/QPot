@@ -661,7 +661,7 @@ func (w *Writer) appendOverflow(ev SessionEvent, data []byte) error {
 	if o.have[key] {
 		return nil
 	}
-	line := make([]byte, 0, len(data)+2)
+	var line []byte
 	if o.torn {
 		// The file ends in part of a line (a write the disk had no room
 		// for): end it, so this line does not continue it.
