@@ -1599,6 +1599,11 @@ sources:
 {{end}}
     read_from: beginning
     offset_key: qpot_offset
+    # How much the collector takes from one file before it turns to the
+    # next. Its default, 2 kB, made a large backlog in one file wait for
+    # every other file on each round: with 3,000 HiFi record files to go
+    # round, 34,000 waiting lines arrived at 3 a second.
+    max_read_bytes: 1048576
     # The default fingerprint (the first line's checksum) names each log in
     # the checkpoints disk cleanup reads (internal/cleanup): keep it.
     multiline:
@@ -1615,6 +1620,7 @@ sources:
       - "/data/honeypots/ssh-proxy/logs/cells/*/archive-g*/logs/**/*.json"
     read_from: beginning
     offset_key: qpot_offset
+    max_read_bytes: 1048576
 {{end}}
 {{- if .Config.Collector.IngestSuricata}}
   # T-Pot's Suricata network IDS writes one EVE JSON object per line. Harmless
@@ -1626,6 +1632,7 @@ sources:
       - "/data/suricata/log/*.json"
     read_from: beginning
     offset_key: qpot_offset
+    max_read_bytes: 1048576
 {{- end}}
 {{- if .Config.Collector.IngestP0f}}
   # p0f passive OS fingerprinting (one JSON object per line).
@@ -1635,6 +1642,7 @@ sources:
       - "/data/p0f/log/p0f.json"
     read_from: beginning
     offset_key: qpot_offset
+    max_read_bytes: 1048576
 {{- end}}
 {{- if .Config.Collector.IngestFatt}}
   # fatt network fingerprinting (JA3/HASSH; one JSON object per line).
@@ -1645,6 +1653,7 @@ sources:
       - "/data/fatt/log/*.json"
     read_from: beginning
     offset_key: qpot_offset
+    max_read_bytes: 1048576
 {{- end}}
 
 transforms:
