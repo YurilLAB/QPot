@@ -529,10 +529,24 @@ one account. The failure soak found the second one: the 413th command of a
   streams from one account, or 56 MiB), the control plane stops that
   container (`docker kill`). The visitor's connection ends as on a host that
   went down, the broker has the cell recreated, and the visitor's next
-  connection gets a fresh cell. What the cell ran between reaching the
-  reserve and stopping keeps its record but no stream files; the reserve
-  holds about 250 such commands. The control plane logs "An SSH cell came
+  connection gets a fresh cell. The control plane logs "An SSH cell came
   close to its capture limit and was stopped".
+* The control plane reads what a cell records a little after the cell
+  writes it, and nobody stops a cell while the control plane is down. A
+  visitor who runs commands without a pause is therefore ahead of it (by
+  about 1,300 commands in a test at 160 commands a second on a disk that
+  syncs every file), and with the control plane down a visitor runs until
+  sshd ends the connection. A command that no longer fits the limits is
+  still recorded when the log is converted: who ran it,
+  when, the command, its exit status and the first 4 kB of its input and
+  output, with `truncated` set and no stream files. These records go to one
+  file per account, `uid-<n>/overflow.json`, so their number adds no files,
+  and they have an allowance of their own (128 MiB per cell, tens of
+  thousands of commands) on top of the limits above. That covers what the
+  capture budgets of a visitor's three connections can hold of ordinary
+  commands. A visitor who sets out to use it up with thousands of very long
+  commands or binary output can; what they run after that, while the
+  control plane is still down, is not recorded.
 
 What is still cut short, and says so in its record (`truncated`): one channel
 past its 8 MiB. The rest of that channel's bytes are carried but not kept, so
@@ -604,8 +618,9 @@ insert duplicate historical events. Log retention does not remove these cursors.
 Guest root can end capture for later connections by killing or replacing sshd,
 and can read its own copy of the host keys. It can also write forged session
 records into sshd's error stream: they land only in its own cell's evidence,
-within limits for the whole container (256 MiB, 8,192 files, 64 account
-folders, bounded sessions held in memory) that no account or session number
+within limits for the whole container (256 MiB and 128 MiB of overflow
+records, 8,192 files, 64 account folders, bounded sessions held in memory)
+that no account or session number
 gets round, and they are joined only to broker connections made after that
 container was created. One container serves one visitor's address, so a
 forged record can never name an earlier visitor. It cannot alter the broker's records or the

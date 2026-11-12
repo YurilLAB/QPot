@@ -95,6 +95,20 @@ func records(t *testing.T, files map[string]string) map[string][]SessionEvent {
 	return out
 }
 
+// sessions returns every record line in files by the session it belongs to,
+// in file order: a session's own record file, or its lines in an account's
+// overflow file.
+func sessions(t *testing.T, files map[string]string) map[string][]SessionEvent {
+	t.Helper()
+	out := map[string][]SessionEvent{}
+	for _, evs := range records(t, files) {
+		for _, ev := range evs {
+			out[ev.Session] = append(out[ev.Session], ev)
+		}
+	}
+	return out
+}
+
 func session(e *emitter) {
 	e.open(0, 0, false, 41000, "uname -a")
 	e.rec(0, KindInput, 1, []byte("stdin-bytes"))
@@ -284,7 +298,8 @@ func TestWriterLimitsAndTruncation(t *testing.T) {
 	}
 
 	// Inside the reserve of the per-account file limit, commands keep their
-	// record but no streams.
+	// record and the first bytes of their streams, in the account's overflow
+	// file, and no stream files.
 	e = newEmitter(testConn)
 	n := softUserFiles/filesPerEntry + 3
 	for i := 0; i < n; i++ {
@@ -296,16 +311,28 @@ func TestWriterLimitsAndTruncation(t *testing.T) {
 	dir = t.TempDir()
 	apply(t, dir, e.lines, nil)
 	limited := 0
-	for _, evs := range records(t, snapshot(t, dir)) {
+	files := snapshot(t, dir)
+	for _, evs := range sessions(t, files) {
+		if len(evs) != 2 {
+			t.Fatalf("a command has %d record lines: %+v", len(evs), evs)
+		}
 		if strings.Contains(evs[1].CaptureError, "account capture limit") {
 			limited++
-			if !evs[1].Truncated || evs[1].Stdout != "" {
+			if !evs[1].Truncated || evs[1].Stdout != "o" || evs[1].StdoutFile != "" || evs[1].ExitCode == nil || *evs[1].ExitCode != 0 || evs[0].Input != "true" {
 				t.Fatalf("limited command: %+v", evs[1])
 			}
 		}
 	}
 	if limited != 3 {
 		t.Fatalf("want exactly three limited commands, got %d", limited)
+	}
+	if lines := strings.Count(files["uid-0/"+overflowName], "\n"); lines != 6 {
+		t.Fatalf("the overflow file holds %d lines, want the start and finish of three commands", lines)
+	}
+	// A command without a terminal has four files (no timing file), though
+	// it counts as five.
+	if got, want := len(files), softUserFiles/filesPerEntry*(filesPerEntry-1)+1; got != want {
+		t.Fatalf("%d files kept, want %d: those of the full commands and one overflow file", got, want)
 	}
 }
 
@@ -314,7 +341,8 @@ func TestWriterLimitsAndTruncation(t *testing.T) {
 // without leaving any record (found by the HiFi capture soak: the 413th
 // command of a 21-minute session). The writer now says the capture is full
 // while there is still room, so the follower can stop the cell, and every
-// command up to the hard limit keeps at least its record.
+// command after that keeps its record whether the cell is stopped or not:
+// with the control plane down nobody stops it.
 func TestWriterSaysFullBeforeAnyCommandGoesUnrecorded(t *testing.T) {
 	dir := t.TempDir()
 	w, err := NewWriter(dir, testContainer, testCreated, nil)
@@ -336,14 +364,14 @@ func TestWriterSaysFullBeforeAnyCommandGoesUnrecorded(t *testing.T) {
 		}
 		applied = len(e.lines)
 	}
-	const afterFull = 200 // what a visitor might still run before the cell stops
+	const afterFull = 3000 // far more than the old limits held: nobody stopped the cell
 	n := 0
 	for ; fullAt == 0 || n < fullAt+afterFull; n++ {
 		run(n)
 		if fullAt == 0 && w.Full() != "" {
 			fullAt = n + 1
 		}
-		if n > 2*maxUserFiles {
+		if n > 4*maxUserFiles {
 			t.Fatal("the writer never said its capture was full")
 		}
 	}
@@ -356,13 +384,270 @@ func TestWriterSaysFullBeforeAnyCommandGoesUnrecorded(t *testing.T) {
 	if w.Full() != "files kept for one account" {
 		t.Errorf("full because of %q", w.Full())
 	}
+	files := snapshot(t, dir)
 	have := map[string]int{}
-	for _, evs := range records(t, snapshot(t, dir)) {
+	for _, evs := range sessions(t, files) {
 		have[evs[0].Input] = len(evs)
+		if last := evs[len(evs)-1]; last.Phase != "finish" || last.ExitCode == nil || last.Stdout != "o" {
+			t.Fatalf("%q ends with %+v", evs[0].Input, last)
+		}
 	}
 	for i := 0; i < n; i++ {
 		if have[fmt.Sprintf("echo %d", i)] != 2 {
 			t.Fatalf("command %d of %d (full after %d) has %d record lines, want its start and its finish", i+1, n, fullAt, have[fmt.Sprintf("echo %d", i)])
+		}
+	}
+	// The host keeps no more files for it, however long the stay.
+	if len(files) > softUserFiles+1 {
+		t.Errorf("%d files kept for %d commands, want at most %d", len(files), n, softUserFiles+1)
+	}
+
+	// A replay of the same capture, as a reset's drain makes after a
+	// follower, adds nothing and changes nothing.
+	w2, err := NewWriter(dir, testContainer, testCreated, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, l := range e.lines {
+		if err := w2.Apply(l); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := w2.Finish(); err != nil {
+		t.Fatal(err)
+	}
+	again := snapshot(t, dir)
+	if len(again) != len(files) || again["uid-0/"+overflowName] != files["uid-0/"+overflowName] {
+		t.Errorf("a replay changed the folder: %d files then, %d now; overflow file %d bytes then, %d now",
+			len(files), len(again), len(files["uid-0/"+overflowName]), len(again["uid-0/"+overflowName]))
+	}
+}
+
+// The overflow file is appended to line by line, so a follower that was cut
+// off, a disk that filled mid-line and sessions that end in another order
+// must all leave every session with one start and one finish.
+func TestWriterOverflowSurvivesInterruptedWriters(t *testing.T) {
+	dir := t.TempDir()
+	e := newEmitter(testConn)
+	const n = 40
+	// Sessions that overlap: all open, then all close.
+	for i := 0; i < n; i++ {
+		e.open(i, 0, false, 41000, fmt.Sprintf("echo %d", i))
+	}
+	for i := 0; i < n; i++ {
+		e.rec(i, KindOutput, 1, []byte("out"))
+		e.rec(i, KindExit, 2, []byte("exit=3"))
+		e.rec(i, KindClosed, 2, nil)
+	}
+	writer := func() *Writer {
+		t.Helper()
+		w, err := NewWriter(dir, testContainer, testCreated, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		w.usage[0] = &usage{files: softUserFiles} // every session overflows
+		return w
+	}
+	// A follower sees the first two thirds of the stream, then its stream
+	// ends (as when Docker restarts): it finishes what it can.
+	first := writer()
+	for _, l := range e.lines[:len(e.lines)*2/3] {
+		if err := first.Apply(l); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := first.Finish(); err != nil {
+		t.Fatal(err)
+	}
+	// The disk filled while a line was being written.
+	name := filepath.Join(dir, "uid-0", overflowName)
+	f, err := os.OpenFile(name, os.O_WRONLY|os.O_APPEND, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.WriteString(`{"session":"torn","phase":"sta`); err != nil {
+		t.Fatal(err)
+	}
+	f.Close()
+	// The drain replays everything.
+	second := writer()
+	for _, l := range e.lines {
+		if err := second.Apply(l); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := second.Finish(); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	starts, finishes, torn := map[string]int{}, map[string]int{}, 0
+	for _, line := range strings.Split(strings.TrimSuffix(string(data), "\n"), "\n") {
+		var ev SessionEvent
+		if err := json.Unmarshal([]byte(line), &ev); err != nil {
+			torn++
+			continue
+		}
+		if ev.Phase == "start" {
+			starts[ev.Input]++
+		} else {
+			finishes[ev.Input]++
+			if ev.ExitCode == nil || *ev.ExitCode != 3 || ev.Stdout != "out" {
+				t.Errorf("%q finished as %+v", ev.Input, ev)
+			}
+		}
+	}
+	if torn != 1 {
+		t.Errorf("%d unreadable lines, want only the one the full disk cut short", torn)
+	}
+	for i := 0; i < n; i++ {
+		in := fmt.Sprintf("echo %d", i)
+		if starts[in] != 1 || finishes[in] != 1 {
+			t.Errorf("%q has %d start and %d finish lines, want one of each", in, starts[in], finishes[in])
+		}
+	}
+}
+
+// A reset's drain is a second writer over the same stream. It runs between
+// two batches of the follower, which holds nothing in the folder then, and
+// it can stop half-way (its time ran out, found by the capture soak with
+// 17,000 commands in one stay). The follower goes on with the next batch: it
+// must not write again what the drain wrote, and nothing may be missing.
+func TestWriterOverflowWithADrainInBetween(t *testing.T) {
+	dir := t.TempDir()
+	e := newEmitter(testConn)
+	const n = 90
+	for i := 0; i < n; i++ {
+		e.open(i%5, 0, false, 41000, fmt.Sprintf("echo %d", i))
+		e.rec(i%5, KindOutput, 1, []byte("out"))
+		e.rec(i%5, KindExit, 2, []byte("exit=0"))
+		e.rec(i%5, KindClosed, 2, nil)
+	}
+	writer := func() *Writer {
+		t.Helper()
+		w, err := NewWriter(dir, testContainer, testCreated, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		w.usage[0] = &usage{files: softUserFiles} // every session overflows
+		return w
+	}
+	apply := func(w *Writer, lines [][]byte) {
+		t.Helper()
+		for _, l := range lines {
+			if err := w.Apply(l); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	third := len(e.lines) / 3
+	follower := writer()
+	apply(follower, e.lines[:third])
+	if err := follower.Flush(); err != nil {
+		t.Fatal(err)
+	}
+	drain := writer()
+	apply(drain, e.lines[:2*third])
+	if err := drain.Finish(); err != nil {
+		t.Fatal(err)
+	}
+	apply(follower, e.lines[third:2*third+7])
+	if err := follower.Flush(); err != nil {
+		t.Fatal(err)
+	}
+	// A second drain, this one whole, and the follower's last batch.
+	drain = writer()
+	apply(drain, e.lines)
+	if err := drain.Finish(); err != nil {
+		t.Fatal(err)
+	}
+	apply(follower, e.lines[2*third+7:])
+	if err := follower.Finish(); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(filepath.Join(dir, "uid-0", overflowName))
+	if err != nil {
+		t.Fatal(err)
+	}
+	seen := map[string]int{}
+	for _, line := range strings.Split(strings.TrimSuffix(string(data), "\n"), "\n") {
+		var ev SessionEvent
+		if err := json.Unmarshal([]byte(line), &ev); err != nil {
+			t.Fatalf("unreadable line %q: %v", line, err)
+		}
+		seen[ev.Input+"/"+ev.Phase]++
+	}
+	if len(seen) != 2*n {
+		t.Errorf("%d different lines, want a start and a finish for each of %d commands", len(seen), n)
+	}
+	for key, count := range seen {
+		if count != 1 {
+			t.Errorf("%s is in the file %d times", key, count)
+		}
+	}
+}
+
+// A write the disk cut exactly before the line's newline left a whole
+// record: the replay must end that line and not write the record again.
+func TestWriterOverflowLineMissingOnlyItsNewline(t *testing.T) {
+	dir := t.TempDir()
+	e := newEmitter(testConn)
+	const n = 12
+	for i := 0; i < n; i++ {
+		e.open(i, 0, false, 41000, fmt.Sprintf("echo %d", i))
+		e.rec(i, KindExit, 2, []byte("exit=0"))
+		e.rec(i, KindClosed, 2, nil)
+	}
+	replay := func(lines [][]byte) {
+		t.Helper()
+		w, err := NewWriter(dir, testContainer, testCreated, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		w.usage[0] = &usage{files: softUserFiles} // every session overflows
+		for _, l := range lines {
+			if err := w.Apply(l); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if err := w.Finish(); err != nil {
+			t.Fatal(err)
+		}
+	}
+	replay(e.lines[:len(e.lines)/2])
+	name := filepath.Join(dir, "uid-0", overflowName)
+	data, err := os.ReadFile(name)
+	if err != nil || len(data) < 2 || data[len(data)-1] != '\n' {
+		t.Fatalf("overflow file after half the stream: %d bytes, %v", len(data), err)
+	}
+	if err := os.WriteFile(name, data[:len(data)-1], 0o600); err != nil {
+		t.Fatal(err)
+	}
+	replay(e.lines)
+	replay(e.lines)
+	data, err = os.ReadFile(name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(data) == 0 || data[len(data)-1] != '\n' {
+		t.Fatal("the overflow file does not end in a whole line")
+	}
+	seen := map[string]int{}
+	for _, line := range strings.Split(strings.TrimSuffix(string(data), "\n"), "\n") {
+		var ev SessionEvent
+		if err := json.Unmarshal([]byte(line), &ev); err != nil {
+			t.Fatalf("unreadable line %q: %v", line, err)
+		}
+		seen[ev.Session+"/"+ev.Phase]++
+	}
+	if len(seen) != 2*n {
+		t.Errorf("%d different lines, want a start and a finish for each of %d sessions", len(seen), n)
+	}
+	for key, count := range seen {
+		if count != 1 {
+			t.Errorf("%s is in the file %d times", key, count)
 		}
 	}
 }
@@ -588,20 +873,26 @@ func TestWriterBoundsWhatAForgedStreamCanMakeTheHostKeep(t *testing.T) {
 		t.Fatalf("over the container limits: %+v", w.total)
 	}
 	// The container-wide byte and file limits hold across accounts too.
-	one := func(total usage) (*Writer, string) {
+	// one runs a session in a container that has used atOpen when the
+	// session opens and, when given, running once it is open.
+	one := func(atOpen usage, running *usage) (*Writer, string) {
 		t.Helper()
 		dir := t.TempDir()
 		w, err := NewWriter(dir, testContainer, testCreated, nil)
 		if err != nil {
 			t.Fatal(err)
 		}
-		w.total = total
+		w.total = atOpen
 		e := newEmitter(testConn)
 		e.open(0, 5, false, 41000, "x")
+		opened := len(e.lines)
 		e.rec(0, KindOutput, 1, big)
 		e.rec(0, KindExit, 1, []byte("exit=0"))
 		e.rec(0, KindClosed, 1, nil)
-		for _, l := range e.lines {
+		for i, l := range e.lines {
+			if i == opened && running != nil {
+				w.total = *running
+			}
 			if err := w.Apply(l); err != nil {
 				t.Fatal(err)
 			}
@@ -611,9 +902,9 @@ func TestWriterBoundsWhatAForgedStreamCanMakeTheHostKeep(t *testing.T) {
 		}
 		return w, dir
 	}
-	// Room for one more session's files, but only a little more data: the
-	// record line counts too, and the output is cut at the limit.
-	w2, dir2 := one(usage{bytes: maxContainerBytes - 1500, files: softContainerFiles - filesPerEntry - 1})
+	// A session open when the container reaches its byte limit: the output
+	// is cut at the limit.
+	w2, dir2 := one(usage{files: softContainerFiles - filesPerEntry - 1}, &usage{bytes: maxContainerBytes - 1500, files: softContainerFiles - 1})
 	outputs, _ := filepath.Glob(filepath.Join(dir2, "uid-5", "*.out"))
 	if w2.total.files != softContainerFiles-1 || len(outputs) != 1 {
 		t.Fatalf("container byte limit not applied: %+v %v", w2.total, outputs)
@@ -628,15 +919,18 @@ func TestWriterBoundsWhatAForgedStreamCanMakeTheHostKeep(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	w4.total = usage{bytes: maxContainerBytes - 4000}
 	e4 := newEmitter(testConn)
 	e4.open(0, 5, true, 41000, "")
+	opened := len(e4.lines)
 	for i := 0; i < 1000; i++ {
 		e4.rec(0, KindOutput, int64(i), []byte("x"))
 	}
 	e4.rec(0, KindExit, 1000, []byte("exit=0"))
 	e4.rec(0, KindClosed, 1000, nil)
-	for _, l := range e4.lines {
+	for i, l := range e4.lines {
+		if i == opened {
+			w4.total = usage{bytes: maxContainerBytes - 4000, files: filesPerEntry}
+		}
 		if err := w4.Apply(l); err != nil {
 			t.Fatal(err)
 		}
@@ -656,19 +950,23 @@ func TestWriterBoundsWhatAForgedStreamCanMakeTheHostKeep(t *testing.T) {
 		t.Fatalf("a single-byte PTY stream kept %d bytes against a 4000-byte allowance", kept)
 	}
 	// No room outside the reserve for a session's files: its record alone,
-	// one file.
-	w3, dir3 := one(usage{files: softContainerFiles - filesPerEntry + 1})
+	// in the account's overflow file.
+	w3, dir3 := one(usage{files: softContainerFiles - filesPerEntry + 1}, nil)
 	if outputs, _ := filepath.Glob(filepath.Join(dir3, "uid-5", "*.out")); w3.total.files != softContainerFiles-filesPerEntry+2 || w3.total.bytes > 4096 || len(outputs) != 0 {
 		t.Fatalf("container file limit not applied: %+v %v", w3.total, outputs)
 	}
-	// Record lines count too: sessions with long commands and no data stop
-	// opening once the container is at its limit.
+	if kept, _ := os.ReadFile(filepath.Join(dir3, "uid-5", overflowName)); strings.Count(string(kept), "\n") != 2 {
+		t.Fatalf("the overflow file holds %q, want the session's start and finish", kept)
+	}
+	// The overflow file has its own allowance: sessions with long commands
+	// and no data stop being recorded once it is used up.
 	dir5 := t.TempDir()
 	w5, err := NewWriter(dir5, testContainer, testCreated, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	w5.total = usage{bytes: maxContainerBytes - 100<<10}
+	w5.total = usage{bytes: softContainerBytes}
+	w5.overflowBytes = maxOverflowBytes - 100<<10
 	e5 := newEmitter(testConn)
 	command := strings.Repeat("c", maxCommand)
 	for ch := 0; ch < 50; ch++ {
@@ -684,7 +982,8 @@ func TestWriterBoundsWhatAForgedStreamCanMakeTheHostKeep(t *testing.T) {
 	if err := w5.Finish(); err != nil {
 		t.Fatal(err)
 	}
-	if records, _ := filepath.Glob(filepath.Join(dir5, "uid-5", "*.json")); len(records) == 0 || len(records) > 4 {
-		t.Fatalf("%d records kept against a 100 KiB allowance of 32 KiB records", len(records))
+	kept5 := len(sessions(t, snapshot(t, dir5)))
+	if kept5 == 0 || kept5 > 4 || w5.overflowBytes > maxOverflowBytes+64<<10 || w5.Full() == "" {
+		t.Fatalf("%d sessions kept against a 100 KiB allowance of 32 KiB records; %d overflow bytes; full %q", kept5, w5.overflowBytes, w5.Full())
 	}
 }

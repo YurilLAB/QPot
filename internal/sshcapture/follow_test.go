@@ -393,7 +393,7 @@ func TestFollowRetiresACellCloseToItsCaptureLimit(t *testing.T) {
 			t.Fatalf("stopped %v, want the container once", retired)
 		}
 		// What ran before the stop landed is all recorded.
-		if got := len(records(t, snapshot(t, dir))); got != n {
+		if got := len(sessions(t, snapshot(t, dir))); got != n {
 			t.Fatalf("%d of %d commands have a record", got, n)
 		}
 	})

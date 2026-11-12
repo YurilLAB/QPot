@@ -459,10 +459,24 @@ func (h *hifiHarness) settleHiFi(ctx context.Context, cleared time.Time, limit t
 	return -1, why
 }
 
-// longStayMost is more commands than one cell can record for one account
-// (2,048 files, five for a command with its streams and one without): a stay
-// the honeypot has not ended by then is running unrecorded.
-const longStayMost = 2100
+// cellStreamsMost is more commands than one cell keeps with their streams
+// for one account (2,048 files, five for a command with its streams): the
+// commands after them leave a record in the account's overflow file only.
+const cellStreamsMost = 2100
+
+// longStayMost is how far a stay may get before the follower has stopped
+// its cell. The follower stops a cell when its capture passes the first
+// mark (about 360 commands of one account), and a visitor who never pauses
+// is ahead of it by what it writes to disk in the meantime: 2,100 commands
+// in the 12 seconds the follower needed on a filesystem that really syncs.
+// Left alone, sshd ends the connection at about 17,000 commands (its 64 MiB
+// budget), so a stay that gets to 12,000 was not ended by the follower.
+const longStayMost = 12000
+
+// longOutageMost is more commands than one connection's capture budget
+// records (64 MiB of container log, about 4 kB for a short command): a
+// connection the backend has not ended by then is running unrecorded.
+const longOutageMost = 40000
 
 // cells lists the instance's running cell containers.
 func (h *hifiHarness) cells(ctx context.Context) []string {
@@ -492,6 +506,7 @@ func (h *hifiHarness) hifiFaults() []fault {
 	}
 	var stopped int
 	var filler string
+	hoursOutage, _ := time.ParseDuration(strings.TrimSpace(os.Getenv("QPOT_SOAK_HIFI_OUTAGE")))
 	return []fault{
 		{name: "long-stay", what: "one visitor stays in one cell and runs commands without a pause until the honeypot ends the stay: a cell keeps only so much recording, and must stop serving before a command would run without a record", hold: 10 * time.Second,
 			inject: func(ctx context.Context) error {
@@ -511,10 +526,57 @@ func (h *hifiHarness) hifiFaults() []fault {
 				}
 				h.logf("  the stay ended after %d commands", ran)
 				if ran >= longStayMost {
-					return fmt.Errorf("the cell still served after %d commands in one stay, more than it can record", ran)
+					return fmt.Errorf("the cell still served after %d commands in one stay: the follower did not stop it when its capture passed the mark", ran)
 				}
 				return nil
 			}, clear: func(context.Context) error { return nil }},
+		{name: "long-outage", what: "the control plane is killed and, while it is down, one visitor runs commands in one cell until the honeypot ends the connection: nobody converts the recordings or stops the cell, so every command must wait in the cell's own log and be recorded once the control plane is back", hold: 10 * time.Second,
+			inject: func(ctx context.Context) error {
+				pid := h.servePID()
+				if pid == 0 {
+					return errors.New("no control plane process")
+				}
+				if err := syscall.Kill(pid, syscall.SIGKILL); err != nil {
+					return err
+				}
+				// The broker still takes visitors for 30 seconds.
+				var client *ssh.Client
+				for wait := time.Now().Add(25 * time.Second); client == nil && time.Now().Before(wait) && ctx.Err() == nil; {
+					if client = h.login(); client == nil {
+						time.Sleep(2 * time.Second)
+					}
+				}
+				if client == nil {
+					return errors.New("no cell took the visitor in the 25 seconds after the control plane stopped")
+				}
+				defer client.Close()
+				ran := 0
+				for ran < longOutageMost && ctx.Err() == nil && h.run(client, false) {
+					ran++
+				}
+				h.logf("  the visitor ran %d commands with the control plane down", ran)
+				if ran >= longOutageMost {
+					return fmt.Errorf("the connection was still served after %d commands, more than its capture budget records", ran)
+				}
+				if ran <= cellStreamsMost {
+					return fmt.Errorf("the connection ended after %d commands: too few to pass what a cell keeps for one account, so this run says nothing about the overflow", ran)
+				}
+				return nil
+			}, clear: up},
+		{name: "hours-outage", what: "the control plane is killed and stays down for QPOT_SOAK_HIFI_OUTAGE, longer than a cell lives, with a session open: its commands wait in the cell's log, the broker ends the stay when the cell's life is over, and everything is recorded once the control plane is back", hold: hoursOutage,
+			skip: func() string {
+				if hoursOutage <= 0 {
+					return "QPOT_SOAK_HIFI_OUTAGE is not set (for example 2h15m)"
+				}
+				return ""
+			},
+			inject: func(context.Context) error {
+				pid := h.servePID()
+				if pid == 0 {
+					return errors.New("no control plane process")
+				}
+				return syscall.Kill(pid, syscall.SIGKILL)
+			}, clear: up},
 		{name: "capture-stop", what: "the control plane, which turns the cells' recordings into evidence and tells the broker the capture is alive, is killed (SIGKILL), then started",
 			inject: func(context.Context) error {
 				pid := h.servePID()
@@ -732,7 +794,7 @@ func TestHiFiCapture(t *testing.T) {
 		if f.AdmittedLate > 0 {
 			t.Errorf("%s: %d logins were taken although the capture had been down for more than 45 s", f.Name, f.AdmittedLate)
 		}
-		if f.Name == "long-stay" && f.Error != "" {
+		if (f.Name == "long-stay" || f.Name == "long-outage" || f.Name == "hours-outage") && f.Error != "" {
 			t.Errorf("%s: %s", f.Name, f.Error)
 		}
 	}

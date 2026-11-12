@@ -10,8 +10,10 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"maps"
 	"os"
 	"path"
+	"slices"
 	"strconv"
 	"time"
 )
@@ -23,12 +25,19 @@ import (
 // count everything written: streams, timing lines and record lines alike.
 // Sessions open when a limit is reached may still add their finish lines.
 //
-// Past a limit a session leaves no record at all, so a cell must not get
-// there while it serves a visitor: the last eighth of every limit is a
-// reserve. Once an account or the container is inside it, Full says so and
-// the follower stops the cell (Converter.Retire); what the cell still runs
-// before it stops keeps its record but no stream files, so the reserve holds
-// some 250 commands rather than 50.
+// A cell should not get to a limit while it serves a visitor: the last eighth
+// of every limit is a reserve. Once an account or the container is inside
+// it, Full says so and the follower stops the cell (Converter.Retire).
+//
+// Nobody stops a cell while the control plane is down, and what its visitor
+// runs then waits in the container's log to be converted later. So a session
+// that no longer fits the limits is not dropped: it keeps its record (who,
+// when, the command, its exit status and the first bytes of each stream) in
+// the account's overflow file, one file however many sessions, within an
+// allowance of its own. Only a session past that allowance, or past what is
+// held in memory, leaves nothing. The allowance covers what the capture
+// budgets of a visitor's three connections hold of ordinary commands;
+// thousands of very long commands or binary output can use it up.
 const (
 	maxUserBytes      = 64 << 20
 	maxUserFiles      = 2048
@@ -40,6 +49,11 @@ const (
 	maxCommand        = 16 << 10
 	previewBytes      = 4096
 	filesPerEntry     = 5
+	// maxOverflowBytes bounds the record lines of sessions past the other
+	// limits, for the whole container; overflowName is their file in an
+	// account's folder.
+	maxOverflowBytes = 128 << 20
+	overflowName     = "overflow.json"
 
 	reserveShare       = 8
 	softUserBytes      = maxUserBytes - maxUserBytes/reserveShare
@@ -124,6 +138,28 @@ type Writer struct {
 	usage    map[int64]*usage
 	total    usage
 	full     string // which limit's reserve was reached first; "" while none
+	// overflowBytes counts the overflow lines this replay has produced;
+	// overflow holds what is known of each account's overflow file.
+	overflowBytes int64
+	overflow      map[int64]*overflowFile
+}
+
+// overflowFile is one account's overflow file as this writer knows it.
+//
+// The lines it holds are remembered, so that a line is appended once. That
+// memory is only as good as the last look at the file: between two batches
+// the follower lets go of the folder, and a reset's drain, which is another
+// writer over the same stream, may append to the file meanwhile. (Found by
+// the capture soak: a drain that timed out half-way left lines the follower
+// did not know of, and the follower wrote them a second time.) So the file
+// is read again, from where the last look ended, each time it is opened, and
+// it is opened anew after every Flush.
+type overflowFile struct {
+	have  map[string]bool // session and phase of the lines the file holds
+	whole int64           // the file up to here is whole lines, all in have
+	torn  bool            // past whole, the file ends in part of a line
+	f     *os.File        // open for appending until the next Flush
+	dirty bool            // written since it was opened
 }
 
 // Full names the limit this container's capture has come within the reserve
@@ -165,8 +201,9 @@ type command struct {
 }
 
 type usage struct {
-	bytes int64
-	files int
+	bytes    int64
+	files    int
+	overflow bool // the account's overflow file is counted in files
 }
 
 type entry struct {
@@ -178,7 +215,8 @@ type entry struct {
 	streams   bool              // the stream files exist (not over a limit)
 	lastMS    int64
 	exit      *Exit
-	limited   bool
+	overflow  bool            // its record goes to the account's overflow file
+	previews  map[Kind][]byte // an overflow session's first bytes per stream
 	truncated bool
 	errs      []string
 	user      *usage
@@ -196,7 +234,8 @@ func NewWriter(dir, containerID string, created time.Time, attribute Attributor)
 		return nil, errors.New("capture folder is not a directory")
 	}
 	return &Writer{dir: dir, container: containerID, created: created, attribute: attribute,
-		pending: map[string]*command{}, active: map[string]*entry{}, ordinals: map[string]int{}, usage: map[int64]*usage{}}, nil
+		pending: map[string]*command{}, active: map[string]*entry{}, ordinals: map[string]int{}, usage: map[int64]*usage{},
+		overflow: map[int64]*overflowFile{}}, nil
 }
 
 // Apply consumes one capture line. Lines that are not records are ignored:
@@ -276,9 +315,9 @@ func (w *Writer) open(key string, r Record) error {
 	delete(w.pending, key)
 	u := w.usage[o.UID]
 	if len(w.active) >= maxOpen || (w.ordinals[key] == 0 && len(w.ordinals) >= maxSessions) ||
-		(u == nil && len(w.usage) >= maxAccounts) || w.total.files >= maxContainerFiles {
-		// Past what one container may make the host keep; the reserve was
-		// reached long before, unless the follower could not stop the cell.
+		(u == nil && len(w.usage) >= maxAccounts) {
+		// Past what is held in memory for one container: no honest sshd
+		// opens this many sessions at once or names this many accounts.
 		w.fill("a session past the cell's limits")
 		return nil
 	}
@@ -286,9 +325,24 @@ func (w *Writer) open(key string, r Record) error {
 		u = &usage{}
 		w.usage[o.UID] = u
 	}
-	if u.files >= maxUserFiles || u.bytes >= maxUserBytes || w.total.bytes >= maxContainerBytes {
-		w.fill("a session past an account's limits")
-		return nil
+	// Inside a reserve the session keeps its record only, in the account's
+	// overflow file.
+	overflow := ""
+	switch {
+	case u.files+filesPerEntry > softUserFiles:
+		overflow = "files kept for one account"
+	case w.total.files+filesPerEntry > softContainerFiles:
+		overflow = "files kept for the cell"
+	case u.bytes >= softUserBytes:
+		overflow = "bytes kept for one account"
+	case w.total.bytes >= softContainerBytes:
+		overflow = "bytes kept for the cell"
+	}
+	if overflow != "" {
+		w.fill(overflow)
+		if w.overflowBytes >= maxOverflowBytes {
+			return nil // past everything one container may make the host keep
+		}
 	}
 	defer func() { w.check(u) }()
 	w.ordinals[key]++
@@ -332,16 +386,17 @@ func (w *Writer) open(key string, r Record) error {
 		return err
 	}
 	e.user = u
-	if u.files+filesPerEntry > softUserFiles || w.total.files+filesPerEntry > softContainerFiles {
-		// Inside the reserve: the record alone, which counts as one file.
-		e.limited = true
+	if overflow != "" {
+		e.overflow = true
+		e.previews = map[Kind][]byte{}
 		e.errs = append(e.errs, "account capture limit reached")
-		u.files++
-		w.total.files++
-		if u.files+filesPerEntry > softUserFiles {
-			w.fill("files kept for one account")
-		} else {
-			w.fill("files kept for the cell")
+		// No stream files exist for it.
+		e.event.StdoutFile, e.event.StderrFile, e.event.InputFile, e.event.TimingFile = "", "", "", ""
+		e.event.StdinRecorded = false
+		if !u.overflow {
+			u.overflow = true
+			u.files++
+			w.total.files++
 		}
 	} else {
 		u.files += filesPerEntry
@@ -373,8 +428,14 @@ func (w *Writer) open(key string, r Record) error {
 }
 
 func (w *Writer) data(e *entry, r Record) error {
-	if e.limited {
+	if e.overflow {
+		// Only the first bytes of each stream, held in memory for the
+		// finish line.
+		if room := previewBytes - len(e.previews[r.Kind]); room > 0 {
+			e.previews[r.Kind] = append(e.previews[r.Kind], r.Payload[:min(len(r.Payload), room)]...)
+		}
 		e.truncated = true
+		e.lastMS = max(e.lastMS, r.Millis)
 		return nil
 	}
 	f, err := w.stream(e, r.Kind)
@@ -446,12 +507,20 @@ func (w *Writer) finish(e *entry, millis int64) error {
 	for _, f := range e.files {
 		_ = f.Sync()
 	}
-	ev.Stdout = w.preview(e.base + ".out")
-	ev.Stderr = w.preview(e.base + ".err")
-	if ev.Input == "" && !e.event.CommandTruncated {
-		ev.Input = w.preview(e.base + ".in")
+	if e.overflow {
+		ev.Stdout, ev.Stderr = string(e.previews[KindOutput]), string(e.previews[KindError])
+		if ev.Input == "" && !e.event.CommandTruncated {
+			ev.Input = string(e.previews[KindInput])
+		}
+		ev.Truncated = true // its streams were not kept
+	} else {
+		ev.Stdout = w.preview(e.base + ".out")
+		ev.Stderr = w.preview(e.base + ".err")
+		if ev.Input == "" && !e.event.CommandTruncated {
+			ev.Input = w.preview(e.base + ".in")
+		}
+		ev.Truncated = e.truncated
 	}
-	ev.Truncated = e.truncated
 	if len(e.errs) > 0 {
 		ev.CaptureError = joinErrors(e.errs)
 	}
@@ -462,7 +531,9 @@ func (w *Writer) finish(e *entry, millis int64) error {
 // others keep only their start record, as after an abrupt teardown.
 func (w *Writer) Finish() error {
 	var errs []error
-	for key, e := range w.active {
+	// In a fixed order, so every replay writes the same lines the same way.
+	for _, key := range slices.Sorted(maps.Keys(w.active)) {
+		e := w.active[key]
 		if e.exit != nil {
 			errs = append(errs, w.finish(e, e.lastMS))
 		} else {
@@ -475,16 +546,28 @@ func (w *Writer) Finish() error {
 }
 
 // Flush closes every handle in the folder; the next write reopens them.
+// What was appended to the overflow files reaches the disk here, once for
+// the batch instead of once per line.
 func (w *Writer) Flush() error {
 	for _, e := range w.active {
 		w.close(e)
 	}
-	if w.root == nil {
-		return nil
+	var errs []error
+	for _, o := range w.overflow {
+		if o.f == nil {
+			continue
+		}
+		if o.dirty {
+			errs = append(errs, o.f.Sync())
+		}
+		errs = append(errs, o.f.Close())
+		o.f, o.dirty = nil, false
 	}
-	err := w.root.Close()
-	w.root = nil
-	return err
+	if w.root != nil {
+		errs = append(errs, w.root.Close())
+		w.root = nil
+	}
+	return errors.Join(errs...)
 }
 
 func (w *Writer) ensureRoot() (*os.Root, error) {
@@ -543,6 +626,9 @@ func (w *Writer) appendLine(e *entry, ev SessionEvent, index int) error {
 	if err != nil {
 		return err
 	}
+	if e.overflow {
+		return w.appendOverflow(ev, data)
+	}
 	e.user.bytes += int64(len(data) + 1)
 	w.total.bytes += int64(len(data) + 1)
 	if n, err := w.existingLines(e.base + ".json"); err != nil || n != index {
@@ -558,6 +644,116 @@ func (w *Writer) appendLine(e *entry, ev SessionEvent, index int) error {
 	}
 	_, werr := f.Write(append(data, '\n'))
 	return errors.Join(werr, f.Sync(), f.Close())
+}
+
+// appendOverflow adds one record line to its account's overflow file unless
+// the file holds that session's line for that phase already. Lines are told
+// apart by session and phase, not by their place in the file: sessions end
+// in an order that a follower cut off mid-stream need not share with the
+// replay that follows it.
+func (w *Writer) appendOverflow(ev SessionEvent, data []byte) error {
+	w.overflowBytes += int64(len(data) + 1)
+	o, err := w.openOverflow(ev.UID)
+	if err != nil {
+		return err
+	}
+	key := ev.Session + "/" + ev.Phase
+	if o.have[key] {
+		return nil
+	}
+	line := make([]byte, 0, len(data)+2)
+	if o.torn {
+		// The file ends in part of a line (a write the disk had no room
+		// for): end it, so this line does not continue it.
+		line = append(line, '\n')
+	}
+	line = append(append(line, data...), '\n')
+	if _, err := o.f.Write(line); err != nil {
+		// Whatever reached the file is read again before the next line.
+		_ = o.f.Close()
+		delete(w.overflow, ev.UID)
+		return err
+	}
+	info, err := o.f.Stat()
+	if err != nil {
+		_ = o.f.Close()
+		delete(w.overflow, ev.UID)
+		return err
+	}
+	o.have[key] = true
+	o.whole, o.torn, o.dirty = info.Size(), false, true
+	return nil
+}
+
+// openOverflow returns an account's overflow file, open for appending, with
+// everything the file holds now in its memory.
+func (w *Writer) openOverflow(uid int64) (*overflowFile, error) {
+	o := w.overflow[uid]
+	if o != nil && o.f != nil {
+		return o, nil
+	}
+	root, err := w.ensureRoot()
+	if err != nil {
+		return nil, err
+	}
+	name := path.Join("uid-"+strconv.FormatInt(uid, 10), overflowName)
+	f, err := root.OpenFile(name, os.O_RDWR|os.O_CREATE|os.O_APPEND, 0o600)
+	if err != nil {
+		return nil, err
+	}
+	info, err := f.Stat()
+	if err != nil {
+		_ = f.Close()
+		return nil, err
+	}
+	if o == nil || info.Size() < o.whole {
+		// Not seen before, or shorter than what was seen: another file.
+		o = &overflowFile{have: map[string]bool{}}
+	}
+	// What is past the last whole line this writer knows of: nothing, the
+	// torn end it knows, or lines another writer has appended.
+	whole, torn, err := scanOverflow(io.NewSectionReader(f, o.whole, info.Size()-o.whole), o.have)
+	if err != nil {
+		_ = f.Close()
+		delete(w.overflow, uid)
+		return nil, err
+	}
+	o.whole, o.torn, o.f, o.dirty = o.whole+whole, torn, f, false
+	w.overflow[uid] = o
+	return o, nil
+}
+
+// scanOverflow adds the sessions' lines r holds to have, and returns how many
+// bytes of r are whole lines and whether it ends in part of one. A line that
+// is not a record is skipped. A last line that lacks only its newline is a
+// record like any other (a record cut short does not parse): counting it as
+// missing would write it a second time.
+func scanOverflow(r io.Reader, have map[string]bool) (whole int64, torn bool, err error) {
+	br := bufio.NewReaderSize(r, 64<<10)
+	for {
+		line, err := br.ReadBytes('\n')
+		if len(line) > 0 {
+			ended := line[len(line)-1] == '\n'
+			var ev struct {
+				Session string `json:"session"`
+				Phase   string `json:"phase"`
+			}
+			if json.Unmarshal(line, &ev) == nil && ev.Session != "" {
+				have[ev.Session+"/"+ev.Phase] = true
+			}
+			if ended {
+				whole += int64(len(line))
+			} else {
+				torn = true
+			}
+		}
+		if errors.Is(err, io.EOF) {
+			return whole, torn, nil
+		}
+		if err != nil {
+			return 0, false, err
+		}
+	}
 }
 
 func (w *Writer) existingLines(name string) (int, error) {
