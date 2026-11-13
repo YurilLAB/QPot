@@ -455,6 +455,45 @@ counted by the database.
 Lists ranked by a count keep one order: equal counts are ordered by name or
 address, in every database backend.
 
+## Investigation
+
+One session or campaign, followed through its records
+([investigate.md](investigate.md)). All three only read.
+
+| Endpoint | Answer |
+|---|---|
+| `GET /api/investigate?limit=` | `{"sessions", "campaigns", "scanned", "more"}`: the `limit` (1 to 500, default 100) most recently active sessions, and the campaigns of more than one session |
+| `GET /api/investigate/case?session=<id>` | the case of one session |
+| `GET /api/investigate/case?campaign=<fingerprint>` | the case of one campaign |
+| `GET /api/investigate/export?session=` or `?campaign=` | the case as an evidence bundle: a zip download |
+
+`max_events` (1 to 50000, default 5000) is how many events a case reads; a
+campaign's sessions share them.
+
+A case is `{"kind", "id", "instance", "generated", "summary", "sessions",
+"links", "related", "canary_trips", "gaps", "records"}`:
+
+- `sessions[]`: `{"session", "honeypots", "reached", "events_read",
+  "timeline", "files", "evidence"}`. A timeline step is `{"at", "until",
+  "phase", "honeypot", "event_type", "summary", "count", "refs",
+  "more_refs"}` and, by phase, `username`, `password`, `outcome`, `tried`,
+  `command`, `exit_code`, `output` (`stdout`, `stderr`, `bytes`, `cut`,
+  `binary`), `url`, `sha256`, `file`, `caused_by`, `because`, `technique`.
+  `phase` is `connection`, `credentials`, `command`, `transfer`, `canary`,
+  `close` or `other`;
+- `links[]`: `{"kind", "value", "sessions": [{"session_id", "at", "refs"}]}`;
+- `gaps[]`: `{"kind", "session_id", "detail", "count", "refs"}`;
+- `records[]`: `{"ref", "session_id", "event"}`, the stored events the `refs`
+  name. A ref of the form `trip:<id>` names an entry of `canary_trips`.
+
+| Status | When |
+|---|---|
+| 400 | neither or both of `session` and `campaign`, a value that is no ID, a `limit` or `max_events` out of range |
+| 404 | no such session or campaign among the 5,000 most recent sessions |
+| 429 | two cases are being built already; `Retry-After` says when to ask again |
+| 503 `QP-INST-005` | the database is not available |
+| 504 | reading the case took longer than 90 seconds: ask for fewer events |
+
 ## Canaries
 
 | Endpoint | What it does |

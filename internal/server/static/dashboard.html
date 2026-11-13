@@ -17,7 +17,7 @@
     <link href="/map/static/fonts/fonts.css" rel="stylesheet" integrity="sha384-WiEXL66/E+frAZqRB5+nO/MLUoXj+VrnKxXgvK33R87imSuzxukyaFlj5lnDHV80">
     <link href="/map/static/fontawesome/css/all.min.css" rel="stylesheet" integrity="sha384-qrALq7+6jBOZIQsNnT6xGkMDru64qD6uTlDra39xrt2SoXl4pO3FX6Roz/RpR/BS">
     <link href="/map/static/index.css?v=8" rel="stylesheet" integrity="sha384-F4gdNU3u74uMqjmFBLqfUI0IMwkZi07wpwIdoGzPWeWF6/qEGw/uaeb0plLpu7pT">
-    <link href="/assets/css/dashboard.css" rel="stylesheet" integrity="sha384-Eei4PIT9CxhH77UrYFMztiY74+nKrDJ6/S492NoqLCIpPlbxxntUi/aB//mfiyi4">
+    <link href="/assets/css/dashboard.css" rel="stylesheet" integrity="sha384-80Huire2gDzNJwmodrH4DN78iSn8fOkgJQoai0dPcRFtnXr45rjDKc3KJy92pG2J">
 </head>
 <body class="qpot-dashboard">
 
@@ -90,6 +90,7 @@
             <button class="tab-btn active" data-tab="dashboard" role="tab" type="button"><i class="fas fa-gauge-high"></i><span>Dashboard</span></button>
             <button class="tab-btn" data-tab="events" role="tab" type="button"><i class="fas fa-list-ol"></i><span>Events</span></button>
             <button class="tab-btn" data-tab="intel" role="tab" type="button"><i class="fas fa-crosshairs"></i><span>Threat Intel</span></button>
+            <button class="tab-btn" data-tab="investigate" role="tab" type="button"><i class="fas fa-magnifying-glass"></i><span>Investigate</span></button>
             <button class="tab-btn" data-tab="canaries" role="tab" type="button"><i class="fas fa-dove"></i><span>Canaries</span></button>
             <button class="tab-btn" data-tab="overview" role="tab" type="button"><i class="fas fa-chart-bar"></i><span>Overview</span></button>
             <button class="tab-btn" data-tab="doctor" role="tab" type="button"><i class="fas fa-stethoscope"></i><span>Doctor</span></button>
@@ -317,6 +318,106 @@
                             <thead><tr><th>Source</th><th>Techniques</th><th class="optional">Kill chain</th><th>Events</th><th class="optional">Last seen</th><th class="optional">Confidence</th></tr></thead>
                             <tbody id="ti-ttp-body"></tbody>
                         </table>
+                    </div>
+                </div>
+            </section>
+
+            <!-- ============ Investigate ============ -->
+            <section class="dash-pane" id="tab-investigate">
+                <div id="inv-list">
+                    <div class="dash-card">
+                        <div class="card-header flex-between">
+                            <h4 class="flex-center"><i class="fas fa-people-group"></i> Campaigns</h4>
+                            <span class="card-note">sessions of different sources that share a payload, a download host or a command sequence</span>
+                        </div>
+                        <div class="table-wrapper">
+                            <table class="data-table">
+                                <thead><tr><th>Sources</th><th>Sessions</th><th>Events</th><th class="optional">Techniques</th><th class="optional">Last seen</th><th class="optional">Confidence</th></tr></thead>
+                                <tbody id="inv-campaigns"></tbody>
+                            </table>
+                        </div>
+                    </div>
+                    <div class="dash-card">
+                        <div class="card-header flex-between">
+                            <h4 class="flex-center"><i class="fas fa-shoe-prints"></i> Sessions</h4>
+                            <span class="card-note" id="inv-list-note"></span>
+                        </div>
+                        <div class="table-wrapper">
+                            <table class="data-table">
+                                <thead><tr><th>Source</th><th>First seen</th><th>Events</th><th class="optional">Kill chain</th><th class="optional">Last seen</th><th class="optional">Campaign</th></tr></thead>
+                                <tbody id="inv-sessions"></tbody>
+                            </table>
+                        </div>
+                    </div>
+                </div>
+
+                <div id="inv-case" class="hidden">
+                    <div class="dash-card">
+                        <div class="card-header flex-between">
+                            <h4 class="flex-center" id="inv-title"><i class="fas fa-magnifying-glass"></i> Case</h4>
+                            <div class="card-tools">
+                                <select class="setting-select" id="inv-max" aria-label="Events to read">
+                                    <option value="1000">Read 1,000 events</option>
+                                    <option value="5000" selected>Read 5,000 events</option>
+                                    <option value="20000">Read 20,000 events</option>
+                                    <option value="50000">Read 50,000 events</option>
+                                </select>
+                                <button class="btn-base btn-secondary hover-lift" id="inv-export" type="button"><i class="fas fa-file-zipper"></i> Export evidence bundle</button>
+                                <button class="btn-base btn-secondary hover-lift" id="inv-back" type="button"><i class="fas fa-chevron-left"></i> All sessions</button>
+                            </div>
+                        </div>
+                        <div class="card-body">
+                            <div class="callout error modal-message" id="inv-error"></div>
+                            <dl class="kv" id="inv-facts"></dl>
+                            <div class="inv-reached" id="inv-reached"></div>
+                        </div>
+                    </div>
+                    <div id="inv-timelines"></div>
+                    <div class="dash-card" id="inv-links-card">
+                        <div class="card-header flex-between">
+                            <h4 class="flex-center"><i class="fas fa-link"></i> Why these sessions are one campaign</h4>
+                            <span class="card-note">evidence two or more sessions share, and the records that show it in each</span>
+                        </div>
+                        <div class="table-wrapper">
+                            <table class="data-table">
+                                <thead><tr><th>Evidence</th><th>Value</th><th>Session</th><th class="optional">First shown</th><th>Records</th></tr></thead>
+                                <tbody id="inv-links"></tbody>
+                            </table>
+                        </div>
+                    </div>
+                    <div class="dash-card" id="inv-trips-card">
+                        <div class="card-header flex-between">
+                            <h4 class="flex-center"><i class="fas fa-dove"></i> Canary trips by this source</h4>
+                        </div>
+                        <div class="table-wrapper">
+                            <table class="data-table">
+                                <thead><tr><th>Time</th><th>Canary</th><th>Kind</th><th>Channel</th><th>Source IP</th><th>When</th></tr></thead>
+                                <tbody id="inv-trips"></tbody>
+                            </table>
+                        </div>
+                    </div>
+                    <div class="dash-card" id="inv-related-card">
+                        <div class="card-header flex-between">
+                            <h4 class="flex-center"><i class="fas fa-diagram-project"></i> Related sessions</h4>
+                        </div>
+                        <div class="table-wrapper">
+                            <table class="data-table">
+                                <thead><tr><th>Relation</th><th>Source</th><th>First seen</th><th>Events</th></tr></thead>
+                                <tbody id="inv-related"></tbody>
+                            </table>
+                        </div>
+                    </div>
+                    <div class="dash-card">
+                        <div class="card-header flex-between">
+                            <h4 class="flex-center"><i class="fas fa-circle-exclamation"></i> Gaps</h4>
+                            <span class="card-note">what was cut, discarded, not captured or left out of this case</span>
+                        </div>
+                        <div class="table-wrapper">
+                            <table class="data-table">
+                                <thead><tr><th>Gap</th><th>What it means</th><th>Records</th></tr></thead>
+                                <tbody id="inv-gaps"></tbody>
+                            </table>
+                        </div>
                     </div>
                 </div>
             </section>
@@ -1926,13 +2027,13 @@
             const sb = $('ti-ttp-body');
             const sl = Array.isArray(ttps) ? ttps : [];
             if (!sl.length) emptyRow(sb, 6, 'No sessions yet.', 'fa-people-group');
-            else sb.replaceChildren(...sl.map((s) => h('tr', {},
+            else sb.replaceChildren(...sl.map((s) => openRow(h('tr', {},
                 h('td', { class: 'mono-accent wrap' }, Array.isArray(s.source_ips) ? s.source_ips.map(String).join(', ') : ''),
                 h('td', {}, plural(Array.isArray(s.techniques) ? s.techniques.length : 0, 'technique', 'techniques')),
                 h('td', { class: 'optional wrap' }, Array.isArray(s.kill_chain_stages) ? s.kill_chain_stages.filter(Boolean).map(String).join(' → ') : ''),
                 h('td', {}, fmt(s.event_count)),
                 h('td', { class: 'optional' }, ago(s.last_seen)),
-                h('td', { class: 'optional' }, Number.isFinite(Number(s.confidence)) ? Math.round(Number(s.confidence) * 100) + ' %' : ''))));
+                h('td', { class: 'optional' }, Number.isFinite(Number(s.confidence)) ? Math.round(Number(s.confidence) * 100) + ' %' : '')), 'session', s.session_id)));
             await loadIOCTable();
         }
 
@@ -2618,9 +2719,230 @@
             return new Promise((resolve) => { confirmResolve = resolve; });
         }
 
+        // ---------- investigate: one session or campaign, followed through its records ----------
+
+        const PHASE = { connection: 'muted', credentials: 'warn', command: 'accent', transfer: 'bad', canary: 'bad', close: 'muted', other: 'muted' };
+        const GAP = {
+            'event-limit': 'More events than were read', 'events-missing': 'Events no longer stored', 'value-cut': 'Values cut',
+            'line-discarded': 'Log lines discarded', 'capture-cut': 'Capture incomplete', 'capture-error': 'Capture error',
+            'output-missing': 'Output file gone', 'output-not-captured': 'Output not captured', 'command-unfinished': 'Command without a finish',
+            'unclassified': 'Not classified yet', 'shared-source': 'Source address is not the visitor\'s', 'unknown-source': 'No source address',
+            'old-session': 'Session from an earlier version', 'source-list': 'More addresses than listed', 'session-limit': 'More sessions than shown',
+            'session-scan': 'Older sessions not looked through', 'no-shared-evidence': 'No shared evidence read', 'canary-not-matched': 'Canary trips not matched'
+        };
+        let invQuery = null;     // {session: id} or {campaign: fingerprint}, from the link
+        let invRecords = new Map();
+
+        const shortID = (id) => { id = String(id || ''); return id.length > 20 ? id.slice(0, 12) + '…' : id; };
+        const percent = (c) => Number.isFinite(Number(c)) ? Math.round(Number(c) * 100) + ' %' : '';
+        const sourcesText = (list, more) => {
+            const l = Array.isArray(list) ? list.map(String) : [];
+            if (!l.length) return '(no source address)';
+            return l.join(', ') + (Number(more) > 0 ? ' and ' + fmt(more) + ' more' : '');
+        };
+
+        function openCase(kind, id) {
+            location.hash = 'investigate?' + kind + '=' + encodeURIComponent(String(id));
+        }
+
+        function openRow(tr, kind, id) {
+            tr.classList.add('clickable');
+            tr.tabIndex = 0;
+            tr.title = 'Open this ' + kind;
+            tr.addEventListener('click', () => openCase(kind, id));
+            tr.addEventListener('keydown', (ev) => { if (ev.key === 'Enter') openCase(kind, id); });
+            return tr;
+        }
+
+        // the records a statement rests on: each opens the stored event
+        function refCells(refs, more) {
+            const list = Array.isArray(refs) ? refs.map(String) : [];
+            const out = list.slice(0, 4).map((ref) => {
+                const rec = invRecords.get(ref);
+                if (!rec) return h('span', { class: 'ref-chip plain', title: ref }, ref.startsWith('trip:') ? 'canary trip' : shortID(ref));
+                return h('button', { class: 'ref-chip', type: 'button', title: 'Show the stored record ' + ref,
+                    onclick: (ev) => { ev.stopPropagation(); showEvent(rec.event); } }, shortID(ref));
+            });
+            const rest = list.length - out.length + (Number(more) || 0);
+            if (rest > 0) out.push(h('span', { class: 'ref-chip plain' }, '+' + fmt(rest)));
+            return h('td', { class: 'ref-cell' }, ...out);
+        }
+
+        async function loadInvestigate() {
+            if (invQuery) return loadCase();
+            $('inv-case').classList.add('hidden');
+            $('inv-list').classList.remove('hidden');
+            const data = await api(`${API_BASE}/investigate?limit=100`);
+            const camps = Array.isArray(data && data.campaigns) ? data.campaigns : [];
+            const cb = $('inv-campaigns');
+            if (!camps.length) emptyRow(cb, 6, 'No campaign yet: no two sources have shown the same strong evidence.', 'fa-people-group');
+            else cb.replaceChildren(...camps.map((c) => openRow(h('tr', {},
+                h('td', { class: 'mono-accent wrap' }, sourcesText(c.source_ips, c.more_source_ips)),
+                h('td', {}, fmt(c.sessions)), h('td', {}, fmt(c.event_count)),
+                h('td', { class: 'optional wrap' }, Array.isArray(c.techniques) ? c.techniques.map(String).join(', ') : ''),
+                h('td', { class: 'optional' }, ago(c.last_seen)), h('td', { class: 'optional' }, percent(c.confidence))), 'campaign', c.campaign_fingerprint)));
+            const sess = Array.isArray(data && data.sessions) ? data.sessions : [];
+            const sb = $('inv-sessions');
+            if (!sess.length) emptyRow(sb, 6, 'No sessions yet. The classifier builds them from the events it has read.', 'fa-shoe-prints');
+            else sb.replaceChildren(...sess.map((s) => openRow(h('tr', {},
+                h('td', { class: 'mono-accent wrap' }, sourcesText(s.source_ips, s.more_source_ips)),
+                timeCell(s.first_seen), h('td', {}, fmt(s.event_count)),
+                h('td', { class: 'optional wrap' }, Array.isArray(s.kill_chain_stages) ? s.kill_chain_stages.filter(Boolean).map(String).join(' → ') : ''),
+                h('td', { class: 'optional' }, ago(s.last_seen)),
+                h('td', { class: 'optional' }, Number(s.campaign_sessions) > 1 ? plural(s.campaign_sessions, 'session', 'sessions') : '')), 'session', s.session_id)));
+            $('inv-list-note').textContent = data && data.more ? 'the ' + fmt(data.scanned) + ' most recent sessions were looked through' : 'most recent first';
+        }
+
+        function caseQuery() {
+            const p = new URLSearchParams(invQuery);
+            p.set('max_events', $('inv-max').value);
+            return p.toString();
+        }
+
+        function stepRow(st) {
+            const what = h('td', { class: 'wrap' }, String(st.summary || ''));
+            const add = (text, cls) => what.append(h('div', { class: 'inv-note ' + (cls || '') }, text));
+            if (Number(st.count) > 1) add('×' + fmt(st.count) + (st.until ? ', until ' + when(st.until) : ''));
+            if (st.phase === 'command' && st.outcome) add(String(st.outcome));
+            if (st.exit_code !== undefined && st.exit_code !== null) add('exit code ' + String(st.exit_code));
+            if (st.caused_by) {
+                const rec = invRecords.get(String(st.caused_by));
+                add('follows from a command: ' + String(st.because || '') + (rec && rec.event && rec.event.command ? ' (' + String(rec.event.command).slice(0, 200) + ')' : ''));
+            }
+            const o = st.output;
+            if (o && (o.stdout || o.stderr)) {
+                for (const [label, text] of [['printed', o.stdout], ['errors', o.stderr]]) {
+                    if (!text) continue;
+                    const s = String(text);
+                    what.append(h('div', { class: 'inv-note' }, label + ':'), h('pre', { class: 'log-view inv-output' }, s.length > 6000 ? s.slice(0, 6000) + '\n… (the bundle holds the rest)' : s));
+                }
+                if (o.cut) add('the output is cut');
+                if (o.binary) add('bytes that are not text were replaced; the bundle holds them as captured');
+            } else if (o && o.cut) add('output left out: the case holds as much as it carries');
+            return h('tr', {}, timeCell(st.at), h('td', {}, pill(String(st.phase || ''), PHASE[st.phase] || 'muted')),
+                clipCell(st.honeypot, 'optional honeypot-cell'), what, refCells(st.refs, st.more_refs));
+        }
+
+        function timelineCard(sc, many) {
+            const s = sc.session || {};
+            const steps = Array.isArray(sc.timeline) ? sc.timeline : [];
+            const body = h('tbody', {});
+            if (!steps.length) emptyRow(body, 5, 'Nothing to show for this session.', 'fa-shoe-prints');
+            else body.replaceChildren(...steps.map(stepRow));
+            const card = h('div', { class: 'dash-card' },
+                h('div', { class: 'card-header flex-between' },
+                    h('h4', { class: 'flex-center' }, icon('fa-timeline'), ' Timeline' + (many ? ' of ' + sourcesText(s.source_ips) : '')),
+                    h('span', { class: 'card-note' }, plural(sc.events_read, 'event', 'events') + ' read · ' + when(s.first_seen) + ' → ' + when(s.last_seen))),
+                h('div', { class: 'table-wrapper' }, h('table', { class: 'data-table inv-timeline' },
+                    h('thead', {}, h('tr', {}, h('th', {}, 'Time'), h('th', {}, 'Step'), h('th', { class: 'optional' }, 'Honeypot'), h('th', {}, 'What happened'), h('th', {}, 'Records'))), body)));
+            const files = Array.isArray(sc.files) ? sc.files : [];
+            if (files.length) {
+                card.append(h('div', { class: 'card-header flex-between' }, h('h4', { class: 'flex-center' }, icon('fa-file-arrow-down'), ' Files')),
+                    h('div', { class: 'table-wrapper' }, h('table', { class: 'data-table' },
+                        h('thead', {}, h('tr', {}, h('th', {}, 'SHA-256'), h('th', {}, 'From / as'), h('th', {}, 'Transfers'), h('th', {}, 'Records'), h('th', {}, 'Command'))),
+                        h('tbody', {}, ...files.map((f) => h('tr', {},
+                            h('td', { class: 'mono-accent wrap' }, f.empty ? '(empty file)' : String(f.sha256 || '(no hash recorded)')),
+                            h('td', { class: 'wrap' }, [...(f.urls || []), ...(f.names || [])].map(String).join('\n')),
+                            h('td', {}, fmt(f.transfers)), refCells(f.refs, 0), refCells(f.commands || [], 0)))))));
+            }
+            const ev = Array.isArray(sc.evidence) ? sc.evidence : [];
+            if (ev.length) {
+                card.append(h('div', { class: 'card-header flex-between' }, h('h4', { class: 'flex-center' }, icon('fa-fingerprint'), ' Campaign evidence in this session'),
+                        h('span', { class: 'card-note' }, 'what links it to other sources when they show the same')),
+                    h('div', { class: 'table-wrapper' }, h('table', { class: 'data-table' },
+                        h('thead', {}, h('tr', {}, h('th', {}, 'Evidence'), h('th', {}, 'Value'), h('th', {}, 'Shared'), h('th', {}, 'Records'))),
+                        h('tbody', {}, ...ev.map((e) => h('tr', {},
+                            h('td', {}, String(e.kind || '')), h('td', { class: 'mono-accent wrap' }, String(e.value || '')),
+                            h('td', {}, e.shared ? pill('shared', 'bad') : ''), refCells(e.refs, 0)))))));
+            }
+            return card;
+        }
+
+        async function loadCase() {
+            $('inv-list').classList.add('hidden');
+            $('inv-case').classList.remove('hidden');
+            callout($('inv-error'), '', '');
+            const kind = invQuery.has('campaign') ? 'campaign' : 'session';
+            $('inv-title').replaceChildren(icon('fa-magnifying-glass'), ' ' + capitalize(kind) + ' ' + shortID(invQuery.get(kind)));
+            let c;
+            try {
+                c = await api(`${API_BASE}/investigate/case?${caseQuery()}`);
+            } catch (e) {
+                if (e.status === 401 || e.status === 403) throw e;
+                for (const id of ['inv-facts', 'inv-reached', 'inv-timelines', 'inv-links', 'inv-related', 'inv-trips', 'inv-gaps']) $(id).replaceChildren();
+                callout($('inv-error'), 'error', errorText(e));
+                return;
+            }
+            invRecords = new Map((Array.isArray(c.records) ? c.records : []).map((r) => [String(r.ref), r]));
+            const s = c.summary || {};
+            const dl = $('inv-facts');
+            dl.replaceChildren();
+            factRow(dl, kind === 'campaign' ? 'Fingerprint' : 'Session', String(c.id || ''));
+            if (kind === 'session') factRow(dl, 'Campaign', h('button', { class: 'ref-chip', type: 'button', onclick: () => openCase('campaign', s.campaign_fingerprint) }, String(s.campaign_fingerprint || '')));
+            else factRow(dl, 'Sessions', fmt(s.sessions));
+            factRow(dl, 'Sources', sourcesText(s.source_ips, s.more_source_ips));
+            factRow(dl, 'Seen', when(s.first_seen) + ' → ' + when(s.last_seen));
+            factRow(dl, 'Events', fmt(s.events) + ' counted, ' + fmt(s.events_read) + ' read');
+            factRow(dl, 'Honeypots', (s.honeypots || []).map(String).join(', '));
+            factRow(dl, 'Techniques', (s.techniques || []).map(String).join(', ') || 'none yet');
+            factRow(dl, 'Confidence', percent(s.confidence) + (s.shared_infrastructure ? ' (shared or cloud address)' : ''));
+            factRow(dl, 'Records', fmt(invRecords.size) + ' support this case');
+            // how far it got, in the order an intrusion passes through
+            const reached = new Set((s.reached || []).map(String));
+            $('inv-reached').replaceChildren(...['connection', 'credentials', 'command', 'transfer', 'canary'].flatMap((p, i) =>
+                [i ? h('span', { class: 'inv-arrow' }, '→') : null, pill(p, reached.has(p) ? (PHASE[p] === 'muted' ? 'ok' : PHASE[p]) : 'muted off')]).filter(Boolean));
+            const cases = Array.isArray(c.sessions) ? c.sessions : [];
+            $('inv-timelines').replaceChildren(...cases.map((sc) => timelineCard(sc, cases.length > 1)));
+
+            const links = Array.isArray(c.links) ? c.links : [];
+            $('inv-links-card').classList.toggle('hidden', kind !== 'campaign');
+            const lb = $('inv-links');
+            if (!links.length) emptyRow(lb, 5, 'The events read show no evidence two of these sessions share. See Gaps.', 'fa-link');
+            else lb.replaceChildren(...links.flatMap((l) => (l.sessions || []).map((side, i) => h('tr', {},
+                h('td', {}, i ? '' : String(l.kind || '')), h('td', { class: 'mono-accent wrap' }, i ? '' : String(l.value || '')),
+                h('td', {}, h('button', { class: 'ref-chip', type: 'button', onclick: () => openCase('session', side.session_id) }, shortID(side.session_id))),
+                h('td', { class: 'optional' }, when(side.at)), refCells(side.refs, 0)))));
+
+            const rel = Array.isArray(c.related) ? c.related : [];
+            $('inv-related-card').classList.toggle('hidden', !rel.length);
+            $('inv-related').replaceChildren(...rel.map((r) => openRow(h('tr', {},
+                h('td', {}, String(r.relation || '')), h('td', { class: 'mono-accent wrap' }, sourcesText(r.source_ips)),
+                timeCell(r.first_seen), h('td', {}, fmt(r.event_count))), 'session', r.session_id)));
+
+            const trips = Array.isArray(c.canary_trips) ? c.canary_trips : [];
+            $('inv-trips-card').classList.toggle('hidden', !trips.length);
+            $('inv-trips').replaceChildren(...trips.map((t) => h('tr', {},
+                timeCell(t.time), h('td', { class: 'wrap' }, String(t.name || '')), h('td', {}, KIND[t.kind] || String(t.kind || '')),
+                h('td', {}, String(t.channel || '')), h('td', { class: 'mono-accent' }, String(t.source_ip || '')),
+                h('td', { class: 'wrap' }, t.session_id ? 'during the session' + (cases.length > 1 ? ' ' + shortID(t.session_id) : '') : 'by the same source, at another time'))));
+
+            const gaps = Array.isArray(c.gaps) ? c.gaps : [];
+            const gb = $('inv-gaps');
+            if (!gaps.length) emptyRow(gb, 3, 'None found: nothing read for this case was cut, discarded or left out.', 'fa-check');
+            else gb.replaceChildren(...gaps.map((g) => h('tr', {},
+                h('td', {}, pill(GAP[g.kind] || String(g.kind || ''), 'warn')),
+                h('td', { class: 'wrap' }, String(g.detail || ''), cases.length > 1 && g.session_id ? h('div', { class: 'inv-note' }, 'session ',
+                    h('button', { class: 'ref-chip', type: 'button', onclick: () => openCase('session', g.session_id) }, shortID(g.session_id))) : null),
+                refCells(g.refs, Math.max(0, (Number(g.count) || 0) - (Array.isArray(g.refs) ? g.refs.length : 0)) * (Array.isArray(g.refs) && g.refs.length ? 1 : 0)))));
+        }
+
+        async function exportCase() {
+            if (!invQuery) return;
+            const btn = $('inv-export');
+            btn.disabled = true;
+            try {
+                const got = await download(`${API_BASE}/investigate/export?${caseQuery()}`, 'qpot-case.zip');
+                toast('Saved ' + got.name + '. Check it any time with: qpot investigate verify ' + got.name);
+            } catch (e) {
+                if (e.status !== 401 && e.status !== 403) toast(errorText(e), 'error');
+            } finally {
+                btn.disabled = false;
+            }
+        }
+
         // ---------- tabs and refresh ----------
 
-        const TABS = ['dashboard', 'events', 'intel', 'canaries', 'overview', 'doctor', 'pairing', 'security'];
+        const TABS = ['dashboard', 'events', 'intel', 'investigate', 'canaries', 'overview', 'doctor', 'pairing', 'security'];
         let current = 'dashboard';
         let refreshTimer = null;
 
@@ -2629,6 +2951,7 @@
                 if (name === 'dashboard') await refreshDashboard();
                 else if (name === 'events') await loadEvents();
                 else if (name === 'intel') await loadIntel();
+                else if (name === 'investigate') await loadInvestigate();
                 else if (name === 'canaries') await loadCanaries();
                 else if (name === 'overview') await Promise.all([loadOverview(), loadInstance(), loadCleanup()]);
                 else if (name === 'doctor') await Promise.all([loadStatus(), loadDoctor(false), loadCodes()]);
@@ -2652,11 +2975,17 @@
             loadTab(name);
         }
 
-        // #overview, #pairing, #security, #intel, #canaries, #events?honeypot=cowrie&range=24h
+        // #overview, #pairing, #security, #intel, #canaries, #events?honeypot=cowrie&range=24h, #investigate?session=<id>
         function openFromHash() {
             const raw = (location.hash || '').slice(1);
             const [name, query] = raw.split('?');
             if (name === 'events' && query !== undefined) applyEventLink(new URLSearchParams(query));
+            if (name === 'investigate') {
+                // #investigate?session=<id> or #investigate?campaign=<fingerprint> opens that case
+                const p = new URLSearchParams(query || '');
+                const kind = p.get('campaign') ? 'campaign' : p.get('session') ? 'session' : '';
+                invQuery = kind ? new URLSearchParams([[kind, p.get(kind)]]) : null;
+            }
             evOffset = 0;
             switchTab(TABS.includes(name) ? name : 'dashboard', { keepHash: true });
         }
@@ -2708,6 +3037,9 @@
         $('action-export').addEventListener('click', () => exportMISP());
         $('ioc-export').addEventListener('click', () => exportMISP({ type: $('ioc-type').value, honeypot: $('ioc-honeypot').value }));
         $('ioc-type').addEventListener('change', loadIOCTable);
+        $('inv-back').addEventListener('click', () => { location.hash = 'investigate'; });
+        $('inv-export').addEventListener('click', exportCase);
+        $('inv-max').addEventListener('change', () => { if (invQuery) loadTab('investigate'); });
         $('ioc-honeypot').addEventListener('change', loadIOCTable);
         $('logs-load').addEventListener('click', loadLogs);
         $('logs-honeypot').addEventListener('change', loadLogs);

@@ -19,6 +19,7 @@ import (
 
 	"github.com/qpot/qpot/internal/config"
 	"github.com/qpot/qpot/internal/hostsetup"
+	"github.com/qpot/qpot/internal/investigate"
 	"github.com/qpot/qpot/internal/proxy"
 )
 
@@ -831,4 +832,22 @@ func sshBrokerHostReadable(cfg *config.Config) (bool, error) {
 		return false, err
 	}
 	return !store.legacy && store.State == "ready", nil
+}
+
+// SSHCapturedOutput reads what commands printed in the instance's HiFi SSH
+// cells, for an investigation case. It is nil for an instance whose record
+// area cannot be found: a case then shows no output and says so.
+func SSHCapturedOutput(cfg *config.Config) investigate.OutputReader {
+	if cfg == nil {
+		return nil
+	}
+	area, err := SSHRuntimeLogArea(cfg)
+	if err != nil {
+		return nil
+	}
+	dataPath := cfg.DataPath
+	return &investigate.HiFiOutput{
+		Cells: filepath.Join(area, "logs", "cells"),
+		Slot:  func(service string) (string, error) { return SSHRuntimeCellID(dataPath, service) },
+	}
 }

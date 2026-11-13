@@ -613,30 +613,14 @@ func (b *TTPBuilder) observe(s *sessionState, event *database.Event, ts time.Tim
 		s.weak, grown = addSmallest(s.weak, key, maxSessionWeak, b.weakEntries < b.maxWeak)
 		b.weakEntries += grown
 	}
-	host := func(_, h string) {
-		// A private or loopback host is each victim's own, not shared
-		// infrastructure; hostIOC drops those and anything that is no host.
-		if typ, v := hostIOC(h); typ != "" {
-			strong(&s.evidence, kindHost+hash128(domainHost, v), maxSessionEvidence)
+	// EventEvidence is the one reading of an event's strong evidence, so a
+	// case can show in the clear what is recorded here as a hash.
+	for _, e := range EventEvidence(event) {
+		if e.Kind == EvidenceCommand {
+			strong(&s.commands, e.Key, sequenceCommands)
+		} else {
+			strong(&s.evidence, e.Key, maxSessionEvidence)
 		}
-	}
-
-	// The command field of an NSM sensor is its own text, not attacker input.
-	if event.Command != "" && !sensorText(event) {
-		eachLocation(refang(event.Command), host)
-		if isCommandEvent(event.EventType) {
-			// Whitespace is all that is normalised: the same script sends the
-			// same text, and anything looser would link different ones.
-			if cmd := strings.Join(strings.Fields(event.Command), " "); cmd != "" {
-				strong(&s.commands, hash128(domainCommand, cmd), sequenceCommands)
-			}
-		}
-	}
-	if text := payloadLocationText(event); text != "" {
-		eachLocation(text, host)
-	}
-	if h := payloadSHA256(event); h != "" && h != emptySHA256 {
-		strong(&s.evidence, kindPayload+hash128(domainPayload, h), maxSessionEvidence)
 	}
 
 	if ua := event.Metadata["user_agent"]; ua != "" {

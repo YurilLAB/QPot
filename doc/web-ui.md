@@ -39,6 +39,7 @@ Log in with the instance's **QPot ID**, which `qpot id` prints.
 | Dashboard | Live totals; turn honeypots on and off; view a honeypot's logs; restart it; change its settings, for example the Cowrie persona, rotation and bait, the Conpot template or the LLM settings of galah and beelzebub; export IOCs to MISP |
 | Events | Browse captured events with filters and text search, and open any event's details |
 | Threat Intel | ATT&CK techniques, IOCs and campaigns |
+| Investigate | Open one session or campaign and follow it: connection, credentials, commands with captured output, files, canary trips, the evidence that links sessions, related sessions and gaps. Every line opens the stored record it rests on. **Export evidence bundle** downloads the case as a zip with a manifest of hashes. See [investigate.md](investigate.md) |
 | Canaries | Create web, file and AWS canaries; download a file canary's document; review trips; delete your own canaries |
 | Overview | Host CPU, memory, disk and process load, 24-hour activity per honeypot and the latest events with a severity; disk cleanup settings, the last cleanup run and **Clean up now** (it shows what it would free before it runs) |
 | Doctor | `qpot doctor`'s checks, with each problem's code, cause and fix (read-only) |

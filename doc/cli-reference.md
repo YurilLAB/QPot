@@ -37,6 +37,7 @@ this document stays in lock-step with the code.
 - [Overview — `qpot overview`](#overview--qpot-overview)
 - [Disk cleanup — `qpot cleanup`](#disk-cleanup--qpot-cleanup)
 - [Engagement — `qpot engagement`](#engagement--qpot-engagement)
+- [Investigation — `qpot investigate`](#investigation--qpot-investigate)
 - [GeoIP — `qpot geoip`](#geoip--qpot-geoip)
 - [Configuration — `qpot config`](#configuration--qpot-config)
 - [Utilities](#utilities)
@@ -96,6 +97,7 @@ qpot --version
 | `qpot overview` | Host resources, 24h honeypot activity and recent events, for one or all local instances. |
 | `qpot cleanup` | Remove old captured files, logs and backup days to keep the instance within its disk limits. |
 | `qpot engagement` | Engagement metrics for an instance, or for any Cowrie JSON log, side by side. |
+| `qpot investigate` | Follow one session or campaign through its records; export and verify evidence bundles. |
 | `qpot geoip` | Install or refresh the GeoIP database used for countries and the attack map. |
 | `qpot config` | Open or print the instance config file. |
 | `qpot id` | Show the QPot ID for an instance. |
@@ -924,6 +926,36 @@ saw), and after it the 95% intervals, a verdict for each tested difference
 table of the sources that visited both sides.
 [effectiveness.md](effectiveness.md#reading-a-comparison) explains each
 part and what it does not prove.
+
+---
+
+## Investigation — `qpot investigate`
+
+Everything recorded about one session or one campaign, in the order it
+happened, with the stored record behind every line. [investigate.md](investigate.md)
+describes a case and an evidence bundle in full.
+
+```bash
+qpot investigate list                                   # campaigns and the most recent sessions
+qpot investigate session <session-id>                   # one session
+qpot investigate campaign <fingerprint>                 # one campaign, and what links its sessions
+qpot investigate export session <session-id> --out case.zip
+qpot investigate verify case.zip
+```
+
+| Command | Flags |
+|---|---|
+| `list` | `-i` instance, `--limit` rows (default 30, at most 500), `--json` |
+| `session <session-id>`, `campaign <fingerprint>` | `-i`, `--max-events` events to read (default 5000, at most 50000), `--no-output` leaves out what captured commands printed, `--json` prints the whole case with its records |
+| `export (session\|campaign) <id>` | `-i`, `--max-events`, `--no-output`, `--out` the bundle to write (required; never written over an existing file) |
+| `verify <bundle.zip>` | `--json`. Needs no instance |
+
+`list`, `session`, `campaign` and `export` read the instance's database, so
+the instance must be up; `qpot serve` need not run. The text output shows
+control characters in attacker input as visible escapes.
+
+`export` prints the bundle's SHA-256. `verify` exits 0 for a whole bundle
+and 1 for one with problems, which it lists.
 
 ---
 

@@ -68,6 +68,11 @@ type Server struct {
 	// instance's config file while the server runs.
 	planted plantedFollower
 
+	// casesBuilding counts the investigation cases being put together, under
+	// caseMu: at most caseSlots at once (api_investigate.go).
+	caseMu        sync.Mutex
+	casesBuilding int
+
 	// lastAlert is when the alert loop last fired (webhook/response hooks),
 	// used to debounce alerting within Alerts.Cooldown. Touched only by the
 	// single alertLoop goroutine.

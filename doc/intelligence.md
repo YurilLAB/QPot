@@ -131,6 +131,9 @@ shares a download host scores 1 - 0.5 × 0.3 = 0.85; with a shared payload as
 well, 0.97, which is capped at 0.95. `shared_infrastructure` is true when any
 address of the session is in a known cloud range.
 
+To see which evidence links the sessions of a campaign, and the records that
+show it, open the campaign's case ([investigate.md](investigate.md)).
+
 The worker bounds what it keeps per session (32 hosts and payloads, the
 earliest seen) and in total (200,000 evidence entries, 100,000 open sessions
 after each run). At a limit the events are still counted, but new evidence is

@@ -1275,3 +1275,70 @@ a.navbar-brand:hover {
 #cleanup-limits {
     margin: var(--spacing-sm) 0 var(--spacing-md);
 }
+
+/* the Investigate tab: a record's reference is a small button that opens the stored event */
+.ref-cell {
+    white-space: normal;
+}
+
+.ref-chip {
+    display: inline-block;
+    margin: 0 4px 4px 0;
+    padding: 1px 8px;
+    border: 1px solid var(--border-secondary);
+    border-radius: var(--radius-sm);
+    background: var(--bg-tertiary);
+    color: var(--primary-color);
+    font-family: var(--font-mono);
+    font-size: var(--font-xs);
+    cursor: pointer;
+}
+
+.ref-chip:hover,
+.ref-chip:focus-visible {
+    border-color: var(--primary-color);
+}
+
+.ref-chip.plain {
+    color: var(--text-muted);
+    cursor: default;
+}
+
+/* how far the session got: the phases in order, the ones not reached dimmed */
+.inv-reached {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: var(--spacing-sm);
+    margin-top: var(--spacing-md);
+}
+
+.inv-reached .pill.off {
+    opacity: 0.45;
+}
+
+.inv-arrow {
+    color: var(--text-muted);
+}
+
+.inv-timeline td {
+    vertical-align: top;
+}
+
+.inv-note {
+    margin-top: 4px;
+    color: var(--text-secondary);
+    font-size: var(--font-xs);
+}
+
+.inv-output {
+    max-height: 16rem;
+    margin: 4px 0 0;
+}
+
+/* the tab's cards sit in wrappers: keep the pane's spacing between them */
+#inv-list > * + *,
+#inv-case > * + *,
+#inv-timelines > * + * {
+    margin-top: var(--spacing-lg);
+}

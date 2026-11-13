@@ -149,6 +149,7 @@ Each QPot instance has a unique ID (qp_*) for tracking and authentication.`,
 	rootCmd.AddCommand(newCanaryCommand())
 	rootCmd.AddCommand(newCleanupCommand())
 	rootCmd.AddCommand(newEngagementCommand())
+	rootCmd.AddCommand(newInvestigateCommand())
 
 	err := rootCmd.ExecuteContext(ctx)
 	explainCodedError(rootCmd.ErrOrStderr(), err)
