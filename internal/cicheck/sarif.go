@@ -590,10 +590,14 @@ func (reviews *codeQLReviews) accept(run codeQLRun, id string, raw json.RawMessa
 }
 
 // codeQLResultSHA256 digests a result with every artifact named by its path
-// alone, rewriting value in place. CodeQL lists a run's artifacts in no fixed
-// order, so an index into that list differs between two analyses of the same
-// code, while the path it names does not.
+// alone and its rule by its identifier alone, rewriting value in place.
+// CodeQL lists a run's artifacts in no fixed order, so an index into that
+// list differs between two analyses of the same code, while the path it
+// names does not. The same holds for the rules a tool component lists.
 func codeQLResultSHA256(run codeQLRun, value map[string]any) (string, error) {
+	if err := codeQLNameRule(run, value); err != nil {
+		return "", err
+	}
 	var resolve func(any) error
 	resolve = func(node any) error {
 		switch n := node.(type) {
@@ -631,6 +635,42 @@ func codeQLResultSHA256(run codeQLRun, value map[string]any) (string, error) {
 	}
 	sum := sha256.Sum256(canonical)
 	return hex.EncodeToString(sum[:]), nil
+}
+
+// codeQLNameRule rewrites a result's reference to its rule so that it names
+// the rule and the tool component, not their places in two lists. Two
+// analyses of one commit, minutes apart, listed the query pack's 35 rules in
+// different orders: go/weak-sensitive-data-hashing was rule 8 in one and
+// rule 3 in the other, the digest covered that number, and the second
+// analysis's gate refused all 45 reviewed findings as new. Each place is
+// checked against the name it stands for before it is dropped.
+func codeQLNameRule(run codeQLRun, value map[string]any) error {
+	raw, err := json.Marshal(value)
+	if err != nil {
+		return err
+	}
+	var result codeQLResult
+	if err := json.Unmarshal(raw, &result); err != nil {
+		return fmt.Errorf("invalid CodeQL result rule reference: %w", err)
+	}
+	rule, err := codeQLResultRule(run, result)
+	if err != nil {
+		return err
+	}
+	delete(value, "ruleIndex")
+	value["ruleId"] = rule.ID
+	reference, ok := value["rule"].(map[string]any)
+	if !ok {
+		return nil
+	}
+	delete(reference, "index")
+	reference["id"] = rule.ID
+	if component, ok := reference["toolComponent"].(map[string]any); ok {
+		// codeQLResultRule has checked the index.
+		delete(component, "index")
+		component["name"] = run.Tool.Extensions[*result.Rule.ToolComponent.Index].Name
+	}
+	return nil
 }
 
 func codeQLArtifactURI(run codeQLRun, location map[string]any) (string, error) {

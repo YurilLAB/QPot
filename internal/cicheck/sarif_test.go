@@ -4,6 +4,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"maps"
 	"os"
 	"path/filepath"
 	"strings"
@@ -152,10 +153,20 @@ func codeQLReviewFixture(t testing.TB) (string, string, map[string]any, codeQLRe
 	return root, reports, document, review
 }
 
+// codeQLTestDigest digests a fixture result as the gate does: with its rule
+// named by ruleId, not by a place in the rule list.
 func codeQLTestDigest(t testing.TB, value any) string {
 	t.Helper()
 	data, err := json.Marshal(value)
 	if err != nil {
+		t.Fatal(err)
+	}
+	var named map[string]any
+	if err := json.Unmarshal(data, &named); err != nil {
+		t.Fatal(err)
+	}
+	delete(named, "ruleIndex")
+	if data, err = json.Marshal(named); err != nil {
 		t.Fatal(err)
 	}
 	sum := sha256.Sum256(data)
@@ -277,6 +288,68 @@ func TestCodeQLReviewIgnoresArtifactOrder(t *testing.T) {
 			_, err := CheckReviewedCodeQLReports(root, reports, ".github/reviews.json")
 			if accepted := err == nil; accepted != (scenario != "index disagrees") {
 				t.Fatalf("accepted %v: %v", accepted, err)
+			}
+		})
+	}
+}
+
+// CodeQL lists a component's rules, and the components, in no fixed order
+// either. Two analyses of one commit listed the query pack's rules in
+// different orders, and the second one's gate refused every reviewed finding
+// because the digest covered the rule's place in the list. The reviewed
+// finding is the same wherever its rule is listed and however the result
+// refers to it, while a place that names another rule is refused.
+func TestCodeQLReviewIgnoresRuleOrder(t *testing.T) {
+	other := func(id string) map[string]any {
+		return map[string]any{"id": id, "defaultConfiguration": map[string]any{"level": "warning"}, "properties": map[string]any{"security-severity": "5.0"}}
+	}
+	for _, scenario := range []string{"first of one", "last of three", "in a query pack", "in a query pack listed second", "place names another rule", "pack place names another pack"} {
+		t.Run(scenario, func(t *testing.T) {
+			root, reports, document, review := codeQLReviewFixture(t)
+			run := document["runs"].([]any)[0].(map[string]any)
+			tool := run["tool"].(map[string]any)
+			driver := tool["driver"].(map[string]any)
+			reviewed := driver["rules"].([]any)[0]
+			result := run["results"].([]any)[0].(map[string]any)
+			pack := func(rules ...any) map[string]any {
+				return map[string]any{"name": "codeql/go-queries", "semanticVersion": "1.6.14", "rules": rules}
+			}
+			empty := map[string]any{"name": "codeql/go-all", "semanticVersion": "7.0.0"}
+			byPack := func(component, index int) {
+				driver["rules"] = []any{}
+				delete(result, "ruleIndex")
+				result["rule"] = map[string]any{"id": "go/test-security-rule", "index": index, "toolComponent": map[string]any{"index": component}}
+				// The pin is taken from the result with the rule and its pack
+				// named, so both orders below are held to one digest.
+				named := maps.Clone(result)
+				named["rule"] = map[string]any{"id": "go/test-security-rule", "toolComponent": map[string]any{"name": "codeql/go-queries"}}
+				review.ResultSHA256 = codeQLTestDigest(t, named)
+			}
+			switch scenario {
+			case "last of three":
+				driver["rules"] = []any{other("go/first"), other("go/second"), reviewed}
+				result["ruleIndex"] = 2
+			case "in a query pack":
+				tool["extensions"] = []any{pack(other("go/first"), reviewed), empty}
+				byPack(0, 1)
+			case "in a query pack listed second":
+				tool["extensions"] = []any{empty, pack(reviewed, other("go/first"), other("go/second"))}
+				byPack(1, 0)
+			case "place names another rule":
+				driver["rules"] = []any{other("go/first"), reviewed}
+				result["ruleIndex"] = 0
+			case "pack place names another pack":
+				tool["extensions"] = []any{pack(reviewed), empty}
+				byPack(1, 0)
+			}
+			writeCodeQLReviewFixture(t, root, reports, document, []codeQLReview{review})
+			_, err := CheckReviewedCodeQLReports(root, reports, ".github/reviews.json")
+			refused := scenario == "place names another rule" || scenario == "pack place names another pack"
+			if accepted := err == nil; accepted == refused {
+				t.Fatalf("accepted %v: %v", accepted, err)
+			}
+			if refused && !strings.Contains(err.Error(), "rule") {
+				t.Fatalf("refused for another reason: %v", err)
 			}
 		})
 	}

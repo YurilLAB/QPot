@@ -3,7 +3,7 @@
     {
       "disposition": "intentional-decoy",
       "justification": "SMSESSION belongs only to the synthetic refrigeration HTTP device emulator. Its opaque, expiring virtual-plant session does not authenticate to the QPot control plane or real infrastructure. Plain HTTP is the intended legacy persona protocol; Secure would prevent the HTTP browser session and logout flow. HttpOnly, SameSite Strict, bounded lifetime, forged-session rejection and cross-origin refusal remain tested. Only these exact emulator findings and referenced source bytes are reviewed.",
-      "resultSHA256": "49ce20a15aab5bbd249d42276e44be543c0c2b0e4d9033dae2ff767d6acef4ed",
+      "resultSHA256": "6a63379a23419c45880a63b141792a0484498e2d4e1310660063c1988d05ad31",
       "ruleId": "go/cookie-secure-not-set",
       "sourceSHA256": {
         "cmd/qpot-refrigeration/main.go": {
@@ -42,7 +42,7 @@
     {
       "disposition": "intentional-decoy",
       "justification": "SMSESSION belongs only to the synthetic refrigeration HTTP device emulator. Its opaque, expiring virtual-plant session does not authenticate to the QPot control plane or real infrastructure. Plain HTTP is the intended legacy persona protocol; Secure would prevent the HTTP browser session and logout flow. HttpOnly, SameSite Strict, bounded lifetime, forged-session rejection and cross-origin refusal remain tested. Only these exact emulator findings and referenced source bytes are reviewed.",
-      "resultSHA256": "a342dbd7ed42849bba3b382c60d37649b5019face0e5214f3df921cf974c4ec8",
+      "resultSHA256": "ff0088e5b5c5b461aa871039485cfa6732e22abb55acbf203c706d201573a085",
       "ruleId": "go/cookie-secure-not-set",
       "sourceSHA256": {
         "cmd/qpot-refrigeration/main.go": {
@@ -81,7 +81,7 @@
     {
       "disposition": "false-positive",
       "justification": "InsecureSkipVerify disables Go default verification only because mandatory VerifyConnection replaces it. Cluster certificates must verify at the current time for server use against a CA whose Ed25519 public key hashes to the configured cluster ID. A supplied expected-node callback additionally rejects mismatched, removed, or revoked nodes. Explicit operator trust verifies the full peer chain against the configured/system roots and the actually dialed hostname or IP; missing names fail. clusterPeerClient disables ambient proxies so CONNECT cannot bypass its custom verified DialTLSContext, and enforces TLS1.2 minimum. Real owned TLS tests confirm valid success, wrong-cluster rejection, callback rejection, unrelated-system-root rejection, wrong-IP-name rejection and zero proxy requests; upstream node certificate admission/gossip tests are preserved.",
-      "resultSHA256": "08f4666b5deb2ad397f33f68d0aacba2e94f693f833af1ed516bd42d5ea2866b",
+      "resultSHA256": "4ea2f43b0a0e1c432bad8f8f696a6b3107882c620fdd4033193a68dd23f542e8",
       "ruleId": "go/disabled-certificate-check",
       "sourceSHA256": {
         "go.mod": {
@@ -120,7 +120,7 @@
     {
       "disposition": "false-positive",
       "justification": "Aggregator.digest reduces strings to 128-bit keys of in-memory bounded sets. The flagged flow is hash64(e.Username, e.Password) for a login event: the pair an attacker typed into a honeypot, read back from QPot's own stored events or from a Cowrie log, hashed only so that the report can count distinct credential pairs that logged in. The digest is a set slot: it is never written to disk, printed, returned in the Report (which carries counts), compared with a supplied credential or used to authenticate anything. The same pairs are stored in clear in the events table as evidence, so the digest conceals nothing and needs no salt or work factor. The other callers hash session ids, source addresses, commands, URLs, hosts and technique ids. engagement_test.go checks the distinct credential count and that the result does not depend on event order.",
-      "resultSHA256": "5a4a90c35b2fbc22599c0a0cc8e1ef3b8507f05039224138065626df212cf014",
+      "resultSHA256": "edaf4a12feb93d8840eb7d1deb7f179139912813cce7cf70632e514ae22863dc",
       "ruleId": "go/weak-sensitive-data-hashing",
       "sourceSHA256": {
         "go.mod": {
@@ -147,7 +147,7 @@
     {
       "disposition": "false-positive",
       "justification": "esDocID uses full SHA256 only when an attacker-supplied document identity exceeds the Elasticsearch512-byte _id limit. Its consumers use the digest as deterministic document/update/read identity and preserve the original IOC/session content in the record. It is not a password verifier, authentication token, encryption key or attempt to conceal a low-entropy secret. No work factor or salt is required for this non-secret stable identifier. The real httptest long-indicator read verifies the hashed identity is used for _mget and the original long value survives storage translation.",
-      "resultSHA256": "739145e950cc625e2ada88f6d8d4521b92f174deb74e84c60ce0ece6d052facb",
+      "resultSHA256": "3eabe39642b29107e11614977beba82a1ec3ccde00067e61c7f7677dca5d1a9b",
       "ruleId": "go/weak-sensitive-data-hashing",
       "sourceSHA256": {
         "go.mod": {
@@ -189,7 +189,7 @@
     {
       "disposition": "false-positive",
       "justification": "hash128 names campaign evidence: a domain-separated SHA-256 truncated to 128 bits. The flagged flow is hash128(domainCredential, event.Username, event.Password) in the campaign builder: a username and password an attacker submitted to a honeypot become one weak-evidence key, kept (the eight smallest per session) only to raise a campaign's confidence when two already-linked sessions used the same pair. The key never links sessions by itself, is not a password verifier, is never compared with a supplied credential and grants nothing. It is persisted in the worker's checkpoint, next to the same credentials in clear in the events table, so it discloses nothing the store does not already hold; a salted or slow hash would make equal pairs unequal, which is the one property the key exists for. The other callers hash source addresses, download hosts, commands, payload hashes and user agents. ttp_test.go (TestWeakEvidenceOnlyCorroborates, TestCheckpointRoundTripMidStream) covers the use and the persistence.",
-      "resultSHA256": "51e4c2a4878fb6884f287b0db227ba3e178fe21c16eb8042455122a7fab15043",
+      "resultSHA256": "574ad357aa2a04bd67f10ef24694aa72b42128b80ce6cf5f2c0bb04ef976c037",
       "ruleId": "go/weak-sensitive-data-hashing",
       "sourceSHA256": {
         "go.mod": {
@@ -213,7 +213,7 @@
     {
       "disposition": "intentional-decoy",
       "justification": "The refrigeration emulator authenticates only its isolated synthetic controller accounts, independent of QPot/control-plane credentials. sha256Bytes produces fixed-length buffers for subtle.ConstantTimeCompare of a supplied password and the in-memory expected synthetic value; no password hash is stored or used as a reusable credential. The deliberately guessable legacy controller accounts and HTTP protocol belong to the decoy persona. This disposition covers only this exact emulator comparison, not general password-storage hashing. Owned protocol/session tests preserve valid/invalid login behavior, role checks, opaque random session tokens with expiry and logout checks, plus cross-origin refusal.",
-      "resultSHA256": "11b2cd24bcea09b247338aca8f5d9895ede77160a7b4d5dca5c53a6337ade626",
+      "resultSHA256": "cbff72658ae54676cafa906a02dbad4ba07440cda9e6a774bd44a15cf217eceb",
       "ruleId": "go/weak-sensitive-data-hashing",
       "sourceSHA256": {
         "cmd/qpot-refrigeration/main.go": {
@@ -252,7 +252,7 @@
     {
       "disposition": "false-positive",
       "justification": "canaryEventKey hashes captured event fields and payload to a128-bit stable deduplication key. The only production call supplies Observation.EventKey; Store.MatchObservation combines it with the canary ID in eventHits to avoid recording the same captured row twice. No authentication/authorization path compares this digest, and no persisted password verifier is derived from it. Inclusion of an observed attacker password in event identity does not turn this operation into password storage. Source tracing covers the sole caller and the complete consumer. No previously blocked credential-reuse or positive canary action was performed for this review.",
-      "resultSHA256": "f6bc7d9de108de55742195a9183d640d0e3092adfab7ea48375b806d69d152d9",
+      "resultSHA256": "ffc6189d9a8f743a65e5a6a974a4dbb90ec2ae3207f5a185d2c721c11a753bec",
       "ruleId": "go/weak-sensitive-data-hashing",
       "sourceSHA256": {
         "go.mod": {
@@ -273,7 +273,7 @@
     {
       "disposition": "false-positive",
       "justification": "prepareOwnership first calls the exact finite deployProfileFor switch. Unknown input has no RunAsUID/OwnedSubdirs and returns before constructing a path or invoking Docker. The two reachable ownership profiles use compile-time catalog names and fixed subdirectory literals; an attacker-controlled traversal/absolute name cannot select a profile. No case is accepted merely because another API happened to validate it. The helper receives that catalog-derived local directory as an argv bind value, without a shell. The independent negative traversal/absolute/unknown-name probe creates no filesystem entries and invokes no Docker helper; the refrigeration positive control creates exactly its declared logs/state directories.",
-      "resultSHA256": "5f3e0ee97d2ae757fb2b1a46c2e06efbff6ff268ba3eae83f09bffe5a076a989",
+      "resultSHA256": "275130c13c4cbcaa1fc4edd8a4435caf4c8fb86d5aa32eecd313f07b25bbced4",
       "ruleId": "go/path-injection",
       "sourceSHA256": {
         "go.mod": {
@@ -315,7 +315,7 @@
     {
       "disposition": "false-positive",
       "justification": "prepareOwnership first calls the exact finite deployProfileFor switch. Unknown input has no RunAsUID/OwnedSubdirs and returns before constructing a path or invoking Docker. The two reachable ownership profiles use compile-time catalog names and fixed subdirectory literals; an attacker-controlled traversal/absolute name cannot select a profile. No case is accepted merely because another API happened to validate it. The helper receives that catalog-derived local directory as an argv bind value, without a shell. The independent negative traversal/absolute/unknown-name probe creates no filesystem entries and invokes no Docker helper; the refrigeration positive control creates exactly its declared logs/state directories.",
-      "resultSHA256": "0238cef73d9069b2767a3a4ef1637d00d3c07cc5658c14b3bbe0c003943750af",
+      "resultSHA256": "484fbc932ca309982c9b63f7a95abeb1d10337d89e62ea45c7e70e3248cd1331",
       "ruleId": "go/path-injection",
       "sourceSHA256": {
         "go.mod": {
@@ -357,7 +357,7 @@
     {
       "disposition": "false-positive",
       "justification": "The reported data reaches structured slog attribute values, with constant attribute keys. Logging messages are literals, except sendInternalError whose production context callers all pass literals. QPot installs the standard JSONHandler; setup temporarily uses TextHandler. These handlers quote CR, LF and control characters, so arbitrary attribute values remain one record. Actual Go 1.26.11 controls preserve values and prevent forged records. Both handler configuration sources and this trace are pinned.",
-      "resultSHA256": "eda94f63b14a46d83edc17b49b0c170ef2842186c827445daf49c9572ad20954",
+      "resultSHA256": "34a8843b4a5afe13567b0e6546890201ffdcc6ab8fa06da0f8f0c304d90ff8ed",
       "ruleId": "go/log-injection",
       "sourceSHA256": {
         "cmd/qpot/main.go": {
@@ -384,7 +384,7 @@
     {
       "disposition": "false-positive",
       "justification": "The reported data reaches structured slog attribute values, with constant attribute keys. Logging messages are literals, except sendInternalError whose production context callers all pass literals. QPot installs the standard JSONHandler; setup temporarily uses TextHandler. These handlers quote CR, LF and control characters, so arbitrary attribute values remain one record. Actual Go 1.26.11 controls preserve values and prevent forged records. Both handler configuration sources and this trace are pinned.",
-      "resultSHA256": "f0075c83c7b5eb55e9b2ed172f8bc3f682435add45ce18aa52ad6fd9d6e1ef82",
+      "resultSHA256": "88639dcf8a7294ce3d8b64ba85067e3549889810d56ddad6f8ca57fde59f4ea6",
       "ruleId": "go/log-injection",
       "sourceSHA256": {
         "cmd/qpot/main.go": {
@@ -411,7 +411,7 @@
     {
       "disposition": "false-positive",
       "justification": "The reported data reaches structured slog attribute values, with constant attribute keys. Logging messages are literals, except sendInternalError whose production context callers all pass literals. QPot installs the standard JSONHandler; setup temporarily uses TextHandler. These handlers quote CR, LF and control characters, so arbitrary attribute values remain one record. Actual Go 1.26.11 controls preserve values and prevent forged records. Both handler configuration sources and this trace are pinned.",
-      "resultSHA256": "ce132b7b0577bd42b20ac650bc0fc63d1b1fbbc239202edde1818b53859a41af",
+      "resultSHA256": "dd91539bd03a63478dc0b1b2ac99e50b33f64954eec865ca0abdb7bc03885184",
       "ruleId": "go/log-injection",
       "sourceSHA256": {
         "cmd/qpot/main.go": {
@@ -438,7 +438,7 @@
     {
       "disposition": "false-positive",
       "justification": "The reported data reaches structured slog attribute values, with constant attribute keys. Logging messages are literals, except sendInternalError whose production context callers all pass literals. QPot installs the standard JSONHandler; setup temporarily uses TextHandler. These handlers quote CR, LF and control characters, so arbitrary attribute values remain one record. Actual Go 1.26.11 controls preserve values and prevent forged records. Both handler configuration sources and this trace are pinned.",
-      "resultSHA256": "96460a0f44af24940e687a39d296386f7d0297eac0ea7b4f7066ef807e8ea33d",
+      "resultSHA256": "01b166710ac7278791adb05631e5f707dee9ac1b4e016c387f5c074e61aff084",
       "ruleId": "go/log-injection",
       "sourceSHA256": {
         "cmd/qpot/main.go": {
@@ -477,7 +477,7 @@
     {
       "disposition": "false-positive",
       "justification": "The reported data reaches structured slog attribute values, with constant attribute keys. Logging messages are literals, except sendInternalError whose production context callers all pass literals. QPot installs the standard JSONHandler; setup temporarily uses TextHandler. These handlers quote CR, LF and control characters, so arbitrary attribute values remain one record. Actual Go 1.26.11 controls preserve values and prevent forged records. Both handler configuration sources and this trace are pinned.",
-      "resultSHA256": "f8098f071a7a65e092351fbe8ee29443a2042d95d4f96a09711e12325d340095",
+      "resultSHA256": "0b849fff2d99c7a76705b679037b15a7a7363594835870c24858d93a36e1ecaf",
       "ruleId": "go/log-injection",
       "sourceSHA256": {
         "cmd/qpot/main.go": {
@@ -516,7 +516,7 @@
     {
       "disposition": "false-positive",
       "justification": "The reported data reaches structured slog attribute values, with constant attribute keys. Logging messages are literals, except sendInternalError whose production context callers all pass literals. QPot installs the standard JSONHandler; setup temporarily uses TextHandler. These handlers quote CR, LF and control characters, so arbitrary attribute values remain one record. Actual Go 1.26.11 controls preserve values and prevent forged records. Both handler configuration sources and this trace are pinned.",
-      "resultSHA256": "911473acbedfa4c398b19a27a858ebd74830d7d02b726dc0ede8c49b46d4909c",
+      "resultSHA256": "36cac6535426b24099828482eb89dafd0d2e00fcd9a24bd0d7253a83eb9efe9f",
       "ruleId": "go/log-injection",
       "sourceSHA256": {
         "cmd/qpot/main.go": {
@@ -555,7 +555,7 @@
     {
       "disposition": "false-positive",
       "justification": "The reported data reaches structured slog attribute values, with constant attribute keys. Logging messages are literals, except sendInternalError whose production context callers all pass literals. QPot installs the standard JSONHandler; setup temporarily uses TextHandler. These handlers quote CR, LF and control characters, so arbitrary attribute values remain one record. Actual Go 1.26.11 controls preserve values and prevent forged records. Both handler configuration sources and this trace are pinned.",
-      "resultSHA256": "2e99d8254ffbef60f198dac99cee95e5b669fb60750ba396ec05a6a76697f965",
+      "resultSHA256": "8ecf64ade622f07e99073c77d75d3f5736c786fce0241058ab4458f1137d3729",
       "ruleId": "go/log-injection",
       "sourceSHA256": {
         "cmd/qpot/main.go": {
@@ -594,7 +594,7 @@
     {
       "disposition": "false-positive",
       "justification": "The reported data reaches structured slog attribute values, with constant attribute keys. Logging messages are literals, except sendInternalError whose production context callers all pass literals. QPot installs the standard JSONHandler; setup temporarily uses TextHandler. These handlers quote CR, LF and control characters, so arbitrary attribute values remain one record. Actual Go 1.26.11 controls preserve values and prevent forged records. Both handler configuration sources and this trace are pinned.",
-      "resultSHA256": "8c54a939488ec35950441fd87b48246953be5a4cfa6b860c833a6f0d5624c697",
+      "resultSHA256": "ed7e68d4d3d89b0f75f07b1afd1e0c62c3b90971fe5b0d38e3beebe3473cba9d",
       "ruleId": "go/log-injection",
       "sourceSHA256": {
         "cmd/qpot/main.go": {
@@ -621,7 +621,7 @@
     {
       "disposition": "false-positive",
       "justification": "The reported data reaches structured slog attribute values, with constant attribute keys. Logging messages are literals, except sendInternalError whose production context callers all pass literals. QPot installs the standard JSONHandler; setup temporarily uses TextHandler. These handlers quote CR, LF and control characters, so arbitrary attribute values remain one record. Actual Go 1.26.11 controls preserve values and prevent forged records. Both handler configuration sources and this trace are pinned.",
-      "resultSHA256": "fcd35db0fa53bfce9e1f92676899734322f6f2e1210112029a835989b3064e51",
+      "resultSHA256": "90cd935549d8a3f921e1315e591a31a28022a570682c78efac24fef13868852b",
       "ruleId": "go/log-injection",
       "sourceSHA256": {
         "cmd/qpot/main.go": {
@@ -651,7 +651,7 @@
     {
       "disposition": "false-positive",
       "justification": "The reported data reaches structured slog attribute values, with constant attribute keys. Logging messages are literals, except sendInternalError whose production context callers all pass literals. QPot installs the standard JSONHandler; setup temporarily uses TextHandler. These handlers quote CR, LF and control characters, so arbitrary attribute values remain one record. Actual Go 1.26.11 controls preserve values and prevent forged records. Both handler configuration sources and this trace are pinned.",
-      "resultSHA256": "a97b9ff72a9e14a8c6e79c9845abafd42ffc3ace8bb03e507e02e1f4b0c7a6fc",
+      "resultSHA256": "5ab311f92bc2ccf480e9a777c09d48028972c914b3e943f79218bad2c3e67680",
       "ruleId": "go/log-injection",
       "sourceSHA256": {
         "cmd/qpot/main.go": {
@@ -702,7 +702,7 @@
     {
       "disposition": "false-positive",
       "justification": "The reported data reaches structured slog attribute values, with constant attribute keys. Logging messages are literals, except sendInternalError whose production context callers all pass literals. QPot installs the standard JSONHandler; setup temporarily uses TextHandler. These handlers quote CR, LF and control characters, so arbitrary attribute values remain one record. Actual Go 1.26.11 controls preserve values and prevent forged records. Both handler configuration sources and this trace are pinned.",
-      "resultSHA256": "76295a983f402174ff671aa67b184d30a29b49af942d9730a139e29fea7330e6",
+      "resultSHA256": "7fab297a324c465650a9d9bd83361d90ce6d81de0f0c1096d406f6bd53bd4811",
       "ruleId": "go/log-injection",
       "sourceSHA256": {
         "cmd/qpot/main.go": {
@@ -729,7 +729,7 @@
     {
       "disposition": "false-positive",
       "justification": "The reported data reaches structured slog attribute values, with constant attribute keys. Logging messages are literals, except sendInternalError whose production context callers all pass literals. QPot installs the standard JSONHandler; setup temporarily uses TextHandler. These handlers quote CR, LF and control characters, so arbitrary attribute values remain one record. Actual Go 1.26.11 controls preserve values and prevent forged records. Both handler configuration sources and this trace are pinned.",
-      "resultSHA256": "6573e4b395e23ceae64d47daacf4aa042be34d88c659c8a91b81deaee04d245c",
+      "resultSHA256": "a3e27c3f81b1ea089e517e91a2a5d633e8c9822367269293b5ed1ba1ee65e52f",
       "ruleId": "go/log-injection",
       "sourceSHA256": {
         "cmd/qpot/main.go": {
@@ -756,7 +756,7 @@
     {
       "disposition": "false-positive",
       "justification": "The reported data reaches structured slog attribute values, with constant attribute keys. Logging messages are literals, except sendInternalError whose production context callers all pass literals. QPot installs the standard JSONHandler; setup temporarily uses TextHandler. These handlers quote CR, LF and control characters, so arbitrary attribute values remain one record. Actual Go 1.26.11 controls preserve values and prevent forged records. Both handler configuration sources and this trace are pinned.",
-      "resultSHA256": "98ff0dd9483bb2d51a549f18b0ff51a32c8ab1e722ce286d03edf4b649c3e262",
+      "resultSHA256": "81ce88f23dc9ab7af6a97c561fabeffe02b1fc6048a221e7fa0cb1507d8b4e89",
       "ruleId": "go/log-injection",
       "sourceSHA256": {
         "cmd/qpot/main.go": {
@@ -783,7 +783,7 @@
     {
       "disposition": "false-positive",
       "justification": "The reported data reaches structured slog attribute values, with constant attribute keys. Logging messages are literals, except sendInternalError whose production context callers all pass literals. QPot installs the standard JSONHandler; setup temporarily uses TextHandler. These handlers quote CR, LF and control characters, so arbitrary attribute values remain one record. Actual Go 1.26.11 controls preserve values and prevent forged records. Both handler configuration sources and this trace are pinned.",
-      "resultSHA256": "64a2e22a6d645566e83787e01cb272f0738745cb50a1fdc7341c2bf007dd955f",
+      "resultSHA256": "00c9cdcb57eadf64d4c9253e9734867ae4c088105bb2e96860ef5b266ae1ea87",
       "ruleId": "go/log-injection",
       "sourceSHA256": {
         "cmd/qpot/main.go": {
@@ -810,7 +810,7 @@
     {
       "disposition": "false-positive",
       "justification": "The reported data reaches structured slog attribute values, with constant attribute keys. Logging messages are literals, except sendInternalError whose production context callers all pass literals. QPot installs the standard JSONHandler; setup temporarily uses TextHandler. These handlers quote CR, LF and control characters, so arbitrary attribute values remain one record. Actual Go 1.26.11 controls preserve values and prevent forged records. Both handler configuration sources and this trace are pinned.",
-      "resultSHA256": "eddc423d457f372995d75b51ce6687a2e3d7cf8be76885a9a7fac64afb30ba2f",
+      "resultSHA256": "f03004b5710a748e83dc5db15f37086cbce0fd16f3a5fbdeb680093695c7c491",
       "ruleId": "go/log-injection",
       "sourceSHA256": {
         "cmd/qpot/main.go": {
@@ -834,7 +834,7 @@
     {
       "disposition": "false-positive",
       "justification": "The reported data reaches structured slog attribute values, with constant attribute keys. Logging messages are literals, except sendInternalError whose production context callers all pass literals. QPot installs the standard JSONHandler; setup temporarily uses TextHandler. These handlers quote CR, LF and control characters, so arbitrary attribute values remain one record. Actual Go 1.26.11 controls preserve values and prevent forged records. Both handler configuration sources and this trace are pinned.",
-      "resultSHA256": "50a84d33af912e49b89b66d86f110ed7af5d3b2bbb4756730e9ff61d871d1b9e",
+      "resultSHA256": "e7e0049de79c1c201d03c61879b237bb5334317b43c6678dc1383ed4fb2bc975",
       "ruleId": "go/log-injection",
       "sourceSHA256": {
         "cmd/qpot/main.go": {
@@ -858,7 +858,7 @@
     {
       "disposition": "false-positive",
       "justification": "The reported data reaches structured slog attribute values, with constant attribute keys. Logging messages are literals, except sendInternalError whose production context callers all pass literals. QPot installs the standard JSONHandler; setup temporarily uses TextHandler. These handlers quote CR, LF and control characters, so arbitrary attribute values remain one record. Actual Go 1.26.11 controls preserve values and prevent forged records. Both handler configuration sources and this trace are pinned.",
-      "resultSHA256": "f5191450b1b6fc62d55276cdc0fa4773a3d8d7a727f34e819f052d37b6a9c726",
+      "resultSHA256": "4991f84b769eca8d99918f00593557e9eac008e49172d53f008c4dcf87411b13",
       "ruleId": "go/log-injection",
       "sourceSHA256": {
         "cmd/qpot/main.go": {
@@ -882,7 +882,7 @@
     {
       "disposition": "false-positive",
       "justification": "The reported data reaches structured slog attribute values, with constant attribute keys. Logging messages are literals, except sendInternalError whose production context callers all pass literals. QPot installs the standard JSONHandler; setup temporarily uses TextHandler. These handlers quote CR, LF and control characters, so arbitrary attribute values remain one record. Actual Go 1.26.11 controls preserve values and prevent forged records. Both handler configuration sources and this trace are pinned.",
-      "resultSHA256": "d7c5d314fa38e13f32d36065e7412b748d912cd114399c2b0ba13cc24c903ea6",
+      "resultSHA256": "baa143a9206d170107844dbba2a8a527cbd9ebb9e54d08cacb79b701bd475e5f",
       "ruleId": "go/log-injection",
       "sourceSHA256": {
         "cmd/qpot/main.go": {
@@ -906,7 +906,7 @@
     {
       "disposition": "false-positive",
       "justification": "The reported data reaches structured slog attribute values, with constant attribute keys. Logging messages are literals, except sendInternalError whose production context callers all pass literals. QPot installs the standard JSONHandler; setup temporarily uses TextHandler. These handlers quote CR, LF and control characters, so arbitrary attribute values remain one record. Actual Go 1.26.11 controls preserve values and prevent forged records. Both handler configuration sources and this trace are pinned.",
-      "resultSHA256": "423ebc0ef77e61fa264f52dee8fa76320a18e517744c0780389ba61722fc4fa8",
+      "resultSHA256": "910882df4f57fcc8a217a43881536c5c7c036f1953a252833a7c482b735e476a",
       "ruleId": "go/log-injection",
       "sourceSHA256": {
         "cmd/qpot/main.go": {
@@ -930,7 +930,7 @@
     {
       "disposition": "false-positive",
       "justification": "The reported data reaches structured slog attribute values, with constant attribute keys. Logging messages are literals, except sendInternalError whose production context callers all pass literals. QPot installs the standard JSONHandler; setup temporarily uses TextHandler. These handlers quote CR, LF and control characters, so arbitrary attribute values remain one record. Actual Go 1.26.11 controls preserve values and prevent forged records. Both handler configuration sources and this trace are pinned.",
-      "resultSHA256": "de323e3fee80faee173943bc24499e72ad99c44cdaabc0ba84ee67230aa8b151",
+      "resultSHA256": "7ac533ea37020cc8aa73d47aea47b30dfd323907030d6de9c56161b33eb53987",
       "ruleId": "go/log-injection",
       "sourceSHA256": {
         "cmd/qpot/main.go": {
@@ -954,7 +954,7 @@
     {
       "disposition": "false-positive",
       "justification": "The reported data reaches structured slog attribute values, with constant attribute keys. Logging messages are literals, except sendInternalError whose production context callers all pass literals. QPot installs the standard JSONHandler; setup temporarily uses TextHandler. These handlers quote CR, LF and control characters, so arbitrary attribute values remain one record. Actual Go 1.26.11 controls preserve values and prevent forged records. Both handler configuration sources and this trace are pinned.",
-      "resultSHA256": "97ecf4bc268cbe0efb9e1042c2b97329cfdfd29acb3a8574954f13c7d6410e99",
+      "resultSHA256": "eff75914b9ede864eec9faaf7f666c48f1cd4b6ce8894364c936c8db26c57339",
       "ruleId": "go/log-injection",
       "sourceSHA256": {
         "cmd/qpot/main.go": {
@@ -978,7 +978,7 @@
     {
       "disposition": "false-positive",
       "justification": "The reported data reaches structured slog attribute values, with constant attribute keys. Logging messages are literals, except sendInternalError whose production context callers all pass literals. QPot installs the standard JSONHandler; setup temporarily uses TextHandler. These handlers quote CR, LF and control characters, so arbitrary attribute values remain one record. Actual Go 1.26.11 controls preserve values and prevent forged records. Both handler configuration sources and this trace are pinned.",
-      "resultSHA256": "6543d6d0767b89f9e36b5b4f6f2ccba2321b0d39e06a2bd4a64d54267787bbfa",
+      "resultSHA256": "dd1eab2e0cda95a56030ca57bd37fbbdfec618c7f01df223914c4e773c8d9f83",
       "ruleId": "go/log-injection",
       "sourceSHA256": {
         "cmd/qpot/main.go": {
@@ -1002,7 +1002,7 @@
     {
       "disposition": "false-positive",
       "justification": "The reported data reaches structured slog attribute values, with constant attribute keys. Logging messages are literals, except sendInternalError whose production context callers all pass literals. QPot installs the standard JSONHandler; setup temporarily uses TextHandler. These handlers quote CR, LF and control characters, so arbitrary attribute values remain one record. Actual Go 1.26.11 controls preserve values and prevent forged records. Both handler configuration sources and this trace are pinned.",
-      "resultSHA256": "7ab2b98ae8d2f89444db6f9d55aa21e6e7c9d4e2f97bbb2678e3bcc03c306d0f",
+      "resultSHA256": "1f93c875504f1b95ada6d34f75ed428d094e02126f4dc95b14a40976e1f580f8",
       "ruleId": "go/log-injection",
       "sourceSHA256": {
         "cmd/qpot/main.go": {
@@ -1026,7 +1026,7 @@
     {
       "disposition": "false-positive",
       "justification": "The reported data reaches structured slog attribute values, with constant attribute keys. Logging messages are literals, except sendInternalError whose production context callers all pass literals. QPot installs the standard JSONHandler; setup temporarily uses TextHandler. These handlers quote CR, LF and control characters, so arbitrary attribute values remain one record. Actual Go 1.26.11 controls preserve values and prevent forged records. Both handler configuration sources and this trace are pinned.",
-      "resultSHA256": "f7db2fc28c2079de26f554afdbdb8a5f9ee22237d7779c6d5d07325b9baf69bb",
+      "resultSHA256": "4c3d1009274f3a3813071d71162378b1753e3558227562ad8f38faf3aa9c3c27",
       "ruleId": "go/log-injection",
       "sourceSHA256": {
         "cmd/qpot/main.go": {
@@ -1050,7 +1050,7 @@
     {
       "disposition": "false-positive",
       "justification": "The reported data reaches structured slog attribute values, with constant attribute keys. Logging messages are literals, except sendInternalError whose production context callers all pass literals. QPot installs the standard JSONHandler; setup temporarily uses TextHandler. These handlers quote CR, LF and control characters, so arbitrary attribute values remain one record. Actual Go 1.26.11 controls preserve values and prevent forged records. Both handler configuration sources and this trace are pinned.",
-      "resultSHA256": "ae39844d04c0deeba519a3c634d51086da14f7b3933635a60775118e9137dec0",
+      "resultSHA256": "0250bc9b1251fa3bc7a7b491fff078243b9d62df84693ad2682d2bb3f0f522b6",
       "ruleId": "go/log-injection",
       "sourceSHA256": {
         "cmd/qpot/main.go": {
@@ -1098,7 +1098,7 @@
     {
       "disposition": "false-positive",
       "justification": "The reported data reaches structured slog attribute values, with constant attribute keys. Logging messages are literals, except sendInternalError whose production context callers all pass literals. QPot installs the standard JSONHandler; setup temporarily uses TextHandler. These handlers quote CR, LF and control characters, so arbitrary attribute values remain one record. Actual Go 1.26.11 controls preserve values and prevent forged records. Both handler configuration sources and this trace are pinned.",
-      "resultSHA256": "b5d7041fd5ed5a33bdd631581c2df2bdf9b7499065c332990b19edac80b6fc00",
+      "resultSHA256": "05ef3def58964ad9b6fa70fc4056be05027123d1d7e8baf06d157a928bb9d236",
       "ruleId": "go/log-injection",
       "sourceSHA256": {
         "cmd/qpot/main.go": {
@@ -1146,7 +1146,7 @@
     {
       "disposition": "false-positive",
       "justification": "The reported data reaches structured slog attribute values, with constant attribute keys. Logging messages are literals, except sendInternalError whose production context callers all pass literals. QPot installs the standard JSONHandler; setup temporarily uses TextHandler. These handlers quote CR, LF and control characters, so arbitrary attribute values remain one record. Actual Go 1.26.11 controls preserve values and prevent forged records. Both handler configuration sources and this trace are pinned.",
-      "resultSHA256": "d30a606c757727d5eee81fb9f1991d2fccc945c9838c06292aa0142d88b651e5",
+      "resultSHA256": "8054b9ba7633a811c881bc607f65af62b41085aa9d5f58aa351d99695c3596c5",
       "ruleId": "go/log-injection",
       "sourceSHA256": {
         "cmd/qpot/main.go": {
@@ -1176,7 +1176,7 @@
     {
       "disposition": "false-positive",
       "justification": "The reported data reaches structured slog attribute values, with constant attribute keys. Logging messages are literals, except sendInternalError whose production context callers all pass literals. QPot installs the standard JSONHandler; setup temporarily uses TextHandler. These handlers quote CR, LF and control characters, so arbitrary attribute values remain one record. Actual Go 1.26.11 controls preserve values and prevent forged records. Both handler configuration sources and this trace are pinned.",
-      "resultSHA256": "fdfcdd827563f27ee510fcdd88b6657867514628227e688ed42f7904a799bc0c",
+      "resultSHA256": "ea9abc811eeed11b440801b0790c4efaddbe957b7cb9cb5bfe633928ad2e30f2",
       "ruleId": "go/log-injection",
       "sourceSHA256": {
         "cmd/qpot/main.go": {
@@ -1206,7 +1206,7 @@
     {
       "disposition": "false-positive",
       "justification": "The reported data reaches structured slog attribute values, with constant attribute keys. Logging messages are literals, except sendInternalError whose production context callers all pass literals. QPot installs the standard JSONHandler; setup temporarily uses TextHandler. These handlers quote CR, LF and control characters, so arbitrary attribute values remain one record. Actual Go 1.26.11 controls preserve values and prevent forged records. Both handler configuration sources and this trace are pinned.",
-      "resultSHA256": "a26ea43fefe07ef156880f0638b56e33ed2a63bce84183a15486029e6ef4ee87",
+      "resultSHA256": "412bd67d3623fa95d6eeec8c41317f6c5a2d7a5dbf10a89fb7518cc2e0cc3c72",
       "ruleId": "go/log-injection",
       "sourceSHA256": {
         "cmd/qpot/main.go": {
@@ -1236,7 +1236,7 @@
     {
       "disposition": "false-positive",
       "justification": "The reported data reaches structured slog attribute values, with constant attribute keys. Logging messages are literals, except sendInternalError whose production context callers all pass literals. QPot installs the standard JSONHandler; setup temporarily uses TextHandler. These handlers quote CR, LF and control characters, so arbitrary attribute values remain one record. Actual Go 1.26.11 controls preserve values and prevent forged records. Both handler configuration sources and this trace are pinned.",
-      "resultSHA256": "476de66dd8857e6cef55d6c1339b582b9c072df5049fbdce49216881998f7f0b",
+      "resultSHA256": "d467a8a2191300e4fa9ed58dbae1eac80a701e7e2e340a839cbcba7ab55a4338",
       "ruleId": "go/log-injection",
       "sourceSHA256": {
         "cmd/qpot/main.go": {
@@ -1266,7 +1266,7 @@
     {
       "disposition": "false-positive",
       "justification": "The reported data reaches structured slog attribute values, with constant attribute keys. Logging messages are literals, except sendInternalError whose production context callers all pass literals. QPot installs the standard JSONHandler; setup temporarily uses TextHandler. These handlers quote CR, LF and control characters, so arbitrary attribute values remain one record. Actual Go 1.26.11 controls preserve values and prevent forged records. Both handler configuration sources and this trace are pinned.",
-      "resultSHA256": "12285c24e1b9b26194731b5875a3ce283af8b5642e9eae7d41a6a9cb781882e5",
+      "resultSHA256": "d14cd60db8bdf6f31667b48f5a7bf4f5bbb3af9b96dc1f99392ac74eadef41a5",
       "ruleId": "go/log-injection",
       "sourceSHA256": {
         "cmd/qpot/main.go": {
@@ -1293,7 +1293,7 @@
     {
       "disposition": "false-positive",
       "justification": "The reported data reaches structured slog attribute values, with constant attribute keys. Logging messages are literals, except sendInternalError whose production context callers all pass literals. QPot installs the standard JSONHandler; setup temporarily uses TextHandler. These handlers quote CR, LF and control characters, so arbitrary attribute values remain one record. Actual Go 1.26.11 controls preserve values and prevent forged records. Both handler configuration sources and this trace are pinned.",
-      "resultSHA256": "fb30b0ffb7852c1d9be592f1137a21edfd46edf13c6296e45811e0cca2332b8c",
+      "resultSHA256": "2cc2192bd67a108b01c77b40490ccc2381b0a472d498b85688de223f0f7ee45d",
       "ruleId": "go/log-injection",
       "sourceSHA256": {
         "cmd/qpot/main.go": {
@@ -1323,7 +1323,7 @@
     {
       "disposition": "false-positive",
       "justification": "The reported data reaches structured slog attribute values, with constant attribute keys. Logging messages are literals, except sendInternalError whose production context callers all pass literals. QPot installs the standard JSONHandler; setup temporarily uses TextHandler. These handlers quote CR, LF and control characters, so arbitrary attribute values remain one record. Actual Go 1.26.11 controls preserve values and prevent forged records. Both handler configuration sources and this trace are pinned.",
-      "resultSHA256": "a283c9821ee9483b436e87db8dd2955eea12e4c095d94b3ec7f8ceb130c5ffcf",
+      "resultSHA256": "85e2bf1d2e5c99cb118e68e26eee57d4b37e4dc401340d9425b4bb30817203b4",
       "ruleId": "go/log-injection",
       "sourceSHA256": {
         "cmd/qpot/main.go": {
@@ -1350,7 +1350,7 @@
     {
       "disposition": "false-positive",
       "justification": "The reported data reaches structured slog attribute values, with constant attribute keys. Logging messages are literals, except sendInternalError whose production context callers all pass literals. QPot installs the standard JSONHandler; setup temporarily uses TextHandler. These handlers quote CR, LF and control characters, so arbitrary attribute values remain one record. Actual Go 1.26.11 controls preserve values and prevent forged records. Both handler configuration sources and this trace are pinned.",
-      "resultSHA256": "a906e2887e8b03a5c259284643ab970faf3d09809e32f216bad8e918cef358ff",
+      "resultSHA256": "f55b5682654a735a36f9dce80e8d95f0b2bb6e6c73862a37b55ce1978d506e5e",
       "ruleId": "go/log-injection",
       "sourceSHA256": {
         "cmd/qpot/main.go": {
@@ -1401,7 +1401,7 @@
     {
       "disposition": "false-positive",
       "justification": "The reported data reaches structured slog attribute values, with constant attribute keys. Logging messages are literals, except sendInternalError whose production context callers all pass literals. QPot installs the standard JSONHandler; setup temporarily uses TextHandler. These handlers quote CR, LF and control characters, so arbitrary attribute values remain one record. Actual Go 1.26.11 controls preserve values and prevent forged records. Both handler configuration sources and this trace are pinned.",
-      "resultSHA256": "665412b293f62009ab140870a710865e32d66402320d0a64056c89bac167ef5b",
+      "resultSHA256": "22543132bb4f1abf430f2c044dc93090c3a1c2a890a343f22c9f23b9cc6de420",
       "ruleId": "go/log-injection",
       "sourceSHA256": {
         "cmd/qpot/main.go": {
@@ -1450,6 +1450,6 @@
       "uri": "internal/server/server.go"
     }
   ],
-  "sourceCatalogSHA256": "ba613d848a50874aab43a4185e88e2ab19c73a56563e25575a0954d91256fed0",
+  "sourceCatalogSHA256": "7454a146566a112dd2342c4c9451cbe22f590e2a5a987ed99433dae487d7cb0d",
   "version": 2
 }
