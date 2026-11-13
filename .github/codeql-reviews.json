@@ -147,7 +147,7 @@
     {
       "disposition": "false-positive",
       "justification": "esDocID uses full SHA256 only when an attacker-supplied document identity exceeds the Elasticsearch512-byte _id limit. Its consumers use the digest as deterministic document/update/read identity and preserve the original IOC/session content in the record. It is not a password verifier, authentication token, encryption key or attempt to conceal a low-entropy secret. No work factor or salt is required for this non-secret stable identifier. The real httptest long-indicator read verifies the hashed identity is used for _mget and the original long value survives storage translation.",
-      "resultSHA256": "3b19cbea698822cc6545fa78a4f4c4da31500ebceb9ce28016697e142dbb67fc",
+      "resultSHA256": "739145e950cc625e2ada88f6d8d4521b92f174deb74e84c60ce0ece6d052facb",
       "ruleId": "go/weak-sensitive-data-hashing",
       "sourceSHA256": {
         "go.mod": {
@@ -175,7 +175,7 @@
           "sha256": "853d42ba076548290f1817093fe63abea2121308929e8691c1bd14ae514cf820"
         },
         "internal/intelligence/worker.go": {
-          "sha256": "32e9912b932d05dc1766ae419ce3bf0b98eabbc18678fdf8fc4c2b1db855a409"
+          "sha256": "bf9339efbb6306dc77b1f34385ba77eb02f3a1921ce167022b8f51188fc4ccaf"
         },
         "internal/server/canary.go": {
           "sha256": "c5dbc8276b246a9fb0502cf1e41791c6d81c44624c0fcf968c3fe77c55abb80a"
@@ -205,7 +205,7 @@
           "sha256": "b90bf186234abaaf96bed7368a493168a22eb2ffd5bc91d463cd18fc9ea27ef1"
         },
         "internal/intelligence/worker.go": {
-          "sha256": "32e9912b932d05dc1766ae419ce3bf0b98eabbc18678fdf8fc4c2b1db855a409"
+          "sha256": "bf9339efbb6306dc77b1f34385ba77eb02f3a1921ce167022b8f51188fc4ccaf"
         }
       },
       "uri": "internal/intelligence/ttp.go"
@@ -286,7 +286,7 @@
           "sha256": "b4d4d4da6df750ec213d058986885ca869c6a39acd950486eeff70c21b608eb2"
         },
         "internal/instance/deploy.go": {
-          "sha256": "9843253b2de80c3cb42f44f9af9dfc6337d55b5d1bf3a13283ed6dfa9e4b3e98"
+          "sha256": "58f5217dc6e40b889c75190fac3696e9ff1e788d6341476fbd1bb41eaabbd341"
         },
         "internal/instance/manager.go": {
           "sha256": "6c0d0e176145ef542bbb77951eb36ffc09fd7a393a6e1338cb0f789851dbb909"
@@ -328,7 +328,7 @@
           "sha256": "b4d4d4da6df750ec213d058986885ca869c6a39acd950486eeff70c21b608eb2"
         },
         "internal/instance/deploy.go": {
-          "sha256": "9843253b2de80c3cb42f44f9af9dfc6337d55b5d1bf3a13283ed6dfa9e4b3e98"
+          "sha256": "58f5217dc6e40b889c75190fac3696e9ff1e788d6341476fbd1bb41eaabbd341"
         },
         "internal/instance/manager.go": {
           "sha256": "6c0d0e176145ef542bbb77951eb36ffc09fd7a393a6e1338cb0f789851dbb909"
@@ -1050,7 +1050,7 @@
     {
       "disposition": "false-positive",
       "justification": "The reported data reaches structured slog attribute values, with constant attribute keys. Logging messages are literals, except sendInternalError whose production context callers all pass literals. QPot installs the standard JSONHandler; setup temporarily uses TextHandler. These handlers quote CR, LF and control characters, so arbitrary attribute values remain one record. Actual Go 1.26.11 controls preserve values and prevent forged records. Both handler configuration sources and this trace are pinned.",
-      "resultSHA256": "b3dc6838f574cb6ea2488d94624a39968c80f17811b55395475d6b739d3ba1af",
+      "resultSHA256": "ae39844d04c0deeba519a3c634d51086da14f7b3933635a60775118e9137dec0",
       "ruleId": "go/log-injection",
       "sourceSHA256": {
         "cmd/qpot/main.go": {
@@ -1087,7 +1087,7 @@
           "sha256": "853d42ba076548290f1817093fe63abea2121308929e8691c1bd14ae514cf820"
         },
         "internal/intelligence/worker.go": {
-          "sha256": "32e9912b932d05dc1766ae419ce3bf0b98eabbc18678fdf8fc4c2b1db855a409"
+          "sha256": "bf9339efbb6306dc77b1f34385ba77eb02f3a1921ce167022b8f51188fc4ccaf"
         },
         "internal/server/canary.go": {
           "sha256": "c5dbc8276b246a9fb0502cf1e41791c6d81c44624c0fcf968c3fe77c55abb80a"
@@ -1098,7 +1098,7 @@
     {
       "disposition": "false-positive",
       "justification": "The reported data reaches structured slog attribute values, with constant attribute keys. Logging messages are literals, except sendInternalError whose production context callers all pass literals. QPot installs the standard JSONHandler; setup temporarily uses TextHandler. These handlers quote CR, LF and control characters, so arbitrary attribute values remain one record. Actual Go 1.26.11 controls preserve values and prevent forged records. Both handler configuration sources and this trace are pinned.",
-      "resultSHA256": "6d8ef98460b4bc7dc105476efcbef1e68a9ad944b8c604331d135755fac24b4d",
+      "resultSHA256": "b5d7041fd5ed5a33bdd631581c2df2bdf9b7499065c332990b19edac80b6fc00",
       "ruleId": "go/log-injection",
       "sourceSHA256": {
         "cmd/qpot/main.go": {
@@ -1135,7 +1135,7 @@
           "sha256": "853d42ba076548290f1817093fe63abea2121308929e8691c1bd14ae514cf820"
         },
         "internal/intelligence/worker.go": {
-          "sha256": "32e9912b932d05dc1766ae419ce3bf0b98eabbc18678fdf8fc4c2b1db855a409"
+          "sha256": "bf9339efbb6306dc77b1f34385ba77eb02f3a1921ce167022b8f51188fc4ccaf"
         },
         "internal/server/canary.go": {
           "sha256": "c5dbc8276b246a9fb0502cf1e41791c6d81c44624c0fcf968c3fe77c55abb80a"
@@ -1450,6 +1450,6 @@
       "uri": "internal/server/server.go"
     }
   ],
-  "sourceCatalogSHA256": "aeaf3a19e2dc0fe311e19b90528c18cac394a4b6d0780d3e5dcb76b10d0abd42",
+  "sourceCatalogSHA256": "394d7ccefeee2157cf55eb82af023d07f6a42e313191d932dbea86ed02454968",
   "version": 2
 }
