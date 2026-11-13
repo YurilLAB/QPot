@@ -485,7 +485,7 @@ func (s *Server) diskGuardTick(ctx context.Context, now time.Time) {
 	// to take: what a honeypot logs between a disk filling at once and its
 	// stop goes there.
 	if t.On() && !g.state.Held() && r.Known && r.Free >= t.MinFree {
-		g.keepLogRoom(cfg, now)
+		g.keepLogRoom(cfg, now, t)
 	}
 
 	cond := diskguard.Describe(t, r, g.state.Held())
@@ -508,17 +508,29 @@ func (s *Server) diskGuardTick(ctx context.Context, now time.Time) {
 	g.mu.Unlock()
 }
 
-// keepLogRoom keeps diskguard.LogRoom allocated beyond the end of every log
+// keepLogRoom keeps diskguard.LogRoom allocated beyond the end of the logs
 // in the logs folder of each enabled honeypot (the HiFi broker's logs live
-// elsewhere and are not a honeypot's own writes). Logs it cannot give room
-// to are logged now and then.
-func (g *diskGuardState) keepLogRoom(cfg *config.Config, now time.Time) {
-	var denied, failed []string
+// elsewhere and are not a honeypot's own writes): its deploy profile's logs
+// first, at most diskguard.LogRoomFiles per honeypot, and each allocation
+// only while the disk still has the floor and the room above it. Logs it
+// cannot give room to are logged now and then.
+func (g *diskGuardState) keepLogRoom(cfg *config.Config, now time.Time, t diskguard.Thresholds) {
+	free := g.free
+	if free == nil {
+		free = diskFreeBytes
+	}
+	folder := diskGuardFolder(cfg)
+	allow := func() bool {
+		n, known := free(folder)
+		return known && n >= t.MinFree+diskguard.LogRoom
+	}
+	var denied, failed, over []string
 	for name, hp := range cfg.SnapshotHoneypots() {
 		if !hp.Enabled || name == "ssh-proxy" {
 			continue
 		}
-		res, err := diskguard.KeepLogRoom(filepath.Join(diskGuardFolder(cfg), name, "logs"))
+		res, err := diskguard.KeepLogRoom(filepath.Join(folder, name, "logs"), diskguard.LogRoomOptions{
+			Preferred: instance.HoneypotLogNames(name), MaxFiles: diskguard.LogRoomFiles, Allow: allow})
 		if errors.Is(err, diskguard.ErrLogRoomUnsupported) {
 			return
 		}
@@ -532,15 +544,23 @@ func (g *diskGuardState) keepLogRoom(cfg *config.Config, now time.Time) {
 		for log, err := range res.Failed {
 			failed = append(failed, name+"/logs/"+log+": "+err.Error())
 		}
+		for _, log := range res.Over {
+			over = append(over, name+"/logs/"+log)
+		}
 	}
 	sort.Strings(denied)
 	sort.Strings(failed)
+	sort.Strings(over)
 	if len(denied) > 0 && g.warnNow("logroom-denied", now) {
 		slog.Warn("Disk guard: these logs belong to the honeypot's own user, so QPot keeps no room beyond their end; on a disk that fills at once their honeypot loses what it logs until it is stopped",
 			"logs", denied)
 	}
 	if len(failed) > 0 && g.warnNow("logroom-failed", now) {
 		slog.Warn("Disk guard: room beyond the end of these logs could not be kept", "logs", failed)
+	}
+	if len(over) > 0 && g.warnNow("logroom-over", now) {
+		slog.Warn("Disk guard: these logs get no room: their honeypot has as many logs with room as QPot keeps for one",
+			"logs", over, "per_honeypot", diskguard.LogRoomFiles)
 	}
 }
 

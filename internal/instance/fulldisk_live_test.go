@@ -172,7 +172,7 @@ func runFullDisk(t *testing.T, fs string, target fullDiskTarget, scenario string
 		if !room {
 			return
 		}
-		res, err := diskguard.KeepLogRoom(logs)
+		res, err := diskguard.KeepLogRoom(logs, diskguard.LogRoomOptions{Preferred: target.profile.Logs})
 		if err != nil || len(res.Denied)+len(res.Failed) > 0 || !slices.Contains(res.Kept, target.logFile) {
 			t.Fatalf("keep room beyond the logs: %+v, %v", res, err)
 		}

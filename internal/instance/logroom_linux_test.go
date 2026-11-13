@@ -4,6 +4,7 @@ package instance
 
 import (
 	"bytes"
+	"fmt"
 	"os"
 	"path/filepath"
 	"slices"
@@ -65,7 +66,7 @@ func TestKeepLogRoom(t *testing.T) {
 	done := make(chan struct{})
 	var res diskguard.LogRoomResult
 	var err error
-	go func() { res, err = diskguard.KeepLogRoom(dir); close(done) }()
+	go func() { res, err = diskguard.KeepLogRoom(dir, diskguard.LogRoomOptions{}); close(done) }()
 	select {
 	case <-done:
 	case <-time.After(10 * time.Second):
@@ -106,7 +107,7 @@ func TestKeepLogRoom(t *testing.T) {
 	if _, room := allocated("b.log"); room > diskguard.LogRoom*3/4 {
 		t.Fatalf("b.log still has %d of room after half of it was written", room)
 	}
-	if _, err := diskguard.KeepLogRoom(dir); err != nil {
+	if _, err := diskguard.KeepLogRoom(dir, diskguard.LogRoomOptions{}); err != nil {
 		t.Fatal(err)
 	}
 	if size, room := allocated("b.log"); size != 512<<10 || room < diskguard.LogRoom-4096 {
@@ -118,12 +119,93 @@ func TestKeepLogRoom(t *testing.T) {
 		if err := os.WriteFile(filepath.Join(dir, "theirs.log"), []byte("x\n"), 0o444); err != nil {
 			t.Fatal(err)
 		}
-		res, err := diskguard.KeepLogRoom(dir)
+		res, err := diskguard.KeepLogRoom(dir, diskguard.LogRoomOptions{})
 		if err != nil || !slices.Contains(res.Denied, "theirs.log") {
 			t.Fatalf("an unwritable log: %+v, %v", res, err)
 		}
 	}
-	if res, err := diskguard.KeepLogRoom(filepath.Join(dir, "missing")); err != nil || len(res.Kept) != 0 {
+	if res, err := diskguard.KeepLogRoom(filepath.Join(dir, "missing"), diskguard.LogRoomOptions{}); err != nil || len(res.Kept) != 0 {
 		t.Fatalf("a missing folder: %+v, %v", res, err)
+	}
+}
+
+// TestKeepLogRoomIsBounded: a honeypot that fills its logs folder with empty
+// logs gets room for at most diskguard.LogRoomFiles of them, its own logs
+// first, however many ticks pass; a log that has room already counts against
+// the limit whatever its name; and no room is taken once the disk says it
+// cannot spare it.
+func TestKeepLogRoomIsBounded(t *testing.T) {
+	dir := t.TempDir()
+	if err := ensureHoneypotLogs(dir, HoneypotLogNames("conpot")); err != nil {
+		t.Fatal(err)
+	}
+	// What a compromised Conpot could leave: a thousand empty logs whose
+	// names sort before its own.
+	for i := range 1000 {
+		if err := os.WriteFile(filepath.Join(dir, fmt.Sprintf("a%04d.json", i)), nil, 0o666); err != nil {
+			t.Fatal(err)
+		}
+	}
+	total := func() (sum int64, withRoom int) {
+		entries, err := os.ReadDir(dir)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, e := range entries {
+			info, err := e.Info()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if r := fileAllocated(info) - (info.Size()+4095)&^4095; r > 0 {
+				sum += r
+				withRoom++
+			}
+		}
+		return sum, withRoom
+	}
+	opt := diskguard.LogRoomOptions{Preferred: HoneypotLogNames("conpot"), MaxFiles: diskguard.LogRoomFiles}
+	for tick := range 5 {
+		res, err := diskguard.KeepLogRoom(dir, opt)
+		if err != nil {
+			t.Fatal(err)
+		}
+		sum, n := total()
+		if n > diskguard.LogRoomFiles || sum > int64(diskguard.LogRoomFiles)*(diskguard.LogRoom+4096) || res.Held != n {
+			t.Fatalf("tick %d: %d logs hold %d bytes of room (result says %d), want at most %d logs", tick, n, sum, res.Held, diskguard.LogRoomFiles)
+		}
+		for _, own := range HoneypotLogNames("conpot") {
+			if !slices.Contains(res.Kept, own) {
+				t.Fatalf("tick %d: Conpot's own %s has no room: kept %v", tick, own, res.Kept)
+			}
+		}
+		if len(res.Over) != 1002-diskguard.LogRoomFiles {
+			t.Fatalf("tick %d: %d logs reported over the limit", tick, len(res.Over))
+		}
+	}
+	// A log that already has room counts, whatever its name: one the
+	// container renamed after it got room does not make room for another.
+	if err := os.Rename(filepath.Join(dir, "a0000.json"), filepath.Join(dir, "zz-renamed.log")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := diskguard.KeepLogRoom(dir, opt); err != nil {
+		t.Fatal(err)
+	}
+	if _, n := total(); n > diskguard.LogRoomFiles {
+		t.Fatalf("after a rename %d logs have room", n)
+	}
+	// The disk can spare room for one more log, then none.
+	other := t.TempDir()
+	for i := range 4 {
+		if err := os.WriteFile(filepath.Join(other, fmt.Sprintf("l%d.log", i)), nil, 0o666); err != nil {
+			t.Fatal(err)
+		}
+	}
+	asked := 0
+	res, err := diskguard.KeepLogRoom(other, diskguard.LogRoomOptions{Allow: func() bool { asked++; return asked <= 1 }})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(res.Kept) != 1 || len(res.Failed) != 3 || res.Held != 1 || asked != 4 {
+		t.Fatalf("with room for one: %+v, asked %d times", res, asked)
 	}
 }

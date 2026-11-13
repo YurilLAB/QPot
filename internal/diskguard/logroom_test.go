@@ -12,7 +12,7 @@ func TestKeepLogRoomOffLinux(t *testing.T) {
 	if runtime.GOOS == "linux" {
 		t.Skip("Linux keeps room")
 	}
-	if _, err := KeepLogRoom(t.TempDir()); !errors.Is(err, ErrLogRoomUnsupported) {
+	if _, err := KeepLogRoom(t.TempDir(), LogRoomOptions{}); !errors.Is(err, ErrLogRoomUnsupported) {
 		t.Fatalf("KeepLogRoom: %v", err)
 	}
 }

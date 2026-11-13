@@ -135,9 +135,18 @@ events:
 
 - **The watch.** One second is the longest a full disk goes unnoticed.
 - **Room in every log.** While the disk has room above `min_free_mb`, the
-  guard keeps one megabyte allocated beyond the end of every log in each
+  guard keeps one megabyte allocated beyond the end of the logs in each
   enabled honeypot's `logs` folder (`*.log` and `*.json`), and gives back
-  what a honeypot has written into it every five seconds. The log's size and
+  what a honeypot has written into it every five seconds. At most four logs
+  per honeypot have room at a time: the honeypot's own logs first (the ones
+  `qpot up` creates, below), then others in name order. Every log that has
+  room counts against the four, whatever its name, so a compromised
+  honeypot that fills its folder with empty logs gets four megabytes and no
+  more; a slot comes free only when a honeypot has written a log's room full
+  with lines of its own. The honeypots write one or two logs each, so four
+  leave room to spare. Before each allocation the guard reads the disk again
+  and allocates only while `min_free_mb` and the megabyte above it are
+  free. The log's size and
   content do not change; the blocks are only reserved for it (Linux
   `fallocate` with `FALLOC_FL_KEEP_SIZE`). Writing into them needs no new
   space, so on a disk that is full to the last byte each honeypot goes on
@@ -206,6 +215,8 @@ reported or showed a full disk (the test's negative control).
 
 What can still be lost:
 
+- **A honeypot with more than four logs.** The logs past the fourth get no
+  room; the `qpot serve` log names them.
 - **A honeypot that writes more than a megabyte** between the moment the
   disk fills and the moment it is stopped (normally a second, at most the
   time the guard takes to stop every honeypot). Past its room it behaves

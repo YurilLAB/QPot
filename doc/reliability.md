@@ -1056,14 +1056,16 @@ indicators and sessions count it once.
   `honeypot-` fault.
 - **A disk that fills in one step.** The disk guard closes the honeypots
   when free space runs low, and then nothing is lost. For a disk that goes
-  from enough to nothing between two looks, every honeypot log QPot can
-  write to has a megabyte allocated beyond its end, and the honeypot goes on
-  logging into it until the guard has stopped it: endlessh, Conpot and
+  from enough to nothing between two looks, up to four logs per honeypot
+  that QPot can write to (its own logs first) have a megabyte allocated
+  beyond their end, and the honeypot goes on logging into it until the
+  guard has stopped it: endlessh, Conpot and
   Dionaea kept 100 of 100 visitors on a full disk, where without it
   endlessh kept 3 to 68, Conpot stopped itself at the first failed write and
   Dionaea kept 1 when stopped. Cowrie also holds what it cannot write. A
   20-minute soak with 8 full disks lost nothing. What can still be lost:
-  more than a megabyte of one honeypot's log before it stops; logs a
+  more than a megabyte of one honeypot's log before it stops; logs of a
+  honeypot past its fourth; logs a
   honeypot created as its own user, unless QPot runs as root (every
   honeypot other than Cowrie, endlessh, Conpot and Dionaea, and every log
   of an instance made before this change); hosts other than Linux, and

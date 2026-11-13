@@ -19,6 +19,35 @@ import (
 // lines written into the room, nothing written without it.
 const LogRoom = 1 << 20
 
+// LogRoomFiles is the most logs of one honeypot that have room at a time.
+//
+// The folder is the container's, and room is space on the host: without a
+// bound, a compromised honeypot that creates thousands of empty logs would
+// make QPot reserve a megabyte for each. The honeypots write at most two
+// logs each that the collector reads (Conpot conpot.json and conpot.log,
+// ADBHoney adbhoney.json and adbhoney.log; Cowrie, endlessh, Dionaea and
+// Heralding one), counted from their configurations and from the logs
+// measured on their images. Four leave room for a release that adds one
+// without letting a folder take more than four megabytes. Every log that
+// has room now counts, whatever its name, so the
+// bound holds across ticks: a slot comes free only when a honeypot has
+// written its room full with lines of its own.
+const LogRoomFiles = 4
+
+// LogRoomOptions say which logs of a folder get room first, how many may
+// have it, and whether the disk can spare more.
+type LogRoomOptions struct {
+	// Preferred are the honeypot's own logs (its deploy profile's): they
+	// get room first, in this order; the folder's other logs follow in name
+	// order.
+	Preferred []string
+	// MaxFiles is the most logs with room at a time (LogRoomFiles when 0).
+	MaxFiles int
+	// Allow is asked before each allocation and says whether the disk can
+	// spare LogRoom now (nil allows).
+	Allow func() bool
+}
+
 // logRoomTopUp is how little room may be left before it is made whole
 // again: a tick that finds a log has used a quarter of its room gives the
 // room back.
@@ -38,6 +67,11 @@ type LogRoomResult struct {
 	// Failed are the logs whose room could not be kept for another reason
 	// (the disk is full, the filesystem cannot), with the error.
 	Failed map[string]error
+	// Over are the logs that get no room because LogRoomFiles of the
+	// folder's logs have it already.
+	Over []string
+	// Held is how many logs of the folder have room after the call.
+	Held int
 }
 
 // isLogName reports whether a file name is one the collector reads as a log
