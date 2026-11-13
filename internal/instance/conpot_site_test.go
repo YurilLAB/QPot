@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 
@@ -122,18 +123,91 @@ check(site.site_seed() == seeds[5], "the seed QPot passes was not used")
 
 # What the image draws on a first start comes from the seed: the same on
 # every start that kept nothing, another for another seed or template, and
-# the image's own secrets module is put back afterwards.
-tpot.secrets = "the module"
-def image_load_identity(name, tpl):
+# the image's own secrets module is put back afterwards. resolve_identity is
+# the image's (tpot_templates.py): it draws what is not kept, in order.
+import os
+SPEC = {"identity": {
+    "IP": {"gen": "lan_ip"}, "MAC": {"gen": "mac", "oui": "00:1b:1b"}, "SERIAL": {"gen": "digits", "n": 8},
+    "HEX": {"gen": "hex", "n": 6, "upper": True}, "BYTES": {"gen": "hexbytes", "n": 3},
+    "NUM": {"gen": "int", "min": 1, "max": 254}, "KIND": {"gen": "choice", "values": ["a", "b"]},
+    "MAC_TAIL": {"derive": "mac_tail", "of": "MAC"}}}
+def image_resolve_identity(tpl, stored):
     s = tpot.secrets
-    return [s.randbelow(256) for _ in range(6)] + [s.choice("0123456789abcdef") for _ in range(8)]
-tpot.load_identity = image_load_identity
-first = site.load_identity("IEC104", {}, seeds[1])
-check(first == site.load_identity("IEC104", {}, seeds[1]), "the same seed drew other first-start values")
-check(first != site.load_identity("IEC104", {}, seeds[2]), "two seeds drew the same first-start values")
-check(first != site.load_identity("ipmi", {}, seeds[1]), "two templates drew the same first-start values")
-check(all(0 <= v < 256 for v in first[:6]) and all(c in "0123456789abcdef" for c in first[6:]), "drawn values out of range: %r" % first)
+    values = dict(stored)
+    for token, gen in tpl["identity"].items():
+        if "gen" in gen and token not in values:
+            kind = gen["gen"]
+            if kind == "lan_ip":
+                values[token] = "10.%d.%d.%d" % (s.randbelow(256), s.randbelow(256), 10 + s.randbelow(240))
+            elif kind == "mac":
+                values[token] = gen["oui"].upper() + "".join(":%02X" % s.randbelow(256) for _ in range(3))
+            elif kind == "digits":
+                values[token] = str(1 + s.randbelow(9)) + "".join(str(s.randbelow(10)) for _ in range(gen["n"] - 1))
+            elif kind == "hex":
+                values[token] = "".join(s.choice("0123456789abcdef") for _ in range(gen["n"])).upper()
+            elif kind == "hexbytes":
+                values[token] = " ".join("%02X" % s.randbelow(256) for _ in range(gen["n"]))
+            elif kind == "int":
+                values[token] = gen["min"] + s.randbelow(gen["max"] - gen["min"] + 1)
+            else:
+                values[token] = s.choice(gen["values"])
+    values["MAC_TAIL"] = values["MAC"].replace(":", "")[-6:]
+    return values, True
+tpot.secrets = "the module"
+tpot.resolve_identity = image_resolve_identity
+first = site.load_identity("IEC104", SPEC, seeds[1])
+check(first == site.load_identity("IEC104", SPEC, seeds[1]), "the same seed drew other first-start values")
+check(first != site.load_identity("IEC104", SPEC, seeds[2]), "two seeds drew the same first-start values")
+check(first != site.load_identity("ipmi", SPEC, seeds[1]), "two templates drew the same first-start values")
+check(all(site.plausible(SPEC["identity"][k], v) for k, v in first.items() if "gen" in SPEC["identity"][k]), "drawn values the image would not draw: %r" % first)
 check(tpot.secrets == "the module", "the image's secrets module was not put back")
+
+# Values an earlier start kept are used where the image could have drawn
+# them; whatever else the container leaves in its state folder is ignored,
+# never stops the start and never blocks it.
+state = pathlib.Path(tpot.IDENTITY_DIR)
+state.mkdir(parents=True, exist_ok=True)
+ident = state / "IEC104.json"
+kept = {"IP": "192.168.7.23", "MAC": "00:1B:1B:0A:0B:0C", "SERIAL": "12345678", "HEX": "ABCDEF", "BYTES": "01 02 03", "NUM": 9, "KIND": "b"}
+ident.write_text(json.dumps({"version": 1, "template": "IEC104", "values": kept}))
+got = site.load_identity("IEC104", SPEC, seeds[1])
+check(all(got[k] == v for k, v in kept.items()) and got["MAC_TAIL"] == "0A0B0C", "kept plausible values were not used: %r" % got)
+bad = {"IP": "8.8.8.8", "MAC": "AA:BB:CC:0A:0B:0C", "SERIAL": "0123", "HEX": "xyz", "BYTES": "1 2", "NUM": 10**9, "KIND": "c"}
+ident.write_text(json.dumps({"values": bad}))
+check(site.load_identity("IEC104", SPEC, seeds[1]) == first, "implausible kept values were used")
+written = (site.read_state_json(ident) or {}).get("values")
+check(written == {k: v for k, v in first.items() if k != "MAC_TAIL"}, "the identity was not kept where the image keeps it: %r" % written)
+hostile = {
+    "garbage": lambda: ident.write_bytes(b"\x00\xff{not json"),
+    "a list": lambda: ident.write_text("[1, 2]"),
+    "a large file": lambda: ident.write_bytes(b" " * (site.IDENTITY_MAX_BYTES + 10) + b"{}"),
+    "a directory": lambda: ident.mkdir(),
+    "a link": lambda: ident.symlink_to(work / "elsewhere.json"),
+    "a FIFO": lambda: os.mkfifo(ident),
+}
+(work / "elsewhere.json").write_text(json.dumps({"values": kept}))
+for what, plant in hostile.items():
+    if ident.is_dir() and not ident.is_symlink():
+        ident.rmdir()
+    elif ident.exists() or ident.is_symlink():
+        ident.unlink()
+    try:
+        plant()
+    except (OSError, AttributeError, NotImplementedError):
+        continue  # not on this system (a FIFO on Windows)
+    try:
+        got = site.load_identity("IEC104", SPEC, seeds[1])
+        check(got == first, "%s in the state folder changed the identity: %r" % (what, got))
+    except Died:
+        check(False, "%s in the state folder stopped the start" % what)
+# A leftover seed file of the earlier site step is not read.
+if ident.is_dir() and not ident.is_symlink():
+    ident.rmdir()
+elif ident.exists() or ident.is_symlink():
+    ident.unlink()
+(state / "qpot_site.json").write_text('{"version": 1, "seed": "0123456789abcdef0123456789abcdef"}')
+os.environ["QPOT_SITE_SEED"] = seeds[5]
+check(site.site_seed() == seeds[5], "a leftover qpot_site.json was used")
 print(json.dumps(result))
 `
 
@@ -190,11 +264,8 @@ func TestConpotSiteIdentity(t *testing.T) {
 	// Conpot gets its site's seed from QPot, on every template.
 	for _, id := range ConpotTemplateIDs() {
 		cfg := conpotConfig("qp_site_mount", id)
-		want, err := conpotSiteSeed(cfg)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if got := deployProfile(cfg, "conpot").Env[conpotSiteSeedEnv]; got != want || !validConpotSiteSeed(got) {
+		want := conpotSiteSeed(cfg)
+		if got := deployProfile(cfg, "conpot").Env[conpotSiteSeedEnv]; got != want || !siteSeedShape.MatchString(got) {
 			t.Errorf("%s: %s = %q, want %q", id, conpotSiteSeedEnv, got, want)
 		}
 	}
@@ -203,10 +274,14 @@ func TestConpotSiteIdentity(t *testing.T) {
 	}
 }
 
+// siteSeedShape is what conpotSiteSeed gives and the site step accepts.
+var siteSeedShape = regexp.MustCompile(`^[0-9a-f]{32}$`)
+
 // TestConpotSiteSeed: the site's seed is QPot's, the same on every start of an
-// instance and another for another instance; an instance that ran an earlier
-// QPot keeps the seed its Conpot drew; and a seed file that is there but
-// cannot be used stops the start instead of changing the plant.
+// instance and another for another instance, and nothing the container leaves
+// in its state folder changes it or keeps the compose file from being made.
+// (The container writes that folder: a compromised Conpot must not be able to
+// change its plant or stop the instance from starting.)
 func TestConpotSiteSeed(t *testing.T) {
 	newConfig := func(id string) *config.Config {
 		cfg := conpotConfig(id, "IEC104")
@@ -214,20 +289,16 @@ func TestConpotSiteSeed(t *testing.T) {
 		return cfg
 	}
 	one := newConfig("qp_siteseedone")
-	a, err := conpotSiteSeed(one)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if b, _ := conpotSiteSeed(one); a != b || !validConpotSiteSeed(a) || len(a) != 32 {
+	a := conpotSiteSeed(one)
+	if b := conpotSiteSeed(one); a != b || !siteSeedShape.MatchString(a) {
 		t.Fatalf("one instance: %q then %q", a, b)
 	}
 	// Nothing is kept anywhere: another folder for the same instance (a
 	// restored or moved instance) gives the same site.
-	moved := newConfig("qp_siteseedone")
-	if b, _ := conpotSiteSeed(moved); a != b {
+	if b := conpotSiteSeed(newConfig("qp_siteseedone")); a != b {
 		t.Errorf("the same instance in another folder: %q, want %q", b, a)
 	}
-	if b, _ := conpotSiteSeed(newConfig("qp_siteseedtwo")); a == b {
+	if b := conpotSiteSeed(newConfig("qp_siteseedtwo")); a == b {
 		t.Errorf("two instances share the site seed %q", a)
 	}
 	// The seed is not the QPot ID, nor shows it.
@@ -235,76 +306,50 @@ func TestConpotSiteSeed(t *testing.T) {
 		t.Errorf("the seed %q shows the QPot ID", a)
 	}
 
+	gen := &ComposeGenerator{Config: one}
+	clean, err := gen.Generate()
+	if err != nil {
+		t.Fatalf("compose with an empty state folder: %v", err)
+	}
 	stateDir := filepath.Join(one.DataPath, "honeypots", "conpot", "state")
-	if err := os.MkdirAll(stateDir, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	write := func(content string) {
-		t.Helper()
-		if err := os.WriteFile(filepath.Join(stateDir, conpotLegacySiteFile), []byte(content), 0o644); err != nil {
-			t.Fatal(err)
-		}
-	}
-	// What an earlier QPot's Conpot kept is what its visitors saw.
-	write(`{"version": 1, "seed": "0123456789abcdef0123456789abcdef"}`)
-	if got, err := conpotSiteSeed(one); err != nil || got != "0123456789abcdef0123456789abcdef" {
-		t.Errorf("the kept seed: %q, %v", got, err)
-	}
-	if got := deployProfile(one, "conpot").Env[conpotSiteSeedEnv]; got != "0123456789abcdef0123456789abcdef" {
-		t.Errorf("Conpot is not given the kept seed: %q", got)
-	}
-	// A file that is there but holds no seed stops the start, and Conpot
-	// gets no seed (its site step then refuses to start, too).
-	for _, bad := range []string{"not json", `{"seed": "short"}`, `{"seed": 7}`, `{"seed": "0123456789abcdef!0123456789abcdef"}`, `{}`, strings.Repeat(" ", 5000)} {
-		write(bad)
-		if got, err := conpotSiteSeed(one); err == nil {
-			t.Errorf("%.30q: accepted as %q", bad, got)
-		}
-		if got, ok := deployProfile(one, "conpot").Env[conpotSiteSeedEnv]; ok {
-			t.Errorf("%.30q: Conpot is still given a seed %q", bad, got)
-		}
-		gen := &ComposeGenerator{Config: one}
-		if _, err := gen.Generate(); err == nil || !strings.Contains(err.Error(), conpotLegacySiteFile) {
-			t.Errorf("%.30q: the compose was generated anyway: %v", bad, err)
-		}
-	}
-	// A link the container left in its own folder is not followed.
-	if err := os.Remove(filepath.Join(stateDir, conpotLegacySiteFile)); err != nil {
-		t.Fatal(err)
-	}
+	site := filepath.Join(stateDir, "qpot_site.json")
 	outside := filepath.Join(t.TempDir(), "outside.json")
 	if err := os.WriteFile(outside, []byte(`{"seed": "0123456789abcdef0123456789abcdef"}`), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Symlink(outside, filepath.Join(stateDir, conpotLegacySiteFile)); err == nil {
-		if got, err := conpotSiteSeed(one); err == nil {
-			t.Errorf("a link out of the state folder was followed: %q", got)
-		}
-		_ = os.Remove(filepath.Join(stateDir, conpotLegacySiteFile))
+	hostile := map[string]func() error{
+		"a seed of its own": func() error {
+			return os.WriteFile(site, []byte(`{"version": 1, "seed": "0123456789abcdef0123456789abcdef"}`), 0o644)
+		},
+		"garbage":      func() error { return os.WriteFile(site, []byte("\x00\xff not json"), 0o644) },
+		"a large file": func() error { return os.WriteFile(site, make([]byte, 1<<20), 0o644) },
+		"unreadable":   func() error { return os.WriteFile(site, []byte(`{"seed": "x"}`), 0o000) },
+		"a directory":  func() error { return os.Mkdir(site, 0o755) },
+		"a link out":   func() error { return os.Symlink(outside, site) },
 	}
-	// Without the file the instance gets its derived site again.
-	if got, err := conpotSiteSeed(one); err != nil || got != a {
-		t.Errorf("after the file was removed: %q, %v; want %q", got, err, a)
-	}
-}
-
-// FuzzConpotSiteSeedFile: whatever a container leaves as its seed file, the
-// seed QPot reads is either refused or one the site step accepts.
-func FuzzConpotSiteSeedFile(f *testing.F) {
-	for _, s := range []string{`{"seed":"0123456789abcdef0123456789abcdef"}`, `{"seed":""}`, "", "null", `{"seed":"\u00e4\u00e4\u00e4\u00e4\u00e4\u00e4\u00e4\u00e4\u00e4\u00e4\u00e4\u00e4\u00e4\u00e4\u00e4\u00e4"}`} {
-		f.Add([]byte(s))
-	}
-	dir := f.TempDir()
-	f.Fuzz(func(t *testing.T, content []byte) {
-		if err := os.WriteFile(filepath.Join(dir, conpotLegacySiteFile), content, 0o600); err != nil {
+	for what, plant := range hostile {
+		if err := os.RemoveAll(stateDir); err != nil {
 			t.Fatal(err)
 		}
-		seed, err := conpotLegacySiteSeed(dir)
-		if err == nil && !validConpotSiteSeed(seed) {
-			t.Fatalf("%q read as the seed %q", content, seed)
+		if err := os.MkdirAll(stateDir, 0o755); err != nil {
+			t.Fatal(err)
 		}
-		if err == nil && seed == "" {
-			t.Fatalf("%q: no error and no seed", content)
+		if err := plant(); err != nil {
+			t.Logf("%s: cannot be made here: %v", what, err)
+			continue
 		}
-	})
+		if got := conpotSiteSeed(one); got != a {
+			t.Errorf("%s in the state folder changed the seed to %q", what, got)
+		}
+		if got := deployProfile(one, "conpot").Env[conpotSiteSeedEnv]; got != a {
+			t.Errorf("%s in the state folder: Conpot is given %q", what, got)
+		}
+		out, err := gen.Generate()
+		if err != nil {
+			t.Errorf("%s in the state folder stops the compose: %v", what, err)
+		} else if out != clean {
+			t.Errorf("%s in the state folder changed the compose", what)
+		}
+	}
+	_ = os.Chmod(site, 0o644)
 }

@@ -204,6 +204,25 @@ print(actual)`
 			if after := conpotLiveSnapshot(t, name, test.id); after != before {
 				t.Fatalf("the same instance with an empty state folder shows another device:\nbefore %s\nafter %s", before, after)
 			}
+			// Nor on what a compromised container leaves there: a seed file of
+			// its own, a damaged identity and a gauge state with another seed
+			// change nothing and do not keep it from starting.
+			remove()
+			hostileRoot := t.TempDir()
+			args = runArgs(cfg, hostileRoot)
+			for file, content := range map[string]string{
+				"qpot_site.json":  `{"version": 1, "seed": "0123456789abcdef0123456789abcdef"}`,
+				test.id + ".json": "\x00 not an identity",
+				"qpot_gauge.json": `{"seed": "0123456789abcdef0123456789abcdef", "labels": {}, "anchor": 86400}`,
+			} {
+				if err := os.WriteFile(filepath.Join(hostileRoot, "state", file), []byte(content), 0o666); err != nil {
+					t.Fatal(err)
+				}
+			}
+			start()
+			if after := conpotLiveSnapshot(t, name, test.id); after != before {
+				t.Fatalf("what the container left in its state folder changed the device:\nbefore %s\nafter %s", before, after)
+			}
 			// Another instance shows another site.
 			remove()
 			args = runArgs(conpotConfig("qp_liveprotocolother", test.id), t.TempDir())
@@ -286,10 +305,6 @@ for shared in ("BER01","Corporate IT",'"DoE"',"pwr_ctrl_mgmt01","10.232.15.242",
 import os
 assert len(os.environ.get("QPOT_SITE_SEED",""))>=16, "Conpot was given no site seed"
 files["site"]=os.environ["QPOT_SITE_SEED"]
-assert not pathlib.Path("/var/lib/conpot/qpot_site.json").exists(), "the site step still keeps a seed of its own"
-identity=pathlib.Path("/var/lib/conpot")/(sys.argv[1]+".json")
-if sys.argv[1] not in ("plc_modbus","guardian_ast"): assert identity.is_file(), "persistent identity missing"
-files["identity"]=hashlib.sha256(identity.read_bytes()).hexdigest() if identity.is_file() else None
 if sys.argv[1]=="guardian_ast":
  gauge=json.loads((pathlib.Path("/var/lib/conpot")/"qpot_gauge.json").read_text())
  files["gauge"]=[gauge["seed"],gauge["anchor"],gauge["labels"]]

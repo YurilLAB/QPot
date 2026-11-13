@@ -16,16 +16,23 @@ is not, the image has changed and this stops instead of starting a device
 with values nobody reviewed.
 
 The seed comes from QPot, so nothing here has to be saved for the site to
-stay the same. The values the image draws itself on a first start (addresses,
-MACs, serial numbers), which it keeps in /var/lib/conpot, are drawn from the
-seed too: if they cannot be kept, the next start draws the same ones. Without
-a seed this stops: a site made up for one start would change the plant
-between two visits.
+stay the same, and nothing in the state folder (which the container writes)
+is read for it. The values the image draws itself on a first start
+(addresses, MACs, serial numbers) are drawn from the seed too; values an
+earlier start kept in /var/lib/conpot are used where they are values the
+image could have drawn, and ignored otherwise, and the identity is kept
+there as the image keeps it. Without a seed this stops: a
+site made up for one start would change the plant between two visits.
 """
 
 import hashlib
+import ipaddress
+import json
 import os
+import re
+import stat
 import sys
+import tempfile
 import tomllib
 from pathlib import Path
 
@@ -95,6 +102,61 @@ def site_seed():
     return seed
 
 
+# The most of an identity file that is read. The file is in a folder the
+# container writes: what is in it must not keep the device from starting.
+IDENTITY_MAX_BYTES = 65536
+
+
+def read_state_json(path):
+    """A JSON object from the state folder, or None: never through a link,
+    never from a FIFO or anything but a regular file, never a large one."""
+    try:
+        fd = os.open(path, os.O_RDONLY | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0))
+    except OSError:
+        return None
+    try:
+        info = os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode) or info.st_size > IDENTITY_MAX_BYTES:
+            return None
+        data = os.read(fd, IDENTITY_MAX_BYTES + 1)
+    except OSError:
+        return None
+    finally:
+        os.close(fd)
+    try:
+        value = json.loads(data.decode("utf-8"))
+    except (UnicodeDecodeError, ValueError):
+        return None
+    return value if isinstance(value, dict) else None
+
+
+def plausible(gen, value):
+    """Whether a kept value is one the image's generator could have drawn."""
+    kind = gen.get("gen")
+    if kind == "int":
+        return type(value) is int and gen["min"] <= value <= gen["max"]
+    if kind == "choice":
+        return type(value) in (str, int) and value in gen["values"]
+    if not isinstance(value, str) or len(value) > 64:
+        return False
+    if kind == "lan_ip":
+        try:
+            address = ipaddress.IPv4Address(value)
+        except ValueError:
+            return False
+        return address.is_private and str(address) == value
+    if kind == "mac":
+        return re.fullmatch(re.escape(gen["oui"].upper()) + "(:[0-9A-F]{2}){3}", value) is not None
+    if kind == "digits":
+        return len(value) == gen["n"] and value.isdigit() and value.isascii() and value[0] != "0"
+    if kind == "hex":
+        digits = "0-9A-F" if gen.get("upper") else "0-9a-f"
+        return re.fullmatch("[%s]{%d}" % (digits, gen["n"]), value) is not None
+    if kind == "hexbytes":
+        return re.fullmatch("[0-9A-F]{2}( [0-9A-F]{2}){%d}" % (gen["n"] - 1), value) is not None
+    return False
+
+
 class SeededDraws(object):
     """What the image's identity step takes from the secrets module, drawn
     from the site's seed instead: the same seed draws the same values."""
@@ -111,14 +173,48 @@ class SeededDraws(object):
 
 
 def load_identity(name, tpl, seed):
-    """The image's identity for this template: the one it kept, or values
-    drawn from the site's seed where it kept none."""
+    """The image's identity for this template: the values an earlier start
+    kept in the state folder where they are values the image could have
+    drawn, and values drawn from the site's seed for the rest: the seed
+    draws the same values on every start. A kept file that is damaged, of
+    another kind or holds values the image never draws is ignored where the
+    image would stop. The identity is written back where the image keeps it
+    when it differs from what was there."""
+    stored = read_state_json(Path(tpot.IDENTITY_DIR) / ("%s.json" % name)) or {}
+    values = stored.get("values")
+    kept = {}
+    if isinstance(values, dict):
+        for token, gen in tpl.get("identity", {}).items():
+            if "gen" in gen and token in values and plausible(gen, values[token]):
+                kept[token] = values[token]
     drawn = tpot.secrets
     tpot.secrets = SeededDraws(seed, "identity:" + name)
     try:
-        return tpot.load_identity(name, tpl)
+        values = tpot.resolve_identity(tpl, kept)[0]
     finally:
         tpot.secrets = drawn
+    primary = {k: values[k] for k, gen in tpl.get("identity", {}).items() if "gen" in gen}
+    if primary != values_of(stored):
+        save_identity(name, primary)
+    return values
+
+
+def values_of(stored):
+    values = stored.get("values")
+    return values if isinstance(values, dict) else None
+
+
+def save_identity(name, primary):
+    """Keep the identity where the image keeps it, as the image writes it, so
+    that what reads it there finds it. Best effort: the next start draws the
+    same values from the seed whether or not this worked."""
+    try:
+        fd, tmp = tempfile.mkstemp(dir=tpot.IDENTITY_DIR, prefix=".%s." % name)
+        with os.fdopen(fd, "w") as f:
+            json.dump({"version": 1, "template": name, "values": primary}, f, indent=2)
+        os.replace(tmp, Path(tpot.IDENTITY_DIR) / ("%s.json" % name))
+    except OSError as exc:
+        tpot.info("identity of %s not kept in %s (%s); the next start draws the same" % (name, tpot.IDENTITY_DIR, exc))
 
 
 def apply_site(name, rendered, seed):

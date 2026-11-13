@@ -250,19 +250,30 @@ the container has to be saved for the site to stay the same: every start of
 an instance shows the same plant, a new container or an empty state folder
 included, and no two instances show the same one. The values the image draws
 itself on a first start (addresses, MACs, serial numbers) are drawn from the
-same seed, and so are the PLC's process and a new tank gauge's station and
-tanks. (The gauge's history starts ten days before its first start and is
-kept, with the labels visitors set, in `qpot_gauge.json` in the state
-folder; a gauge that already has that file keeps its own seed.)
+same seed, and so are the PLC's process and the tank gauge's station and
+tanks.
 
-Before this, Conpot drew its seed itself and kept it in its state folder
-(`qpot_site.json`); when that file could not be written, it ran with a seed
-for that start only, and the plant changed at the next restart. An instance
-that ran that version keeps the seed in that file: QPot reads it and goes on
-using it, so its visitors see the plant they saw before. A `qpot_site.json`
-that is there but cannot be read, or holds no seed, stops `qpot up` with an
-error that names the file; Conpot itself refuses to start without a seed,
-rather than show a plant made up for one start.
+The state folder is written by the container, so what is in it decides
+nothing about the site and can never keep the instance from starting:
+
+- The seed is not read from it. A `qpot_site.json` there (an unreleased
+  version of the site step kept its seed in that file) is ignored.
+- The image's identity file of a template (`<template>.json`, which 1.1.2
+  and earlier kept) is read without following a link, never from anything
+  but a small regular file, and each value in it is used only if the
+  image's own generator could have drawn it (a private address, a MAC with
+  the template's vendor prefix, the right number of digits, and so on).
+  Anything else is ignored and drawn from the seed instead; a damaged file
+  no longer stops Conpot. So an instance that ran 1.1.2 keeps the
+  addresses, MACs and serial numbers its visitors saw.
+- The tank gauge keeps the labels visitors set and where its model stands
+  (`qpot_gauge.json`). Labels that are not a gauge's (too long, not plain
+  text, no tank number) are dropped, and the model is never replayed from
+  further back than 30 days: a gauge without a midnight kept in the last 30
+  days starts its history again ten days back.
+
+Conpot refuses to start without the seed QPot passes, rather than show a
+plant made up for one start.
 
 Each value the image is known to carry must be found where it is expected:
 if one is not, the image has changed and the honeypot does not start with

@@ -513,11 +513,6 @@ func (g *ComposeGenerator) Generate() (string, error) {
 	if err := validateSSHStorePlan(g.Config); err != nil {
 		return "", err
 	}
-	if hp, ok := g.Config.GetHoneypotConfig("conpot"); ok && hp.Enabled {
-		if _, err := conpotSiteSeed(g.Config); err != nil {
-			return "", err
-		}
-	}
 	if hp, ok := g.Config.GetHoneypotConfig("refrigeration"); ok && hp.Enabled {
 		if err := CheckSetting("refrigeration", "site_profile", refrigerationSiteProfile(g.Config)); err != nil {
 			return "", err

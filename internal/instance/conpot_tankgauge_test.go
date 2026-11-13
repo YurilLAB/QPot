@@ -203,6 +203,59 @@ check(again.site.header == server.site.header, "the site changed across a restar
 check(talk(again, b"\x01S60299X\n") == b"\x019999FF1B\x03" and talk(again, b"\x01S60200X\n") == b"\x019999FF1B\x03", "a label for no tank or all tanks")
 out = talk(again, b"\x01S60202" + b"\x00\x1b[2J" + b"B" * 40 + b"\n")
 check(b"\x1b" not in out and b"\x00" not in out and b"B" * 21 not in out and b"BBBB" in out, "a label is not cut to twenty characters without control bytes: %r" % out)
+# 6b. The state file is in a folder the container writes. Under QPot (a
+# site seed given) nothing in it changes the station or its tanks, keeps the
+# gauge from starting, or makes it replay the model from long ago; labels
+# that are not a gauge's are dropped. Without a site seed the gauge keeps the
+# seed it drew, as before.
+import os, time
+os.environ["QPOT_SITE_SEED"] = "fedcba9876543210fedcba9876543210"
+site_seed = g.gauge_seed()
+check(len(site_seed) == 32 and site_seed == g.gauge_seed(), "the gauge's seed does not follow the site's")
+now = int(time.time())
+state_path = sys.argv[2] + ".hostile"
+def plant(content):
+    if os.path.isdir(state_path) and not os.path.islink(state_path):
+        os.rmdir(state_path)
+    elif os.path.lexists(state_path):
+        os.remove(state_path)
+    if content == "dir":
+        os.mkdir(state_path)
+    elif content == "fifo":
+        os.mkfifo(state_path)
+    elif content == "link":
+        os.symlink(sys.argv[2], state_path)
+    else:
+        with open(state_path, "wb") as f:
+            f.write(content)
+hostile = {
+    "garbage": b"\x00\xff{not json",
+    "a list": b"[1, 2]",
+    "a large file": b" " * (g.STATE_MAX_BYTES + 10) + b"{}",
+    "its own seed": json.dumps({"seed": "0123456789abcdef0123456789abcdef", "labels": {}, "anchor": (now // 86400 - 3) * 86400}).encode(),
+    "an anchor from long ago": json.dumps({"seed": "0123456789abcdef0123456789abcdef", "labels": {}, "anchor": 86400}).encode(),
+    "labels no gauge has": json.dumps({"labels": {"1": "X" * 500, "2": "\u001b[2J", "abc": "Y", "3": 7, "4": "DIESEL"}, "anchor": "soon"}).encode(),
+    "dir": "dir", "fifo": "fifo", "link": "link",
+}
+for what, content in hostile.items():
+    try:
+        plant(content)
+    except (OSError, AttributeError, NotImplementedError):
+        continue  # not on this system (a FIFO or a link on Windows)
+    began = time.monotonic()
+    state = g.load_state(state_path)
+    check(time.monotonic() - began < 5, "%s: loading the state took %.1f s" % (what, time.monotonic() - began))
+    check(state["seed"] == site_seed, "%s changed the gauge's seed" % what)
+    check(isinstance(state["anchor"], int) and now - 31 * 86400 <= state["anchor"] <= now, "%s: anchor %r" % (what, state["anchor"]))
+    check(all(isinstance(v, str) and len(v) <= g.LABEL_LENGTH for v in state["labels"].values()), "%s: labels %r" % (what, state["labels"]))
+    if what == "labels no gauge has":
+        check(state["labels"] == {"4": "DIESEL"}, "labels kept: %r" % state["labels"])
+    began = time.monotonic()
+    g.Site(state["seed"], state["labels"], state["anchor"], state.get("checkpoint")).state(now)
+    check(time.monotonic() - began < 20, "%s: the model took %.1f s to reach now" % (what, time.monotonic() - began))
+plant(json.dumps({"seed": "0123456789abcdef0123456789abcdef", "labels": {}, "anchor": (now // 86400 - 3) * 86400}).encode())
+del os.environ["QPOT_SITE_SEED"]
+check(g.load_state(state_path)["seed"] == "0123456789abcdef0123456789abcdef", "without a site seed the gauge lost the seed it drew")
 # 7. Arbitrary bytes, as scanners and fuzzers send them: the server neither
 # fails nor answers with anything but whole framed replies, and never with
 # more than the reports of the commands it was sent.

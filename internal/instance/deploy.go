@@ -491,11 +491,7 @@ func deployProfile(cfg *config.Config, name string) honeypotDeploy {
 		d.UDPPorts = slices.Clone(t.UDP)
 		d.Env = maps.Clone(d.Env)
 		d.Env["CONPOT_TEMPLATE"] = t.ID
-		// Without a seed the site step refuses to start Conpot; the start
-		// itself fails first (ComposeGenerator.Generate) and says why.
-		if seed, err := conpotSiteSeed(cfg); err == nil {
-			d.Env[conpotSiteSeedEnv] = seed
-		}
+		d.Env[conpotSiteSeedEnv] = conpotSiteSeed(cfg)
 		d.Volumes = append(slices.Clone(d.Volumes), conpotSiteVolume())
 		if t.ID == "plc_modbus" {
 			d.Volumes = append(d.Volumes, conpotModbusPatchVolume(), conpotModbusSlavePatchVolume())
@@ -549,6 +545,13 @@ func deployProfile(cfg *config.Config, name string) honeypotDeploy {
 		}
 	}
 	return d
+}
+
+// HoneypotLogNames returns the logs a honeypot appends its events to, as
+// its deploy profile names them (honeypotDeploy.Logs): the disk guard gives
+// these room first.
+func HoneypotLogNames(name string) []string {
+	return slices.Clone(deployProfileFor(name).Logs)
 }
 
 // deployPorts returns the container ports (TCP, UDP) deployProfile gives the

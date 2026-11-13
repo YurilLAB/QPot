@@ -44,6 +44,7 @@ import math
 import os
 import secrets
 import socket
+import stat
 import threading
 import time
 
@@ -406,23 +407,73 @@ def gauge_seed():
     return secrets.token_hex(16)
 
 
-def load_state(path=None):
-    """The gauge's seed and the labels visitors set, kept across restarts."""
-    path = path or STATE_FILE
+# How much of the state file is read, and how far back a model without a
+# recent midnight may start: the file is in a folder the container writes, so
+# neither its size nor its anchor may make a start slow.
+STATE_MAX_BYTES = 1 << 20
+ANCHOR_MAX_AGE = 30 * 86400
+
+
+def read_state_file(path):
+    """The state file's JSON, or None: never through a link, never from a
+    FIFO or anything but a regular file, never more than STATE_MAX_BYTES."""
     try:
-        with open(path, "r", encoding="utf-8") as f:
-            state = json.load(f)
-        if (isinstance(state.get("seed"), str) and len(state["seed"]) >= 16 and isinstance(state.get("labels"), dict)
-                and isinstance(state.get("anchor"), int) and 0 < state["anchor"] <= time.time()):
-            return state
-    except (OSError, ValueError):
-        pass
+        fd = os.open(path, os.O_RDONLY | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0))
+    except OSError:
+        return None
+    try:
+        info = os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode) or info.st_size > STATE_MAX_BYTES:
+            return None
+        data = os.read(fd, STATE_MAX_BYTES + 1)
+    except OSError:
+        return None
+    finally:
+        os.close(fd)
+    try:
+        state = json.loads(data.decode("utf-8"))
+    except (UnicodeDecodeError, ValueError):
+        return None
+    return state if isinstance(state, dict) else None
+
+
+def load_state(path=None):
+    """The labels visitors set and where the model stands, kept across
+    restarts. Under QPot the gauge's seed is the site's (gauge_seed), never
+    the file's: what is in the file can neither change the station and its
+    tanks nor keep the gauge from starting."""
+    path = path or STATE_FILE
+    now = int(time.time())
+    stored = read_state_file(path) or {}
+    labels = {}
+    if isinstance(stored.get("labels"), dict):
+        for number, label in list(stored["labels"].items())[:16]:
+            if (isinstance(number, str) and number.isdigit() and len(number) <= 2 and isinstance(label, str)
+                    and 0 < len(label) <= LABEL_LENGTH and all(32 <= ord(c) < 127 for c in label)):
+                labels[number] = label
     # The model starts ten days back, so the first look already shows
-    # deliveries and tanks at different levels. The gauge's seed follows from
-    # the site's (QPOT_SITE_SEED, from QPot), so its station, tanks and
-    # products are the same whether or not this file could be kept.
-    state = {"seed": gauge_seed(), "labels": {}, "anchor": (int(time.time()) // 86400 - 10) * 86400}
-    save_state(state, path)
+    # deliveries and tanks at different levels. A kept anchor is used when it
+    # is a past midnight and the model need not be replayed from further back
+    # than ANCHOR_MAX_AGE: a kept midnight that recent, or the anchor itself.
+    anchor = stored.get("anchor")
+    checkpoint = stored.get("checkpoint")
+    kept = checkpoint if isinstance(checkpoint, list) else [checkpoint]
+    recent = any(isinstance(c, dict) and isinstance(c.get("t"), int) and now - ANCHOR_MAX_AGE <= c["t"] <= now for c in kept)
+    seed = gauge_seed()
+    if (not os.environ.get("QPOT_SITE_SEED") and isinstance(stored.get("seed"), str) and 16 <= len(stored["seed"]) <= 64
+            and all(c in "0123456789abcdef" for c in stored["seed"])):
+        # Started without QPot's site step: the seed it drew at its first
+        # start, as before there was a site seed.
+        seed = stored["seed"]
+    state = {"seed": seed, "labels": labels}
+    if isinstance(anchor, int) and not isinstance(anchor, bool) and 0 < anchor <= now and (recent or now - anchor <= ANCHOR_MAX_AGE):
+        state["anchor"] = anchor
+        if recent:
+            state["checkpoint"] = checkpoint
+    else:
+        state["anchor"] = (now // 86400 - 10) * 86400
+    if state != stored:
+        save_state(state, path)
     return state
 
 
