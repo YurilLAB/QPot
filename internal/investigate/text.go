@@ -144,7 +144,8 @@ func WriteText(w io.Writer, c *Case) error {
 		}
 		for _, st := range sc.Timeline {
 			count := ""
-			if st.Count > 1 {
+			// A folded run of logins says how many in its summary.
+			if st.Count > 1 && st.Phase != PhaseCredentials {
 				count = fmt.Sprintf(" ×%d", st.Count)
 			}
 			fmt.Fprintf(out, "  %s  %-11s %-14s %s%s  %s\n", stamp(st.At), st.Phase, Clean(cut(st.Honeypot, 14)), Clean(st.Summary), count, refsText(st.Refs, st.MoreRefs))

@@ -10,6 +10,10 @@ a61bcc50343c2198a8ba8d35c121218877c6e94a:internal/instance/compose.go:generic-ap
 # built at runtime.
 430da0767267b979d655d753d273d6a4de2b7a10:internal/cluster/approval_test.go:generic-api-key:16
 
+# generic-api-key matched the hex alphabet a member's stored key hash was
+# checked against; the check is now a named pattern.
+d1c8337c90cb2061313eb6fd41a31d97638ef5bd:internal/access/access.go:generic-api-key:128
+
 # private-key matched the armor lines of the OpenSSH key pattern ssh on the
 # honeypot reads identity files with, and of the key files its test feeds
 # it (no key: armor around a few bytes); both are now put together at runtime.

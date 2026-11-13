@@ -142,6 +142,16 @@ func TestBehaviourAlertsAreRaisedKeptAndSent(t *testing.T) {
 	if rec := a.do(http.MethodPut, "/api/alerts", `{"rule":"progression","enabled":true}`); rec.Code != http.StatusOK {
 		t.Fatalf("PUT on = %d", rec.Code)
 	}
+	// All on: also the rules that were off one by one.
+	a.do(http.MethodPut, "/api/alerts", `{"rule":"new-payload","enabled":false}`)
+	if rec := a.do(http.MethodPut, "/api/alerts", `{"enabled":true}`); rec.Code != http.StatusOK || strings.Contains(string(a.configFile(t)), "rules_off") {
+		t.Fatalf("PUT all on = %d\n%s", rec.Code, a.configFile(t))
+	}
+	for _, r := range getAlerts(t, a).Rules {
+		if !r.Enabled {
+			t.Fatalf("%s is off after turning all on", r.Name)
+		}
+	}
 	if v := getAlerts(t, a); !v.Enabled || !v.Rules[1].Enabled || strings.Contains(string(a.configFile(t)), "- progression") {
 		t.Fatalf("on again: %+v", v.Rules)
 	}

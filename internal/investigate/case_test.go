@@ -260,6 +260,9 @@ func TestSessionCaseFollowsTheIntrusion(t *testing.T) {
 	if g := gapOf(c, GapEventLimit); g != nil {
 		t.Fatalf("unexpected limit gap: %+v", g)
 	}
+	if g := gapOf(c, GapSameInstant); g != nil {
+		t.Fatalf("every event has a time of its own, yet: %+v", g)
+	}
 	// Evidence: the download host, the payload. Four commands are no sequence.
 	var kinds []string
 	for _, e := range c.Sessions[0].Evidence {
@@ -358,6 +361,48 @@ func TestCampaignCaseShowsWhySessionsAreLinked(t *testing.T) {
 	}
 	if len(one.Related) != 2 || one.Related[0].Relation != "same campaign" {
 		t.Fatalf("related: %+v", one.Related)
+	}
+}
+
+// The collector stamps events when it reads them: a quick connection's events
+// are stored with one time, in whatever order the database returns them. The
+// timeline then follows the course of a connection, the same way every time,
+// and the case says that the order inside the instant was not recorded.
+func TestEventsOfOneInstantFollowTheCourseOfAConnection(t *testing.T) {
+	const ip = "203.0.113.30"
+	closed := ev(0, "cowrie", ip, "cowrie.session.closed")
+	events := []*database.Event{
+		closed, cmd(0, ip, "id"), ev(0, "cowrie", ip, "cowrie.log.closed"), login(0, ip, "root", "x", true), ev(0, "cowrie", ip, "cowrie.session.params"),
+		ev(0, "cowrie", ip, "cowrie.client.version"), download(0, ip, "http://dl.example.net/a", payloadSHA, "dl/a"), ev(0, "cowrie", ip, "cowrie.session.connect"),
+		cmd(500, ip, "later"),
+	}
+	want := "connection,other,credentials,other,command,transfer,other,close,command"
+	for round := 0; round < 3; round++ {
+		// Whatever order the store gives them in.
+		events = append(events[1:], events[0])
+		db := newDB(t, events...)
+		c, err := SessionCaseFor(context.Background(), db, sessionOf(t, db, ip).SessionID, Options{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		var phases []string
+		for _, st := range c.Sessions[0].Timeline {
+			phases = append(phases, st.Phase)
+		}
+		if got := strings.Join(phases, ","); got != want {
+			t.Fatalf("round %d: timeline %s", round, got)
+		}
+		if g := gapOf(c, GapSameInstant); g == nil || g.Count != 8 {
+			t.Fatalf("gap: %+v", g)
+		}
+	}
+	// Where events carry the honeypot's own time, that decides.
+	a, b := cmd(0, ip, "second"), cmd(0, ip, "first")
+	a.Metadata["observed_at"], b.Metadata["observed_at"] = "2026-11-14T10:00:02Z", "2026-11-14T10:00:01Z"
+	db := newDB(t, a, b)
+	c, err := SessionCaseFor(context.Background(), db, sessionOf(t, db, ip).SessionID, Options{})
+	if err != nil || c.Sessions[0].Timeline[0].Command != "first" {
+		t.Fatalf("observed_at does not order: %v", err)
 	}
 }
 

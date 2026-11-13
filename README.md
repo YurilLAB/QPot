@@ -50,6 +50,18 @@ brings T-Pot's web interface with a dashboard for all of it.
 - **T-Pot's web UI in QPot's colours.** The landing page and live attack map,
   plus a dashboard for honeypot controls, events, intelligence, canaries and
   health checks.
+- **Investigation.** Open one session or campaign and follow it from the first
+  connection through the credentials tried, the commands run and the files
+  fetched, with the stored record behind every line and the evidence that links
+  sessions into a campaign. Export it as an evidence bundle that can be checked
+  later. [investigate.md](doc/investigate.md)
+- **Behaviour alerts.** Alerts on what a visitor does, not only on volume: a
+  payload not seen before, a session that moves on to persistence, a planted
+  credential used in another service, sources sharing a playbook, a visitor who
+  comes back. [alerts.md](doc/alerts.md)
+- **Team access.** Give other people a key of their own as viewer, analyst or
+  admin, with an audit log of every change.
+  [security.md](doc/security.md#team-access-keys-with-roles)
 - **Canaries.** Decoy credentials, files and links you plant in your own
   environment, plus bait planted inside the honeypots. QPot raises a critical
   alert when it observes one in use; [canary.md](doc/canary.md) explains what it
@@ -138,8 +150,9 @@ them all.
 | [Honeypots](doc/honeypots.md) | The 28 honeypots and how to manage them |
 | [Deception](doc/deception.md) | How each instance gets its own identity |
 | [Data and threat intelligence](doc/intelligence.md) | Collection, ATT&CK tagging, IOCs and campaigns |
+| [Investigating](doc/investigate.md) | Following a session or campaign through its records; evidence bundles |
 | [Canaries](doc/canary.md) | Decoys, bait and what a trip means |
-| [Alerts and response hooks](doc/alerts.md) | Webhooks and your own commands |
+| [Alerts and response hooks](doc/alerts.md) | The volume alert, behaviour alerts, webhooks and your own commands |
 | [Clusters](doc/clustering.md) | Pairing nodes, enrollment and trust |
 | [Architecture](doc/architecture.md) | What runs where, and how data flows |
 | [Security model](doc/security.md), [Threat model](doc/threat-model.md) | Isolation, the egress guard, safe operation, and what is and is not defended |

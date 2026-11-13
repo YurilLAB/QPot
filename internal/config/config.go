@@ -40,7 +40,7 @@ type BehaviourAlertConfig struct {
 	Disabled bool `yaml:"disabled,omitempty"`
 	// Off names the rules that are off: new-payload, progression,
 	// credential-reuse, shared-playbook, returning-visitor.
-	Off []string `yaml:"off,omitempty"`
+	Off []string `yaml:"rules_off,omitempty"`
 }
 
 // ResponseConfig configures local commands to execute when an alert

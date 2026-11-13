@@ -129,6 +129,67 @@ func readSession(ctx context.Context, db Reader, s *database.TTPSession, want st
 	return events, false, nil
 }
 
+// courseRank places an event in the usual course of one connection: it
+// connects, the client introduces itself, logs in, runs commands, transfers
+// files and closes. It orders only events stored with the same time.
+func courseRank(e *database.Event) int {
+	t := strings.ToLower(e.EventType)
+	switch phaseOf(e) {
+	case PhaseConnection:
+		return 0
+	case PhaseCredentials:
+		return 2
+	case PhaseCommand:
+		return 4
+	case PhaseTransfer:
+		return 5
+	case PhaseClose:
+		return 9
+	}
+	switch {
+	case strings.Contains(t, ".client."):
+		return 1
+	case strings.Contains(t, "closed"):
+		return 8
+	}
+	return 3
+}
+
+// inOrder sorts a session's events for its timeline and returns how many of
+// them share their stored time with another.
+//
+// The collector stamps an event when it reads the line, not when the
+// honeypot wrote it, so the events of a quick connection are often stored
+// with one and the same time and their real order is not recorded. Within
+// such an instant they are shown by the honeypot's own time where an event
+// carries it (observed_at), then in the usual course of a connection, then
+// by reference, so that the same events always give the same timeline.
+func inOrder(events []*database.Event) (sameInstant int) {
+	refs := make(map[*database.Event]string, len(events))
+	for _, e := range events {
+		refs[e] = RecordRef(e)
+	}
+	sort.SliceStable(events, func(i, j int) bool {
+		a, b := events[i], events[j]
+		if !a.Timestamp.Equal(b.Timestamp) {
+			return a.Timestamp.Before(b.Timestamp)
+		}
+		if x, y := a.Metadata["observed_at"], b.Metadata["observed_at"]; x != y && x != "" && y != "" {
+			return x < y
+		}
+		if x, y := courseRank(a), courseRank(b); x != y {
+			return x < y
+		}
+		return refs[a] < refs[b]
+	})
+	for i, e := range events {
+		if (i > 0 && e.Timestamp.Equal(events[i-1].Timestamp)) || (i+1 < len(events) && e.Timestamp.Equal(events[i+1].Timestamp)) {
+			sameInstant++
+		}
+	}
+	return sameInstant
+}
+
 // phaseOf places an event type in the course of an intrusion.
 func phaseOf(e *database.Event) string {
 	t := strings.ToLower(e.EventType)
@@ -190,6 +251,10 @@ func (b *builder) session(ctx context.Context, db Reader, s *database.TTPSession
 		return nil, err
 	}
 	sc.EventsRead = len(events)
+	if n := inOrder(events); n > 0 {
+		b.gap(Gap{Kind: GapSameInstant, SessionID: id, Count: n,
+			Detail: fmt.Sprintf("%d of these events were stored with the same time as another. The collector stamps an event when it reads it, so the order inside such an instant was not recorded: the timeline shows those events in the usual course of a connection.", n)})
+	}
 	switch {
 	case more:
 		b.gap(Gap{Kind: GapEventLimit, SessionID: id, Count: len(events),

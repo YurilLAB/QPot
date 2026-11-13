@@ -95,6 +95,7 @@ const (
 	GapSessionScan      = "session-scan"
 	GapNoSharedEvidence = "no-shared-evidence"
 	GapCanaryUnmatched  = "canary-not-matched"
+	GapSameInstant      = "same-instant"
 )
 
 // ErrNotFound is returned for a session or campaign that is not among the
@@ -429,7 +430,9 @@ func SessionCaseFor(ctx context.Context, db Reader, sessionID string, opts Optio
 		return nil, fmt.Errorf("session %w", ErrNotFound)
 	}
 	b := newBuilder(opts)
-	c := b.start("session", sessionID)
+	// The case is named by the stored session, not by what was asked for:
+	// nothing of the request itself goes into a case.
+	c := b.start("session", subject.SessionID)
 	sc, err := b.session(ctx, db, subject, opts.maxEvents())
 	if err != nil {
 		return nil, err
@@ -464,7 +467,7 @@ func CampaignCaseFor(ctx context.Context, db Reader, fingerprint string, opts Op
 		return members[i].SessionID < members[j].SessionID
 	})
 	b := newBuilder(opts)
-	c := b.start("campaign", fingerprint)
+	c := b.start("campaign", members[0].CampaignFingerprint)
 	built := members
 	if len(built) > MaxCampaignSessions {
 		built = built[:MaxCampaignSessions]

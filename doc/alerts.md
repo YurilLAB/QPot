@@ -106,7 +106,7 @@ instance's settings file:
 alerts:
   behaviour:
     disabled: false          # true turns every rule off
-    off: [returning-visitor] # the rules that are off
+    rules_off: [returning-visitor] # the rules that are off
 
 response:
   enabled: true

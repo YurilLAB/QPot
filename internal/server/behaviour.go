@@ -299,6 +299,9 @@ func (s *Server) putAlerts(w http.ResponseWriter, r *http.Request) {
 	c := &cfg.Alerts.Behaviour
 	if req.Rule == "" {
 		c.Disabled = !*req.Enabled
+		if *req.Enabled {
+			c.Off = nil // all of them on, whichever were off one by one
+		}
 	} else {
 		// The list holds known rules only, each once, in the rules' order.
 		off := map[string]bool{}

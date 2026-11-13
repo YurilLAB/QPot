@@ -62,7 +62,9 @@ const (
 var (
 	reName = regexp.MustCompile(`^[a-z0-9][a-z0-9._-]{0,31}$`)
 	reKey  = regexp.MustCompile(`^qp_[a-z2-7]{24}$`)
-	b32    = base32.StdEncoding.WithPadding(base32.NoPadding)
+	// reSHA256 is a SHA-256 in lower-case hex.
+	reSHA256 = regexp.MustCompile(`^[0-9a-f]{64}$`)
+	b32      = base32.StdEncoding.WithPadding(base32.NoPadding)
 )
 
 // Errors of Add and Remove.
@@ -125,7 +127,7 @@ func Load(dataPath string) (*List, error) {
 	}
 	seen := map[string]bool{}
 	for _, m := range l.Members {
-		if !reName.MatchString(m.Name) || !ValidRole(m.Role) || len(m.KeyHash) != 64 || strings.Trim(m.KeyHash, "0123456789abcdef") != "" || seen[m.Name] {
+		if !reName.MatchString(m.Name) || !ValidRole(m.Role) || !reSHA256.MatchString(m.KeyHash) || seen[m.Name] {
 			return nil, fmt.Errorf("access: %s holds an entry that is no member", fileName)
 		}
 		seen[m.Name] = true

@@ -2859,7 +2859,7 @@
             'output-missing': 'Output file gone', 'output-not-captured': 'Output not captured', 'command-unfinished': 'Command without a finish',
             'unclassified': 'Not classified yet', 'shared-source': 'Source address is not the visitor\'s', 'unknown-source': 'No source address',
             'old-session': 'Session from an earlier version', 'source-list': 'More addresses than listed', 'session-limit': 'More sessions than shown',
-            'session-scan': 'Older sessions not looked through', 'no-shared-evidence': 'No shared evidence read', 'canary-not-matched': 'Canary trips not matched'
+            'session-scan': 'Older sessions not looked through', 'no-shared-evidence': 'No shared evidence read', 'canary-not-matched': 'Canary trips not matched', 'same-instant': 'Order inside an instant not recorded'
         };
         let invQuery = null;     // {session: id} or {campaign: fingerprint}, from the link
         let invRecords = new Map();
@@ -2934,7 +2934,7 @@
         function stepRow(st) {
             const what = h('td', { class: 'wrap' }, String(st.summary || ''));
             const add = (text, cls) => what.append(h('div', { class: 'inv-note ' + (cls || '') }, text));
-            if (Number(st.count) > 1) add('×' + fmt(st.count) + (st.until ? ', until ' + when(st.until) : ''));
+            if (Number(st.count) > 1) add((st.phase === 'credentials' ? '' : '×' + fmt(st.count) + ', ') + (st.until ? 'until ' + when(st.until) : ''));
             if (st.phase === 'command' && st.outcome) add(String(st.outcome));
             if (st.exit_code !== undefined && st.exit_code !== null) add('exit code ' + String(st.exit_code));
             if (st.caused_by) {

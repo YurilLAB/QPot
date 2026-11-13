@@ -8,7 +8,6 @@ import (
 	"net/http"
 	"sort"
 	"strings"
-	"sync"
 	"testing"
 	"time"
 
@@ -24,7 +23,6 @@ type caseDB struct {
 	stored   []*database.Event
 	sessions []*database.TTPSession
 	block    chan struct{}
-	reading  sync.WaitGroup
 }
 
 func (d *caseDB) GetEvents(ctx context.Context, f database.EventFilter) ([]*database.Event, error) {
