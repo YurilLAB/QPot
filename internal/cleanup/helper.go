@@ -54,6 +54,17 @@ while [ "$#" -ge 2 ]; do
 done
 exit "$rc"`
 
+// writableScript lets every user write the regular files named in its
+// arguments, and changes nothing about who may read them. A name that is not
+// a regular file (a link, a folder, a FIFO, or gone) is left as it is.
+const writableScript = `rc=0
+for f; do
+  if [ -f "$f" ] && [ ! -L "$f" ]; then
+    chmod a+w -- "$f" || rc=1
+  fi
+done
+exit "$rc"`
+
 // firstLinesScript prints, one output line per file named in its arguments,
 // the file's first line in hex (nothing for a file it cannot read), reading
 // no more of it than the collector's longest line.
@@ -101,6 +112,16 @@ func (d *DockerHelper) FirstLines(ctx context.Context, dir string, rels []string
 		return nil, fmt.Errorf("cleanup helper: %d first lines for %d files", len(lines), len(rels))
 	}
 	return lines, nil
+}
+
+// MakeWritable lets QPot write the files rels names in dir: logs a honeypot
+// created as its own user, which the disk guard keeps room beyond the end of
+// (diskguard.KeepLogRoom) and can only do so for a file it may write. It
+// adds the permission to write and nothing else: who may read a log stays as
+// the honeypot set it, and the honeypot goes on writing it as before.
+func (d *DockerHelper) MakeWritable(ctx context.Context, dir string, rels []string) error {
+	_, err := d.do(ctx, dir, rels, helperBatch, nil, "sh", "-c", writableScript, "sh")
+	return err
 }
 
 // Empty implements Helper.

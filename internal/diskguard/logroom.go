@@ -34,6 +34,14 @@ const LogRoom = 1 << 20
 // written its room full with lines of its own.
 const LogRoomFiles = 4
 
+// LogRoomEntries is the most entries a logs folder may hold for its logs to
+// get room. Which logs have room is told from the folder's listing, every
+// tick; a honeypot keeps a few logs and their rotated files there, and a
+// folder past this many is one its container filled. Its logs get no new
+// room: reading it all, every few seconds, would be the host's time the
+// container spends.
+const LogRoomEntries = 4096
+
 // LogRoomOptions say which logs of a folder get room first, how many may
 // have it, and whether the disk can spare more.
 type LogRoomOptions struct {
@@ -48,9 +56,9 @@ type LogRoomOptions struct {
 	Allow func() bool
 }
 
-// logRoomTopUp is how little room may be left before it is made whole
-// again: a tick that finds a log has used a quarter of its room gives the
-// room back.
+// logRoomTopUp is how much room counts as whole when the disk cannot spare
+// more: a log that still has three quarters of its room is not reported
+// then. While the disk can spare it, the room is made whole on every call.
 const logRoomTopUp = LogRoom * 3 / 4
 
 // ErrLogRoomUnsupported: this system cannot keep room beyond a file's end
@@ -70,6 +78,9 @@ type LogRoomResult struct {
 	// Over are the logs that get no room because LogRoomFiles of the
 	// folder's logs have it already.
 	Over []string
+	// Crowded says the folder holds more than LogRoomEntries entries:
+	// nothing in it was given room.
+	Crowded bool
 	// Held is how many logs of the folder have room after the call.
 	Held int
 }

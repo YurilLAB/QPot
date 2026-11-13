@@ -136,8 +136,14 @@ events:
 - **The watch.** One second is the longest a full disk goes unnoticed.
 - **Room in every log.** While the disk has room above `min_free_mb`, the
   guard keeps one megabyte allocated beyond the end of the logs in each
-  enabled honeypot's `logs` folder (`*.log` and `*.json`), and gives back
-  what a honeypot has written into it every five seconds. At most four logs
+  enabled honeypot's `logs` folder (`*.log` and `*.json`), and asks for it
+  again every five seconds, which gives back what a honeypot has written
+  into it. A log the honeypot created as its own user is one QPot may not
+  write, and room can only be given to a file QPot may write: the helper
+  container that cleanup uses (below) makes such a log writable, once, and
+  the guard gives it its room on a following tick. So the logs of every
+  honeypot get room, also those of an instance that ran before this
+  version, without QPot running as root. At most four logs
   per honeypot have room at a time: the honeypot's own logs first (the ones
   `qpot up` creates, below), then others in name order. Every log that has
   room counts against the four, whatever its name, so a compromised
@@ -146,7 +152,10 @@ events:
   with lines of its own. The honeypots write one or two logs each, so four
   leave room to spare. Before each allocation the guard reads the disk again
   and allocates only while `min_free_mb` and the megabyte above it are
-  free. The log's size and
+  free. A `logs` folder with more than 4,096 entries gets no room at all:
+  which logs have room is read from the folder's listing every five
+  seconds, and a folder that large is one its container filled. The log's
+  size and
   content do not change; the blocks are only reserved for it (Linux
   `fallocate` with `FALLOC_FL_KEEP_SIZE`). Writing into them needs no new
   space, so on a disk that is full to the last byte each honeypot goes on
@@ -221,21 +230,29 @@ What can still be lost:
   disk fills and the moment it is stopped (normally a second, at most the
   time the guard takes to stop every honeypot). Past its room it behaves
   as the table's "without room" column says.
-- **A log QPot may not write to.** The room needs a log that QPot's own
-  user may open for writing. `qpot up` creates the logs of Cowrie
-  (`cowrie.json`), endlessh (`endlessh.log`), Conpot (`conpot.json`,
-  `conpot.log`) and Dionaea (`dionaea.json`) itself, empty and writable by
-  the container, before their first start. A log a honeypot created itself,
-  which is every log of the other honeypots and the logs of an instance
-  that ran before this version, belongs to the container's user: it gets
-  room only when QPot runs as root. The `qpot serve` log names such logs
-  every five minutes.
+- **A log in its first seconds, and one the helper cannot reach.** The
+  room needs a log that QPot's own user may open for writing. `qpot up`
+  creates the logs of Cowrie (`cowrie.json`), endlessh (`endlessh.log`),
+  Conpot (`conpot.json`, `conpot.log`) and Dionaea (`dionaea.json`) itself,
+  empty and writable by the container, before their first start, so these
+  have room from the first tick. A log a honeypot created itself (every log
+  of the other honeypots, and the logs of an instance that ran before this
+  version) belongs to the container's user: the guard hands it to the
+  helper container, which lets every user write it (who may read it does
+  not change), and gives it its room
+  five seconds later. One honeypot's logs are handed over at most every
+  five minutes, so a second log it creates within that time waits that
+  long. Where the helper cannot run (Docker refuses the container) the log
+  gets no room, and the `qpot serve` log names it every five minutes.
+- **A `logs` folder with more than 4,096 entries.** None of its logs gets
+  room; the `qpot serve` log says so.
 - **A disk below `min_free_mb`.** The room is taken only while there is
   room above the floor; a log that used its room while the disk was low
   gets it back once the disk is above the floor again.
 - **Other systems and filesystems.** The room is Linux only (Docker
-  Desktop on Windows and macOS keeps none). A filesystem that needs new
-  space to overwrite a file (btrfs, ZFS) gives no room either.
+  Desktop on Windows and macOS keeps none). It was measured on ext4 and
+  tmpfs. A filesystem that needs new space to overwrite a file (btrfs, ZFS)
+  gives no room; XFS was not measured.
 - **Cowrie** loses the events it holds in memory when it is killed instead
   of stopped, and more than a megabyte of them at one stop. Cowrie run as
   the comparison arm (`deception=stock`) has the image's log writer, so

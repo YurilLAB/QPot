@@ -9,9 +9,11 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
+	"github.com/qpot/qpot/internal/diskguard"
 	"github.com/qpot/qpot/internal/instance"
 	"github.com/qpot/qpot/internal/vectorstate"
 )
@@ -224,5 +226,87 @@ chmod 0700 /w/logs/cells/opaque-cell/archive-g1-123/logs/uid-1001`)
 ln /w/logs/cells/opaque-cell/archive-g1-123/logs/uid-1001/* /w/logs/cells/opaque-cell/archive-g1-123/logs/hard-link`)
 	if _, err := helper.SSHInventory(context.Background(), root); err == nil {
 		t.Fatal("multiply linked evidence inventory was marked complete")
+	}
+}
+
+// TestDockerHelperMakesLogsWritable: a log the honeypot created as its own
+// user is one QPot may not write, so the disk guard can keep no room beyond
+// its end. The helper makes it writable, the log then gets its room, and
+// nothing else changes: not the log's content, not a log that was not named,
+// and nothing a planted link leads to outside the folder.
+func TestDockerHelperMakesLogsWritable(t *testing.T) {
+	dockerTest(t)
+	cfg := testInstance(t)
+	data := cfg.DataPath
+	t.Cleanup(func() {
+		asContainerRoot(t, data, fmt.Sprintf("chown -R %d:%d /w", os.Getuid(), os.Getgid()))
+	})
+	keep := put(t, cfg, "outside/keep", 4096, 0)
+	if err := os.Chmod(keep, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	asContainerRoot(t, data, `
+h=/w/honeypots/dionaea
+mkdir -p "$h/logs/folder.log"
+echo '{"e":1}' > "$h/logs/dionaea.json"
+echo '{"e":2}' > "$h/logs/other.json"
+ln -s "$OUTSIDE" "$h/logs/abs-link.log"
+ln -s ../../../outside/keep "$h/logs/rel-link.log"
+mkfifo "$h/logs/fifo.log"
+chown -R 2000:2000 "$h"
+chmod 0755 "$h" "$h/logs"
+chmod 0640 "$h/logs/dionaea.json" "$h/logs/other.json"
+`, "OUTSIDE="+keep)
+	logs := filepath.Join(data, "honeypots", "dionaea", "logs")
+	log := filepath.Join(logs, "dionaea.json")
+	writable := func(p string) bool {
+		f, err := os.OpenFile(p, os.O_WRONLY|os.O_APPEND, 0)
+		if err != nil {
+			return false
+		}
+		_ = f.Close()
+		return true
+	}
+	if writable(log) {
+		t.Fatal("the honeypot's log is writable before the helper ran: the test shows nothing")
+	}
+	opt := diskguard.LogRoomOptions{Preferred: []string{"dionaea.json"}}
+	res, err := diskguard.KeepLogRoom(logs, opt)
+	if err != nil || !strings.Contains(strings.Join(res.Denied, " "), "dionaea.json") || len(res.Kept) != 0 {
+		t.Fatalf("before the helper: denied %v, kept %v, %v; want dionaea.json denied", res.Denied, res.Kept, err)
+	}
+	h := &DockerHelper{Image: instance.CollectorImage}
+	if err := h.MakeWritable(context.Background(), logs,
+		[]string{"dionaea.json", "abs-link.log", "rel-link.log", "fifo.log", "folder.log", "missing.log"}); err != nil {
+		t.Fatal(err)
+	}
+	if !writable(log) {
+		t.Fatal("the helper left the honeypot's log unwritable")
+	}
+	if info, err := os.Stat(log); err != nil || info.Mode().Perm() != 0o662 {
+		t.Errorf("the log's mode is %v (%v), want 0662: writable by all, readable by whom it was", info.Mode().Perm(), err)
+	}
+	if writable(filepath.Join(logs, "other.json")) {
+		t.Error("a log that was not named became writable")
+	}
+	if info, err := os.Stat(keep); err != nil || info.Mode().Perm() != 0o600 {
+		t.Errorf("a planted link led the helper to a file outside the folder: %v, %v", info.Mode().Perm(), err)
+	}
+	if info, err := os.Stat(filepath.Join(logs, "folder.log")); err != nil || info.Mode().Perm() != 0o755 {
+		t.Errorf("a folder named like a log was changed: %v, %v", info.Mode().Perm(), err)
+	}
+	res, err = diskguard.KeepLogRoom(logs, opt)
+	if err != nil || len(res.Kept) != 1 || res.Kept[0] != "dionaea.json" {
+		t.Fatalf("after the helper: kept %v, denied %v, failed %v, %v; want dionaea.json kept", res.Kept, res.Denied, res.Failed, err)
+	}
+	if content, err := os.ReadFile(log); err != nil || string(content) != "{\"e\":1}\n" {
+		t.Errorf("the log's content changed: %q, %v", content, err)
+	}
+	info, err := os.Stat(log)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st, ok := info.Sys().(*syscall.Stat_t); !ok || st.Blocks*512 < diskguard.LogRoom {
+		t.Errorf("the log holds %d bytes of blocks, want its room of %d", st.Blocks*512, diskguard.LogRoom)
 	}
 }

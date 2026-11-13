@@ -350,13 +350,29 @@ func TestDockerHelperArguments(t *testing.T) {
 	if err := d.Empty(context.Background(), dir, []string{"a", "b"}, []int64{1}); err == nil {
 		t.Error("sizes that do not match the files were accepted")
 	}
+	if err := d.MakeWritable(context.Background(), filepath.Join(dir, "logs"), []string{"dionaea.json", "-rf.log"}); err != nil {
+		t.Fatal(err)
+	}
+	writable := calls[3]
+	if i := slices.Index(writable, "--entrypoint"); i < 0 || writable[i+1] != "sh" || writable[i+2] != "img@sha256:x" || writable[i+3] != "-c" || writable[i+4] != writableScript {
+		t.Errorf("making logs writable runs %q", writable)
+	}
+	if got := strings.Join(writable[len(writable)-3:], " "); got != "sh /c/dionaea.json /c/-rf.log" {
+		t.Errorf("writable args end %q", got)
+	}
+	if !slices.Contains(writable, "type=bind,source="+filepath.Join(dir, "logs")+",target=/c") {
+		t.Errorf("making logs writable mounts %q, want only the logs folder", writable)
+	}
 	// Negative controls: nothing outside dir, no relative or odd mounts.
 	for _, bad := range [][2]string{{dir, "../escape"}, {dir, "/etc/passwd"}, {"relative/dir", "x"}, {dir + ",target=/etc", "x"}} {
 		if err := d.Remove(context.Background(), bad[0], []string{bad[1]}); err == nil {
 			t.Errorf("Remove(%q, %q) accepted", bad[0], bad[1])
 		}
+		if err := d.MakeWritable(context.Background(), bad[0], []string{bad[1]}); err == nil {
+			t.Errorf("MakeWritable(%q, %q) accepted", bad[0], bad[1])
+		}
 	}
-	if len(calls) != 3 {
+	if len(calls) != 4 {
 		t.Errorf("a refused request still ran docker (%d calls)", len(calls))
 	}
 }

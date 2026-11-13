@@ -10,9 +10,12 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"sync"
+	"sync/atomic"
 	"time"
 
+	"github.com/qpot/qpot/internal/cleanup"
 	"github.com/qpot/qpot/internal/config"
 	"github.com/qpot/qpot/internal/diskguard"
 	"github.com/qpot/qpot/internal/hostsetup"
@@ -117,6 +120,14 @@ type diskGuardState struct {
 
 	// free replaces diskFreeBytes (tests).
 	free func(path string) (int64, bool)
+
+	// writable lets QPot write logs a honeypot created as its own user, so
+	// that they can be given room (nil: the cleanup helper's container;
+	// tests replace it). helped is when each honeypot's logs were last
+	// handed to it, and helping says a run is under way.
+	writable func(ctx context.Context, dir string, names []string) error
+	helped   map[string]time.Time
+	helping  atomic.Bool
 
 	// mu guards view, which GET /api/status reads, and watch.
 	mu   sync.Mutex
@@ -485,7 +496,7 @@ func (s *Server) diskGuardTick(ctx context.Context, now time.Time) {
 	// to take: what a honeypot logs between a disk filling at once and its
 	// stop goes there.
 	if t.On() && !g.state.Held() && r.Known && r.Free >= t.MinFree {
-		g.keepLogRoom(cfg, now, t)
+		g.keepLogRoom(cfg, now, t, s.logWritable())
 	}
 
 	cond := diskguard.Describe(t, r, g.state.Held())
@@ -508,13 +519,35 @@ func (s *Server) diskGuardTick(ctx context.Context, now time.Time) {
 	g.mu.Unlock()
 }
 
+// logRoomHelpEvery is how often one honeypot's logs are handed to the
+// helper, and logRoomHelpTimeout bounds one run of it.
+const (
+	logRoomHelpEvery   = 5 * time.Minute
+	logRoomHelpTimeout = time.Minute
+)
+
+// logWritable returns what makes a honeypot's own logs writable to QPot:
+// the cleanup helper's container (Linux), or nothing where there is none.
+func (s *Server) logWritable() func(ctx context.Context, dir string, names []string) error {
+	if w := s.api.diskGuard.writable; w != nil {
+		return w
+	}
+	if d, ok := s.cleanupHelper().(*cleanup.DockerHelper); ok {
+		return d.MakeWritable
+	}
+	return nil
+}
+
 // keepLogRoom keeps diskguard.LogRoom allocated beyond the end of the logs
 // in the logs folder of each enabled honeypot (the HiFi broker's logs live
 // elsewhere and are not a honeypot's own writes): its deploy profile's logs
 // first, at most diskguard.LogRoomFiles per honeypot, and each allocation
-// only while the disk still has the floor and the room above it. Logs it
-// cannot give room to are logged now and then.
-func (g *diskGuardState) keepLogRoom(cfg *config.Config, now time.Time, t diskguard.Thresholds) {
+// only while the disk still has the floor and the room above it. A log the
+// honeypot created as its own user is one QPot may not write: writable makes
+// it so, in the background, and a later tick gives it its room. Logs that
+// still get none are logged now and then.
+func (g *diskGuardState) keepLogRoom(cfg *config.Config, now time.Time, t diskguard.Thresholds,
+	writable func(ctx context.Context, dir string, names []string) error) {
 	free := g.free
 	if free == nil {
 		free = diskFreeBytes
@@ -524,7 +557,8 @@ func (g *diskGuardState) keepLogRoom(cfg *config.Config, now time.Time, t diskgu
 		n, known := free(folder)
 		return known && n >= t.MinFree+diskguard.LogRoom
 	}
-	var denied, failed, over []string
+	var denied, failed, over, crowded []string
+	help := map[string][]string{}
 	for name, hp := range cfg.SnapshotHoneypots() {
 		if !hp.Enabled || name == "ssh-proxy" {
 			continue
@@ -538,8 +572,23 @@ func (g *diskGuardState) keepLogRoom(cfg *config.Config, now time.Time, t diskgu
 			failed = append(failed, name+": "+err.Error())
 			continue
 		}
-		for _, log := range res.Denied {
-			denied = append(denied, name+"/logs/"+log)
+		if res.Crowded {
+			crowded = append(crowded, name)
+		}
+		if len(res.Denied) > 0 {
+			// Handed to the helper when it is this honeypot's turn; said
+			// only when there is no helper or it has had its turn and the
+			// logs are still not QPot's to write.
+			last, tried := g.helped[name]
+			due := !tried || now.Sub(last) >= logRoomHelpEvery || now.Before(last)
+			switch {
+			case writable != nil && due:
+				help[name] = res.Denied
+			case writable == nil || now.Sub(last) >= logRoomHelpTimeout:
+				for _, log := range res.Denied {
+					denied = append(denied, name+"/logs/"+log)
+				}
+			}
 		}
 		for log, err := range res.Failed {
 			failed = append(failed, name+"/logs/"+log+": "+err.Error())
@@ -548,20 +597,68 @@ func (g *diskGuardState) keepLogRoom(cfg *config.Config, now time.Time, t diskgu
 			over = append(over, name+"/logs/"+log)
 		}
 	}
+	g.helpLogRoom(now, folder, help, writable)
 	sort.Strings(denied)
 	sort.Strings(failed)
 	sort.Strings(over)
+	sort.Strings(crowded)
 	if len(denied) > 0 && g.warnNow("logroom-denied", now) {
-		slog.Warn("Disk guard: these logs belong to the honeypot's own user, so QPot keeps no room beyond their end; on a disk that fills at once their honeypot loses what it logs until it is stopped",
-			"logs", denied)
+		slog.Warn("Disk guard: these logs belong to the honeypot's own user and QPot could not make them writable, so it keeps no room beyond their end; on a disk that fills at once their honeypot loses what it logs until it is stopped",
+			"logs", firstFew(denied))
 	}
 	if len(failed) > 0 && g.warnNow("logroom-failed", now) {
-		slog.Warn("Disk guard: room beyond the end of these logs could not be kept", "logs", failed)
+		slog.Warn("Disk guard: room beyond the end of these logs could not be kept", "logs", firstFew(failed))
 	}
 	if len(over) > 0 && g.warnNow("logroom-over", now) {
 		slog.Warn("Disk guard: these logs get no room: their honeypot has as many logs with room as QPot keeps for one",
-			"logs", over, "per_honeypot", diskguard.LogRoomFiles)
+			"logs", firstFew(over), "per_honeypot", diskguard.LogRoomFiles)
 	}
+	if len(crowded) > 0 && g.warnNow("logroom-crowded", now) {
+		slog.Warn("Disk guard: the logs folders of these honeypots hold more files than QPot looks through, so their logs get no room beyond their end",
+			"honeypots", crowded, "most_files", diskguard.LogRoomEntries)
+	}
+}
+
+// helpLogRoom hands the logs QPot may not write to writable, one honeypot's
+// folder at a time, off the tick: the tick watches the disk and does not
+// wait for a container. One run goes at a time, and a honeypot's logs are
+// handed over at most every logRoomHelpEvery, so a container that keeps
+// taking the permission away costs one short helper container in that time.
+func (g *diskGuardState) helpLogRoom(now time.Time, folder string, help map[string][]string,
+	writable func(ctx context.Context, dir string, names []string) error) {
+	if writable == nil || len(help) == 0 || !g.helping.CompareAndSwap(false, true) {
+		return
+	}
+	if g.helped == nil {
+		g.helped = map[string]time.Time{}
+	}
+	names := make([]string, 0, len(help))
+	for name := range help {
+		g.helped[name] = now
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	go func() {
+		defer g.helping.Store(false)
+		ctx, cancel := context.WithTimeout(context.Background(), logRoomHelpTimeout)
+		defer cancel()
+		for _, name := range names {
+			if err := writable(ctx, filepath.Join(folder, name, "logs"), help[name]); err != nil {
+				slog.Warn("Disk guard: a honeypot's own logs could not be made writable, so they get no room beyond their end",
+					"honeypot", name, "error", err)
+			}
+		}
+	}()
+}
+
+// firstFew bounds a list in a log line: the names are files a honeypot's
+// container made, and it can make many.
+func firstFew(list []string) []string {
+	const most = 8
+	if len(list) <= most {
+		return list
+	}
+	return append(append([]string{}, list[:most]...), "and "+strconv.Itoa(len(list)-most)+" more")
 }
 
 // diskGuardUrgent reports whether the disk is so nearly full (under a quarter

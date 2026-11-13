@@ -1156,7 +1156,7 @@ func TestDockerIntegrationRequiresPrivateEvidenceAndLiveNames(t *testing.T) {
 		t.Fatal("ordinary-user Docker helper gate is missing or elevated")
 	}
 	required := []string{
-		"TestCollectorAndCleanupWithRealDocker", "TestDockerHelperForReal", "TestDockerSSHInventoryPrivateEvidenceAndUnsupportedObjects",
+		"TestCollectorAndCleanupWithRealDocker", "TestDockerHelperForReal", "TestDockerHelperMakesLogsWritable", "TestDockerSSHInventoryPrivateEvidenceAndUnsupportedObjects",
 		"TestVectorRemapLive", "TestVectorConfigValidatesLive", "TestVectorEdgeConfigsValidateLive",
 	}
 	scenarios := []struct {
@@ -1185,7 +1185,7 @@ case " $* " in
    if [ "$1" = '-list' ]; then shift; pattern="$1"; break; fi
    shift
   done
-  for name in TestCollectorAndCleanupWithRealDocker TestDockerHelperForReal TestDockerSSHInventoryPrivateEvidenceAndUnsupportedObjects TestVectorRemapLive TestVectorConfigValidatesLive TestVectorEdgeConfigsValidateLive; do
+  for name in TestCollectorAndCleanupWithRealDocker TestDockerHelperForReal TestDockerHelperMakesLogsWritable TestDockerSSHInventoryPrivateEvidenceAndUnsupportedObjects TestVectorRemapLive TestVectorConfigValidatesLive TestVectorEdgeConfigsValidateLive; do
    if [ "$name" != "$QPOT_FAKE_OMIT" ] && printf '%s\n' "$name" | grep -Eq "$pattern"; then printf '%s\n' "$name"; fi
   done
   exit 0;;
