@@ -14,6 +14,7 @@ measured, and where the promise ends.
 - [The HiFi capture soak](#the-hifi-capture-soak)
 - [Restore rehearsal](#restore-rehearsal)
 - [The 1.1.2 release run](#the-112-release-run)
+- [The 1.1.3 release run](#the-113-release-run)
 - [Upgrade and rollback rehearsal](#upgrade-and-rollback-rehearsal)
 - [Third round: a disk that fills at once, long HiFi outages, a large database](#third-round-a-disk-that-fills-at-once-long-hifi-outages-a-large-database)
 - [Where the promise ends](#where-the-promise-ends)
@@ -652,6 +653,100 @@ when it cannot mark a log: sending everything again silently is worse than
 stopping. `TestSeedReadsWhatThisUserMayNot` and `TestCollectorLogReaderLive`
 cover it; the table above is the run after the fix.
 
+### From 1.1.2 to 1.1.3
+
+2026-11-13, same host, the released 1.1.2 and the tree that was tagged
+1.1.3, both run by an ordinary user in the `docker` group. The same
+procedure. Its checks for what 1.0.1 did wrong (scanner banners dropped,
+the QPot ID in backups and container environments) have nothing to find in
+1.1.2 and are left out.
+
+| Stage | Check | Result |
+|---|---|---|
+| 1.1.2 | 60 connections stored once | 60, 0 duplicates |
+| | scanner banners stored and tagged `nmap` | 5 of 5 |
+| Upgrade | connections across the upgrade stored once | 120, 0 duplicates |
+| | scanner banners stored and tagged `nmap` | 10 of 10 |
+| | generated files, container environments, mounts and logs carrying the QPot ID | 0 |
+| Refusals | no login on `0.0.0.0`: `qpot up` and `qpot serve` | refused, no container started |
+| | egress guard off with dionaea enabled: `qpot up` | refused, no container started |
+| | connections after the refusals and a restart stored once | 150, 0 duplicates |
+| Rollback | database after restoring the backup under 1.1.2 | the 60 connections it held, 0 duplicates |
+| | 1.1.2 collects again | 90, 0 duplicates |
+
+What 1.1.3 changes in an instance 1.1.2 made, on a second instance with 40
+connections before the upgrade and 40 after:
+
+| Check | Under 1.1.2 | After `qpot up` with 1.1.3 |
+|---|---|---|
+| Cowrie's log, which the container's user owns | mode 640, no room beyond its end | writable by QPot (mode 662) and one megabyte of room, within 5 seconds |
+| Events table takes lightweight updates | no | yes (`enable_block_number_column`) |
+| Events stored / classified / distinct IDs | 120 / 0 (the worker had not run yet) | 240 / 240 / 240 |
+| Connections made after the upgrade, classified | | 40 of 40 |
+| Tagging mutations | | 0 |
+
+## The 1.1.3 release run
+
+2026-11-13, 18:35 to 19:38, the tree that was tagged 1.1.3. Every fault
+once, the three database faults twice, 5 connections a second, each fault
+held for 90 seconds with two minutes between. The instance was on a 4 GB
+ext4 filesystem of its own.
+
+| Connections | Count |
+|---|---|
+| sent | 23,207 |
+| accepted by the honeypot | 21,872 |
+| refused (honeypot closed or restarting) | 1,335 |
+| stored, distinct | 21,872 |
+| **lost** | **0** |
+| **stored twice** | **0** |
+
+Collection delay: median 0.2 s, 99th percentile 84.2 s, longest 103.8 s.
+
+| Fault | Recovery (s) | Accepted during | Refused during | Lost | Stored twice |
+|---|---|---|---|---|---|
+| database-stop | 14, 17 | 595, 611 | 0 | 0 | 0 |
+| database-kill | 20, 9 | 574, 515 | 0 | 0 | 0 |
+| database-freeze | 6, 15 | 498, 540 | 0 | 0 | 0 |
+| collector-kill | 6 | 502 | 0 | 0 | 0 |
+| collector-recreate | 6 | 514 | 0 | 0 | 0 |
+| network-partition | 16 | 547 | 0 | 0 | 0 |
+| honeypot-kill | 6 | 175 | 301 | 0 | 0 |
+| honeypot-restart | 8 | 49 | 40 | 0 | 0 |
+| control-plane-kill | 4 | 494 | 0 | 0 | 0 |
+| worker-takeover | 2 | 500 | 0 | 0 | 0 |
+| collector-amnesia | 8 | 529 | 0 | 0 | 0 |
+| disk-low | 18 | 80 | 498 | 0 | 0 |
+| disk-full | 16 | 68 | 496 | 0 | 0 |
+| traffic-burst (10 times the rate) | 4 | 4,532 | 0 | 0 | 0 |
+
+446 of 446 indicators found, none counted twice, no second copy of any event
+left (the worker removed 37,027), no event left unclassified, no query
+refused for lack of memory.
+
+Before this run, the changes of the two rounds below were gone through
+again. That found six things, each fixed with a test that fails without the
+fix:
+
+- **A restore undone.** Rows `qpot db restore` brought back after the
+  events table had lost them were deleted again as second copies (see
+  "A row is a second copy only while the first is there" below).
+- **A server without lightweight updates** would have failed every batch;
+  it is now asked once at start.
+- **What a honeypot's logs folder could cost the host.** The guard listed
+  the whole folder every five seconds, opened every log in it, and named
+  every one of them in a log line. It now lists at most 4,096 entries (a
+  folder with more gets no room), opens at most four logs a tick and names
+  at most eight.
+- **Conpot stopped on a state file of nested brackets.** A file of 20,000
+  `[` raised an error the two state readers did not catch.
+- **A worker stopped in the middle of a step reported an error.** This was
+  the test that failed once or twice in a hundred runs on Linux
+  (`TestIntelligenceSummaryReportsWorkerLifecycleWithoutSecrets`: 58
+  failures in 2,400 runs before, none in 4,800 after).
+- **Cowrie logged a client in on a public-key query** that carries no
+  signature ([deception.md](deception.md#cowrie-patch-layer)).
+
 ## Third round: a disk that fills at once, long HiFi outages, a large database
 
 2026-11-12 into the 13th, after 1.1.2. Same host as the runs above; every
@@ -835,31 +930,54 @@ What still grows, and was left:
   history's IDs are of the collector's kind and in the set of classified
   IDs, as if the worker had classified them.
 
-Before is `cd84f192`, after is this round's change,
-both with the extended benchmark, on the same host. The 25 M "before"
-figures come from two runs: the first (during which another soak ran on the
-host, in its own containers) stopped when its copy of the sample hit the
-harness's 30 s query limit, the second measured only the copies.
+Before is `cd84f192`, after is the tree that was tagged 1.1.3, both with the
+extended benchmark, on the same host. The 25 M "before" figures come from
+two runs: the first (during which another soak ran on the host, in its own
+containers) stopped when its copy of the sample hit the harness's 30 s
+query limit, the second measured only the copies.
 
 | | 1 M before | 1 M after | 25 M before | 25 M after |
 |---|---|---|---|---|
-| Classified per second, worker at its limit | 72.4 | 449.7 | 62.2 | 231.1 |
-| Rows sent again | 249,377 | 249,934 | 201,177 | 201,261 |
-| Last second copy gone after (s) | 1,876 | 26 | 1,966 | 152 |
+| Classified per second, worker at its limit | 72.4 | 436.0 | 62.2 | 226.3 |
+| Rows sent again | 249,377 | 249,437 | 201,177 | 201,895 |
+| Last second copy gone after (s) | 1,876 | 31 | 1,966 | 147 |
 | IDs stored twice at the end | 0 | 0 | 0 | 0 |
 | Live connections lost / stored twice | 0 / 0 | 0 / 0 | 0 / 0 | 0 / 0 |
 | Queries refused for lack of memory | 0 | 0 | 0 | 0 |
 
-In a run with patches written in from 20,000 rows instead of 2,000, the
-25 M rate was 167.5 a second; in one more with 2,000 and no copies, 288.8.
+The rate varies from run to run: earlier trees of this change measured
+231.1 and 288.8 a second at 25 M (the second without copies), and 167.5
+with patches written in from 20,000 rows instead of 2,000. One run of the
+final tree stopped at 1 M when the database refused the harness's own
+statement that stores the sample again, for lack of memory; the run above
+is the one after it.
 
-The dashboard is slower at 25 M while the worker is at work. Its 95th
-percentile in the five minutes of live traffic, before and after:
-`/api/stats` 686 and 752 ms, `/api/intelligence` 491 and 644 ms,
-`/api/iocs` 388 and 625 ms, `/api/techniques` 283 and 335 ms. Reads apply
-the patches not yet written in, and writing them in takes CPU the
-dashboard's queries wait for (the database was held back in 15% of
-periods, against 12% before).
+**The dashboard's slowest calls at 25 M are slower than with 1.1.2's
+tagging.** Median, 95th percentile and longest call in the five minutes of
+live traffic (61 calls each), with nothing else running on the host:
+
+| Call | Before (ms) | After (ms) |
+|---|---|---|
+| `/api/stats` | 404 / 591 / 867 | 404 / 754 / 1,041 |
+| `/api/intelligence` | 273 / 458 / 670 | 268 / 651 / 849 |
+| `/api/techniques` | 160 / 268 / 557 | 154 / 453 / 655 |
+| `/api/iocs?limit=15` | 272 / 370 / 552 | 262 / 550 / 653 |
+
+The medians are the same; the slowest calls take 1.3 to 1.7 times as long.
+What they wait for is the database's one CPU: patches of lightweight
+updates are written into the parts in the background (a mutation each
+time 2,000 patched rows have built up), and a call that falls into one
+waits. A run that never wrote the patches in had lower 95th percentiles
+(706, 570, 465 and 477 ms) and higher medians (507, 385, 363 and 365 ms),
+because every read then applies all of them; that is no way to run.
+
+The first version of this change was slower still (95th percentiles of
+967, 760, 632 and 646 ms): a worker that was keeping up looked for second
+copies every two minutes, a read of every unclassified row and a lookup in
+the set of classified IDs, one to two seconds of the database's CPU each
+time, for rows its own next batch reads anyway. It no longer does. At 1 M
+the same calls take 23 to 35 ms at the median and 114 to 124 at the 95th
+percentile.
 
 What was changed:
 
@@ -883,7 +1001,18 @@ What was changed:
   and deletes those rows wherever they are in time, taking turns with
   classification (`TestWorkerSweepsCopiesAheadOfOrder`,
   `TestClickHouseSweepsReplayedEvents`). Deletes of second copies are
-  patches too.
+  patches too. It looks ahead only while it has more than a batch to
+  classify or is finding copies.
+- **A row is a second copy only while the first is there.** `qpot db
+  restore` stores events the events table no longer has. Where the table
+  had lost rows the worker had classified, the set of classified IDs still
+  knew them, and the restored rows would have been deleted as second
+  copies: the restore undone, without a word. Restoring now takes those IDs
+  out of the set first (`TestClickHouseRestoredRowsAreNotSecondCopies`).
+- **A server that takes the settings and not the statements** is asked
+  once, at start, with an update and a delete that name no row; if it
+  refuses, events are marked with mutations as before. A background write
+  of the patches that keeps failing is logged every ten minutes.
 - **What else a batch waited for.** The lookup of a batch's stored
   indicators named each key as a filter on the deduplicated indicators and
   read all of them (0.55 s at 25,000 indicators, 0.9 s at 625,000); the
@@ -1063,14 +1192,14 @@ indicators and sessions count it once.
   Dionaea kept 100 of 100 visitors on a full disk, where without it
   endlessh kept 3 to 68, Conpot stopped itself at the first failed write and
   Dionaea kept 1 when stopped. Cowrie also holds what it cannot write. A
-  20-minute soak with 8 full disks lost nothing. What can still be lost:
-  more than a megabyte of one honeypot's log before it stops; logs of a
-  honeypot past its fourth; logs a
-  honeypot created as its own user, unless QPot runs as root (every
-  honeypot other than Cowrie, endlessh, Conpot and Dionaea, and every log
-  of an instance made before this change); hosts other than Linux, and
-  btrfs or ZFS; and what a Cowrie holds in memory when it is killed instead
-  of stopped. See
+  20-minute soak with 8 full disks lost nothing. A log a honeypot created
+  as its own user (every other honeypot's, and the logs of an instance made
+  before this change) is made writable by cleanup's helper container and
+  then gets its room too. What can still be lost: more than a megabyte of
+  one honeypot's log before it stops; logs of a honeypot past its fourth; a
+  log in the seconds before the helper has reached it; hosts other than
+  Linux, and btrfs or ZFS (XFS was not measured); and what a Cowrie holds
+  in memory when it is killed instead of stopped. See
   [disk-cleanup.md](disk-cleanup.md#a-disk-that-fills-at-once).
 - **A log line that reaches the disk in two pieces.** The collector gives
   such a line one identity when it reads it live and another when it reads
@@ -1096,20 +1225,21 @@ indicators and sessions count it once.
 - **Rows sent again stay for a few minutes.** When the collector loses its
   place it sends every log again. Those rows carry the identities they
   already had and the worker removes them, ahead of what it still has to
-  classify: in the database benchmark 201,000 such rows at 25 million
-  events were gone 152 seconds after they were stored (33 minutes before
+  classify: in the database benchmark 202,000 such rows at 25 million
+  events were gone 147 seconds after they were stored (33 minutes before
   this change; 47 minutes for 213,000 in the third round's soak). Until
   then a list of events shows them twice; indicators and sessions count
-  them once. The worker looks for them every 2 minutes while it keeps up
-  and every 30 seconds while it is behind, so the first can wait that long.
+  them once. The worker finds the first of them in its next pass
+  (`worker_interval`, 5 minutes by default; one minute in the benchmark) and
+  from then on looks for more before every batch.
   On TimescaleDB they are removed in time order, as before.
 - **A large database.** Measured to 25 million events on ClickHouse with
   one sensor. Past that, and with many sensors or many addresses at once,
   nothing here is measured. Classification is bounded by the database's one
-  CPU: 231 events a second at 25 million events and 450 at 1 million in
+  CPU: 226 events a second at 25 million events and 436 at 1 million in
   the benchmark; traffic above that is stored at once and classified late.
-  At 25 million the dashboard's slower calls take up to 1.6 times as long
-  (95th percentile) as before this change while the worker is at work.
+  At 25 million the dashboard's slowest calls (95th percentile) take 1.3 to
+  1.7 times as long as with 1.1.2's tagging, at the same median.
 - **One long HiFi channel.** Past 8 MiB one channel's bytes are carried but
   not kept, and its record says so. In an interactive session that includes
   what is typed after that point.
