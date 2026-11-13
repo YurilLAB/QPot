@@ -235,7 +235,8 @@ That was checked on 2026-11-11: 1.0.1 rebuilt from its tag on Windows 11 and
 on Linux gave the published `SHA256SUMS` exactly. Later releases build with
 `-buildvcs=false` and do not depend on where the output goes: 1.1.2,
 rebuilt from its tag on Windows 11 on 2026-11-12 into a folder outside the
-repository, gave the published `SHA256SUMS` exactly.
+repository, gave the published `SHA256SUMS` exactly, and so did 1.1.3 on
+2026-11-13.
 
 ## Cutting a release
 
