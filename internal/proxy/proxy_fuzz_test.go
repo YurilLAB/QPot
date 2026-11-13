@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -57,9 +58,16 @@ func FuzzSpliceTransparency(f *testing.F) {
 		backends[i] = Backend{ID: "be" + strconv.Itoa(i), Addr: be.Addr().String()}
 	}
 	pool := NewPool(backends, nil)
+	// A connection the broker turned away or could not find a backend for
+	// was never spliced. Under load the dial to the echo backend itself
+	// fails now and then (seen on Windows: the broker recorded
+	// backend_dial_failed and closed the connection, and the fuzzer saved
+	// the input as one the splice had altered).
+	unserved := &unservedSink{ports: map[int]string{}}
 	b := NewBroker(Config{
 		Honeypot: "fz", IdleTimeout: 2 * time.Second, BufferSize: 4096,
 		RatePerSecPerIP: 1e9, BurstPerIP: 1e9, MaxConcurrentIP: 1 << 20, MaxConcurrent: 1 << 20,
+		Sink: unserved,
 	}, pool)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -96,9 +104,42 @@ func FuzzSpliceTransparency(f *testing.F) {
 			}
 		}
 		if !bytes.Equal(got[:min(len(got), len(payload))], payload) {
+			// The broker records why before it closes the connection.
+			if local, ok := c.LocalAddr().(*net.TCPAddr); ok {
+				if reason := unserved.reason(local.Port); reason != "" && len(got) == 0 {
+					t.Skipf("the broker did not serve this connection (%s): nothing was spliced", reason)
+				}
+			}
 			t.Fatalf("splice not transparent: got %d bytes, want %d, mismatch", len(got), len(payload))
 		}
 	})
+}
+
+// unservedSink remembers, by the visitor's port, the connections the broker
+// recorded as turned away or without a reachable backend.
+type unservedSink struct {
+	mu    sync.Mutex
+	ports map[int]string
+}
+
+func (u *unservedSink) Emit(e Event) {
+	u.mu.Lock()
+	defer u.mu.Unlock()
+	if e.EventType != EventBackendError && e.EventType != EventRejected {
+		// A later connection from the same port that was served.
+		delete(u.ports, e.SrcPort)
+		return
+	}
+	if len(u.ports) >= 4096 {
+		clear(u.ports)
+	}
+	u.ports[e.SrcPort] = e.EventType + " " + e.Reason
+}
+
+func (u *unservedSink) reason(port int) string {
+	u.mu.Lock()
+	defer u.mu.Unlock()
+	return u.ports[port]
 }
 
 // FuzzParseBackends asserts the operator backend-list parser never panics and,

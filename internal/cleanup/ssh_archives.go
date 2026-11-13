@@ -412,7 +412,8 @@ func decodeSSHInventory(output []byte) ([]sshEvidenceFile, error) {
 			return nil, err
 		}
 		rel := string(name)
-		if !filepath.IsLocal(filepath.FromSlash(rel)) || filepath.ToSlash(filepath.Clean(filepath.FromSlash(rel))) != rel || strings.ContainsRune(rel, 0) || seen[rel] {
+		// "." is local and clean, and would name the record tree itself.
+		if rel == "." || !filepath.IsLocal(filepath.FromSlash(rel)) || filepath.ToSlash(filepath.Clean(filepath.FromSlash(rel))) != rel || strings.ContainsRune(rel, 0) || seen[rel] {
 			return nil, errors.New("invalid SSH evidence inventory path")
 		}
 		seen[rel] = true
