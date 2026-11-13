@@ -1503,13 +1503,19 @@ func (g *ComposeGenerator) ScannerTagInputs() []string {
 	return g.pipelineInputs()
 }
 
-// pipelineInputs are the event transforms: honeypots (if any) and sensors.
+// pipelineInputs are the event transforms: honeypots (if any), sensors and,
+// with either, the collector's own record of the lines it discarded.
 func (g *ComposeGenerator) pipelineInputs() []string {
 	var in []string
 	if g.HoneypotsEnabled() {
 		in = append(in, "add_qpot_metadata")
 	}
-	return append(in, g.EnabledSensors()...)
+	in = append(in, g.EnabledSensors()...)
+	if len(in) > 0 {
+		// Every file source can discard a line (see discarded_lines).
+		in = append(in, "discarded_lines")
+	}
+	return in
 }
 
 // OwnSubnets lists the subnets of the instance's own Docker networks, sorted.
@@ -1655,8 +1661,87 @@ sources:
     offset_key: qpot_offset
     max_read_bytes: 1048576
 {{- end}}
+  # What the collector reports about itself. One report is read, by
+  # discarded_lines below: a line it would not take. These reports are not
+  # read from a file, so the collector warns at start that it cannot
+  # acknowledge them. (At debug level the collector reports every event a
+  # step drops, this one's included; QPot runs it at its default level.)
+  collector_reports:
+    type: internal_logs
 
 transforms:
+  # A file source discards, whole, a line longer than its longest line
+  # (102,400 bytes), and until now nothing recorded that: on a live instance
+  # a visitor's command of 60,000 characters, which cowrie writes twice in
+  # one line, was in neither the database nor the log backup. QPot's own
+  # cowrie logger now keeps its lines shorter (jsonlog.py), but every other
+  # honeypot writes what it writes. So each discarded line becomes an event
+  # of its honeypot, with the start of the line (the collector reports its
+  # first thousand bytes or so) as the payload and, where that start names
+  # them, the visitor's address and session. The whole line stays in the
+  # honeypot's own log until disk cleanup empties it.
+  discarded_lines:
+    type: remap
+    inputs:
+      - collector_reports
+    source: |
+      if (to_string(.message) ?? "") != "Found line that exceeds max_line_bytes; discarding." {
+        abort
+      }
+      component = to_string(.vector.component_id) ?? ""
+      hp = "unknown"
+      if component == "ssh_backend_logs" {
+        hp = "ssh-proxy"
+      } else if ends_with(component, "_logs") {
+        hp = replace(component, r'_logs$', "")
+      }
+{{- if .Config.Collector.IngestSuricata}}
+      if component == "suricata_eve" { hp = "suricata" }
+{{- end}}
+{{- if .Config.Collector.IngestP0f}}
+      if component == "p0f_log" { hp = "p0f" }
+{{- end}}
+{{- if .Config.Collector.IngestFatt}}
+      if component == "fatt_log" { hp = "fatt" }
+{{- end}}
+      # The start of the line as the collector prints bytes: b"..." with a
+      # backslash before each quote and backslash.
+      head = to_string(.truncated_bytes) ?? ""
+      head = replace(replace(head, r'^b"', ""), r'"$', "")
+      head = replace(replace(head, "\\\"", "\""), "\\\\", "\\")
+      head = truncate(head, 2048)
+      sip = "0.0.0.0"
+      im, ierr = parse_regex(head, r'"(?:src_ip|source_ip|sourceIp|client_ip|REMOTE_ADDR|client|IP|target_ip)" ?: ?"(?:::ffff:)?(?P<ip>[0-9a-fA-F:.]{2,45})"')
+      if ierr == null {
+        found = string(im.ip) ?? ""
+        if (ip_cidr_contains("0.0.0.0/0", found) ?? false) || (ip_cidr_contains("::/0", found) ?? false) {
+          sip = found
+        }
+      }
+      md = {"sensor": "collector", "reason": "line longer than the collector reads", "limit_bytes": to_string(.configured_limit) ?? ""}
+      sm, serr = parse_regex(head, r'"session(?:_id)?" ?: ?"(?P<session>[^"\\]{1,128})"')
+      if serr == null {
+        md.session = string(sm.session) ?? ""
+      }
+      eid = sha2(component + "\n" + (to_string(.timestamp) ?? "") + "\n" + head, variant: "SHA-256")
+      event_uuid = slice!(eid, 0, 8) + "-" + slice!(eid, 8, 12) + "-8" + slice!(eid, 13, 16) + "-8" + slice!(eid, 17, 20) + "-" + slice!(eid, 20, 32)
+      . = {
+        "honeypot": hp,
+        "source_ip": sip,
+        "source_port": 0,
+        "dest_port": 0,
+        "protocol": "",
+        "event_type": hp + ".log.line_discarded",
+        "username": "",
+        "password": "",
+        "command": "",
+        "payload": head,
+        "metadata": md,
+        "event_id": event_uuid,
+        "sensor_id": "{{.Config.SensorID}}",
+        "qpot_instance": "{{.Config.InstanceName}}",
+        "timestamp": format_timestamp!(now(), "%Y-%m-%d %H:%M:%S%.3f")
+      }
 {{- if .HoneypotsEnabled}}
   add_qpot_metadata:
     type: remap
@@ -2104,6 +2189,16 @@ transforms:
             md = set!(md, [k], sv)
           }
         }
+      }
+      # QPot's cowrie logger cuts the values of a line that would be longer
+      # than the collector reads, and names them (jsonlog.py): keep which
+      # were cut, and the length and hash of the whole command.
+      if is_object(.qpot_truncated) {
+        md.truncated = truncate(join(keys(object!(.qpot_truncated)), ","), 256)
+        cut_chars = to_string(.qpot_truncated.input.chars) ?? ""
+        cut_sha = to_string(.qpot_truncated.input.sha256) ?? ""
+        if match(cut_chars, r'^[0-9]{1,12}$') { md.input_chars = cut_chars }
+        if match(cut_sha, r'^[0-9a-f]{64}$') { md.input_sha256 = cut_sha }
       }
       if hp == "conpot" {
         # Keep the profile from this log event, not today's configured profile:

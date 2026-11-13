@@ -16,11 +16,20 @@
 # in 46,000 was stored twice). Lines that still wait when Cowrie is stopped
 # on a full disk are written into a small file that has its blocks, and go
 # into the log at the next start. See doc/disk-cleanup.md.
+#
+# A second change: no line is written longer than the collector reads. The
+# collector discards, whole, a line longer than 102,400 bytes, and Cowrie
+# writes a command twice (as "input" and in "message"): a visitor who ran
+# one command of 60,000 characters left no record of it in the database or
+# in the log backup (found on a live instance). A line that would be longer
+# than QPOT_LINE_BYTES now has its long values cut, and names what was cut
+# under "qpot_truncated" with each value's full length and SHA-256.
 
 from __future__ import annotations
 
 import collections
 import errno
+import hashlib
 import json
 import os
 import time
@@ -51,6 +60,46 @@ QPOT_STOP_WAIT_SECONDS = 2.0
 # kept beside the persona's state, not among the logs, which cleanup prunes.
 QPOT_SPILL_DEFAULT = "/home/cowrie/cowrie/etc/qpot-jsonlog.spill"
 QPOT_SPILL_BYTES = 1024 * 1024
+# The longest line written, under the collector's 102,400 bytes with room
+# for what it adds, and the lengths long values are cut to, tried in turn
+# until the line fits.
+QPOT_LINE_BYTES = 96 * 1024
+QPOT_VALUE_CHARS = (16384, 4096, 1024, 128, 16)
+
+
+def qpot_line(event):
+    """
+    The log line for event, a newline included, never longer than
+    QPOT_LINE_BYTES. An event that fits is written as it is.
+    """
+    data = (json.dumps(event, separators=(",", ":")) + "\n").encode("utf-8")
+    if len(data) <= QPOT_LINE_BYTES:
+        return data
+    cut = {}
+    for limit in QPOT_VALUE_CHARS:
+        for key in list(event):
+            value = event[key]
+            if key == "qpot_truncated" or isinstance(value, (bool, int, float)) or value is None:
+                continue
+            text = value if isinstance(value, str) else json.dumps(value, separators=(",", ":"))
+            if len(text) <= limit:
+                continue
+            if key not in cut:
+                digest = hashlib.sha256(text.encode("utf-8", "replace")).hexdigest()
+                cut[key] = {"chars": len(text), "sha256": digest}
+            event[key] = text[:limit]
+        event["qpot_truncated"] = cut
+        data = (json.dumps(event, separators=(",", ":")) + "\n").encode("utf-8")
+        if len(data) <= QPOT_LINE_BYTES:
+            return data
+    # More keys than any event Cowrie writes: keep what says who and what.
+    kept = {}
+    for key in ("eventid", "session", "src_ip", "src_port", "dst_ip", "dst_port", "protocol",
+                "sensor", "timestamp", "username", "password", "input", "message"):
+        if key in event:
+            kept[key] = event[key]
+    kept["qpot_truncated"] = {"keys": len(event)}
+    return (json.dumps(kept, separators=(",", ":")) + "\n").encode("utf-8")
 
 
 class Output(cowrie.core.output.Output):
@@ -243,11 +292,10 @@ class Output(cowrie.core.output.Output):
             if i.startswith("log_") or i == "time" or i == "system":
                 del event[i]
         try:
-            line = json.dumps(event, separators=(",", ":")) + "\n"
+            data = qpot_line(event)
         except TypeError:
             self._log.error("jsonlog: Can't serialize: '{event!r}'", event=event)
             return
-        data = line.encode("utf-8")
         if (
             len(self.qpot_pending) >= QPOT_PENDING_LINES
             or self.qpot_pending_bytes + len(data) > QPOT_PENDING_BYTES
