@@ -807,12 +807,12 @@ What grew with the table in 1.1.2, and what was changed:
 
 What still grows, and was left:
 
-- **Tagging.** The worker marks events classified with mutations of 250
-  events each, and a mutation rewrites the changed columns of every part it
-  touches: about 2 s each at 1 M events, 4 to 5 s at 25 M. That is the
-  ceiling on classification: about 55 events a second at 25 M on the one
-  CPU the database has. Live traffic in the benchmark was 15 events a
-  second.
+- **Classification** (changed since; see the next section). In this round
+  the worker marked events classified with mutations of 250 events each,
+  and a mutation rewrites the changed columns of every part it touches:
+  about 2 s each at 1 M events, 4 to 5 s at 25 M, about 55 events a second
+  at 25 M on the one CPU the database has. Live traffic in the benchmark was
+  15 events a second.
 - **Unique visitors of the last 24 hours** (`/api/stats`) is an exact
   count over that day's events: 0.43 s at 450,000 events a day.
 - **Every batch writes the worker's whole session state** (all open
@@ -821,6 +821,82 @@ What still grows, and was left:
 - The benchmark is ClickHouse only, one sensor, 25 million events (about
   three days of a busy sensor at 100 events a second, or the 90 days the
   events table keeps at 3 a second).
+
+### Classification at its limit, and rows sent again
+
+`TestDatabaseBench` now also measures, after each size's five minutes:
+
+- **the worker at its limit**: 30,000 new events stored at once (from 400
+  addresses, the last 20 minutes), and the rate from the last look that
+  found none of them classified to the first that found all;
+- **a collector that lost its place**: about 200,000 classified events of
+  the history (an even sample of all 60 days; 249,000 at 1 M) stored again
+  with the IDs they have, and the time until no second copy is left. The
+  history's IDs are of the collector's kind and in the set of classified
+  IDs, as if the worker had classified them.
+
+Before is `cd84f192`, after is this round's change,
+both with the extended benchmark, on the same host. The 25 M "before"
+figures come from two runs: the first (during which another soak ran on the
+host, in its own containers) stopped when its copy of the sample hit the
+harness's 30 s query limit, the second measured only the copies.
+
+| | 1 M before | 1 M after | 25 M before | 25 M after |
+|---|---|---|---|---|
+| Classified per second, worker at its limit | 72.4 | 449.7 | 62.2 | 231.1 |
+| Rows sent again | 249,377 | 249,934 | 201,177 | 201,261 |
+| Last second copy gone after (s) | 1,876 | 26 | 1,966 | 152 |
+| IDs stored twice at the end | 0 | 0 | 0 | 0 |
+| Live connections lost / stored twice | 0 / 0 | 0 / 0 | 0 / 0 | 0 / 0 |
+| Queries refused for lack of memory | 0 | 0 | 0 | 0 |
+
+In a run with patches written in from 20,000 rows instead of 2,000, the
+25 M rate was 167.5 a second; in one more with 2,000 and no copies, 288.8.
+
+The dashboard is slower at 25 M while the worker is at work. Its 95th
+percentile in the five minutes of live traffic, before and after:
+`/api/stats` 686 and 752 ms, `/api/intelligence` 491 and 644 ms,
+`/api/iocs` 388 and 625 ms, `/api/techniques` 283 and 335 ms. Reads apply
+the patches not yet written in, and writing them in takes CPU the
+dashboard's queries wait for (the database was held back in 15% of
+periods, against 12% before).
+
+What was changed:
+
+- **Lightweight updates.** Events are marked classified with `UPDATE`,
+  which writes a small patch holding the changed values of the batch's
+  rows, instead of a mutation rewriting the changed columns of every part
+  holding one of them. On the pinned server under QPot's limits, at 25 M
+  rows: about 0.07 s per 250 events against 1.7 to 2.2 s. The events table
+  gets the two settings this needs when the control plane starts; a table
+  made by 1.1.2 takes them and its old rows are tagged the same way
+  (`TestClickHouseLightweightTaggingUpgrade`). Reads apply the patches until
+  they are written into the parts: with 123,000 patched rows in 16 patches,
+  the worker's read of unclassified events took 1.2 s at 25 M. Once the
+  patches hold 2,000 rows the worker starts `APPLY PATCHES` in the
+  background, at most every 30 seconds.
+- **Two copies with the same time end as one row.** Tagging marked both;
+  the extra one is now deleted by the part and offset it is stored at
+  (`TestClickHouseTaggingLeavesOneRowPerObservation`).
+- **Second copies are found by ID.** The worker looks through the
+  unclassified rows a window at a time for IDs it has already classified
+  and deletes those rows wherever they are in time, taking turns with
+  classification (`TestWorkerSweepsCopiesAheadOfOrder`,
+  `TestClickHouseSweepsReplayedEvents`). Deletes of second copies are
+  patches too.
+- **What else a batch waited for.** The lookup of a batch's stored
+  indicators named each key as a filter on the deduplicated indicators and
+  read all of them (0.55 s at 25,000 indicators, 0.9 s at 625,000); the
+  keys now go where the table's order finds them (0.08 s at 625,000). The
+  canary scan confirmed the worker's lease once per event (a fifth of a
+  batch at 1 M); it now does so once a second.
+
+What the 25 M figure is made of now: per batch of 500, the read of
+unclassified events (0.2 to 1.2 s, depending on the patches not yet
+written in), the lookup of the batch's IDs in the set of classified IDs
+(0.5 to 0.8 s at 25 million IDs in the freshly filled set), and the
+checkpoint's own writes. The benchmark's look at the backlog (a count over
+the table every 2 seconds) costs the database's CPU too, as it did before.
 
 ### The extended run
 
@@ -980,21 +1056,27 @@ indicators and sessions count it once.
   `honeypot-` fault.
 - **A disk that fills in one step.** The disk guard closes the honeypots
   when free space runs low, and then nothing is lost. For a disk that goes
-  from enough to nothing between two looks, Cowrie now holds what it cannot
-  write: no connection was lost in the full disks of the third round's last
-  runs, where earlier runs lost 2 to 15 per episode. What can still
-  be lost: what a Cowrie holds in memory when it is killed instead of
-  stopped, more than a megabyte of it at one stop, and anything on a
-  filesystem that needs new space to overwrite a file (btrfs, ZFS). The
-  other honeypots run T-Pot's images unchanged and lose what they cannot
-  write for the second or so until the guard stops them; the soak's traffic
-  is Cowrie's.
+  from enough to nothing between two looks, every honeypot log QPot can
+  write to has a megabyte allocated beyond its end, and the honeypot goes on
+  logging into it until the guard has stopped it: endlessh, Conpot and
+  Dionaea kept 100 of 100 visitors on a full disk, where without it
+  endlessh kept 3 to 68, Conpot stopped itself at the first failed write and
+  Dionaea kept 1 when stopped. Cowrie also holds what it cannot write. A
+  20-minute soak with 8 full disks lost nothing. What can still be lost:
+  more than a megabyte of one honeypot's log before it stops; logs a
+  honeypot created as its own user, unless QPot runs as root (every
+  honeypot other than Cowrie, endlessh, Conpot and Dionaea, and every log
+  of an instance made before this change); hosts other than Linux, and
+  btrfs or ZFS; and what a Cowrie holds in memory when it is killed instead
+  of stopped. See
+  [disk-cleanup.md](disk-cleanup.md#a-disk-that-fills-at-once).
 - **A log line that reaches the disk in two pieces.** The collector gives
   such a line one identity when it reads it live and another when it reads
   the file again, and the event is then stored twice. Cowrie under QPot no
-  longer writes a line that way. A honeypot on T-Pot's own image can, on a
-  full disk; it shows only if the collector later loses its place
-  (`collector-amnesia`) or the logs are restored.
+  longer writes a line that way, and no honeypot whose log has room did so
+  in the full-disk test. One without room can, on a full disk; it shows
+  only if the collector later loses its place (`collector-amnesia`) or the
+  logs are restored.
 - **HiFi SSH session capture during a long control-plane outage.** HiFi
   sessions are recorded on each backend's container log and converted by
   the control plane. When the control plane stops, the broker turns new
@@ -1009,16 +1091,23 @@ indicators and sessions count it once.
   cell's capture limits keeps
   the first 4 kB of its input and output, not all of it
   ([ssh-hifi-proxy.md](ssh-hifi-proxy.md) states the bounds).
-- **Rows sent again wait for the worker.** When the collector loses its
+- **Rows sent again stay for a few minutes.** When the collector loses its
   place it sends every log again. Those rows carry the identities they
-  already had and the worker removes them, after it has classified what is
-  older: 47 minutes for 213,000 rows in the third round. Until then the
-  events table holds them twice.
+  already had and the worker removes them, ahead of what it still has to
+  classify: in the database benchmark 201,000 such rows at 25 million
+  events were gone 152 seconds after they were stored (33 minutes before
+  this change; 47 minutes for 213,000 in the third round's soak). Until
+  then a list of events shows them twice; indicators and sessions count
+  them once. The worker looks for them every 2 minutes while it keeps up
+  and every 30 seconds while it is behind, so the first can wait that long.
+  On TimescaleDB they are removed in time order, as before.
 - **A large database.** Measured to 25 million events on ClickHouse with
   one sensor. Past that, and with many sensors or many addresses at once,
   nothing here is measured. Classification is bounded by the database's one
-  CPU (about 55 events a second at 25 million events); traffic above that
-  is stored at once and classified late.
+  CPU: 231 events a second at 25 million events and 450 at 1 million in
+  the benchmark; traffic above that is stored at once and classified late.
+  At 25 million the dashboard's slower calls take up to 1.6 times as long
+  (95th percentile) as before this change while the worker is at work.
 - **One long HiFi channel.** Past 8 MiB one channel's bytes are carried but
   not kept, and its record says so. In an interactive session that includes
   what is typed after that point.
@@ -1037,4 +1126,6 @@ indicators and sessions count it once.
 - **Deception against real attackers.** Nothing on this page says whether
   QPot's Cowrie holds real visitors longer than the stock image. The
   controlled comparison that would is described in
-  [effectiveness.md](effectiveness.md) and has not been run.
+  [effectiveness.md](effectiveness.md). Its procedure was carried out in a
+  lab with harmless sessions, two arms that differ only in the deception
+  layer; the comparison itself has not been run.

