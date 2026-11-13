@@ -448,6 +448,9 @@ var catalog = []Code{
 	{"QP-WEB-005", "The web UI and API would be reachable from other computers without a login.",
 		"web_ui.qpot_id_auth is false, no web_ui username and password are both set, and web_ui.bind_addr is not a loopback address.",
 		"Turn the login back on (web_ui.qpot_id_auth: true, or set both web_ui.username and web_ui.password), or set web_ui.bind_addr: 127.0.0.1 and reach the UI over an SSH tunnel. Edit the settings with: qpot config"},
+	{"QP-WEB-006", "Your key's role may not make this change.",
+		"The request was signed in with a member's key, and the member's role (viewer or analyst) does not cover it. A viewer only reads; an analyst also manages canaries and alert rules.",
+		"Ask the instance's owner to make the change, or to give you a role that covers it: qpot access remove <name>, then qpot access add <name> --role admin"},
 
 	// INST: QPot instance and containers.
 	{"QP-INST-001", "The QPot instance could not be created.",

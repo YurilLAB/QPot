@@ -685,6 +685,33 @@
                     <div class="dash-card stat-card"><div class="stat-label"><i class="fas fa-database"></i> Database</div><span class="stat-value" id="sec-db">-</span><div class="stat-sub">backend</div></div>
                 </div>
                 <div class="dash-card">
+                    <div class="card-header flex-between">
+                        <h4 class="flex-center"><i class="fas fa-user-shield"></i> Access</h4>
+                        <span class="card-note" id="access-you"></span>
+                    </div>
+                    <div class="card-body">
+                        <div class="callout modal-message" id="access-message"></div>
+                    </div>
+                    <div class="table-wrapper" id="access-members-wrap">
+                        <table class="data-table">
+                            <thead><tr><th>Member</th><th>Role</th><th>Added</th></tr></thead>
+                            <tbody id="access-members"></tbody>
+                        </table>
+                    </div>
+                </div>
+                <div class="dash-card" id="access-audit-card">
+                    <div class="card-header flex-between">
+                        <h4 class="flex-center"><i class="fas fa-clipboard-list"></i> Audit log</h4>
+                        <span class="card-note">every change made through the web UI or API, and every request a role was refused</span>
+                    </div>
+                    <div class="table-wrapper">
+                        <table class="data-table">
+                            <thead><tr><th>Time</th><th>Who</th><th class="optional">Role</th><th>Request</th><th>Result</th></tr></thead>
+                            <tbody id="access-audit"></tbody>
+                        </table>
+                    </div>
+                </div>
+                <div class="dash-card">
                     <div class="card-header flex-between"><h4 class="flex-center"><i class="fas fa-shield-halved"></i> Honeypot security</h4></div>
                     <div class="table-wrapper">
                         <table class="data-table">
@@ -933,6 +960,12 @@
             return 'QPot answered ' + status + '.';
         }
 
+        // A key whose role may not do something is answered 403 with X-QPot-Denied: role. The key is
+        // good, so the person stays signed in, and the refusal is shown like any other error: callers
+        // stay quiet on 401 and 403 because signing out has said it, so a refusal gets a status of its own.
+        const ROLE_REFUSED = 430;
+        const errStatus = (r) => (r.status === 403 && r.headers.get('X-QPot-Denied') === 'role' ? ROLE_REFUSED : r.status);
+
         async function request(url, opts) {
             opts = opts || {};
             const headers = { 'X-QPot-ID': currentQPotID };
@@ -946,6 +979,7 @@
                 throw new ApiError(0, 'The QPot API is not reachable. Is qpot serve running?');
             }
             setReachable(true);
+            if (r.status === 403 && r.headers.get('X-QPot-Denied') === 'role') return r;
             if ((r.status === 401 || r.status === 403) && !opts.probe) {
                 signedOut(r.status === 403 ? 'This QPot no longer accepts the saved QPot ID. Sign in again with its ID.'
                                            : 'Sign in with this QPot\'s ID.');
@@ -962,7 +996,7 @@
             try { body = text ? JSON.parse(text) : null; } catch (e) { body = null; }
             if (!r.ok) {
                 const msg = body && typeof body.error === 'string' && body.error ? body.error : plainStatus(r.status);
-                throw new ApiError(r.status, msg, body && typeof body.code === 'string' ? body.code : '', body);
+                throw new ApiError(errStatus(r), msg, body && typeof body.code === 'string' ? body.code : '', body);
             }
             if (opts && typeof opts.onResponse === 'function') opts.onResponse(r);
             return body;
@@ -979,7 +1013,7 @@
             if (!r.ok) {
                 let msg = plainStatus(r.status);
                 try { const b = await r.json(); if (b && typeof b.error === 'string') msg = b.error; } catch (e) { /* not JSON */ }
-                throw new ApiError(r.status, msg);
+                throw new ApiError(errStatus(r), msg);
             }
             const cd = r.headers.get('Content-Disposition') || '';
             const m = /filename="?([^";]+)"?/i.exec(cd);
@@ -2692,9 +2726,37 @@
 
         // ---------- Security ----------
 
+        // ---------- access: who is signed in, the members and what they changed ----------
+
+        const ROLE = { owner: 'accent', admin: 'warn', analyst: 'ok', viewer: 'muted' };
+
+        async function loadAccess() {
+            const v = await api(`${API_BASE}/access?audit=50`);
+            const you = (v && v.you) || {};
+            $('access-you').replaceChildren('signed in as ', h('strong', {}, String(you.name || '')), ' ', pill(String(you.role || ''), ROLE[you.role] || 'muted'));
+            const admin = Array.isArray(v && v.members);
+            callout($('access-message'), '', admin
+                ? 'Each person can have a key of their own with a role: viewer reads, analyst also manages canaries and alert rules, admin changes everything. Add or remove a member on the host: ' + String(v.manage || '')
+                : 'Your key has the role ' + String(you.role || '') + '. The members and the audit log are shown to the owner and to admins.');
+            $('access-members-wrap').classList.toggle('hidden', !admin);
+            $('access-audit-card').classList.toggle('hidden', !admin);
+            if (!admin) return;
+            const mb = $('access-members');
+            if (!v.members.length) emptyRow(mb, 3, 'No members: only the QPot ID signs in.', 'fa-user-shield');
+            else mb.replaceChildren(...v.members.map((m) => h('tr', {},
+                h('td', { class: 'mono-accent' }, String(m.name || '')), h('td', {}, pill(String(m.role || ''), ROLE[m.role] || 'muted')), timeCell(m.created))));
+            const audit = Array.isArray(v.audit) ? v.audit : [];
+            const ab = $('access-audit');
+            if (!audit.length) emptyRow(ab, 5, 'Nothing has been changed through the web UI or API yet.', 'fa-clipboard-list');
+            else ab.replaceChildren(...audit.map((e) => h('tr', {}, timeCell(e.time),
+                h('td', { class: 'mono-accent' }, String(e.who || '')), h('td', { class: 'optional' }, String(e.role || '')),
+                h('td', { class: 'wrap' }, String(e.method || '') + ' ' + String(e.path || '')),
+                h('td', {}, e.denied ? pill('refused', 'bad') : pill(String(e.status || ''), Number(e.status) < 400 ? 'ok' : 'warn')))));
+        }
+
         async function loadSecurity() {
-            await Promise.all([loadStatus(), loadHoneypots()]);
-            $('sec-auth').textContent = 'QPot ID';
+            await Promise.all([loadStatus(), loadHoneypots(), loadAccess()]);
+            $('sec-auth').textContent = 'Keys with roles';
             $('sec-sandbox').textContent = 'Containers';
             const tb = $('security-list');
             if (!honeypots.length) { emptyRow(tb, 4, 'No honeypots configured.', 'fa-shield-halved'); return; }

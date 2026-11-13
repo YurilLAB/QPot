@@ -22,6 +22,11 @@ Log in with the instance's **QPot ID**, which `qpot id` prints.
 - It never appears in a URL: the server accepts it only in the `X-QPot-ID`
   header.
 
+Someone who was given a key of their own (`qpot access add`) signs in with
+that key in the same field. What they can change depends on its role; a
+change the role does not allow is refused with a message, and they stay
+signed in. See [security.md](security.md#team-access-keys-with-roles).
+
 ## Pages
 
 | Page | What it shows |
@@ -44,7 +49,7 @@ Log in with the instance's **QPot ID**, which `qpot id` prints.
 | Overview | Host CPU, memory, disk and process load, 24-hour activity per honeypot and the latest events with a severity; disk cleanup settings, the last cleanup run and **Clean up now** (it shows what it would free before it runs) |
 | Doctor | `qpot doctor`'s checks, with each problem's code, cause and fix (read-only) |
 | Pairing / Networking | Cluster members and pending join requests. Approving or denying a node stays on the host: the tab shows the exact `qpot cluster approve` or `deny` command to run. |
-| Security | The instance's security posture |
+| Security | The instance's security posture; who is signed in and with which role; for the owner and admins, the members and the audit log of every change made through the web UI or API |
 
 The LLM API key of galah and beelzebub is write-only: it is never sent back to
 the browser, and it must be entered again whenever the LLM address changes.

@@ -162,7 +162,11 @@ Stated plainly, so nobody relies on it:
 - **Denial of service against the honeypots themselves.** Limits protect the
   host. An attacker can still fill a honeypot's connection slots.
 - **An attacker with the QPot ID.** It is a bearer credential with full
-  control of the instance. There is one per instance and no per-user roles.
+  control of the instance. People who only need to look can be given a key
+  with a lesser role instead ([security.md](security.md#team-access-keys-with-roles)),
+  but a member's key is a bearer credential too: whoever holds a viewer's
+  key reads everything the instance captured, and whoever holds an admin's
+  key controls it through the web API.
 - **Network attackers when the web UI is bound off loopback without TLS.**
   The login then crosses the network in clear text.
 - **Root on the host, the Docker daemon, or the operator.**

@@ -725,6 +725,13 @@ Exit status 0 means success; 1 is a usage error (an unknown flag).
 - Why: web_ui.qpot_id_auth is false, no web_ui username and password are both set, and web_ui.bind_addr is not a loopback address.
 - Fix: Turn the login back on (web_ui.qpot_id_auth: true, or set both web_ui.username and web_ui.password), or set web_ui.bind_addr: 127.0.0.1 and reach the UI over an SSH tunnel. Edit the settings with: qpot config
 
+### QP-WEB-006
+
+**Your key's role may not make this change.**
+
+- Why: The request was signed in with a member's key, and the member's role (viewer or analyst) does not cover it. A viewer only reads; an analyst also manages canaries and alert rules.
+- Fix: Ask the instance's owner to make the change, or to give you a role that covers it: qpot access remove <name>, then qpot access add <name> --role admin
+
 ## QPot instance and containers (`INST`, exit 21)
 
 ### QP-INST-001

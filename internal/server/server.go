@@ -25,6 +25,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/qpot/qpot/internal/access"
 	"github.com/qpot/qpot/internal/canary"
 	"github.com/qpot/qpot/internal/cluster"
 	"github.com/qpot/qpot/internal/config"
@@ -67,6 +68,10 @@ type Server struct {
 	// planted is followPlanted's state: the planted canaries follow the
 	// instance's config file while the server runs.
 	planted plantedFollower
+
+	// access follows the instance's members and writes its audit log
+	// (access.go).
+	access accessFollower
 
 	// behaviour is the state of the behaviour alerts (behaviour.go).
 	behaviour behaviourState
@@ -432,13 +437,24 @@ func (s *Server) withQPotAuth(next http.HandlerFunc) http.HandlerFunc {
 			return
 		}
 
-		// Check if QPot ID matches this instance (constant-time to prevent timing oracle).
+		// The QPot ID is the owner's key (compared in constant time, so the
+		// answer's timing says nothing about it). Any other key is a
+		// member's, found by its hash.
+		id := identity{Name: "owner", Role: access.Owner}
 		if subtle.ConstantTimeCompare([]byte(qpotID), []byte(s.config.QPotID)) != 1 {
-			s.sendError(w, http.StatusForbidden, "QPot ID does not match this instance")
+			m, ok := s.access.members(s.config.DataPath).Lookup(qpotID)
+			if !ok {
+				s.sendError(w, http.StatusForbidden, "QPot ID does not match this instance")
+				return
+			}
+			id = identity{Name: m.Name, Role: m.Role}
+		}
+		ww, rr, done := s.authorize(w, r, id)
+		if rr == nil {
 			return
 		}
-
-		next(w, r)
+		defer done()
+		next(ww, rr)
 	}
 }
 

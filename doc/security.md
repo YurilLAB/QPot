@@ -82,6 +82,48 @@ count as reachable from other computers. There is no setting that overrides
 the refusal. To put the UI behind a reverse proxy, keep a login on and let
 the proxy pass the header, or bind to loopback and proxy from the same host.
 
+## Team access: keys with roles
+
+The QPot ID is the owner's key and can do everything. Other people get a key
+of their own, with a role, instead of a copy of it:
+
+| Role | May |
+|---|---|
+| `viewer` | read everything the web UI and API show |
+| `analyst` | also create and delete canaries, and switch behaviour alert rules |
+| `admin` | everything the owner can do in the web UI: honeypots on and off, their settings, restarts, disk cleanup |
+
+```bash
+qpot access add alice --role viewer   # prints alice's key, once
+qpot access list
+qpot access remove alice              # the key stops working within seconds
+qpot access log                       # who changed what
+```
+
+- A member's key has the form of a QPot ID and signs in the same way, in the
+  `X-QPot-ID` header. It is 120 random bits, printed once and stored only as
+  its SHA-256 (`access.json` in the instance's data folder, mode 0600). A
+  lost key is replaced by removing the member and adding them again.
+- Members are managed on the host only. No web request can add a member,
+  change a role or read a key, so a stolen web session cannot make itself a
+  key.
+- A request a role may not make is answered `403` with the code
+  `QP-WEB-006`. The role is checked in the control plane for every
+  request; what the web UI shows or hides is not the control.
+- Every request that changes something, and every refused one, is appended
+  to `audit.log` in the data folder with the member's name, role, method,
+  path, status and remote address. Reads are not logged. The log is set aside
+  as `audit.log.1` at 4 MiB. The owner and admins see it on the Security tab.
+- If `access.json` is damaged, no member is let in and the QPot ID still
+  works; the control plane's log says so.
+
+What roles do not do: a viewer reads everything, including captured
+passwords, decoy credentials and canary values. Roles limit who can change
+the instance, not what a member can learn from it. Anyone with a shell on the
+host as the instance's user is the owner. With HTTP Basic authentication or
+no login (`web_ui.qpot_id_auth: false`) there are no members: every request
+acts as the owner.
+
 ## The QPot ID and the sensor ID
 
 The QPot ID (`qp_` and 24 characters, in `qpot.id`) is the API credential. The

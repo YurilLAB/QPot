@@ -33,6 +33,17 @@ curl -H "X-QPot-ID: qp_..." http://127.0.0.1:8080/api/status
 | no header | `401 {"error":"QPot ID required"}` |
 | an ID of the wrong shape (not `qp_` and 27 characters) | `401 {"error":"Invalid QPot ID format"}` |
 | a well-formed ID of another instance | `403 {"error":"QPot ID does not match this instance"}` |
+| a member's key whose role may not make the request | `403 {"error": ..., "code":"QP-WEB-006"}`, with the header `X-QPot-Denied: role` |
+
+A member's key ([security.md](security.md#team-access-keys-with-roles)) goes
+in the same header. A `viewer` may send `GET` and `HEAD`; an `analyst` also
+`POST` and `DELETE /api/canaries` and `PUT /api/alerts`; an `admin`
+everything. `GET /api/access?audit=N` answers `{"you": {"name", "role"},
+"members", "audit", "manage"}`: who the key belongs to and, for the owner and
+admins, the members (`name`, `role`, `created`) and the last `N` (1 to 1000,
+default 50) audited requests (`time`, `who`, `role`, `method`, `path`,
+`status`, `denied`, `remote`), newest first. For other roles `members` and
+`audit` are `null`. There is no endpoint that adds or removes a member.
 
 Only the header counts: a QPot ID in the URL is ignored, so it never lands in
 a proxy log or the browser history. Downloads (the MISP export, a file

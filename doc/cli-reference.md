@@ -39,6 +39,7 @@ this document stays in lock-step with the code.
 - [Engagement — `qpot engagement`](#engagement--qpot-engagement)
 - [Investigation — `qpot investigate`](#investigation--qpot-investigate)
 - [Behaviour alerts — `qpot alerts`](#behaviour-alerts--qpot-alerts)
+- [Team access — `qpot access`](#team-access--qpot-access)
 - [GeoIP — `qpot geoip`](#geoip--qpot-geoip)
 - [Configuration — `qpot config`](#configuration--qpot-config)
 - [Utilities](#utilities)
@@ -100,6 +101,7 @@ qpot --version
 | `qpot engagement` | Engagement metrics for an instance, or for any Cowrie JSON log, side by side. |
 | `qpot investigate` | Follow one session or campaign through its records; export and verify evidence bundles. |
 | `qpot alerts` | Show the alerts on what visitors do, and turn their rules on and off. |
+| `qpot access` | Give other people a key of their own with a role; show the audit log. |
 | `qpot geoip` | Install or refresh the GeoIP database used for countries and the attack map. |
 | `qpot config` | Open or print the instance config file. |
 | `qpot id` | Show the QPot ID for an instance. |
@@ -982,6 +984,24 @@ qpot alerts enable all                 # every rule on
 The rules are `new-payload`, `progression`, `credential-reuse`,
 `shared-playbook` and `returning-visitor`. `-i` names the instance. The
 commands talk to the running instance, so `qpot up` must be active.
+
+---
+
+## Team access — `qpot access`
+
+Keys for other people, each with a role, and the log of what was changed
+([security.md](security.md#team-access-keys-with-roles)).
+
+| Command | What it does |
+|---|---|
+| `qpot access add <name> [--role viewer\|analyst\|admin]` | Adds a member (default role `viewer`) and prints their key once. A name is 1 to 32 lower-case letters, digits, `.`, `-` and `_` |
+| `qpot access list` | The members, their roles and when they were added. Never a key |
+| `qpot access remove <name>` (alias `rm`) | Removes a member; their key stops working within seconds |
+| `qpot access log [--limit N] [--json]` | Every change made through the web UI or API and every refused request, newest first (default 50, at most 1000) |
+
+`-i` names the instance. The commands read and write the instance's data
+folder directly, so they work whether or not the instance is running, and
+only for someone who can already read that folder. At most 100 members.
 
 ---
 
