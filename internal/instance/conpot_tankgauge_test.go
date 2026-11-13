@@ -231,6 +231,7 @@ def plant(content):
 hostile = {
     "garbage": b"\x00\xff{not json",
     "a list": b"[1, 2]",
+    "brackets nested past the parser's depth": b"[" * 100000,
     "a large file": b" " * (g.STATE_MAX_BYTES + 10) + b"{}",
     "its own seed": json.dumps({"seed": "0123456789abcdef0123456789abcdef", "labels": {}, "anchor": (now // 86400 - 3) * 86400}).encode(),
     "an anchor from long ago": json.dumps({"seed": "0123456789abcdef0123456789abcdef", "labels": {}, "anchor": 86400}).encode(),

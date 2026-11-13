@@ -125,7 +125,8 @@ def read_state_json(path):
         os.close(fd)
     try:
         value = json.loads(data.decode("utf-8"))
-    except (UnicodeDecodeError, ValueError):
+    except (UnicodeDecodeError, ValueError, RecursionError):
+        # RecursionError: brackets nested deeper than the parser goes.
         return None
     return value if isinstance(value, dict) else None
 

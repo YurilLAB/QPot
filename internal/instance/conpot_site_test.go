@@ -180,6 +180,7 @@ check(written == {k: v for k, v in first.items() if k != "MAC_TAIL"}, "the ident
 hostile = {
     "garbage": lambda: ident.write_bytes(b"\x00\xff{not json"),
     "a list": lambda: ident.write_text("[1, 2]"),
+    "brackets nested past the parser's depth": lambda: ident.write_bytes(b"[" * 20000),
     "a large file": lambda: ident.write_bytes(b" " * (site.IDENTITY_MAX_BYTES + 10) + b"{}"),
     "a directory": lambda: ident.mkdir(),
     "a link": lambda: ident.symlink_to(work / "elsewhere.json"),
