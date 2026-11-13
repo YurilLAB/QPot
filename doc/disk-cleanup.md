@@ -130,10 +130,20 @@ connections recorded nowhere.
 ### A disk that fills at once
 
 A disk can go from enough to nothing between two looks, for example when
-another program writes a large file. Four things keep that from costing
+another program writes a large file. Five things keep that from costing
 events:
 
 - **The watch.** One second is the longest a full disk goes unnoticed.
+- **Room in every log.** While the disk has room above `min_free_mb`, the
+  guard keeps one megabyte allocated beyond the end of every log in each
+  enabled honeypot's `logs` folder (`*.log` and `*.json`), and gives back
+  what a honeypot has written into it every five seconds. The log's size and
+  content do not change; the blocks are only reserved for it (Linux
+  `fallocate` with `FALLOC_FL_KEEP_SIZE`). Writing into them needs no new
+  space, so on a disk that is full to the last byte each honeypot goes on
+  logging, unchanged, a megabyte's worth, which is longer than the guard
+  needs to stop it. This covers every honeypot at once and changes nothing
+  a visitor sees.
 - **Cowrie holds what it could not write.** On a full disk the Cowrie image
   loses events while it goes on serving: its log write fails and the event
   is dropped, or (with the rotating log file) a line is cut short. QPot's
@@ -172,13 +182,53 @@ freed 64 more, and the writer took them too; Cowrie was stopped a second
 later with two to five events it could not write. See
 [reliability.md](reliability.md#abrupt-disk-exhaustion).
 
-What can still be lost: events of a Cowrie that is killed instead of stopped
-while it holds events (they are in memory only), more than a megabyte of
-them at one stop, and events on a filesystem that needs new space to
-overwrite a file (btrfs, ZFS). The other honeypots run T-Pot's images
-unchanged: what they cannot write while the disk is full is lost, for the
-second or so until they are stopped. Cowrie run as the comparison arm
-(`deception=stock`) behaves like the image.
+#### What each honeypot does on a full disk
+
+Measured with `TestHoneypotLogRoomOnAFullDiskLive` on the T-Pot 24.04.2
+images: the honeypot's logs on an ext4 filesystem of 64 MB, five visitors,
+the filesystem filled to the last byte, 100 visitors on the full disk (each
+connects, sends one line and leaves), then either the disk freed while the
+honeypot runs ("freed") or, as the guard does, the honeypot stopped on the
+full disk, the disk freed and the honeypot started ("stopped"):
+
+| Honeypot | How the image writes its log | Without room | With room |
+|---|---|---|---|
+| endlessh | `printf` to its standard output, appended to the log | Freed: 68 of 100 visitors logged; stopped: 3 of 100. The lines it could not write are dropped. On a tmpfs a line was also written in two pieces. | 100 of 100, both ways |
+| conpot | Python, one JSON line per event | Stops itself at the first write that fails ("Stopping because LogWorker died: No space left on device"), with that event unwritten, and accepts nobody until Docker starts it again (`restart: on-failure`) | 100 of 100, both ways; it keeps running |
+| dionaea | Python, one JSON line per event | Every write raises (a traceback per event) and the line waits in memory. Freed: 100 of 100 written once there is room; stopped: 1 of 100. On a tmpfs a line was written in two pieces and its first piece left in the log for good. | 100 of 100, both ways, no error |
+| cowrie | QPot's log writer (above) | Holds and writes them itself | The same, with room as well |
+
+Endlessh and Conpot are on by default; Conpot and Dionaea are the
+honeypots most often added. A line written in two pieces gets two
+identities from the collector (see [reliability.md](reliability.md)); with
+room no honeypot above wrote one. Without room, every honeypot above
+reported or showed a full disk (the test's negative control).
+
+What can still be lost:
+
+- **A honeypot that writes more than a megabyte** between the moment the
+  disk fills and the moment it is stopped (normally a second, at most the
+  time the guard takes to stop every honeypot). Past its room it behaves
+  as the table's "without room" column says.
+- **A log QPot may not write to.** The room needs a log that QPot's own
+  user may open for writing. `qpot up` creates the logs of Cowrie
+  (`cowrie.json`), endlessh (`endlessh.log`), Conpot (`conpot.json`,
+  `conpot.log`) and Dionaea (`dionaea.json`) itself, empty and writable by
+  the container, before their first start. A log a honeypot created itself,
+  which is every log of the other honeypots and the logs of an instance
+  that ran before this version, belongs to the container's user: it gets
+  room only when QPot runs as root. The `qpot serve` log names such logs
+  every five minutes.
+- **A disk below `min_free_mb`.** The room is taken only while there is
+  room above the floor; a log that used its room while the disk was low
+  gets it back once the disk is above the floor again.
+- **Other systems and filesystems.** The room is Linux only (Docker
+  Desktop on Windows and macOS keeps none). A filesystem that needs new
+  space to overwrite a file (btrfs, ZFS) gives no room either.
+- **Cowrie** loses the events it holds in memory when it is killed instead
+  of stopped, and more than a megabyte of them at one stop. Cowrie run as
+  the comparison arm (`deception=stock`) has the image's log writer, so
+  only the room protects it.
 
 Between the two marks nothing changes. A disk that moves up and down around
 one mark does not stop and start the honeypots in turn.

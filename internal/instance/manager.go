@@ -1019,6 +1019,10 @@ func (m *Manager) generateServiceConfigs() error {
 			}
 		}
 
+		if err := ensureHoneypotLogs(filepath.Join(hpDir, "logs"), prof.Logs); err != nil {
+			return fmt.Errorf("honeypot %q: %w", name, err)
+		}
+
 		if name == "cowrie" {
 			// Cowrie writes a per-session ttylog to log/tty/ but does NOT create
 			// that directory itself, and our logs bind mount shadows whatever the

@@ -89,3 +89,39 @@ func ensureContainerDirIn(root, rel string, mode fs.FileMode) error {
 	}
 	return nil
 }
+
+// ensureHoneypotLogs creates the logs a honeypot appends to (deployProfile's
+// Logs) in its logs volume dir, empty, as QPot's own files that the
+// container may write to, so that the disk guard can keep room beyond their
+// end (diskguard.KeepLogRoom). A log that is there already is left as it is,
+// whoever made it. The folder is the container's: every name is created
+// inside it through os.Root, never through a link, and never over a file.
+func ensureHoneypotLogs(dir string, names []string) error {
+	if len(names) == 0 {
+		return nil
+	}
+	root, err := os.OpenRoot(dir)
+	if err != nil {
+		return err
+	}
+	defer root.Close()
+	for _, name := range names {
+		f, err := root.OpenFile(name, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o666)
+		if errors.Is(err, fs.ErrExist) {
+			continue
+		}
+		if err != nil {
+			return fmt.Errorf("create the log %s: %w", name, err)
+		}
+		// The umask took write access from the container's user; it is a
+		// different user from QPot's.
+		err = f.Chmod(0o666)
+		if cerr := f.Close(); err == nil {
+			err = cerr
+		}
+		if err != nil {
+			return fmt.Errorf("create the log %s: %w", name, err)
+		}
+	}
+	return nil
+}

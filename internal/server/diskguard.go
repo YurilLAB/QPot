@@ -481,6 +481,13 @@ func (s *Server) diskGuardTick(ctx context.Context, now time.Time) {
 		}
 	}
 
+	// Room beyond the end of every honeypot log, taken while there is room
+	// to take: what a honeypot logs between a disk filling at once and its
+	// stop goes there.
+	if t.On() && !g.state.Held() && r.Known && r.Free >= t.MinFree {
+		g.keepLogRoom(cfg, now)
+	}
+
 	cond := diskguard.Describe(t, r, g.state.Held())
 	if cond != g.condition {
 		if g.condition != "" || (cond != diskguard.OK && cond != diskguard.Off) {
@@ -499,6 +506,42 @@ func (s *Server) diskGuardTick(ctx context.Context, now time.Time) {
 	g.view = &v
 	g.watch = w
 	g.mu.Unlock()
+}
+
+// keepLogRoom keeps diskguard.LogRoom allocated beyond the end of every log
+// in the logs folder of each enabled honeypot (the HiFi broker's logs live
+// elsewhere and are not a honeypot's own writes). Logs it cannot give room
+// to are logged now and then.
+func (g *diskGuardState) keepLogRoom(cfg *config.Config, now time.Time) {
+	var denied, failed []string
+	for name, hp := range cfg.SnapshotHoneypots() {
+		if !hp.Enabled || name == "ssh-proxy" {
+			continue
+		}
+		res, err := diskguard.KeepLogRoom(filepath.Join(diskGuardFolder(cfg), name, "logs"))
+		if errors.Is(err, diskguard.ErrLogRoomUnsupported) {
+			return
+		}
+		if err != nil {
+			failed = append(failed, name+": "+err.Error())
+			continue
+		}
+		for _, log := range res.Denied {
+			denied = append(denied, name+"/logs/"+log)
+		}
+		for log, err := range res.Failed {
+			failed = append(failed, name+"/logs/"+log+": "+err.Error())
+		}
+	}
+	sort.Strings(denied)
+	sort.Strings(failed)
+	if len(denied) > 0 && g.warnNow("logroom-denied", now) {
+		slog.Warn("Disk guard: these logs belong to the honeypot's own user, so QPot keeps no room beyond their end; on a disk that fills at once their honeypot loses what it logs until it is stopped",
+			"logs", denied)
+	}
+	if len(failed) > 0 && g.warnNow("logroom-failed", now) {
+		slog.Warn("Disk guard: room beyond the end of these logs could not be kept", "logs", failed)
+	}
 }
 
 // diskGuardUrgent reports whether the disk is so nearly full (under a quarter
