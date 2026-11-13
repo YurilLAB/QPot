@@ -207,6 +207,10 @@ func TestVectorRemapLive(t *testing.T) {
 		// and the whole command's length and hash, are kept with the event.
 		"/data/honeypots/cowrie/logs/cowrie.json\t" + `{"eventid":"cowrie.command.input","input":"echo start","message":"CMD: echo start","src_ip":"203.0.113.90","session":"cut1","qpot_truncated":{"input":{"chars":60050,"sha256":"` + strings.Repeat("ab", 32) + `"},"message":{"chars":60055,"sha256":"` + strings.Repeat("cd", 32) + `"}}}`,
 		"/data/honeypots/cowrie/logs/cowrie.json\t" + `{"eventid":"cowrie.command.input","input":"id","src_ip":"203.0.113.91","session":"cut2","qpot_truncated":{"input":{"chars":"many","sha256":["x"]},"x":1}}`,
+		// The honeypot's own time is kept beside the collector's; anything
+		// in that field that is no time is not.
+		"/data/honeypots/cowrie/logs/cowrie.json\t" + `{"eventid":"cowrie.command.input","input":"w","src_ip":"203.0.113.92","session":"t1","timestamp":"2026-11-07T10:00:00.123456Z"}`,
+		"/data/honeypots/cowrie/logs/cowrie.json\t" + `{"eventid":"cowrie.command.input","input":"w","src_ip":"203.0.113.93","session":"t2","timestamp":"yesterday\u001b[2J"}`,
 	}, "\n") + "\n"
 
 	cmd := exec.Command(run[0], append(run[1:], "--quiet", "--config", cfgPath)...)
@@ -234,6 +238,7 @@ func TestVectorRemapLive(t *testing.T) {
 		Command    string            `json:"command"`
 		Payload    string            `json:"payload"`
 		Metadata   map[string]string `json:"metadata"`
+		Timestamp  string            `json:"timestamp"`
 		Technique  *string           `json:"technique_id"`
 		Classified any               `json:"classified"`
 		EventID    any               `json:"event_id"`
@@ -254,8 +259,14 @@ func TestVectorRemapLive(t *testing.T) {
 	// and the lines without an attacker address (dicompot's finished line,
 	// hellpot's/log4pot's startup lines, wordpot's profile state) must be
 	// dropped.
-	if len(rows) != 59 {
-		t.Fatalf("got %d events, want 59: %+v", len(rows), rows)
+	if len(rows) != 61 {
+		t.Fatalf("got %d events, want 61: %+v", len(rows), rows)
+	}
+	if r := rows[59]; r.SourceIP != "203.0.113.92" || r.Metadata["observed_at"] != "2026-11-07T10:00:00.123456Z" || strings.HasPrefix(r.Timestamp, "2026-11-07") {
+		t.Errorf("the honeypot's own time is not kept beside the collector's: %q, stored %q", r.Metadata["observed_at"], r.Timestamp)
+	}
+	if r := rows[60]; r.SourceIP != "203.0.113.93" || r.Metadata["observed_at"] != "" {
+		t.Errorf("a timestamp field that is no time was kept: %q", r.Metadata["observed_at"])
 	}
 	if r := rows[57]; r.Command != "echo start" || r.Metadata["truncated"] != "input,message" ||
 		r.Metadata["input_chars"] != "60050" || r.Metadata["input_sha256"] != strings.Repeat("ab", 32) {

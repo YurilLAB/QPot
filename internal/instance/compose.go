@@ -2190,6 +2190,13 @@ transforms:
           }
         }
       }
+      # The time the honeypot gave the event, when its line carries one. The
+      # stored timestamp is when the collector read the line, so the events
+      # of a quick connection share it: this keeps their order.
+      own_time = to_string(.timestamp) ?? ""
+      if match(own_time, r'^[0-9]{4}-[0-9]{2}-[0-9]{2}[T ][0-9]{2}:[0-9]{2}:[0-9]{2}(\.[0-9]{1,9})?(Z|[+-][0-9]{2}:?[0-9]{2})?$') {
+        md.observed_at = own_time
+      }
       # QPot's cowrie logger cuts the values of a line that would be longer
       # than the collector reads, and names them (jsonlog.py): keep which
       # were cut, and the length and hash of the whole command.

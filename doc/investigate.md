@@ -121,7 +121,7 @@ there are any.
 | `unclassified` | Some events are not classified yet, so the session's techniques and evidence do not count them |
 | `shared-source` | The source address is Docker's, not the visitor's: the session is one honeypot connection |
 | `unknown-source` | The events have no usable source address and may come from many visitors |
-| `same-instant` | Events were stored with the same time as another. The collector stamps an event when it reads it, so the order inside such an instant was not recorded; the timeline shows those events in the usual course of a connection |
+| `same-instant` | Events were stored with the same time as another and without the honeypot's own time. The collector stamps an event when it reads it; since this version it also keeps the time the honeypot gave the event (`metadata.observed_at`), which orders the events of a quick connection. Events stored before, or by a honeypot that logs no time, are shown in the usual course of a connection inside such an instant |
 | `canary-not-matched` | Canary trips happened during such a session and cannot be matched to it |
 | `old-session` | The session was stored by a version that did not group events by source: it has no timeline |
 | `session-limit` | A campaign has more sessions than get a timeline (25) |

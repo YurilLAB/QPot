@@ -18,7 +18,9 @@ Vector collects every honeypot's JSON log and normalises it:
 
 Each honeypot's own field names are mapped as T-Pot's Logstash pipeline does.
 Vector then adds the attacker's country from the GeoIP database and writes the
-event to the instance's database. Lines without an attacker address (startup
+event to the instance's database. An event's `timestamp` is when the collector
+read its line; the time the honeypot itself gave it, when its log has one, is
+kept in `metadata.observed_at`. Lines without an attacker address (startup
 banners, errors) are dropped. Data is kept for 90 days.
 
 ## Databases

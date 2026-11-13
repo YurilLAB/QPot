@@ -156,7 +156,8 @@ func courseRank(e *database.Event) int {
 }
 
 // inOrder sorts a session's events for its timeline and returns how many of
-// them share their stored time with another.
+// them share their stored time with another and carry nothing that orders
+// them.
 //
 // The collector stamps an event when it reads the line, not when the
 // honeypot wrote it, so the events of a quick connection are often stored
@@ -182,8 +183,17 @@ func inOrder(events []*database.Event) (sameInstant int) {
 		}
 		return refs[a] < refs[b]
 	})
+	// Counted: events whose place beside a neighbour of the same stored time
+	// the honeypot's own time does not settle.
+	tied := func(a, b *database.Event) bool {
+		if !a.Timestamp.Equal(b.Timestamp) {
+			return false
+		}
+		x, y := a.Metadata["observed_at"], b.Metadata["observed_at"]
+		return x == "" || y == "" || x == y
+	}
 	for i, e := range events {
-		if (i > 0 && e.Timestamp.Equal(events[i-1].Timestamp)) || (i+1 < len(events) && e.Timestamp.Equal(events[i+1].Timestamp)) {
+		if (i > 0 && tied(e, events[i-1])) || (i+1 < len(events) && tied(e, events[i+1])) {
 			sameInstant++
 		}
 	}
@@ -253,7 +263,7 @@ func (b *builder) session(ctx context.Context, db Reader, s *database.TTPSession
 	sc.EventsRead = len(events)
 	if n := inOrder(events); n > 0 {
 		b.gap(Gap{Kind: GapSameInstant, SessionID: id, Count: n,
-			Detail: fmt.Sprintf("%d of these events were stored with the same time as another. The collector stamps an event when it reads it, so the order inside such an instant was not recorded: the timeline shows those events in the usual course of a connection.", n)})
+			Detail: fmt.Sprintf("%d of these events were stored with the same time as another and without the honeypot's own time. The collector stamps an event when it reads it, so the order inside such an instant was not recorded: the timeline shows those events in the usual course of a connection.", n)})
 	}
 	switch {
 	case more:

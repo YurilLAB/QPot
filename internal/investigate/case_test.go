@@ -401,8 +401,8 @@ func TestEventsOfOneInstantFollowTheCourseOfAConnection(t *testing.T) {
 	a.Metadata["observed_at"], b.Metadata["observed_at"] = "2026-11-14T10:00:02Z", "2026-11-14T10:00:01Z"
 	db := newDB(t, a, b)
 	c, err := SessionCaseFor(context.Background(), db, sessionOf(t, db, ip).SessionID, Options{})
-	if err != nil || c.Sessions[0].Timeline[0].Command != "first" {
-		t.Fatalf("observed_at does not order: %v", err)
+	if err != nil || c.Sessions[0].Timeline[0].Command != "first" || gapOf(c, GapSameInstant) != nil {
+		t.Fatalf("observed_at does not order: %v, gaps %+v", err, c.Gaps)
 	}
 }
 
