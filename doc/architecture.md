@@ -111,6 +111,14 @@ counting anything. And the log backups carry the ID, so `qpot db restore`
 can rebuild a lost database from them without storing anything twice.
 Two equal lines in one file start at different offsets and stay two events.
 
+A line can be at most 102,400 bytes: the collector discards a longer one
+whole. QPot's Cowrie logger stays under that by cutting the long values of
+a line, and names each with its full length and SHA-256 (the event carries
+`metadata.truncated`, `input_chars` and `input_sha256`). For any other
+honeypot the collector stores an event of type
+`<honeypot>.log.line_discarded` in the line's place, with the start of the
+line as its payload and the visitor's address when that start names it.
+
 **Database.** ClickHouse by default, or TimescaleDB. It sits on an internal
 Docker network that honeypots cannot reach, and is published on the host only
 on `127.0.0.1`. Events are kept for 90 days. The database and collector images

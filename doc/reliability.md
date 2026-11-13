@@ -17,6 +17,7 @@ measured, and where the promise ends.
 - [The 1.1.3 release run](#the-113-release-run)
 - [Upgrade and rollback rehearsal](#upgrade-and-rollback-rehearsal)
 - [Third round: a disk that fills at once, long HiFi outages, a large database](#third-round-a-disk-that-fills-at-once-long-hifi-outages-a-large-database)
+- [Fourth round: TimescaleDB end to end, and lines written to break what reads them](#fourth-round-timescaledb-end-to-end-and-lines-written-to-break-what-reads-them)
 - [Where the promise ends](#where-the-promise-ends)
 
 ## The failure soak
@@ -1177,6 +1178,129 @@ minutes of classifying what the last outages had left, then 213,000 copies
 in 23 minutes). Until then a list of events shows such a row twice;
 indicators and sessions count it once.
 
+## Fourth round: TimescaleDB end to end, and lines written to break what reads them
+
+2026-11-13, after 1.1.3. Both soaks run Cowrie on ClickHouse. This round
+went where they do not: an instance on TimescaleDB from the visitor to the
+dashboard, and log lines made to be refused by whatever reads them. Real
+Docker, the pinned images, one sensor.
+
+### TimescaleDB, end to end
+
+An instance with Cowrie on TimescaleDB, the worker at a one-minute interval.
+Every connection carried a serial number in its SSH version string.
+
+| Check | Result |
+|---|---|
+| 30 plain connections | 30 stored, none twice |
+| Database stopped for 33 s while 40 connections arrive | 40 stored, none twice |
+| Database killed while 40 connections arrive | 40 stored, none twice |
+| Collector killed while 60 connections arrive | 60 stored, none twice |
+| At the end: rows, distinct event IDs, unclassified | 986, 986, 0 |
+| Every read endpoint of the dashboard | answered |
+
+This is three faults once each, not a soak.
+
+### One NUL character cost a whole batch (TimescaleDB)
+
+The collector hands PostgreSQL a batch as one JSON value, and PostgreSQL
+refuses all of it when one value in it cannot be stored. A NUL character is
+such a value. Cowrie writes the bytes of a login as text (`\x00`), but a
+command as it was typed: a visitor who logged in and ran `echo a\0b` made
+Cowrie write the JSON escape of NUL, PostgreSQL answered "unsupported
+Unicode escape sequence", and the collector dropped the request:
+
+| | Before | After |
+|---|---|---|
+| Events in the batch with the command | 103 lost, among them all 30 connections other sources made in those 5 seconds | all stored |
+| The command itself | lost | stored, without the NUL |
+| The collector's mark in the log | moved past the lost lines | (nothing lost) |
+
+The lost events were still in the log backup, and `qpot db restore --merge`
+brings them back. Nothing else told the operator: the collector logged the
+error and went on.
+
+The same loss followed from a value an index entry cannot hold (an event
+name of 12,000 characters, which a honeypot that is no longer its own can
+write), and from any field the honeypot's own JSON carried beside the ones
+QPot stores, because the whole event went to the database. The step in
+front of PostgreSQL now hands over the stored columns and nothing else,
+each made storable: text without NUL, the indexed names bounded, the address
+an address or absent, the ports ports, metadata a flat map of strings. The
+payload column is bytes and keeps every byte.
+
+`TestTimescaleCollectorStoresHostileEventsLive` sends eleven such lines in
+one batch through the real collector into the pinned TimescaleDB with the
+production schema: eleven rows. With the old step: none. With only the NUL
+removal or only the name bound taken out: none. The test, and every other
+PostgreSQL test, now runs in CI against the image an instance runs
+(`timescaledb-integration`); before, CI ran only the worker's lease tests,
+on plain PostgreSQL.
+
+ClickHouse stores a NUL. Eleven hostile lines of the same kinds, appended to
+the log of a live Cowrie on ClickHouse, were all stored (among them a
+90,000-character command and a line whose own fields carry the names of
+QPot's columns with the wrong types).
+
+### One odd row broke every list of events (TimescaleDB)
+
+The metadata column is JSONB and takes any JSON. The collector stores a flat
+map of strings there, and the reads assumed nothing else could be in it: one
+row whose metadata held a number failed the scan of the whole page. On the
+live instance the dashboard's event lists answered "internal error", and the
+worker's batch query fails the same way at the same row on every pass. No
+line the collector writes produces such a row (and the step above now
+guarantees it), but one row from anywhere else stopped every read. A value
+that is not a string is now read as its JSON text
+(`TestPGReadsSurviveOddMetadata`, against the pinned image in CI).
+
+### A long line left no record (both databases)
+
+The collector discards, whole, a line longer than 102,400 bytes. Cowrie
+writes a command twice in one line (as `input` and in `message`), so a
+command of 51,000 characters is already too long:
+
+| A real Cowrie session runs one command of | Cowrie's line | Before | After |
+|---|---|---|---|
+| 20,000 characters | 40 kB | stored | stored |
+| 60,000 characters | 120 kB | the command in neither the database nor the log backup; the rest of the session stored | stored: the first 16,384 characters, with the length and SHA-256 of all of it |
+
+The command in the test began with a download (`wget http://...`) and went
+on with padding. Before, nothing an operator looks at showed the download.
+
+Two changes. QPot's Cowrie logger no longer writes a line the collector
+discards: a line that would be longer than 96 kB has its long values cut,
+and names each one with its full length and SHA-256; the event carries that
+as `metadata.truncated`, `input_chars` and `input_sha256`. And for every
+honeypot, the collector now stores an event when it discards a line:
+`<honeypot>.log.line_discarded`, with the start of the line (the first
+thousand bytes or so, which is what the collector reports) as its payload,
+and the visitor's address and session when that start names them. On the
+live instance a 200 kB line appended to Cowrie's log came out as that event,
+with the address and the session of the line.
+
+### The worker's batches on a large table (TimescaleDB)
+
+The third round measured ClickHouse at 25 million events; TimescaleDB had
+never been measured at any size. With 5 million events stored over 60 days
+and 600 new ones waiting, on the one CPU and one gigabyte the database gets,
+these are PostgreSQL's own execution times for what the worker runs for
+every batch of 500:
+
+| Statement | Before | After |
+|---|---|---|
+| The batch: the oldest unclassified rows | 1.4 to 3.4 s | 2 to 10 ms |
+| Removing second copies of the batch | 6.2 to 6.9 s | 73 to 89 ms |
+
+Before, the batch query sorted every chunk of the table to find the few
+rows it wanted, and the removal looked for the batch's rows by an ID that
+has no index. An index that holds only unclassified rows now answers the
+first, and the batch's own span of time bounds the second. Planning adds 60
+to 200 ms to each statement (61 chunks). The index is created at the first
+start with the new version, which took 4 seconds on those 5 million rows.
+Not measured: 25 million events,
+and a backlog of more than a few hundred rows.
+
 ## Where the promise ends
 
 - **Before the honeypot logs it.** A connection the honeypot never took, or
@@ -1201,6 +1325,15 @@ indicators and sessions count it once.
   Linux, and btrfs or ZFS (XFS was not measured); and what a Cowrie holds
   in memory when it is killed instead of stopped. See
   [disk-cleanup.md](disk-cleanup.md#a-disk-that-fills-at-once).
+- **A log line longer than 102,400 bytes.** The collector does not store
+  it. Cowrie under QPot no longer writes one: it cuts the long values of
+  such a line and records each one's full length and SHA-256. For any other
+  honeypot, and for the stock Cowrie arm of the comparison, the collector
+  stores a `<honeypot>.log.line_discarded` event with the first thousand
+  bytes or so of the line; the rest of the line is in the honeypot's own
+  log until cleanup empties it, and nowhere else. That event is the
+  collector's own report and is not read from a log: one that had not
+  reached the database when the collector was killed is not written again.
 - **A log line that reaches the disk in two pieces.** The collector gives
   such a line one identity when it reads it live and another when it reads
   the file again, and the event is then stored twice. Cowrie under QPot no
@@ -1252,9 +1385,10 @@ indicators and sessions count it once.
   marked, and intelligence no longer treats them as one visitor
   ([release.md](release.md) says which setups are affected).
 - **TimescaleDB.** Both soaks measure a ClickHouse instance. For
-  TimescaleDB the duplicate check, the removal of second copies and the
-  restore are covered by integration tests against a real server, not by a
-  soak.
+  TimescaleDB the duplicate check, the removal of second copies, the
+  restore and the collector's delivery of hostile lines are covered by
+  integration tests against the pinned image in CI, and three faults were
+  run once each on a live instance (fourth round). It has not been soaked.
 - **Deception against real attackers.** Nothing on this page says whether
   QPot's Cowrie holds real visitors longer than the stock image. The
   controlled comparison that would is described in

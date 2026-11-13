@@ -60,7 +60,7 @@ marked events as "source addresses" (QP-NET-015).
 | `database.type` | Status | Notes |
 |---|---|---|
 | `clickhouse` (default) | **CI**, and the soak | Image pinned by digest. |
-| `timescaledb` | **CI**, and **by hand** 2026-11-12 | Schema, ingest view and worker lease are tested against the pinned image. Storing a repeated batch once, removing a line read twice, and restoring from backups were run by hand on a real hypertable. The soak has not been run on it. |
+| `timescaledb` | **CI**, and **by hand** 2026-11-13 | The database tests and the collector's delivery of hostile log lines run against the pinned image in CI (`timescaledb-integration`). A database stop, a database kill and a collector kill were run by hand on a live instance, and every dashboard read endpoint was called ([reliability.md](reliability.md#fourth-round-timescaledb-end-to-end-and-lines-written-to-break-what-reads-them)). The soak has not been run on it. |
 | `elasticsearch` | **Legacy** | A client for an existing cluster. QPot does not run one, and the collector does not write to it. |
 
 ### Honeypots

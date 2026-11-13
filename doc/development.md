@@ -63,6 +63,19 @@ Readiness checks poll listeners/bootstrap only. Each full protocol assertion
 script runs once per startup/restart/recreation, so a failed assertion is not
 hidden by repeating the whole script until it passes.
 
+The TimescaleDB checks need the pinned database image on a loopback port and
+the collector image; `scripts/ci-local.sh --only timescaledb-integration`
+starts both and runs what CI runs: every PostgreSQL test of the database
+package, and hostile log lines through the real collector into the production
+schema. By hand, against a server of your own:
+
+```bash
+QPOT_TEST_POSTGRES=1 QPOT_TEST_TIMESCALE=1 QPOT_TEST_PG_PORT=15433 \
+    go test -race -p 1 -count=1 ./internal/database ./internal/instance -run '^(TestPG|TestTimescale)'
+```
+
+The tests drop and recreate the `events` table of the database they are given.
+
 Ordinary unit runs skip this opt-in test. A requested run fails if Docker or the
 image is unavailable. `scripts/ci-local.sh --only conpot-integration` runs the
 same image pull and tests as CI. These checks validate isolated protocol
