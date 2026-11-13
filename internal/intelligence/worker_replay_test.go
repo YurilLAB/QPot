@@ -301,24 +301,28 @@ func TestWorkerDoesNotSweepDuringABatch(t *testing.T) {
 	}
 }
 
-// A worker that keeps up looks ahead for copies only every sweepIdleEvery
-// (its next batch reads every unclassified row anyway); one that is behind
-// every sweepEvery; one that is finding copies before every batch.
+// A worker that keeps up does not look ahead for copies (its last batch read
+// every unclassified row, and its sweeps were what the dashboard waited
+// for); one that is behind looks every sweepEvery; one that is finding
+// copies before every batch.
 func TestWorkerSweepCadence(t *testing.T) {
 	w := newTestWorker(t, &fakeDB{})
-	w.lastSweep = time.Now().Add(-sweepEvery - time.Second)
 	if w.sweepDue() {
-		t.Error("a worker that keeps up swept again after sweepEvery")
+		t.Error("a worker that has not run a batch swept")
 	}
-	w.behind = true
+	w.lastSweep = time.Now().Add(-24 * time.Hour)
+	if w.sweepDue() {
+		t.Error("a worker that keeps up swept")
+	}
+	w.behind, w.lastSweep = true, time.Now().Add(-sweepEvery+5*time.Second)
+	if w.sweepDue() {
+		t.Error("a worker that is behind swept again before sweepEvery")
+	}
+	w.lastSweep = time.Now().Add(-sweepEvery - time.Second)
 	if !w.sweepDue() {
 		t.Error("a worker that is behind did not sweep after sweepEvery")
 	}
-	w.behind, w.lastSweep = false, time.Now().Add(-sweepIdleEvery-time.Second)
-	if !w.sweepDue() {
-		t.Error("a worker that keeps up did not sweep after sweepIdleEvery")
-	}
-	w.lastSweep, w.sweeping = time.Now(), true
+	w.behind, w.lastSweep, w.sweeping = false, time.Now(), true
 	if !w.sweepDue() {
 		t.Error("a worker finding copies did not sweep before its next batch")
 	}

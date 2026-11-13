@@ -73,3 +73,56 @@ func TestWorkerDrainStopsWhenTaggingFails(t *testing.T) {
 		t.Fatalf("fetched %d batches although tagging failed, want 1", db.fetches)
 	}
 }
+
+// stopDB's read waits until the worker is stopped and then fails with the
+// cancellation, as a query does when the control plane stops; with canceled
+// set it fails that way at once, while the worker runs.
+type stopDB struct {
+	fakeDB
+	reading  chan struct{}
+	canceled bool
+}
+
+func (d *stopDB) GetUnclassifiedEvents(ctx context.Context, _ int) ([]*database.Event, error) {
+	if d.canceled {
+		return nil, context.Canceled
+	}
+	select {
+	case d.reading <- struct{}{}:
+	default:
+	}
+	<-ctx.Done()
+	return nil, ctx.Err()
+}
+
+// TestWorkerStoppedMidStepHasNoError: a step cut short because the worker is
+// being stopped is no fault. It was recorded as one, so a worker stopped at
+// the wrong moment was reported as stopped with an error it never had. The
+// same failure while the worker runs is still reported.
+func TestWorkerStoppedMidStepHasNoError(t *testing.T) {
+	db := &stopDB{reading: make(chan struct{}, 1)}
+	w := NewWorker(newTestClassifierT(t), db, time.Millisecond, 10)
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { defer close(done); w.Run(ctx) }()
+	select {
+	case <-db.reading:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the worker never read")
+	}
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("Run did not return")
+	}
+	if state, err := w.Status(); state != "stopped" || err != nil {
+		t.Fatalf("a worker stopped in the middle of a read: state %q, error %v; want stopped and no error", state, err)
+	}
+
+	running := NewWorker(newTestClassifierT(t), &stopDB{canceled: true}, time.Millisecond, 10)
+	running.runOnce(context.Background())
+	if _, err := running.Status(); err == nil {
+		t.Fatal("a read that failed while the worker runs was not reported")
+	}
+}

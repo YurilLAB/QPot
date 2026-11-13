@@ -33,6 +33,8 @@ type ClickHouse struct {
 	// applyPatchesWhenDue).
 	appliedMu sync.Mutex
 	applied   time.Time
+	// patchWarned is when a failing APPLY PATCHES was last reported.
+	patchWarned time.Time
 }
 
 // NewClickHouse creates a new ClickHouse database instance
@@ -1124,6 +1126,23 @@ func (ch *ClickHouse) enablePatchUpdates(ctx context.Context) {
 		ch.patchUpdates = false
 		return
 	}
+	// A server that takes the settings and not the statements would fail
+	// every batch from then on: ask it once, with statements that name no
+	// row.
+	probes := []struct {
+		query    string
+		settings clickhouse.Settings
+	}{
+		{"UPDATE events SET classified = classified WHERE 0", clickhouse.Settings{}},
+		{"DELETE FROM events WHERE 0", clickhouse.Settings{"lightweight_delete_mode": "lightweight_update"}},
+	}
+	for _, probe := range probes {
+		if err := ch.conn.Exec(clickhouse.Context(ctx, clickhouse.WithSettings(probe.settings)), probe.query); err != nil {
+			slog.Warn("The database server takes no lightweight updates; events are marked classified with mutations, which is slower", "error", err)
+			ch.patchUpdates = false
+			return
+		}
+	}
 	ch.patchUpdates = true
 }
 
@@ -1252,6 +1271,9 @@ var (
 	patchApplyEvery        = 30 * time.Second
 )
 
+// patchFailureEvery is how often a failing APPLY PATCHES is reported.
+const patchFailureEvery = 10 * time.Minute
+
 // applyPatchesWhenDue starts ALTER TABLE events APPLY PATCHES when the
 // patches hold at least patchApplyRows rows, none is being applied, and the
 // last start is patchApplyEvery ago. It does not wait for it, and a failure
@@ -1266,12 +1288,21 @@ func (ch *ClickHouse) applyPatchesWhenDue(ctx context.Context) {
 		return
 	}
 	var rows, running uint64
+	var failing string
 	if err := ch.conn.QueryRow(ctx, `SELECT
 			(SELECT sum(rows) FROM system.parts WHERE database = currentDatabase() AND table = 'events' AND active AND startsWith(name, 'patch-')),
-			(SELECT count() FROM system.mutations WHERE database = currentDatabase() AND table = 'events' AND NOT is_done AND command LIKE '%APPLY PATCHES%')`,
-	).Scan(&rows, &running); err != nil {
+			(SELECT count() FROM system.mutations WHERE database = currentDatabase() AND table = 'events' AND NOT is_done AND command LIKE '%APPLY PATCHES%'),
+			(SELECT max(latest_fail_reason) FROM system.mutations WHERE database = currentDatabase() AND table = 'events' AND NOT is_done AND command LIKE '%APPLY PATCHES%')`,
+	).Scan(&rows, &running, &failing); err != nil {
 		slog.Warn("Could not look at the events table's patches", "error", err)
 		return
+	}
+	if running > 0 && failing != "" && time.Since(ch.patchWarned) >= patchFailureEvery {
+		// One that cannot finish keeps the next from starting: the patches
+		// stay, and every read of the events table applies more of them.
+		ch.patchWarned = time.Now()
+		slog.Warn("Writing the events table's patches into its parts is failing; reads of events get slower until it succeeds",
+			"patched_rows", rows, "reason", failing)
 	}
 	if rows < patchApplyRows || running > 0 {
 		return

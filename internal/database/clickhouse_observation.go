@@ -624,6 +624,45 @@ func (ch *ClickHouse) knownClassified(ctx context.Context, ids []string) (map[st
 	return found, nil
 }
 
+// forgetClassifiedIDs takes the IDs of events out of the set of classified
+// IDs. The events are about to be restored: they have no row in the events
+// table, so if the set still knows them (the table lost rows the worker had
+// classified: a part detached after a crash, a partition dropped, rows
+// deleted by hand) the restored rows would look like second copies, and the
+// worker would delete the only copy there is. Forgotten, they are new events:
+// the worker classifies them again. It is done before the rows are stored, so
+// a restore that stops in between leaves IDs the set does not know, which
+// costs nothing, and never a row the set wrongly knows.
+//
+// A restore into an empty database finds none of its IDs in the set and
+// deletes nothing.
+func (ch *ClickHouse) forgetClassifiedIDs(ctx context.Context, events []*Event) error {
+	ids := observationIDs(events)
+	if len(ids) == 0 {
+		return nil
+	}
+	known, err := ch.knownClassified(ctx, ids)
+	if err != nil {
+		return err
+	}
+	var forget []string
+	for _, id := range ids {
+		if known[id] {
+			forget = append(forget, id)
+		}
+	}
+	// The statement waits until every later read of the set leaves the
+	// rows out.
+	sctx := clickhouse.Context(ctx, clickhouse.WithSettings(clickhouse.Settings{"lightweight_deletes_sync": 2}))
+	for start := 0; start < len(forget); start += observationChunk {
+		if err := ch.conn.Exec(sctx, "DELETE FROM "+classifiedIDsTable+" WHERE event_id IN (SELECT toUUID(arrayJoin(?)))",
+			forget[start:min(start+observationChunk, len(forget))]); err != nil {
+			return fmt.Errorf("forget the classification of restored events: %w", err)
+		}
+	}
+	return nil
+}
+
 // CountEvents implements EventRestorer.
 func (ch *ClickHouse) CountEvents(ctx context.Context) (int64, error) {
 	if ch.conn == nil {
@@ -688,6 +727,10 @@ func (ch *ClickHouse) restoreEvents(ctx context.Context, events []*Event, dryRun
 	}
 	if dryRun || len(missing) == 0 {
 		return len(missing), nil
+	}
+	// Before the rows are stored, never after: see forgetClassifiedIDs.
+	if err := ch.forgetClassifiedIDs(ctx, missing); err != nil {
+		return 0, err
 	}
 	batch, err := ch.conn.PrepareBatch(ctx, `INSERT INTO events (timestamp, honeypot, source_ip, source_port,
 		dest_port, protocol, event_type, username, password, command, payload, metadata, country, city, asn, event_id)`)

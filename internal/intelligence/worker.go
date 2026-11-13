@@ -52,7 +52,10 @@ type Worker struct {
 	running       bool
 	started       bool
 	ready         bool
-	replays       atomic.Uint64
+	// stopping is the context Run was given: once it is done the worker is
+	// being stopped (set under errorMu before Run does anything else).
+	stopping context.Context
+	replays  atomic.Uint64
 	// sweeping is set while second copies are being found (by a sweep or
 	// in a batch): the next sweep is due before the next batch. lastSweep
 	// is when one ran; behind says the last batch was full.
@@ -77,12 +80,14 @@ const (
 	maxBatchesPerTick      = 200
 	// sweepEvery is how often the worker looks for second copies of
 	// classified events when it has found none lately and has more to
-	// classify than one batch; sweepIdleEvery when it is keeping up (then
-	// its own next batch reads every unclassified row anyway). A sweep
-	// reads the unclassified rows of the events table, which at 25 million
-	// rows costs about a second of the database's one CPU.
-	sweepEvery     = 30 * time.Second
-	sweepIdleEvery = 2 * time.Minute
+	// classify than one batch. A worker that keeps up does not look ahead
+	// at all: its batch has just read every unclassified row, and a row
+	// that is a copy went there. A sweep reads the unclassified rows of the
+	// events table and asks the set of classified IDs about them, which at
+	// 25 million rows is one to two seconds of the database's one CPU;
+	// done every two minutes by a worker with nothing to find, it was what
+	// the dashboard's slowest calls waited for.
+	sweepEvery = 30 * time.Second
 	// canaryOwnershipEvery is how long the canary scan of a batch goes on
 	// without confirming the lease again (the lease lasts 30 seconds).
 	canaryOwnershipEvery = time.Second
@@ -146,6 +151,13 @@ func (w *Worker) report(code, stage string, err error) {
 	if lost != nil {
 		code, err = CodeLeaseLost, hostsetup.E(CodeLeaseLost).Wrap(lost)
 	}
+	if lost == nil && errors.Is(err, context.Canceled) && w.beingStopped() {
+		// The step was cut short because the worker is being stopped: that
+		// is no fault, and what it left is picked up by the next start. It
+		// was recorded as one, and a stopped worker then showed an error it
+		// never had.
+		return
+	}
 	var coded *hostsetup.Error
 	var encoding *database.IntelligenceEncodingError
 	if errors.As(err, &encoding) {
@@ -159,6 +171,14 @@ func (w *Worker) report(code, stage string, err error) {
 	w.lastError = coded
 	w.errorMu.Unlock()
 	slog.Warn("Intelligence worker paused", "code", coded.Code, "stage", stage, "remedy", coded.Remedy())
+}
+
+// beingStopped says whether the context Run was given is done.
+func (w *Worker) beingStopped() bool {
+	w.errorMu.RLock()
+	ctx := w.stopping
+	w.errorMu.RUnlock()
+	return ctx != nil && ctx.Err() != nil
 }
 
 func (w *Worker) clearError() {
@@ -197,7 +217,7 @@ func (w *Worker) Run(ctx context.Context) {
 		w.errorMu.Unlock()
 		return
 	}
-	w.started, w.running = true, true
+	w.started, w.running, w.stopping = true, true, ctx
 	w.errorMu.Unlock()
 	defer func() {
 		w.errorMu.Lock()
@@ -295,13 +315,10 @@ func (w *Worker) sweep(ctx context.Context) int {
 // sweepDue says whether a sweep should run before the next batch: while
 // copies are being found, one runs before every batch, so removing them and
 // classifying new events take turns; otherwise every sweepEvery while the
-// worker is behind and every sweepIdleEvery while it keeps up.
+// worker is behind, and never while it keeps up (its last batch read every
+// unclassified row there was).
 func (w *Worker) sweepDue() bool {
-	every := sweepIdleEvery
-	if w.behind {
-		every = sweepEvery
-	}
-	return w.sweeping || time.Since(w.lastSweep) >= every
+	return w.sweeping || (w.behind && time.Since(w.lastSweep) >= sweepEvery)
 }
 
 // shutdown makes one bounded attempt to complete the durable pending record.

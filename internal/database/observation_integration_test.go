@@ -531,3 +531,97 @@ func TestPGHypertableStoresARetriedBatchOnce(t *testing.T) {
 		t.Fatalf("the hypertable holds %d rows, want 2", n)
 	}
 }
+
+// TestClickHouseRestoredRowsAreNotSecondCopies: the events table lost rows
+// the worker had classified (a part detached after a crash, a partition
+// dropped), the set of classified IDs still knows them, and a restore brings
+// the rows back. They are the only copies there are: neither the sweep nor
+// the worker's own check may delete them, and the worker classifies them
+// again.
+func TestClickHouseRestoredRowsAreNotSecondCopies(t *testing.T) {
+	db := connectCH(t)
+	ch := db.(*ClickHouse)
+	ctx := context.Background()
+	savedWindow, savedProbe := sweepWindow, sweepProbe
+	sweepWindow, sweepProbe = 3, 3
+	t.Cleanup(func() { sweepWindow, sweepProbe = savedWindow, savedProbe })
+	marker := fmt.Sprintf("lost-%d", time.Now().UnixNano())
+	at := time.Date(2026, 11, 12, 9, 0, 0, 0, time.UTC)
+	ev := func(n int) *Event {
+		return &Event{ID: obsID(fmt.Sprint(marker, n)), Timestamp: at.Add(time.Duration(n) * time.Second), Honeypot: "cowrie",
+			SourceIP: "198.51.100.93", DestPort: 22, Protocol: "ssh", EventType: marker, Command: fmt.Sprint("cmd-", n)}
+	}
+	count := func(where string) uint64 {
+		t.Helper()
+		var n uint64
+		if err := ch.conn.QueryRow(ctx, `SELECT count() FROM events WHERE event_type = ? AND `+where, marker).Scan(&n); err != nil {
+			t.Fatal(err)
+		}
+		return n
+	}
+	known := func() int {
+		t.Helper()
+		got, err := ch.knownClassified(ctx, []string{ev(1).ID, ev(2).ID, ev(3).ID})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return len(got)
+	}
+	tag := func(events ...*Event) {
+		t.Helper()
+		for _, e := range events {
+			e.TechniqueID, e.Classified = "T1110", true
+		}
+		if err := db.(BatchTagger).TagEvents(ctx, events); err != nil {
+			t.Fatal(err)
+		}
+	}
+	r := db.(EventRestorer)
+	if n, err := r.RestoreEvents(ctx, []*Event{ev(1), ev(2), ev(3)}, false); err != nil || n != 3 {
+		t.Fatalf("first restore stored %d, %v; want 3", n, err)
+	}
+	// The worker classifies 1 and 2; the set knows them.
+	tag(ev(1), ev(2))
+	if count("classified = 1") != 2 || known() != 2 {
+		t.Fatalf("after tagging: %d classified rows, %d IDs in the set; want 2 and 2", count("classified = 1"), known())
+	}
+	// The table loses both rows; the set does not.
+	if err := ch.conn.Exec(ctx, `ALTER TABLE events DELETE WHERE event_type = ? AND classified = 1 SETTINGS mutations_sync = 2`, marker); err != nil {
+		t.Fatal(err)
+	}
+	if count("1") != 1 || known() != 2 {
+		t.Fatalf("after the loss: %d rows, %d IDs in the set; want 1 and 2", count("1"), known())
+	}
+	// A dry run changes nothing, the set included.
+	if n, err := r.RestoreEvents(ctx, []*Event{ev(1), ev(2), ev(3)}, true); err != nil || n != 2 || known() != 2 {
+		t.Fatalf("dry run: would store %d (%v), set knows %d; want 2, 2", n, err, known())
+	}
+	if n, err := r.RestoreEvents(ctx, []*Event{ev(1), ev(2), ev(3)}, false); err != nil || n != 2 {
+		t.Fatalf("restore after the loss stored %d, %v; want 2", n, err)
+	}
+	if known() != 0 {
+		t.Fatalf("the set still knows %d of the restored IDs: their rows would be deleted as second copies", known())
+	}
+	// Every round of the sweep over the shared table, then the worker's own
+	// check of what it reads.
+	var unclassifiedRows uint64
+	if err := ch.conn.QueryRow(ctx, `SELECT count() FROM events WHERE classified = 0`).Scan(&unclassifiedRows); err != nil {
+		t.Fatal(err)
+	}
+	for i := uint64(0); i < 4*(unclassifiedRows/uint64(sweepWindow)+2); i++ {
+		if _, err := db.(ReplaySweeper).SweepReplayedEvents(ctx); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if kept, removed, err := db.(ReplayRemover).RemoveReplayedEvents(ctx, []*Event{ev(1), ev(2), ev(3)}); err != nil || removed != 0 || len(kept) != 3 {
+		t.Fatalf("RemoveReplayedEvents kept %d, removed %d, %v; want 3, 0", len(kept), removed, err)
+	}
+	if count("1") != 3 || count("classified = 0") != 3 {
+		t.Fatalf("restored rows left: %d (%d unclassified); want 3 and 3", count("1"), count("classified = 0"))
+	}
+	// Classified again, each is one row the set knows.
+	tag(ev(1), ev(2), ev(3))
+	if count("1") != 3 || count("classified = 1") != 3 || known() != 3 {
+		t.Fatalf("after classifying the restored rows: %d rows, %d classified, %d in the set; want 3, 3, 3", count("1"), count("classified = 1"), known())
+	}
+}

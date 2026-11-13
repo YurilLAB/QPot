@@ -210,10 +210,14 @@ extra row:
 
 - It looks through the unclassified rows a window at a time for IDs it has
   already classified and deletes those rows, wherever they are in time:
-  every 2 minutes while it keeps up, every 30 seconds while it has more than
-  one batch to classify, and before each batch once it is finding copies
-  (in a sweep or in a batch). New events and second copies take turns:
-  never two such sweeps without a batch of classification between them.
+  every 30 seconds while it has more than one batch to classify, and before
+  each batch once it is finding copies (in a sweep or in a batch). New
+  events and second copies take turns: never two such sweeps without a
+  batch of classification between them. A worker that keeps up does not
+  look ahead: its batch reads every unclassified row there is, copies
+  included, so the first copies of a collector that lost its place are
+  found in the worker's next pass (`worker_interval`, 5 minutes by
+  default).
 - When it reads a batch, a row whose ID is already classified, or that
   repeats an earlier row of the batch with a later time, is deleted before
   anything is counted.
@@ -221,6 +225,13 @@ extra row:
   either was classified) cannot be told apart by any column. Both are
   tagged, and then the extra one is deleted by where it is stored, so one
   row stays.
+
+A row is a second copy only while the first is there. `qpot db restore`
+stores events the events table no longer has, and where the table lost rows
+the worker had classified (a part the server set aside after a crash, a
+dropped partition) it takes their IDs out of the set of classified IDs
+first: the restored rows are then new events, classified again, and not
+copies to delete (`TestClickHouseRestoredRowsAreNotSecondCopies`).
 
 The sweep and the last rule are ClickHouse's. On TimescaleDB every row has
 its own serial number, so rows with the same ID and time are told apart by
