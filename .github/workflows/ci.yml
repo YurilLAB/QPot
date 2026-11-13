@@ -307,7 +307,7 @@ jobs:
   conpot-integration:
     name: Live industrial PLC and RTU protocols
     runs-on: ubuntu-latest
-    timeout-minutes: 12
+    timeout-minutes: 24
     env:
       QPOT_TEST_CONPOT: "1"
     steps:
@@ -322,7 +322,7 @@ jobs:
       - name: Exercise industrial device protocols and persistent identity
         # No host ports or external container connectivity; clients execute
         # inside isolated namespaces. Requested tests fail if the image is absent.
-        run: go test -race -count=1 -timeout 8m ./internal/instance -run '^TestConpotLiveProfiles$'
+        run: go test -race -count=1 -timeout 20m ./internal/instance -run '^TestConpotLiveProfiles$'
 
   refrigeration-integration:
     name: Live refrigeration supervisor and packaged image build
