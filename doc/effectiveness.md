@@ -570,8 +570,8 @@ address has one port 22.
 
 ### Before the run
 
-Write down, before any traffic arrives, which rows decide the result. This
-page suggests three:
+Write down, before any traffic arrives, which rows decide the result, and
+how many sessions each arm needs. This page suggests three rows:
 
 1. "Ran a command" in the funnel: the share of sessions that became
    interactive.
@@ -580,6 +580,30 @@ page suggests three:
 
 Everything else is context. A row picked after looking at the table is not
 a result.
+
+How many sessions are enough depends on how often visitors already do the
+thing on the control arm and on how small a difference should be found. The
+comparison tests up to nine rows and corrects for that (Holm), so the
+smallest p value must be under 0.05 / 9. For a share such as "Ran a
+command", the usual normal approximation for two proportions at that level,
+with an 80% chance of finding a difference that is really there, gives
+these sessions per arm (a calculation, not a measurement):
+
+| Share on the control arm | Difference to find | Sessions per arm |
+|---|---|---|
+| 5% | 2 points | 3,678 |
+| 5% | 5 points | 719 |
+| 10% | 2 points | 6,389 |
+| 10% | 5 points | 1,137 |
+| 20% | 5 points | 1,816 |
+| 20% | 10 points | 483 |
+| 40% | 5 points | 2,548 |
+
+Read the control arm's share after the first week, pick the row, and keep
+both arms running for the four weeks or until both have that many
+sessions, whichever is later. The shared-source table needs sources that
+reached both arms, and only a run can say how many there are; the report
+says "too few to compare" where a row has fewer than 30 sessions on a side.
 
 ### Setting up each arm
 
@@ -598,6 +622,18 @@ cleanup:
   max_age_days: 60
   max_backup_mb: 20000
 ```
+
+On both hosts, the same persona (any ID that `qpot honeypot set` lists for
+`persona`; `ubuntu-noble` here):
+
+```bash
+qpot honeypot set cowrie persona=ubuntu-noble -i arm
+```
+
+Without it each instance draws its own persona from its seed, and the two
+arms would present different machines (another OpenSSH release, another
+distribution, other files): a difference that has nothing to do with QPot's
+layer.
 
 On the control host only:
 
@@ -657,12 +693,56 @@ more. To compare with one, run it on a third address and pass its
 ## Results of the last recorded run
 
 **The controlled experiment has not been run.** It needs two public
-addresses exposed for four weeks. Everything it needs is in place and has
-been checked on scripted traffic: the control arm (`deception=stock`), the
-transfer of one arm's events to the other host (`qpot db restore`), the
-exposure check, the tests and the shared-source table. There are no
-attacker numbers on this page yet, and nothing here says how well the
-deception works.
+addresses exposed for four weeks. There are no attacker numbers on this
+page yet, and nothing here says how well the deception works.
+
+### The procedure, checked in a lab (2026-11-13)
+
+The setup above was followed on one Linux host (Docker 26.1.5), with both
+arms bound to that host only and ordinary SSH sessions as the only traffic,
+to check that an operator can carry it out and that the report works:
+
+- **Two arms.** `qpot instance create`, every honeypot but Cowrie disabled,
+  `persona=ubuntu-noble` on both and `deception=stock` on the control,
+  `qpot up -d`, `qpot doctor`: all checks passed on both.
+- **They differ only in QPot's layer.** With the instance name, the
+  credentials, the ports, the network names and the addresses masked, the
+  two generated compose files differ in 22 lines, all of them in the
+  treatment's Cowrie service: the 21 read-only mounts of QPot's corrected
+  source files and the bait plan. The collector configurations are the
+  same. The running containers have the same image digest, the same
+  environment, the same read-only root, capabilities, memory, PID and CPU limits and
+  runtime. The control's `etc` folder lacks the treatment's
+  `qpot-jsonlog.spill`, which belongs to QPot's log writer.
+- **Traffic.** 40 sessions to each arm at the same time, each logging in as
+  root, running `echo hello N`, `ls`, `uname -a` and `exit` in a shell. The
+  image lets a source log in only after two to five different passwords;
+  instead of trying passwords, the lab put the one password into the
+  image's login cache of both arms beforehand, so every session logged in
+  at its first try (40 of 40 on each arm). Earlier attempts of the lab's
+  own script are in the same window, the same on both arms: 240 refused
+  password logins and 40 key logins its SSH client could not complete.
+- **Report.** `qpot engagement -i treatment --against control --honeypot
+  cowrie --since 1d`: 320 sessions and 1,920 events on each side, the
+  exposure check passed, every row equal or within 0.3 s, and every tested
+  row "no clear difference" (adjusted p 1.000). Returning sources and the
+  shared-source table were reported as meaningless, rightly: all sessions
+  came from one address, Docker's gateway.
+- **Transfer.** The control was stopped, its `backup/logs` packed with
+  `tar` (as the instance's user; `sudo` was not needed there), unpacked,
+  and restored into a third instance with every honeypot disabled:
+  `qpot db restore` stored 1,920 events, 0 unreadable. The comparison
+  against that instance gave the same table as against the running control.
+
+`TestCompareHarmlessTraffic` checks the other half on synthetic sessions of
+the same shape: the same visitors doing the same thing on both arms give no
+clear difference, and the same visitors running one command instead of
+three on one arm give a clear one. `TestCompareVerdicts` and
+`TestCompareIdenticalArms` cover the rest of the tests.
+
+What the lab did not check: anything about real visitors, the shared-source
+table with real public addresses, and a run of four weeks (backup sizes and
+the database over that time).
 
 What has been recorded is a check of the tool itself against traffic whose
 answers are known.

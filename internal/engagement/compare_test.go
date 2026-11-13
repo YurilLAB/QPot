@@ -945,3 +945,64 @@ func FuzzCompare(f *testing.F) {
 		}
 	})
 }
+
+// harmlessArm is the traffic the controlled experiment's procedure was
+// checked with in the lab, as one arm records it: sessions from a few
+// sources that each log in, run the given commands and leave. The session
+// ids, the times and the lengths are the arm's own (seeded), as on two real
+// sensors.
+func harmlessArm(prefix string, seed int64, sessions int, commands []string) []Event {
+	rng := rand.New(rand.NewSource(seed))
+	var events []Event
+	for i := 0; i < sessions; i++ {
+		src := fmt.Sprintf("198.51.100.%d", 1+i%20)
+		sid := fmt.Sprint(prefix, i)
+		start := float64(i*90) + rng.Float64()*20
+		events = append(events, at(start, src, sid, "cowrie.session.connect"),
+			login(start+1+rng.Float64(), src, sid, "root", "labtest"))
+		t := start + 2
+		for _, line := range commands {
+			t += 0.5 + rng.Float64()
+			events = append(events, cmd(t, src, sid, line))
+		}
+		closed := at(t+1, src, sid, "cowrie.session.closed")
+		closed.ReportedDuration = time.Duration((t + 1 - start) * float64(time.Second))
+		events = append(events, closed)
+	}
+	return events
+}
+
+// TestCompareHarmlessTraffic: the same visitors doing the same thing on both
+// arms give no clear difference on any row, although every session id, time
+// and length differs; when the visitors do less on one arm, the comparison
+// says so. (This is what the lab run of doc/effectiveness.md's procedure
+// relies on: it found no difference for identical traffic, which only means
+// something if a difference would have been found.)
+func TestCompareHarmlessTraffic(t *testing.T) {
+	same := []string{"echo hello", "ls", "uname -a"}
+	a := compute(t, Options{}, harmlessArm("t", 1, 120, same)...)
+	b := compute(t, Options{}, harmlessArm("c", 2, 120, same)...)
+	c := Compare(*a, *b)
+	if !c.Exposure.Comparable {
+		t.Fatalf("the same visitors on both arms are not comparable: %+v", c.Exposure)
+	}
+	for _, d := range c.Deltas {
+		if d.Verdict == VerdictClear {
+			t.Errorf("%s: a clear difference between arms that saw the same traffic: %+v", d.Key, d)
+		}
+	}
+	for _, m := range c.Paired.Measures {
+		if m.Verdict == VerdictClear {
+			t.Errorf("shared sources, %s: a clear difference between arms that saw the same traffic", m.Key)
+		}
+	}
+
+	// The same visitors, who give up after one command on the second arm.
+	less := compute(t, Options{}, harmlessArm("c", 2, 120, []string{"uname -a"})...)
+	c = Compare(*a, *less)
+	for _, key := range []string{"depth_median", "distinct_per_session_median"} {
+		if d := deltaOf(t, c, key); d.Verdict != VerdictClear || d.Difference >= 0 {
+			t.Errorf("%s: %q (difference %v) when the second arm's visitors ran one command instead of three", key, d.Verdict, d.Difference)
+		}
+	}
+}
