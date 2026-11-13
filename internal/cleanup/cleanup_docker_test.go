@@ -299,12 +299,15 @@ chmod 0640 "$h/logs/dionaea.json" "$h/logs/other.json"
 	if err != nil || len(res.Kept) != 1 || res.Kept[0] != "dionaea.json" {
 		t.Fatalf("after the helper: kept %v, denied %v, failed %v, %v; want dionaea.json kept", res.Kept, res.Denied, res.Failed, err)
 	}
-	if content, err := os.ReadFile(log); err != nil || string(content) != "{\"e\":1}\n" {
-		t.Errorf("the log's content changed: %q, %v", content, err)
-	}
+	// QPot may write the log now and still not read it; what it holds is
+	// read as its owner would.
+	asContainerRoot(t, data, `[ "$(cat /w/honeypots/dionaea/logs/dionaea.json)" = '{"e":1}' ]`)
 	info, err := os.Stat(log)
 	if err != nil {
 		t.Fatal(err)
+	}
+	if info.Size() != int64(len("{\"e\":1}\n")) {
+		t.Errorf("the log's size changed: %d bytes", info.Size())
 	}
 	if st, ok := info.Sys().(*syscall.Stat_t); !ok || st.Blocks*512 < diskguard.LogRoom {
 		t.Errorf("the log holds %d bytes of blocks, want its room of %d", st.Blocks*512, diskguard.LogRoom)

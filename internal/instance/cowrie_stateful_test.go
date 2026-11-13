@@ -256,7 +256,7 @@ func TestCowrieStatefulPublicKey(t *testing.T) {
 	}
 	answers := func(patched bool) map[string]string {
 		t.Helper()
-		name := cowrieStatefulService(t, "cowrie_pubkey_client.go", patched)
+		name := cowrieStatefulService(t, "pubkey/cowrie_pubkey_client.go", patched)
 		out, err := conpotLiveDocker(time.Minute, "exec", name, "/qpot-stateful-test/ssh-client")
 		var got map[string]string
 		if err != nil || json.Unmarshal([]byte(strings.TrimSpace(out)), &got) != nil {
