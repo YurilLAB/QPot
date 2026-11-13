@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"sort"
 	"strconv"
 	"sync"
 	"time"
@@ -212,9 +213,8 @@ func (ch *ClickHouse) storedObservations(ctx context.Context, ids []string, clas
 // RemoveReplayedEvents implements ReplayRemover. A row is deleted only when
 // it is unclassified and matches a second copy's ID and time exactly, so the
 // copy that stays is never touched. It is a lightweight delete: the rows are
-// masked at once (the statement waits for that), so the next read of
-// unclassified events no longer returns them, and no part is rewritten for a
-// batch of a few hundred rows.
+// masked at once, so the next read of unclassified events no longer returns
+// them, and no part is rewritten for a batch of a few hundred rows.
 func (ch *ClickHouse) RemoveReplayedEvents(ctx context.Context, events []*Event) ([]*Event, int, error) {
 	if ch.conn == nil {
 		return nil, 0, fmt.Errorf("not connected")
@@ -231,33 +231,397 @@ func (ch *ClickHouse) RemoveReplayedEvents(ctx context.Context, events []*Event)
 	if len(plan.remove) == 0 {
 		return plan.keep, 0, nil
 	}
-	sctx := clickhouse.Context(ctx, clickhouse.WithSettings(clickhouse.Settings{"lightweight_deletes_sync": 2}))
+	sctx := clickhouse.Context(ctx, clickhouse.WithSettings(ch.deleteSettings()))
 	for start := 0; start < len(plan.remove); start += tagChunk {
 		chunk := plan.remove[start:min(start+tagChunk, len(plan.remove))]
 		rowIDs := make([]string, len(chunk))
 		keys := make([]string, len(chunk))
-		lo, hi := chunk[0].Timestamp, chunk[0].Timestamp
 		for i, e := range chunk {
 			rowIDs[i] = e.ID
-			keys[i] = e.ID + "@" + strconv.FormatInt(e.Timestamp.UnixMilli(), 10)
-			if e.Timestamp.Before(lo) {
-				lo = e.Timestamp
-			}
-			if e.Timestamp.After(hi) {
-				hi = e.Timestamp
-			}
+			keys[i] = observationKey(e)
 		}
+		lo, hi := timeBounds(chunk)
 		if err := ch.conn.Exec(sctx, `
 			DELETE FROM events
 			WHERE classified = 0
 			  AND toString(event_id) IN ?
-			  AND has(?, concat(toString(event_id), '@', toString(toUnixTimestamp64Milli(timestamp))))
+			  AND has(?, `+observationKeyExpr+`)
 			  AND timestamp >= fromUnixTimestamp64Milli(?) AND timestamp <= fromUnixTimestamp64Milli(?)
 		`, rowIDs, keys, lo.UnixMilli(), hi.UnixMilli()); err != nil {
 			return nil, 0, fmt.Errorf("remove replayed events: %w", err)
 		}
 	}
 	return plan.keep, len(plan.remove), nil
+}
+
+// placedRow is one stored row of an observation, and where it is: the part
+// that holds it and its offset in that part. Two rows with the same ID and
+// time are told apart by that alone.
+type placedRow struct {
+	Key        string // ID@milliseconds
+	Classified bool
+	Part       string
+	Offset     uint64
+}
+
+// place is how a row's place is written in a statement's bound list.
+func (r placedRow) place() string { return r.Part + ":" + strconv.FormatUint(r.Offset, 10) }
+
+const placeExpr = "concat(toString(_part), ':', toString(_part_offset))"
+
+// planOneRowPerObservation returns the places of the rows to delete so that
+// each key keeps exactly one row, a classified one: the first classified row
+// in (part, offset) order stays, and every other row of the key goes,
+// classified or not. A key without a classified row is left as it is, so the
+// last copy of an observation is never named.
+func planOneRowPerObservation(rows []placedRow) []string {
+	byKey := make(map[string][]placedRow)
+	var keys []string
+	for _, r := range rows {
+		if _, ok := byKey[r.Key]; !ok {
+			keys = append(keys, r.Key)
+		}
+		byKey[r.Key] = append(byKey[r.Key], r)
+	}
+	var del []string
+	for _, k := range keys {
+		group := byKey[k]
+		sort.Slice(group, func(i, j int) bool {
+			if group[i].Part != group[j].Part {
+				return group[i].Part < group[j].Part
+			}
+			return group[i].Offset < group[j].Offset
+		})
+		keep := -1
+		for i, r := range group {
+			if r.Classified {
+				keep = i
+				break
+			}
+		}
+		if keep < 0 {
+			continue
+		}
+		for i, r := range group {
+			if i != keep && r.place() != group[keep].place() {
+				del = append(del, r.place())
+			}
+		}
+	}
+	return del
+}
+
+// oneRowAttempts is how often keepOneRowPerObservation looks again after a
+// delete. A merge between the look and the delete renames the parts, and
+// the delete then names no row; the next look sees the new names.
+const oneRowAttempts = 4
+
+// keepOneRowPerObservation leaves one row for each of events (just tagged):
+// a line the collector read twice before either copy was classified is two
+// rows with the same ID and time, and tagging marks both. They cannot be told
+// apart by any column, so the extra one is deleted by its place. Doing it
+// again, or after a crash, deletes nothing more: the classified row that
+// stays is never named.
+func (ch *ClickHouse) keepOneRowPerObservation(ctx context.Context, events []*Event) error {
+	var observed []*Event
+	for _, e := range events {
+		if IsObservationID(e.ID) {
+			observed = append(observed, e)
+		}
+	}
+	if len(observed) == 0 {
+		return nil
+	}
+	sctx := clickhouse.Context(ctx, clickhouse.WithSettings(ch.deleteSettings()))
+	for attempt := 1; ; attempt++ {
+		var places []string
+		var lo, hi time.Time
+		for _, chunk := range tagChunks(observed) {
+			rows, err := ch.placedRows(ctx, chunk)
+			if err != nil {
+				return err
+			}
+			if del := planOneRowPerObservation(rows); len(del) > 0 {
+				clo, chi := timeBounds(chunk)
+				if len(places) == 0 || clo.Before(lo) {
+					lo = clo
+				}
+				if len(places) == 0 || chi.After(hi) {
+					hi = chi
+				}
+				places = append(places, del...)
+			}
+		}
+		if len(places) == 0 {
+			return nil
+		}
+		if attempt == oneRowAttempts {
+			return fmt.Errorf("keep one row per observation: %d rows still stored twice after %d attempts", len(places), attempt-1)
+		}
+		for start := 0; start < len(places); start += observationChunk {
+			if err := ch.conn.Exec(sctx, `
+				DELETE FROM events
+				WHERE has(?, `+placeExpr+`)
+				  AND timestamp >= fromUnixTimestamp64Milli(?) AND timestamp <= fromUnixTimestamp64Milli(?)
+			`, places[start:min(start+observationChunk, len(places))], lo.UnixMilli(), hi.UnixMilli()); err != nil {
+				return fmt.Errorf("keep one row per observation: %w", err)
+			}
+		}
+	}
+}
+
+// placedRows returns every stored row of the observations in events (by ID
+// and time) whose key has more than one row.
+func (ch *ClickHouse) placedRows(ctx context.Context, events []*Event) ([]placedRow, error) {
+	ids := make([]string, len(events))
+	keys := make([]string, len(events))
+	for i, e := range events {
+		ids[i], keys[i] = e.ID, observationKey(e)
+	}
+	lo, hi := timeBounds(events)
+	rows, err := ch.conn.Query(ctx, `
+		SELECT k, groupArray(classified), groupArray(p), groupArray(o)
+		FROM (
+			SELECT `+observationKeyExpr+` AS k, classified, toString(_part) AS p, _part_offset AS o
+			FROM events
+			WHERE toString(event_id) IN ?
+			  AND has(?, `+observationKeyExpr+`)
+			  AND timestamp >= fromUnixTimestamp64Milli(?) AND timestamp <= fromUnixTimestamp64Milli(?)
+		)
+		GROUP BY k
+		HAVING count() > 1
+	`, ids, keys, lo.UnixMilli(), hi.UnixMilli())
+	if err != nil {
+		return nil, fmt.Errorf("look up rows stored twice: %w", err)
+	}
+	defer rows.Close()
+	var out []placedRow
+	for rows.Next() {
+		var k string
+		var classified []uint8
+		var parts []string
+		var offsets []uint64
+		if err := rows.Scan(&k, &classified, &parts, &offsets); err != nil {
+			return nil, fmt.Errorf("look up rows stored twice: %w", err)
+		}
+		for i := range parts {
+			out = append(out, placedRow{Key: k, Classified: i < len(classified) && classified[i] != 0, Part: parts[i], Offset: offsets[i]})
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("look up rows stored twice: %w", err)
+	}
+	return out, nil
+}
+
+// The sweep for second copies.
+//
+// When the collector loses its place it sends every log again, and each line
+// arrives as a new unclassified row with the ID it already had. The worker
+// removes such a row when it reads it (RemoveReplayedEvents), and it reads
+// unclassified rows oldest first: a copy waited behind everything older that
+// was still to classify (213,000 copies took 47 minutes to go in the third
+// soak round). SweepReplayedEvents finds them by ID instead, wherever they
+// are: it walks the unclassified rows in time order, a window at a time,
+// asks the set of classified IDs which of them are known, and deletes those
+// rows. Any unclassified row whose ID is in the set is a second copy: an ID
+// enters the set only after a classified row for it exists.
+//
+// Asking the set costs about a granule of it per ID and part (measured in
+// the database benchmark at 25 million IDs: 0.5 to 0.7 s per 1000 IDs), so a
+// sweep that found nothing last time looks at a small window: a collector
+// that lost its place sends its whole log again, and such copies are in any
+// window. Once it finds some, it looks at large ones.
+var (
+	// sweepWindow is the window after a sweep that found copies.
+	sweepWindow = 5000
+	// sweepProbe is the window after a sweep that found none.
+	sweepProbe = 500
+)
+
+// sweepDeleteChunk is how many IDs one DELETE names; the rows are taken in
+// time order, so its time bounds stay narrow.
+const sweepDeleteChunk = 1000
+
+// sweepCursor is the time after which the next sweep window starts, and
+// whether the last sweep found copies.
+type sweepCursor struct {
+	mu      sync.Mutex
+	started bool
+	millis  int64
+	found   bool
+}
+
+// sweepRow is one unclassified row the sweep looked at.
+type sweepRow struct {
+	ID     string
+	Millis int64
+}
+
+// planSweepDeletes takes the rows of a window whose ID is known classified
+// and cuts them into DELETE statements of at most size IDs each, in time
+// order, with each statement's time bounds.
+func planSweepDeletes(rows []sweepRow, size int) []sweepDelete {
+	if size < 1 {
+		size = 1
+	}
+	sorted := append([]sweepRow(nil), rows...)
+	sort.Slice(sorted, func(i, j int) bool {
+		if sorted[i].Millis != sorted[j].Millis {
+			return sorted[i].Millis < sorted[j].Millis
+		}
+		return sorted[i].ID < sorted[j].ID
+	})
+	var out []sweepDelete
+	for start := 0; start < len(sorted); {
+		end := start
+		d := sweepDelete{Lo: sorted[start].Millis, Hi: sorted[start].Millis}
+		seen := make(map[string]bool)
+		for end < len(sorted) && (len(d.IDs) < size || seen[sorted[end].ID]) {
+			r := sorted[end]
+			if !seen[r.ID] {
+				seen[r.ID] = true
+				d.IDs = append(d.IDs, r.ID)
+			}
+			d.Hi = r.Millis
+			end++
+		}
+		out = append(out, d)
+		start = end
+	}
+	return out
+}
+
+// sweepDelete is one DELETE of the sweep.
+type sweepDelete struct {
+	IDs    []string
+	Lo, Hi int64
+}
+
+// SweepReplayedEvents implements ReplaySweeper.
+func (ch *ClickHouse) SweepReplayedEvents(ctx context.Context) (int, error) {
+	if ch.conn == nil {
+		return 0, fmt.Errorf("not connected")
+	}
+	ch.sweep.mu.Lock()
+	defer ch.sweep.mu.Unlock()
+	size := sweepProbe
+	if ch.sweep.found {
+		size = sweepWindow
+	}
+	window, err := ch.sweepWindowRows(ctx, ch.sweep.started, ch.sweep.millis, size)
+	if err != nil {
+		return 0, err
+	}
+	ch.sweep.found = false
+	if len(window) < size {
+		// The end of the unclassified rows: the next sweep starts again.
+		ch.sweep.started, ch.sweep.millis = false, 0
+	} else {
+		// The next window starts again at the last row's time, so rows of
+		// that time that did not fit are looked at; only a window that is
+		// all of one time goes past it.
+		last := window[len(window)-1].Millis
+		ch.sweep.started, ch.sweep.millis = true, last-1
+		if window[0].Millis == last {
+			ch.sweep.millis = last
+		}
+	}
+	var ids []string
+	seen := make(map[string]bool)
+	for _, r := range window {
+		if IsObservationID(r.ID) && !seen[r.ID] {
+			seen[r.ID] = true
+			ids = append(ids, r.ID)
+		}
+	}
+	if len(ids) == 0 {
+		return 0, nil
+	}
+	known, err := ch.knownClassified(ctx, ids)
+	if err != nil {
+		return 0, err
+	}
+	var copies []sweepRow
+	for _, r := range window {
+		if known[r.ID] {
+			copies = append(copies, r)
+		}
+	}
+	if len(copies) == 0 {
+		return 0, nil
+	}
+	ch.sweep.found = true
+	sctx := clickhouse.Context(ctx, clickhouse.WithSettings(ch.deleteSettings()))
+	for _, d := range planSweepDeletes(copies, sweepDeleteChunk) {
+		if err := ch.conn.Exec(sctx, `
+			DELETE FROM events
+			WHERE classified = 0
+			  AND toString(event_id) IN ?
+			  AND timestamp >= fromUnixTimestamp64Milli(?) AND timestamp <= fromUnixTimestamp64Milli(?)
+		`, d.IDs, d.Lo, d.Hi); err != nil {
+			return 0, fmt.Errorf("remove replayed events: %w", err)
+		}
+	}
+	return len(copies), nil
+}
+
+// sweepWindowRows returns up to size unclassified rows, oldest first, that
+// are later than millis (all of them when not after). Ordered by time alone,
+// the read follows the table's order and stops at the window's end.
+func (ch *ClickHouse) sweepWindowRows(ctx context.Context, after bool, millis int64, size int) ([]sweepRow, error) {
+	query := `SELECT toString(event_id), toUnixTimestamp64Milli(timestamp) FROM events WHERE classified = 0`
+	var args []any
+	if after {
+		query += ` AND timestamp > fromUnixTimestamp64Milli(?)`
+		args = append(args, millis)
+	}
+	query += fmt.Sprintf(` ORDER BY timestamp LIMIT %d`, size)
+	rows, err := ch.conn.Query(ctx, query, args...)
+	if err != nil {
+		return nil, fmt.Errorf("look for replayed events: %w", err)
+	}
+	defer rows.Close()
+	var out []sweepRow
+	for rows.Next() {
+		var r sweepRow
+		if err := rows.Scan(&r.ID, &r.Millis); err != nil {
+			return nil, fmt.Errorf("look for replayed events: %w", err)
+		}
+		out = append(out, r)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("look for replayed events: %w", err)
+	}
+	return out, nil
+}
+
+// knownClassified returns which of ids are in the set of classified IDs.
+// Unlike storedObservations it never reads the events table: a set still
+// being filled after an upgrade knows fewer IDs, and every ID it knows is
+// classified.
+func (ch *ClickHouse) knownClassified(ctx context.Context, ids []string) (map[string]bool, error) {
+	found := make(map[string]bool)
+	for start := 0; start < len(ids); start += observationChunk {
+		rows, err := ch.conn.Query(ctx, "SELECT DISTINCT toString(event_id) FROM "+classifiedIDsTable+" WHERE event_id IN (SELECT toUUID(arrayJoin(?)))", ids[start:min(start+observationChunk, len(ids))])
+		if err != nil {
+			return nil, fmt.Errorf("look up classified observations: %w", err)
+		}
+		for rows.Next() {
+			var id string
+			if err := rows.Scan(&id); err != nil {
+				rows.Close()
+				return nil, fmt.Errorf("look up classified observations: %w", err)
+			}
+			found[id] = true
+		}
+		err = rows.Err()
+		rows.Close()
+		if err != nil {
+			return nil, fmt.Errorf("look up classified observations: %w", err)
+		}
+	}
+	return found, nil
 }
 
 // CountEvents implements EventRestorer.

@@ -533,7 +533,7 @@ func TestIntelligenceClickHouseExactReadsBoundQuotedKeys(t *testing.T) {
 			t.Fatal("exact identity read silently paginates")
 		}
 		args := conn.args[i]
-		if len(args)%3 != 0 || strings.Count(q, "(type = ? AND value = ? AND honeypot = ?)") != len(args)/3 {
+		if len(args)%3 != 0 || strings.Count(q, "(?, ?, ?)") != len(args)/3 || !strings.Contains(q, "WHERE (type, value, honeypot) IN ((?, ?, ?)") {
 			t.Fatal("identity predicates do not cover every key")
 		}
 		for n := 0; n < len(args); n += 3 {

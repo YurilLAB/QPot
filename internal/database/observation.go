@@ -79,6 +79,16 @@ type ReplayRemover interface {
 	RemoveReplayedEvents(ctx context.Context, events []*Event) (kept []*Event, removed int, err error)
 }
 
+// ReplaySweeper is implemented by the stores that can find second copies of
+// classified observations without reading unclassified events in order.
+type ReplaySweeper interface {
+	// SweepReplayedEvents looks at the next window of unclassified rows and
+	// deletes those that are a second copy of an observation already
+	// classified. It returns how many rows it deleted. Successive calls go
+	// round all unclassified rows. It never deletes the only copy.
+	SweepReplayedEvents(ctx context.Context) (removed int, err error)
+}
+
 // EventRestorer is implemented by the stores that can take back events from
 // the collector's log backups.
 type EventRestorer interface {

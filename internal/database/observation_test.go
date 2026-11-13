@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -138,6 +139,156 @@ func FuzzPlanReplays(f *testing.F) {
 		for _, e := range events {
 			if IsObservationID(e.ID) && !classified[e.ID] && kept[e.ID] != 1 {
 				t.Fatalf("observation %s lost every copy", e.ID)
+			}
+		}
+	})
+}
+
+// Two rows of one observation with the same time cannot be told apart by any
+// column; the plan names every row but one classified row, by its place.
+func TestPlanOneRowPerObservation(t *testing.T) {
+	rows := []placedRow{
+		// a: twins, both tagged. The first in (part, offset) order stays.
+		{Key: "a", Classified: true, Part: "p2", Offset: 0},
+		{Key: "a", Classified: true, Part: "p1", Offset: 7},
+		// b: tagged, and an unclassified copy that came after.
+		{Key: "b", Classified: false, Part: "p1", Offset: 1},
+		{Key: "b", Classified: true, Part: "p3", Offset: 4},
+		// c: no classified row (the tag never landed): nothing goes.
+		{Key: "c", Classified: false, Part: "p1", Offset: 2},
+		{Key: "c", Classified: false, Part: "p2", Offset: 2},
+		// d: one row.
+		{Key: "d", Classified: true, Part: "p1", Offset: 3},
+		// e: three rows, the same place read twice is one row.
+		{Key: "e", Classified: true, Part: "p4", Offset: 1},
+		{Key: "e", Classified: true, Part: "p4", Offset: 1},
+		{Key: "e", Classified: true, Part: "p4", Offset: 2},
+	}
+	got := strings.Join(planOneRowPerObservation(rows), " ")
+	if want := "p2:0 p1:1 p4:2"; got != want {
+		t.Errorf("rows to delete: %s\nwant:          %s", got, want)
+	}
+}
+
+// FuzzPlanOneRowPerObservation: whatever the rows, a key with a classified
+// row keeps exactly one (a classified one), a key without one keeps all its
+// rows, and nothing is named that was not given.
+func FuzzPlanOneRowPerObservation(f *testing.F) {
+	f.Add([]byte{0, 1, 0, 1, 1, 0, 2, 2, 1})
+	f.Add([]byte{3, 3, 3, 3, 3, 3})
+	f.Fuzz(func(t *testing.T, data []byte) {
+		if len(data) > 600 {
+			data = data[:600]
+		}
+		var rows []placedRow
+		for i := 0; i+2 < len(data); i += 3 {
+			// A real place holds one row, so places differ between keys.
+			key := fmt.Sprint(data[i] % 5)
+			rows = append(rows, placedRow{Key: key, Classified: data[i+1]%2 == 1,
+				Part: fmt.Sprintf("k%s-p%d", key, data[i+2]%3), Offset: uint64(data[i+2] / 3 % 4)})
+		}
+		del := map[string]bool{}
+		for _, p := range planOneRowPerObservation(rows) {
+			del[p] = true
+		}
+		places := map[string]map[string]bool{} // key -> places
+		classifiedLeft := map[string]map[string]bool{}
+		hasClassified := map[string]bool{}
+		given := map[string]bool{}
+		for _, r := range rows {
+			given[r.place()] = true
+			if places[r.Key] == nil {
+				places[r.Key], classifiedLeft[r.Key] = map[string]bool{}, map[string]bool{}
+			}
+			places[r.Key][r.place()] = true
+			if r.Classified {
+				hasClassified[r.Key] = true
+			}
+		}
+		for p := range del {
+			if !given[p] {
+				t.Fatalf("a place that holds none of the rows is named: %s", p)
+			}
+		}
+		for _, r := range rows {
+			if !del[r.place()] && r.Classified {
+				classifiedLeft[r.Key][r.place()] = true
+			}
+		}
+		for k, ps := range places {
+			left := 0
+			for p := range ps {
+				if !del[p] {
+					left++
+				}
+			}
+			switch {
+			case !hasClassified[k] && left != len(ps):
+				t.Fatalf("key %s has no classified row and lost %d of %d rows", k, len(ps)-left, len(ps))
+			case hasClassified[k] && left != 1:
+				t.Fatalf("key %s keeps %d rows, want 1", k, left)
+			case hasClassified[k] && len(classifiedLeft[k]) == 0:
+				t.Fatalf("key %s keeps no classified row", k)
+			}
+		}
+	})
+}
+
+// The sweep deletes in time order, naming each ID once per statement, with
+// bounds that hold every row named.
+func TestPlanSweepDeletes(t *testing.T) {
+	rows := []sweepRow{{"c", 30}, {"a", 10}, {"b", 20}, {"a", 40}, {"d", 20}, {"e", 50}}
+	var got []string
+	for _, d := range planSweepDeletes(rows, 2) {
+		got = append(got, fmt.Sprintf("%v %d-%d", d.IDs, d.Lo, d.Hi))
+	}
+	if want := "[a b] 10-20; [d c] 20-30; [a e] 40-50"; strings.Join(got, "; ") != want {
+		t.Errorf("deletes: %s\nwant:    %s", strings.Join(got, "; "), want)
+	}
+}
+
+// FuzzPlanSweepDeletes: every row is covered by a statement that names its ID
+// and whose bounds hold its time, no statement names more than size IDs
+// (unless one ID has several rows in a row), and no ID is named that was not
+// given.
+func FuzzPlanSweepDeletes(f *testing.F) {
+	f.Add([]byte{1, 2, 3, 1, 2, 3, 4, 4}, uint8(2))
+	f.Add([]byte{9, 9, 9, 9}, uint8(0))
+	f.Fuzz(func(t *testing.T, data []byte, size uint8) {
+		if len(data) > 400 {
+			data = data[:400]
+		}
+		var rows []sweepRow
+		given := map[string]bool{}
+		for i := 0; i+1 < len(data); i += 2 {
+			r := sweepRow{ID: fmt.Sprint(data[i] % 16), Millis: int64(data[i+1])}
+			rows = append(rows, r)
+			given[r.ID] = true
+		}
+		plan := planSweepDeletes(rows, int(size))
+		limit := max(int(size), 1)
+		for _, r := range rows {
+			covered := false
+			for _, d := range plan {
+				if d.Lo <= r.Millis && r.Millis <= d.Hi && slices.Contains(d.IDs, r.ID) {
+					covered = true
+				}
+			}
+			if !covered {
+				t.Fatalf("row %v is in no statement", r)
+			}
+		}
+		for _, d := range plan {
+			if len(d.IDs) == 0 || d.Lo > d.Hi {
+				t.Fatalf("empty or inverted statement %+v", d)
+			}
+			if len(d.IDs) > limit {
+				t.Fatalf("statement names %d IDs, limit %d", len(d.IDs), limit)
+			}
+			for _, id := range d.IDs {
+				if !given[id] {
+					t.Fatalf("ID %s was not given", id)
+				}
 			}
 		}
 	})

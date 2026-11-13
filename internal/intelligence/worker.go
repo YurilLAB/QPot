@@ -53,6 +53,12 @@ type Worker struct {
 	started       bool
 	ready         bool
 	replays       atomic.Uint64
+	// sweeping is set while second copies are being found (by a sweep or
+	// in a batch): the next sweep is due before the next batch. lastSweep
+	// is when one ran; behind says the last batch was full.
+	sweeping  bool
+	lastSweep time.Time
+	behind    bool
 }
 
 // ReplaysRemoved returns how many event rows this worker has deleted because
@@ -69,6 +75,17 @@ const (
 	defaultWorkerBatchSize = 500
 	shutdownTimeout        = 10 * time.Second
 	maxBatchesPerTick      = 200
+	// sweepEvery is how often the worker looks for second copies of
+	// classified events when it has found none lately and has more to
+	// classify than one batch; sweepIdleEvery when it is keeping up (then
+	// its own next batch reads every unclassified row anyway). A sweep
+	// reads the unclassified rows of the events table, which at 25 million
+	// rows costs about a second of the database's one CPU.
+	sweepEvery     = 30 * time.Second
+	sweepIdleEvery = 2 * time.Minute
+	// canaryOwnershipEvery is how long the canary scan of a batch goes on
+	// without confirming the lease again (the lease lasts 30 seconds).
+	canaryOwnershipEvery = time.Second
 )
 
 // Stable runtime codes share the CLI's explainable error catalog.
@@ -212,6 +229,14 @@ func (w *Worker) Run(ctx context.Context) {
 	w.errorMu.Unlock()
 	ticker := time.NewTicker(w.interval)
 	defer ticker.Stop()
+	// Only a store that can look for second copies ahead of the order gets
+	// a sweep between passes.
+	var sweepTick <-chan time.Time
+	if _, ok := w.db.(database.ReplaySweeper); ok {
+		sweepTicker := time.NewTicker(sweepEvery)
+		defer sweepTicker.Stop()
+		sweepTick = sweepTicker.C
+	}
 	w.drain(runCtx)
 	for {
 		select {
@@ -222,8 +247,61 @@ func (w *Worker) Run(ctx context.Context) {
 			return
 		case <-ticker.C:
 			w.drain(runCtx)
+		case <-sweepTick:
+			// Second copies found between two passes are removed now,
+			// and the pass that removes the rest starts at once.
+			if w.sweepDue() && w.sweep(runCtx) > 0 {
+				w.drain(runCtx)
+			}
 		}
 	}
+}
+
+// sweep removes a window's worth of rows that are second copies of
+// classified events, wherever they are in time (database.ReplaySweeper),
+// and returns how many. It runs only between batches, never while a batch
+// is half recorded. A failure is logged and changes nothing else: the
+// copies are still removed when the worker reads them in order.
+func (w *Worker) sweep(ctx context.Context) int {
+	sweeper, ok := w.db.(database.ReplaySweeper)
+	if !ok || !w.initialized || w.pending != nil || ctx.Err() != nil {
+		return 0
+	}
+	w.lastSweep = time.Now()
+	w.sweeping = false
+	owned, release, err := w.ownedContext(ctx)
+	if err != nil {
+		w.report(CodeOwnership, "replayed events ownership", err)
+		return 0
+	}
+	defer release()
+	if err := w.checkDatabaseOwnership(owned); err != nil {
+		w.report(CodeOwnership, "replayed events ownership", err)
+		return 0
+	}
+	removed, err := sweeper.SweepReplayedEvents(owned)
+	if err != nil {
+		slog.Warn("Looking for events the collector read a second time failed; they are removed when the worker reaches them", "error", err)
+		return 0
+	}
+	if removed > 0 {
+		w.sweeping = true
+		w.replays.Add(uint64(removed))
+		slog.Info("Removed events the collector read a second time", "rows", removed)
+	}
+	return removed
+}
+
+// sweepDue says whether a sweep should run before the next batch: while
+// copies are being found, one runs before every batch, so removing them and
+// classifying new events take turns; otherwise every sweepEvery while the
+// worker is behind and every sweepIdleEvery while it keeps up.
+func (w *Worker) sweepDue() bool {
+	every := sweepIdleEvery
+	if w.behind {
+		every = sweepEvery
+	}
+	return w.sweeping || time.Since(w.lastSweep) >= every
 }
 
 // shutdown makes one bounded attempt to complete the durable pending record.
@@ -242,8 +320,12 @@ func (w *Worker) shutdown() {
 func (w *Worker) drain(ctx context.Context) {
 	defer w.flush(ctx)
 	for i := 0; i < maxBatchesPerTick && ctx.Err() == nil; i++ {
+		if w.sweepDue() {
+			w.sweep(ctx)
+		}
 		n, complete := w.runBatch(ctx)
-		if n < w.batchSize || !complete {
+		w.behind = complete && n >= w.batchSize
+		if !complete || (n < w.batchSize && !w.sweeping) {
 			return
 		}
 	}
@@ -356,10 +438,17 @@ func (w *Worker) replay(ctx context.Context) (int, bool) {
 		// skipped so a recorded trip can never re-trip.
 		if !w.canaryScanned {
 			if w.canary != nil {
+				// Ownership is confirmed before the scan and again whenever
+				// canaryOwnershipEvery has passed, not before every event: a
+				// database round trip per event was a fifth of a batch's time.
+				var checked time.Time
 				for _, event := range cp.Events {
 					if event.Honeypot != "canary" {
-						if err := w.checkDatabaseOwnership(ctx); err != nil {
-							return fail("canary ownership", err)
+						if time.Since(checked) >= canaryOwnershipEvery {
+							if err := w.checkDatabaseOwnership(ctx); err != nil {
+								return fail("canary ownership", err)
+							}
+							checked = time.Now()
 						}
 						w.canary.MatchEvent(ctx, event)
 					}
@@ -449,6 +538,9 @@ func (w *Worker) runBatch(ctx context.Context) (int, bool) {
 		}
 		if removed > 0 {
 			w.replays.Add(uint64(removed))
+			// More copies may lie further on: look for them ahead of the
+			// order from the next batch on.
+			w.sweeping = true
 			slog.Info("Removed events the collector read a second time", "rows", removed)
 		}
 		if events = kept; len(events) == 0 {

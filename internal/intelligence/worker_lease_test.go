@@ -609,3 +609,88 @@ func TestWorkerRuntimeWithoutDatabaseOwnershipStopsBeforeCheckpointRead(t *testi
 		t.Fatalf("uncoordinated runtime status=%q", status)
 	}
 }
+
+// sweepLeasedDB counts sweeps of a leased store.
+type sweepLeasedDB struct {
+	*leasedWorkerDB
+	sweeps atomic.Int64
+}
+
+func (d *sweepLeasedDB) SweepReplayedEvents(context.Context) (int, error) {
+	d.sweeps.Add(1)
+	return 0, nil
+}
+
+// A worker that lost its lease deletes nothing: the sweep stands down with
+// the rest of it.
+func TestWorkerSweepNeedsTheLease(t *testing.T) {
+	lockTestConfig(t)
+	authority := newWorkerLeaseAuthority(0)
+	leased := authority.client("sweep-owner")
+	db := &sweepLeasedDB{leasedWorkerDB: leased}
+	base := recoveryWorker(t, leased.recoveryDB)
+	w := NewWorker(base.classifier, db, time.Hour, 100)
+	release := ownTestWorker(t, w)
+	defer release()
+	w.runOnce(t.Context())
+	w.sweep(t.Context())
+	if db.sweeps.Load() != 1 {
+		t.Fatalf("an owner swept %d times, want 1", db.sweeps.Load())
+	}
+	authority.mu.Lock()
+	authority.owner = "someone-else"
+	authority.mu.Unlock()
+	w.sweep(t.Context())
+	if db.sweeps.Load() != 1 {
+		t.Fatal("a worker without its lease swept for second copies")
+	}
+	var coded *hostsetup.Error
+	if !errors.As(w.LastError(), &coded) || coded.Code != CodeLeaseLost {
+		t.Fatalf("lease loss not reported: %v", w.LastError())
+	}
+}
+
+// validationCountDB counts lease confirmations.
+type validationCountDB struct {
+	*leasedWorkerDB
+	validations atomic.Int64
+}
+
+// TagEvents tags a batch in one call, as the SQL stores do.
+func (d *validationCountDB) TagEvents(ctx context.Context, events []*database.Event) error {
+	for _, e := range events {
+		if err := d.leasedWorkerDB.TagEvent(ctx, e); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (d *validationCountDB) ValidateIntelligenceLease(ctx context.Context, lease database.IntelligenceLease) error {
+	d.validations.Add(1)
+	return d.leasedWorkerDB.ValidateIntelligenceLease(ctx, lease)
+}
+
+// The canary scan confirms the lease once per batch (and again only after
+// canaryOwnershipEvery), not once per event: a round trip per event was a
+// fifth of a batch's time.
+func TestWorkerCanaryScanConfirmsTheLeasePerBatch(t *testing.T) {
+	lockTestConfig(t)
+	authority := newWorkerLeaseAuthority(100)
+	leased := authority.client("canary-owner")
+	db := &validationCountDB{leasedWorkerDB: leased}
+	base := recoveryWorker(t, leased.recoveryDB)
+	w := NewWorker(base.classifier, db, time.Hour, 100).WithCanaryMatcher(leased.recoveryDB)
+	release := ownTestWorker(t, w)
+	defer release()
+	before := db.validations.Load()
+	if n := w.runOnce(t.Context()); n != 100 {
+		t.Fatalf("runOnce classified %d events, want 100", n)
+	}
+	if leased.recoveryDB.canaryCalls != 100 {
+		t.Fatalf("canary matcher saw %d events, want 100", leased.recoveryDB.canaryCalls)
+	}
+	if got := db.validations.Load() - before; got > 30 {
+		t.Errorf("one batch of 100 events confirmed the lease %d times", got)
+	}
+}

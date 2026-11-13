@@ -132,6 +132,172 @@ func TestClickHouseRemovesReplayedEvents(t *testing.T) {
 	}
 }
 
+// chMarkerRows returns helpers for a test's own rows in the shared events
+// table: send stores rows, row writes one, unclassified reads the test's
+// unclassified rows oldest first, and commands lists the test's rows that
+// match where.
+func chMarkerRows(t *testing.T, ch *ClickHouse, marker string) (send func(values ...string), row func(at, command, eventID string) string,
+	unclassified func() []*Event, commands func(where string) string) {
+	ctx := context.Background()
+	send = func(values ...string) {
+		t.Helper()
+		if err := ch.conn.Exec(ctx, `INSERT INTO events (timestamp, honeypot, source_ip, event_type, command, event_id) VALUES `+strings.Join(values, ", ")); err != nil {
+			t.Fatal(err)
+		}
+	}
+	row = func(at, command, eventID string) string {
+		return fmt.Sprintf("('2026-11-12 10:00:%s', 'cowrie', '198.51.100.92', '%s', '%s', '%s')", at, marker, command, eventID)
+	}
+	unclassified = func() []*Event {
+		t.Helper()
+		rows, err := ch.conn.Query(ctx, `SELECT timestamp, command, toString(event_id) FROM events WHERE event_type = ? AND classified = 0 ORDER BY timestamp ASC, command ASC`, marker)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer rows.Close()
+		var out []*Event
+		for rows.Next() {
+			e := &Event{Honeypot: "cowrie", EventType: marker}
+			if err := rows.Scan(&e.Timestamp, &e.Command, &e.ID); err != nil {
+				t.Fatal(err)
+			}
+			out = append(out, e)
+		}
+		return out
+	}
+	commands = func(where string) string {
+		t.Helper()
+		rows, err := ch.conn.Query(ctx, `SELECT command FROM events WHERE event_type = ? AND `+where+` ORDER BY timestamp ASC, command ASC`, marker)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer rows.Close()
+		var out []string
+		for rows.Next() {
+			var c string
+			if err := rows.Scan(&c); err != nil {
+				t.Fatal(err)
+			}
+			out = append(out, c)
+		}
+		return strings.Join(out, " ")
+	}
+	return send, row, unclassified, commands
+}
+
+// TestClickHouseTaggingLeavesOneRowPerObservation: a line the collector read
+// twice before either copy was classified is two rows with the same ID and
+// time, which no column tells apart. Tagging marks both; afterwards one row
+// must be left, classified, with its tags. With lightweight updates and with
+// the mutations a server without them gets.
+func TestClickHouseTaggingLeavesOneRowPerObservation(t *testing.T) {
+	for _, patch := range []bool{true, false} {
+		t.Run(fmt.Sprintf("lightweight=%v", patch), func(t *testing.T) {
+			db := connectCH(t)
+			ch := db.(*ClickHouse)
+			ctx := context.Background()
+			if !ch.patchUpdates {
+				t.Fatal("the events table of the pinned server takes no lightweight updates")
+			}
+			ch.patchUpdates = patch
+			marker := fmt.Sprintf("twins-%v-%d", patch, time.Now().UnixNano())
+			id := func(name string) string { return obsID(marker + name) }
+			send, row, unclassified, commands := chMarkerRows(t, ch, marker)
+			// Two insert blocks, as two collector batches: the twin in both.
+			send(row("40.000", "e-twin", id("e")), row("41.000", "filler-1", id("f1")))
+			send(row("40.000", "e-twin", id("e")), row("42.000", "filler-2", id("f2")))
+			events := unclassified()
+			kept, _, err := db.(ReplayRemover).RemoveReplayedEvents(ctx, events)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(kept) != 3 {
+				t.Fatalf("events to classify: %d, want 3 (the twin once)", len(kept))
+			}
+			for _, e := range kept {
+				e.TechniqueID, e.Categories, e.Classified = "T1059", []string{"execution"}, true
+			}
+			for round := 1; round <= 2; round++ {
+				// The second round is the worker replaying its checkpoint
+				// after a crash: nothing more may go.
+				if err := db.(BatchTagger).TagEvents(ctx, kept); err != nil {
+					t.Fatal(err)
+				}
+				if got, want := commands("1"), "e-twin filler-1 filler-2"; got != want {
+					t.Fatalf("round %d: rows left: %s\nwant:                %s", round, got, want)
+				}
+				if got := commands("classified = 1 AND technique_id = 'T1059' AND has(categories, 'execution')"); got != "e-twin filler-1 filler-2" {
+					t.Fatalf("round %d: tagged rows: %q", round, got)
+				}
+			}
+			// A copy that arrives after the tag is unclassified and removed
+			// like any other second copy.
+			send(row("40.000", "e-twin", id("e")))
+			if _, removed, err := db.(ReplayRemover).RemoveReplayedEvents(ctx, unclassified()); err != nil || removed != 1 {
+				t.Fatalf("a copy after tagging: removed %d, %v; want 1", removed, err)
+			}
+			if got := commands("1"); got != "e-twin filler-1 filler-2" {
+				t.Errorf("rows left at the end: %s", got)
+			}
+		})
+	}
+}
+
+// TestClickHouseSweepsReplayedEvents: the sweep removes every unclassified
+// row whose observation is already classified, wherever it is, in windows
+// smaller than the table, and nothing else.
+func TestClickHouseSweepsReplayedEvents(t *testing.T) {
+	db := connectCH(t)
+	ch := db.(*ClickHouse)
+	ctx := context.Background()
+	savedWindow, savedProbe := sweepWindow, sweepProbe
+	sweepWindow, sweepProbe = 3, 3
+	t.Cleanup(func() { sweepWindow, sweepProbe = savedWindow, savedProbe })
+	marker := fmt.Sprintf("sweep-%d", time.Now().UnixNano())
+	id := func(name string) string { return obsID(marker + name) }
+	random := "0e0e0e0e-0000-4000-8000-00000000000e"
+	send, row, unclassified, commands := chMarkerRows(t, ch, marker)
+
+	// Classified first: a, b and a row with a random ID from the database.
+	send(row("00.000", "a-first", id("a")), row("01.000", "b-first", id("b")), row("02.000", "r-first", random))
+	first := unclassified()
+	for _, e := range first {
+		e.TechniqueID, e.Classified = "T1110", true
+	}
+	if err := db.(BatchTagger).TagEvents(ctx, first); err != nil {
+		t.Fatal(err)
+	}
+	// Then what the collector sends again, older than an unclassified
+	// backlog (c, d) the worker has not reached: a with its own time, b with
+	// another, and a row that only shares the random ID.
+	send(row("00.000", "a-again", id("a")), row("09.000", "b-again", id("b")), row("02.000", "r-again", random))
+	send(row("30.000", "c-only", id("c")), row("31.000", "d-one", id("d")), row("32.000", "d-two", id("d")))
+
+	var unclassifiedRows uint64
+	if err := ch.conn.QueryRow(ctx, `SELECT count() FROM events WHERE classified = 0`).Scan(&unclassifiedRows); err != nil {
+		t.Fatal(err)
+	}
+	// Rounds over every unclassified row of the shared table (windows overlap
+	// by the rows of their last time).
+	removed := 0
+	for i := uint64(0); i < 4*(unclassifiedRows/uint64(sweepWindow)+2); i++ {
+		n, err := db.(ReplaySweeper).SweepReplayedEvents(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		removed += n
+	}
+	if removed < 2 {
+		t.Errorf("the sweep removed %d rows, want at least the 2 copies", removed)
+	}
+	if got, want := commands("1"), "a-first b-first r-again r-first c-only d-one d-two"; got != want {
+		t.Errorf("rows left: %s\nwant:       %s", got, want)
+	}
+	if got := commands("classified = 1"); got != "a-first b-first r-first" {
+		t.Errorf("classified rows: %q", got)
+	}
+}
+
 // TestClickHouseRestoreEvents: restoring stores what is missing, with the
 // event's own time and ID, and nothing twice.
 func TestClickHouseRestoreEvents(t *testing.T) {

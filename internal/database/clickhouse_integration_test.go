@@ -2,12 +2,14 @@ package database
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"strconv"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/ClickHouse/clickhouse-go/v2"
 	"github.com/qpot/qpot/internal/config"
 )
 
@@ -362,6 +364,128 @@ func TestClickHouseCategoriesUpgrade(t *testing.T) {
 	got, err := db.GetEvents(ctx, EventFilter{SourceIPs: []string{"198.51.100.79"}, Categories: []string{"brute-force"}, Limit: 10})
 	if err != nil || len(got) != 1 || len(got[0].Categories) != 1 || got[0].Categories[0] != "brute-force" {
 		t.Fatalf("GetEvents after tagging = %+v, %v", got, err)
+	}
+}
+
+// An events table made by 1.1.2 (without the block number and offset
+// settings) takes lightweight updates after InitializeSchema, rows stored
+// before the upgrade included: tagging them creates no mutation.
+func TestClickHouseLightweightTaggingUpgrade(t *testing.T) {
+	db := connectCH(t)
+	ch := db.(*ClickHouse)
+	ctx := context.Background()
+	exec := func(query string) {
+		t.Helper()
+		if err := ch.conn.Exec(ctx, query); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// The table exactly as 1.1.2 created it.
+	// The views read from events; they keep doing so once it exists again.
+	if err := ch.conn.Exec(clickhouse.Context(ctx, clickhouse.WithSettings(clickhouse.Settings{"check_table_dependencies": 0})),
+		`DROP TABLE IF EXISTS events SYNC`); err != nil {
+		t.Fatal(err)
+	}
+	exec(`CREATE TABLE events (
+			timestamp DateTime64(3), honeypot LowCardinality(String), source_ip String, source_port UInt16, dest_port UInt16,
+			protocol LowCardinality(String), event_type LowCardinality(String), username String, password String, command String,
+			payload String, metadata Map(String, String), country LowCardinality(String), city String, asn String,
+			technique_id String DEFAULT '', technique_name String DEFAULT '', tactic_id String DEFAULT '', tactic_name String DEFAULT '',
+			kill_chain_stage String DEFAULT '', confidence Float64 DEFAULT 0, classified UInt8 DEFAULT 0,
+			categories Array(String) DEFAULT [], event_id UUID DEFAULT generateUUIDv4()
+		) ENGINE = MergeTree() PARTITION BY toYYYYMM(timestamp) ORDER BY (timestamp, honeypot, source_ip)
+		TTL toDateTime(timestamp) + INTERVAL 90 DAY
+		SETTINGS index_granularity = 8192, non_replicated_deduplication_window = 1000`)
+	exec(`INSERT INTO events (timestamp, honeypot, source_ip, event_type, event_id) VALUES (now64(3), 'cowrie', '198.51.100.81', 'old-part', '` + obsID("upgrade-a") + `')`)
+	exec(`INSERT INTO events (timestamp, honeypot, source_ip, event_type, event_id) VALUES (now64(3), 'cowrie', '198.51.100.81', 'old-part', '` + obsID("upgrade-b") + `')`)
+	var setting uint64
+	if err := ch.conn.QueryRow(ctx, `SELECT countIf(engine_full LIKE '%enable_block_number_column = 1%') FROM system.tables WHERE database = currentDatabase() AND name = 'events'`).Scan(&setting); err != nil || setting != 0 {
+		t.Fatalf("setup: the old table already has the setting (%d, %v)", setting, err)
+	}
+	ch.patchUpdates = false
+	if err := db.InitializeSchema(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if !ch.patchUpdates {
+		t.Fatal("InitializeSchema did not enable lightweight updates on the 1.1.2 table")
+	}
+	var mutationsBefore uint64
+	if err := ch.conn.QueryRow(ctx, `SELECT count() FROM system.mutations WHERE database = currentDatabase() AND table = 'events'`).Scan(&mutationsBefore); err != nil {
+		t.Fatal(err)
+	}
+	un, err := db.GetUnclassifiedEvents(ctx, 10)
+	if err != nil || len(un) != 2 {
+		t.Fatalf("GetUnclassifiedEvents = %d rows, %v; want 2", len(un), err)
+	}
+	for _, e := range un {
+		e.TechniqueID, e.Classified = "T1595", true
+	}
+	if err := db.(BatchTagger).TagEvents(ctx, un); err != nil {
+		t.Fatal(err)
+	}
+	if left, err := db.GetUnclassifiedEvents(ctx, 10); err != nil || len(left) != 0 {
+		t.Fatalf("after tagging %d rows are still unclassified (%v)", len(left), err)
+	}
+	var tagged, mutationsAfter uint64
+	if err := ch.conn.QueryRow(ctx, `SELECT count() FROM events WHERE event_type = 'old-part' AND classified = 1 AND technique_id = 'T1595'`).Scan(&tagged); err != nil || tagged != 2 {
+		t.Fatalf("tagged rows = %d (%v), want 2", tagged, err)
+	}
+	if err := ch.conn.QueryRow(ctx, `SELECT count() FROM system.mutations WHERE database = currentDatabase() AND table = 'events'`).Scan(&mutationsAfter); err != nil {
+		t.Fatal(err)
+	}
+	if mutationsAfter != mutationsBefore {
+		t.Errorf("tagging created %d mutations; lightweight updates create none", mutationsAfter-mutationsBefore)
+	}
+}
+
+// Patches pile up with every batch tagged; once they hold patchApplyRows
+// rows they are written into the parts, in the background, and the tags
+// read the same afterwards.
+func TestClickHouseAppliesPatches(t *testing.T) {
+	db := connectCH(t)
+	ch := db.(*ClickHouse)
+	ctx := context.Background()
+	savedRows, savedEvery := patchApplyRows, patchApplyEvery
+	patchApplyRows, patchApplyEvery = 1, 0
+	t.Cleanup(func() { patchApplyRows, patchApplyEvery = savedRows, savedEvery })
+	applies := func() uint64 {
+		t.Helper()
+		var n uint64
+		if err := ch.conn.QueryRow(ctx, `SELECT count() FROM system.mutations WHERE database = currentDatabase() AND table = 'events' AND command LIKE '%APPLY PATCHES%'`).Scan(&n); err != nil {
+			t.Fatal(err)
+		}
+		return n
+	}
+	before := applies()
+	marker := fmt.Sprintf("apply-%d", time.Now().UnixNano())
+	send, row, unclassified, commands := chMarkerRows(t, ch, marker)
+	send(row("50.000", "p-one", obsID(marker+"1")), row("51.000", "p-two", obsID(marker+"2")))
+	events := unclassified()
+	for _, e := range events {
+		e.TechniqueID, e.Classified = "T1110", true
+	}
+	if err := db.(BatchTagger).TagEvents(ctx, events); err != nil {
+		t.Fatal(err)
+	}
+	if applies() != before+1 {
+		t.Fatalf("APPLY PATCHES started %d times after a tagged batch, want 1", applies()-before)
+	}
+	deadline := time.Now().Add(30 * time.Second)
+	for {
+		var pending uint64
+		if err := ch.conn.QueryRow(ctx, `SELECT count() FROM system.mutations WHERE database = currentDatabase() AND table = 'events' AND NOT is_done`).Scan(&pending); err != nil {
+			t.Fatal(err)
+		}
+		if pending == 0 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("APPLY PATCHES did not finish within 30 s")
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+	if got := commands("classified = 1 AND technique_id = 'T1110'"); got != "p-one p-two" {
+		t.Errorf("tagged rows after the patches were applied: %q", got)
 	}
 }
 

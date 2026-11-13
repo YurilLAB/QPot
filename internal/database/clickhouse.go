@@ -6,7 +6,9 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/ClickHouse/clickhouse-go/v2"
@@ -21,6 +23,16 @@ type ClickHouse struct {
 	// ids is the state of the set of classified observation IDs (see
 	// clickhouse_observation.go).
 	ids classifiedIDs
+	// patchUpdates says the events table takes lightweight updates (see
+	// enablePatchUpdates); when false, rows are tagged with mutations.
+	patchUpdates bool
+	// sweep is where the search for second copies goes on (see
+	// SweepReplayedEvents).
+	sweep sweepCursor
+	// applied is when the last APPLY PATCHES was started (see
+	// applyPatchesWhenDue).
+	appliedMu sync.Mutex
+	applied   time.Time
 }
 
 // NewClickHouse creates a new ClickHouse database instance
@@ -150,6 +162,7 @@ func (ch *ClickHouse) InitializeSchema(ctx context.Context) error {
 	if err := ch.ensureEventCategories(ctx); err != nil {
 		return err
 	}
+	ch.enablePatchUpdates(ctx)
 
 	// Create materialized view for hourly statistics
 	hourlyMV := `
@@ -1071,11 +1084,11 @@ func (ch *ClickHouse) TagEvent(ctx context.Context, event *Event) error {
 	)
 }
 
-// tagChunk and tagChunkBytes bound the size of one tagging mutation's
-// statement. clickhouse-go inlines the bound lists, each event id appears
-// eight times, and an event costs about 450 bytes plus its categories;
-// ClickHouse refuses statements over max_query_size (256 KiB by default),
-// which 1000 events per chunk exceeded.
+// tagChunk and tagChunkBytes bound the size of one tagging statement.
+// clickhouse-go inlines the bound lists, each event id appears nine times
+// (once more in its key), and an event costs about 500 bytes plus its
+// categories; ClickHouse refuses statements over max_query_size (256 KiB by
+// default), which 1000 events per chunk exceeded.
 const (
 	tagChunk      = 250
 	tagChunkBytes = 160 << 10
@@ -1085,7 +1098,7 @@ const (
 // as clickhouse-go renders it (quoted, escaped, comma-separated).
 func tagEventSize(e *Event) int {
 	str := func(s string) int { return len(s) + 4 + strings.Count(s, `\`) + strings.Count(s, `'`) }
-	n := 8*str(e.ID) + str(e.TechniqueID) + str(e.TechniqueName) + str(e.TacticID) +
+	n := 9*str(e.ID) + 16 + str(e.TechniqueID) + str(e.TechniqueName) + str(e.TacticID) +
 		str(e.TacticName) + str(e.KillChainStage) + 24 + 4
 	for _, c := range e.Categories {
 		n += str(c)
@@ -1093,11 +1106,53 @@ func tagEventSize(e *Event) int {
 	return n
 }
 
-// TagEvents tags events by their event_id in one mutation per chunk, and waits
-// for it to apply (mutations_sync): ClickHouse mutations are otherwise
-// asynchronous, so the worker's next cycle re-fetched still-unclassified
-// events and re-extracted (double-counted) their IOCs. Events without an ID
-// fall back to TagEvent's (source_ip, timestamp) match.
+// enablePatchUpdates lets the events table take lightweight updates: an
+// UPDATE writes a small patch part holding only the changed values of the
+// rows it names, and reads and merges apply it. Marking a batch classified
+// with a mutation instead rewrote the changed columns of every part holding
+// one of its rows (measured on the pinned server under QPot's limits: about
+// 2 s per 250 events at 25 million rows, which held classification to about
+// 55 events a second). The two settings make every new part keep each row's
+// insert block and offset, which is how a patch finds its row after merges;
+// parts written before keep working, matched by part and offset.
+//
+// A server that refuses the settings keeps the mutations, which are slower
+// and give the same rows.
+func (ch *ClickHouse) enablePatchUpdates(ctx context.Context) {
+	if err := ch.conn.Exec(ctx, "ALTER TABLE events MODIFY SETTING enable_block_number_column = 1, enable_block_offset_column = 1"); err != nil {
+		slog.Warn("The events table takes no lightweight updates; events are marked classified with mutations, which is slower", "error", err)
+		ch.patchUpdates = false
+		return
+	}
+	ch.patchUpdates = true
+}
+
+// deleteSettings are the settings of a DELETE of event rows: with patch
+// updates the rows are masked by a patch part (the statement returns once it
+// is written, and every later read leaves the rows out), otherwise by a
+// mutation the statement waits for.
+func (ch *ClickHouse) deleteSettings() clickhouse.Settings {
+	if ch.patchUpdates {
+		return clickhouse.Settings{"lightweight_delete_mode": "lightweight_update"}
+	}
+	return clickhouse.Settings{"lightweight_deletes_sync": 2}
+}
+
+// observationKey is how a row's ID and time are written in a statement's
+// bound list; observationKeyExpr computes the same from the row.
+func observationKey(e *Event) string {
+	return e.ID + "@" + strconv.FormatInt(e.Timestamp.UnixMilli(), 10)
+}
+
+const observationKeyExpr = "concat(toString(event_id), '@', toString(toUnixTimestamp64Milli(timestamp)))"
+
+// TagEvents marks events classified with their tags, by their event_id and
+// time, and returns once every later read sees them so: otherwise the
+// worker's next cycle re-fetched still-unclassified events and re-extracted
+// (double-counted) their IOCs. Events without an ID fall back to TagEvent's
+// (source_ip, timestamp) match. Two rows of one observation with the same
+// time (the collector read the line twice before either was classified) are
+// left as one (keepOneRowPerObservation).
 func (ch *ClickHouse) TagEvents(ctx context.Context, events []*Event) error {
 	if _, leased := intelligenceLeaseFromContext(ctx); leased {
 		approved, err := intelligenceLeaseEvents(ctx, ch, events)
@@ -1124,41 +1179,33 @@ func (ch *ClickHouse) tagIntelligenceEvents(ctx context.Context, events []*Event
 		}
 		withID = append(withID, e)
 	}
-	sctx := clickhouse.Context(ctx, clickhouse.WithSettings(clickhouse.Settings{"mutations_sync": 1}))
-	for start := 0; start < len(withID); {
-		end, size := start, 0
-		for end < len(withID) && end-start < tagChunk {
-			n := tagEventSize(withID[end])
-			if end > start && size+n > tagChunkBytes {
-				break
-			}
-			size += n
-			end++
-		}
-		chunk := withID[start:end]
-		start = end
+	// A lightweight UPDATE is visible to every read once it returns; a
+	// mutation is waited for (mutations_sync).
+	statement := "UPDATE events SET"
+	sctx := ctx
+	if !ch.patchUpdates {
+		statement = "ALTER TABLE events UPDATE"
+		sctx = clickhouse.Context(ctx, clickhouse.WithSettings(clickhouse.Settings{"mutations_sync": 1}))
+	}
+	for _, chunk := range tagChunks(withID) {
 		ids := make([]string, len(chunk))
+		keys := make([]string, len(chunk))
 		tid, tname, aid, aname, kc := make([]string, len(chunk)), make([]string, len(chunk)),
 			make([]string, len(chunk)), make([]string, len(chunk)), make([]string, len(chunk))
 		conf := make([]float64, len(chunk))
 		cats := make([][]string, len(chunk))
-		lo, hi := chunk[0].Timestamp, chunk[0].Timestamp
+		lo, hi := timeBounds(chunk)
 		for i, e := range chunk {
-			ids[i], tid[i], tname[i], aid[i], aname[i], kc[i], conf[i], cats[i] =
-				e.ID, e.TechniqueID, e.TechniqueName, e.TacticID, e.TacticName, e.KillChainStage, e.Confidence, chCategories(e.Categories)
-			if e.Timestamp.Before(lo) {
-				lo = e.Timestamp
-			}
-			if e.Timestamp.After(hi) {
-				hi = e.Timestamp
-			}
+			ids[i], keys[i], tid[i], tname[i], aid[i], aname[i], kc[i], conf[i], cats[i] =
+				e.ID, observationKey(e), e.TechniqueID, e.TechniqueName, e.TacticID, e.TacticName, e.KillChainStage, e.Confidence, chCategories(e.Categories)
 		}
 		// transform() maps each row's id to its own values (and indexOf
 		// picks its categories array, as transform() takes no array
 		// values); the timestamp bounds let ClickHouse skip partitions that
-		// cannot contain them.
-		query := `
-			ALTER TABLE events UPDATE
+		// cannot contain them. Only the rows read are named, by ID and time:
+		// a later copy of the line with another time is a second copy, which
+		// the next read removes, not a row to classify.
+		query := statement + `
 				technique_id     = transform(toString(event_id), ?, ?, technique_id),
 				technique_name   = transform(toString(event_id), ?, ?, technique_name),
 				tactic_id        = transform(toString(event_id), ?, ?, tactic_id),
@@ -1167,19 +1214,107 @@ func (ch *ClickHouse) tagIntelligenceEvents(ctx context.Context, events []*Event
 				confidence       = transform(toString(event_id), ?, ?, confidence),
 				categories       = CAST(arrayElement(?, indexOf(?, toString(event_id))), 'Array(String)'),
 				classified       = 1
-			WHERE toString(event_id) IN ?
+			WHERE classified = 0 AND toString(event_id) IN ?
+			  AND has(?, ` + observationKeyExpr + `)
 			  AND timestamp >= fromUnixTimestamp64Milli(?) AND timestamp <= fromUnixTimestamp64Milli(?)
 		`
 		if err := ch.conn.Exec(sctx, query,
 			ids, tid, ids, tname, ids, aid, ids, aname, ids, kc, ids, conf,
-			cats, ids, ids, lo.UnixMilli(), hi.UnixMilli(),
+			cats, ids, ids, keys, lo.UnixMilli(), hi.UnixMilli(),
 		); err != nil {
 			return fmt.Errorf("tag events: %w", err)
 		}
 	}
 	// After the rows are marked, never before: an ID in the set whose row is
 	// not classified yet would make that row look like a second copy.
-	return ch.recordClassifiedIDs(ctx, withID)
+	if err := ch.recordClassifiedIDs(ctx, withID); err != nil {
+		return err
+	}
+	if err := ch.keepOneRowPerObservation(ctx, withID); err != nil {
+		return err
+	}
+	ch.applyPatchesWhenDue(ctx)
+	return nil
+}
+
+// patchApplyRows and patchApplyEvery say when the patches of lightweight
+// updates and deletes are written into the parts they change. Until then
+// every read of the changed columns applies them: in the database benchmark
+// at 25 million events, with 123,000 patched rows in 16 patch parts, the
+// worker's read of unclassified events took 1.2 s, against 0.16 s with few
+// patches in an earlier run. Writing
+// them in is a mutation of the parts they touch (0.3 s for 2,000 rows of a
+// 10 million row table on the pinned server under QPot's limits), started
+// in the background at most every patchApplyEvery. Variables so tests can
+// make it due at once.
+var (
+	patchApplyRows  uint64 = 2000
+	patchApplyEvery        = 30 * time.Second
+)
+
+// applyPatchesWhenDue starts ALTER TABLE events APPLY PATCHES when the
+// patches hold at least patchApplyRows rows, none is being applied, and the
+// last start is patchApplyEvery ago. It does not wait for it, and a failure
+// only means reads stay slower until the next try.
+func (ch *ClickHouse) applyPatchesWhenDue(ctx context.Context) {
+	if !ch.patchUpdates {
+		return
+	}
+	ch.appliedMu.Lock()
+	defer ch.appliedMu.Unlock()
+	if time.Since(ch.applied) < patchApplyEvery {
+		return
+	}
+	var rows, running uint64
+	if err := ch.conn.QueryRow(ctx, `SELECT
+			(SELECT sum(rows) FROM system.parts WHERE database = currentDatabase() AND table = 'events' AND active AND startsWith(name, 'patch-')),
+			(SELECT count() FROM system.mutations WHERE database = currentDatabase() AND table = 'events' AND NOT is_done AND command LIKE '%APPLY PATCHES%')`,
+	).Scan(&rows, &running); err != nil {
+		slog.Warn("Could not look at the events table's patches", "error", err)
+		return
+	}
+	if rows < patchApplyRows || running > 0 {
+		return
+	}
+	ch.applied = time.Now()
+	if err := ch.conn.Exec(clickhouse.Context(ctx, clickhouse.WithSettings(clickhouse.Settings{"mutations_sync": 0})),
+		"ALTER TABLE events APPLY PATCHES"); err != nil {
+		slog.Warn("Could not write the events table's patches into its parts; reads apply them until the next try", "error", err)
+	}
+}
+
+// tagChunks splits events into chunks whose tagging statement stays within
+// tagChunk events and tagChunkBytes.
+func tagChunks(events []*Event) [][]*Event {
+	var chunks [][]*Event
+	for start := 0; start < len(events); {
+		end, size := start, 0
+		for end < len(events) && end-start < tagChunk {
+			n := tagEventSize(events[end])
+			if end > start && size+n > tagChunkBytes {
+				break
+			}
+			size += n
+			end++
+		}
+		chunks = append(chunks, events[start:end])
+		start = end
+	}
+	return chunks
+}
+
+// timeBounds returns the earliest and latest time among events (not empty).
+func timeBounds(events []*Event) (lo, hi time.Time) {
+	lo, hi = events[0].Timestamp, events[0].Timestamp
+	for _, e := range events[1:] {
+		if e.Timestamp.Before(lo) {
+			lo = e.Timestamp
+		}
+		if e.Timestamp.After(hi) {
+			hi = e.Timestamp
+		}
+	}
+	return lo, hi
 }
 
 // InsertIOC inserts or updates an IOC record using ClickHouse REPLACE semantics.
@@ -1319,13 +1454,19 @@ func (ch *ClickHouse) GetIOCs(ctx context.Context, filter IOCFilter) ([]*IOC, er
 	query := " WHERE 1=1"
 	var args []interface{}
 
+	// The worker's lookup of whole keys is named inside the source, where
+	// the tables' order (type, value, honeypot) finds the rows: as a filter
+	// on the deduplicated source it read every indicator for each batch
+	// (0.55 s at 25,000 indicators).
+	var keys string
+	var keyArgs []interface{}
 	if len(filter.intelligenceKeys) > 0 {
-		var clauses []string
-		for _, key := range filter.intelligenceKeys {
-			clauses = append(clauses, "(type = ? AND value = ? AND honeypot = ?)")
-			args = append(args, key.Type, key.Value, key.Honeypot)
+		tuples := make([]string, len(filter.intelligenceKeys))
+		for i, key := range filter.intelligenceKeys {
+			tuples[i] = "(?, ?, ?)"
+			keyArgs = append(keyArgs, key.Type, key.Value, key.Honeypot)
 		}
-		query += " AND (" + strings.Join(clauses, " OR ") + ")"
+		keys = "(" + strings.Join(tuples, ", ") + ")"
 	}
 
 	if len(filter.Types) > 0 {
@@ -1371,7 +1512,12 @@ func (ch *ClickHouse) GetIOCs(ctx context.Context, filter IOCFilter) ([]*IOC, er
 		}
 		query, args = "SELECT "+iocColumns+" FROM "+iocSource(iocColumns, legacy, keys)+order, chosen
 	} else {
-		query = "SELECT " + iocColumns + " FROM " + iocSource(iocColumns, legacy, "") + query + order + page
+		sourceArgs := keyArgs
+		if legacy {
+			sourceArgs = append(append([]interface{}{}, keyArgs...), keyArgs...)
+		}
+		query = "SELECT " + iocColumns + " FROM " + iocSource(iocColumns, legacy, keys) + query + order + page
+		args = append(sourceArgs, args...)
 	}
 
 	rows, err := ch.conn.Query(ctx, query, args...)

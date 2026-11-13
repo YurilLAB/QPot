@@ -201,6 +201,42 @@ the worker classifies from now on carry categories. The web UI shows the
 category label wherever the technique is shown, and the Events view has an
 "Attack type" filter.
 
+## Events stored twice
+
+The collector gives every log line an ID derived from the line. When it loses
+its place it sends its logs again, and each line arrives as a second row with
+the ID it already had. The worker counts such a line once and deletes the
+extra row:
+
+- It looks through the unclassified rows a window at a time for IDs it has
+  already classified and deletes those rows, wherever they are in time:
+  every 2 minutes while it keeps up, every 30 seconds while it has more than
+  one batch to classify, and before each batch once it is finding copies
+  (in a sweep or in a batch). New events and second copies take turns:
+  never two such sweeps without a batch of classification between them.
+- When it reads a batch, a row whose ID is already classified, or that
+  repeats an earlier row of the batch with a later time, is deleted before
+  anything is counted.
+- Two rows with the same ID and the same time (the line was read twice before
+  either was classified) cannot be told apart by any column. Both are
+  tagged, and then the extra one is deleted by where it is stored, so one
+  row stays.
+
+The sweep and the last rule are ClickHouse's. On TimescaleDB every row has
+its own serial number, so rows with the same ID and time are told apart by
+it, and a second copy is removed when the worker reads it, in time order.
+
+On ClickHouse, events are marked classified with lightweight updates: each
+batch writes a small patch with the changed values of its own rows, instead
+of rewriting the changed columns of every part that holds one of them. An
+events table created by an earlier version gets the two table settings this
+needs (`enable_block_number_column`, `enable_block_offset_column`) when the
+control plane starts; rows stored before keep working. Reads apply the
+patches until they are written into the parts: once they hold 2,000 rows,
+the worker starts `ALTER TABLE events APPLY PATCHES` in the background, at
+most every 30 seconds. A server that refuses the settings is tagged with
+mutations as before, which is slower.
+
 ## Worker recovery and health
 
 Before it marks source events as classified, the worker saves a database
