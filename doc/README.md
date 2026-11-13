@@ -18,7 +18,7 @@
 | [Data and threat intelligence](intelligence.md) | Event collection, the databases, ATT&CK tagging, IOCs and campaigns |
 | [Investigating](investigate.md) | Following one session or campaign through its records, and exporting an evidence bundle |
 | [Canaries](canary.md) | Decoy credentials, files and links, and the bait planted in the honeypots |
-| [Alerts and response hooks](alerts.md) | Webhook alerts and running your own commands |
+| [Alerts and response hooks](alerts.md) | The volume alert, the behaviour alerts and their rules, the webhook and running your own commands |
 | [Disk cleanup](disk-cleanup.md) | What QPot keeps on disk, for how long, and the storage limits |
 | [Clusters](clustering.md) | Pairing several QPot nodes, enrollment and trust |
 

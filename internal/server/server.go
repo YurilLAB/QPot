@@ -68,6 +68,9 @@ type Server struct {
 	// instance's config file while the server runs.
 	planted plantedFollower
 
+	// behaviour is the state of the behaviour alerts (behaviour.go).
+	behaviour behaviourState
+
 	// casesBuilding counts the investigation cases being put together, under
 	// caseMu: at most caseSlots at once (api_investigate.go).
 	caseMu        sync.Mutex
@@ -561,6 +564,7 @@ func (s *Server) Start(ctx context.Context) error {
 	// This node's uptime and event counts for its cluster, if it joins one.
 	s.startedAt = time.Now()
 	go s.nodeStatsLoop(ctx)
+	go s.behaviourLoop(ctx)
 
 	// Keep the honeypots' logs, captured files and the collector's backup
 	// within their limits (internal/cleanup).
@@ -816,12 +820,16 @@ func (w *capWriter) Write(p []byte) (int, error) {
 // hung script can't block the alert loop, and stdout/stderr are captured
 // (bounded) to the structured log instead of inheriting the parent FDs.
 func (s *Server) runResponseHooks(ctx context.Context, stats *database.Stats) {
-	envExtra := s.responseEnv(ctx, stats)
+	s.runHooks(ctx, s.config.Response.OnAttackDetected, s.responseEnv(ctx, stats))
+}
 
+// runHooks runs each action with envExtra added to the environment, as
+// runResponseHooks describes.
+func (s *Server) runHooks(ctx context.Context, actions []config.ResponseAction, envExtra []string) {
 	const defaultTimeout = 10 * time.Second
 	const hardCap = 5 * time.Minute
 
-	for i, action := range s.config.Response.OnAttackDetected {
+	for i, action := range actions {
 		cmdLine := strings.TrimSpace(action.Command)
 		if cmdLine == "" {
 			slog.Warn("Response hook: empty command, skipping",

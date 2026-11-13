@@ -17,7 +17,7 @@
     <link href="/map/static/fonts/fonts.css" rel="stylesheet" integrity="sha384-WiEXL66/E+frAZqRB5+nO/MLUoXj+VrnKxXgvK33R87imSuzxukyaFlj5lnDHV80">
     <link href="/map/static/fontawesome/css/all.min.css" rel="stylesheet" integrity="sha384-qrALq7+6jBOZIQsNnT6xGkMDru64qD6uTlDra39xrt2SoXl4pO3FX6Roz/RpR/BS">
     <link href="/map/static/index.css?v=8" rel="stylesheet" integrity="sha384-F4gdNU3u74uMqjmFBLqfUI0IMwkZi07wpwIdoGzPWeWF6/qEGw/uaeb0plLpu7pT">
-    <link href="/assets/css/dashboard.css" rel="stylesheet" integrity="sha384-80Huire2gDzNJwmodrH4DN78iSn8fOkgJQoai0dPcRFtnXr45rjDKc3KJy92pG2J">
+    <link href="/assets/css/dashboard.css" rel="stylesheet" integrity="sha384-FrT8/cs9eOpZ3RST+XGkwMy8MIfZbQR0XiIprgjWfodsneW7iUGB+P2TuM+gv6/9">
 </head>
 <body class="qpot-dashboard">
 
@@ -325,6 +325,22 @@
             <!-- ============ Investigate ============ -->
             <section class="dash-pane" id="tab-investigate">
                 <div id="inv-list">
+                    <div class="dash-card">
+                        <div class="card-header flex-between">
+                            <h4 class="flex-center"><i class="fas fa-bell"></i> Behaviour alerts</h4>
+                            <span class="card-note" id="alerts-note"></span>
+                        </div>
+                        <div class="card-body">
+                            <div class="callout modal-message" id="alerts-message"></div>
+                            <div class="alert-rules" id="alert-rules"></div>
+                        </div>
+                        <div class="table-wrapper">
+                            <table class="data-table">
+                                <thead><tr><th>Time</th><th>Alert</th><th>What was seen</th><th class="optional">Source</th></tr></thead>
+                                <tbody id="alerts-body"></tbody>
+                            </table>
+                        </div>
+                    </div>
                     <div class="dash-card">
                         <div class="card-header flex-between">
                             <h4 class="flex-center"><i class="fas fa-people-group"></i> Campaigns</h4>
@@ -2719,6 +2735,59 @@
             return new Promise((resolve) => { confirmResolve = resolve; });
         }
 
+        // ---------- behaviour alerts: what visitors do, with a switch per rule ----------
+
+        const SEV = { critical: 'bad', high: 'warn', medium: 'accent' };
+        let alertBusy = false;
+
+        function renderAlerts(v) {
+            const rules = Array.isArray(v && v.rules) ? v.rules : [];
+            const to = ['this list', 'the log'].concat(v && v.webhook ? ['the webhook'] : [], v && Number(v.hooks) > 0 ? [plural(v.hooks, 'response hook', 'response hooks')] : []);
+            $('alerts-note').textContent = v && v.running ? 'an alert goes to ' + to.join(', ') : '';
+            callout($('alerts-message'), v && v.problem ? 'error' : 'warn',
+                v && v.problem ? String(v.problem)
+                    : v && !v.enabled ? 'Behaviour alerts are turned off. Turn a rule on to start them again.'
+                    : v && !v.running ? 'Behaviour alerts cannot run: the intelligence worker is off (intelligence.enabled in the settings file).' : '');
+            $('alert-rules').replaceChildren(...rules.map((r) => {
+                const box = h('input', { type: 'checkbox', role: 'switch', 'aria-label': String(r.label || r.name) + ' on or off' });
+                box.checked = !!r.enabled;
+                box.addEventListener('change', () => setAlertRule(String(r.name), box.checked, box));
+                return h('div', { class: 'field cleanup-switch alert-rule', title: String(r.description || '') },
+                    h('span', {}, String(r.label || r.name), ' ', pill(String(r.severity || ''), SEV[r.severity] || 'muted')),
+                    h('label', { class: 'switch' }, box, h('span', { class: 'track' })));
+            }));
+            const list = Array.isArray(v && v.alerts) ? v.alerts : [];
+            const tb = $('alerts-body');
+            if (!list.length) emptyRow(tb, 4, v && v.since ? 'No alerts since ' + when(v.since) + '. What was there before does not alert.' : 'No alerts yet.', 'fa-bell');
+            else tb.replaceChildren(...list.map((a) => {
+                const tr = h('tr', {}, timeCell(a.time),
+                    h('td', {}, pill(String(a.severity || ''), SEV[a.severity] || 'muted'), ' ', String(a.title || '')),
+                    h('td', { class: 'wrap' }, String(a.detail || '')),
+                    h('td', { class: 'optional mono-accent wrap' }, Array.isArray(a.source_ips) ? a.source_ips.map(String).join(', ') : ''));
+                if (a.session_id) return openRow(tr, 'session', a.session_id);
+                if (a.campaign_fingerprint) return openRow(tr, 'campaign', a.campaign_fingerprint);
+                return tr;
+            }));
+        }
+
+        async function loadAlerts() {
+            renderAlerts(await api(`${API_BASE}/alerts?limit=50`));
+        }
+
+        async function setAlertRule(name, on, box) {
+            if (alertBusy) { box.checked = !on; return; }
+            alertBusy = true;
+            try {
+                renderAlerts(await api(`${API_BASE}/alerts`, { method: 'PUT', body: { rule: name, enabled: on } }));
+                toast((on ? 'Turned on: ' : 'Turned off: ') + name);
+            } catch (e) {
+                box.checked = !on;
+                if (e.status !== 401 && e.status !== 403) toast(errorText(e), 'error');
+            } finally {
+                alertBusy = false;
+            }
+        }
+
         // ---------- investigate: one session or campaign, followed through its records ----------
 
         const PHASE = { connection: 'muted', credentials: 'warn', command: 'accent', transfer: 'bad', canary: 'bad', close: 'muted', other: 'muted' };
@@ -2772,6 +2841,7 @@
             if (invQuery) return loadCase();
             $('inv-case').classList.add('hidden');
             $('inv-list').classList.remove('hidden');
+            loadAlerts().catch((e) => { if (e.status !== 401 && e.status !== 403) callout($('alerts-message'), 'error', errorText(e)); });
             const data = await api(`${API_BASE}/investigate?limit=100`);
             const camps = Array.isArray(data && data.campaigns) ? data.campaigns : [];
             const cb = $('inv-campaigns');

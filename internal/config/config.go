@@ -28,6 +28,19 @@ type AlertConfig struct {
 	// firewall/SOAR hook every minute. Zero means no cooldown (alert each
 	// minute the threshold is exceeded). Default 5m.
 	Cooldown time.Duration `yaml:"cooldown"`
+	// Behaviour configures the alerts on what visitors do rather than on how
+	// many events there are (doc/alerts.md). They are on unless turned off.
+	Behaviour BehaviourAlertConfig `yaml:"behaviour,omitempty"`
+}
+
+// BehaviourAlertConfig turns the behaviour alert rules off, as a whole or
+// one by one. The zero value has every rule on.
+type BehaviourAlertConfig struct {
+	// Disabled turns every rule off.
+	Disabled bool `yaml:"disabled,omitempty"`
+	// Off names the rules that are off: new-payload, progression,
+	// credential-reuse, shared-playbook, returning-visitor.
+	Off []string `yaml:"off,omitempty"`
 }
 
 // ResponseConfig configures local commands to execute when an alert
@@ -55,6 +68,10 @@ type AlertConfig struct {
 type ResponseConfig struct {
 	Enabled          bool             `yaml:"enabled"`
 	OnAttackDetected []ResponseAction `yaml:"on_attack_detected"`
+	// OnBehaviour runs for every behaviour alert, with QPOT_ALERT_RULE,
+	// QPOT_ALERT_SEVERITY, QPOT_ALERT_TITLE, QPOT_ALERT_SESSION,
+	// QPOT_ALERT_CAMPAIGN and QPOT_ALERT_SOURCE_IP set.
+	OnBehaviour []ResponseAction `yaml:"on_behaviour,omitempty"`
 }
 
 // ResponseAction is one command that fires on an attack-detected event.

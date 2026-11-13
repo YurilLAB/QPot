@@ -38,6 +38,7 @@ this document stays in lock-step with the code.
 - [Disk cleanup — `qpot cleanup`](#disk-cleanup--qpot-cleanup)
 - [Engagement — `qpot engagement`](#engagement--qpot-engagement)
 - [Investigation — `qpot investigate`](#investigation--qpot-investigate)
+- [Behaviour alerts — `qpot alerts`](#behaviour-alerts--qpot-alerts)
 - [GeoIP — `qpot geoip`](#geoip--qpot-geoip)
 - [Configuration — `qpot config`](#configuration--qpot-config)
 - [Utilities](#utilities)
@@ -98,6 +99,7 @@ qpot --version
 | `qpot cleanup` | Remove old captured files, logs and backup days to keep the instance within its disk limits. |
 | `qpot engagement` | Engagement metrics for an instance, or for any Cowrie JSON log, side by side. |
 | `qpot investigate` | Follow one session or campaign through its records; export and verify evidence bundles. |
+| `qpot alerts` | Show the alerts on what visitors do, and turn their rules on and off. |
 | `qpot geoip` | Install or refresh the GeoIP database used for countries and the attack map. |
 | `qpot config` | Open or print the instance config file. |
 | `qpot id` | Show the QPot ID for an instance. |
@@ -956,6 +958,30 @@ control characters in attacker input as visible escapes.
 
 `export` prints the bundle's SHA-256. `verify` exits 0 for a whole bundle
 and 1 for one with problems, which it lists.
+
+---
+
+## Behaviour alerts — `qpot alerts`
+
+The alerts on what visitors do, and their rules
+([alerts.md](alerts.md#behaviour-alerts)).
+
+```bash
+qpot alerts                            # where alerts go, the rules, the most recent alerts
+qpot alerts --limit 100 --json
+qpot alerts disable returning-visitor  # one rule off
+qpot alerts enable all                 # every rule on
+```
+
+| Command | What it does |
+|---|---|
+| `qpot alerts` | Lists the rules with their state and the most recent alerts (`--limit`, default 30, at most 500; `--json`). Under an alert it prints the `qpot investigate` command that opens its case |
+| `qpot alerts enable <rule\|all>` | Turns a rule on, or all of them |
+| `qpot alerts disable <rule\|all>` | Turns a rule off, or all of them |
+
+The rules are `new-payload`, `progression`, `credential-reuse`,
+`shared-playbook` and `returning-visitor`. `-i` names the instance. The
+commands talk to the running instance, so `qpot up` must be active.
 
 ---
 

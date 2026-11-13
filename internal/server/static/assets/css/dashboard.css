@@ -1342,3 +1342,23 @@ a.navbar-brand:hover {
 #inv-timelines > * + * {
     margin-top: var(--spacing-lg);
 }
+
+
+/* the behaviour rules: a switch each, side by side */
+.alert-rules {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+    gap: var(--spacing-sm) var(--spacing-lg);
+}
+
+.alert-rule {
+    display: flex;
+    flex-direction: row;
+    align-items: center;
+    justify-content: space-between;
+    gap: var(--spacing-md);
+}
+
+#alerts-message:not(:empty) {
+    margin-bottom: var(--spacing-md);
+}

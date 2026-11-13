@@ -455,6 +455,15 @@ counted by the database.
 Lists ranked by a count keep one order: equal counts are ordered by name or
 address, in every database backend.
 
+## Behaviour alerts
+
+| Endpoint | What it does |
+|---|---|
+| `GET /api/alerts?limit=` | `{"enabled", "running", "webhook", "hooks", "since", "rules", "alerts", "problem"}`. `rules[]` is `{"name", "label", "severity", "description", "enabled"}`; `alerts[]`, newest first (`limit` 1 to 500, default 100), is `{"id", "rule", "severity", "time", "title", "detail", "session_id", "campaign_fingerprint", "source_ips", "evidence"}`. `running` is false when the intelligence worker is off; `since` is the baseline; `problem` says why the alert state cannot be used |
+| `PUT /api/alerts` | `{"enabled": bool}` turns every rule on or off; `{"rule": "<name>", "enabled": bool}` one rule. Turning a rule on turns the rules on as a whole. Answers the new view. 400 `QP-INPUT-012` for no `enabled` or an unknown rule, 409 `QP-INST-009` while another change runs |
+
+See [alerts.md](alerts.md#behaviour-alerts) for the rules.
+
 ## Investigation
 
 One session or campaign, followed through its records
