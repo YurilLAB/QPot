@@ -392,8 +392,8 @@ jobs:
           cache: true
       - name: Pull the reviewed multi-architecture Cowrie image
         run: docker pull ghcr.io/telekom-security/cowrie:24.04.2@sha256:65ef2aa192779c96f69d504aa1ece20d5150fab2dddfc8cf47e2efefb4e2574a
-      - name: Exercise four profiles and real SSH and SFTP channels
-        run: go test -race -count=1 -timeout 5m ./internal/instance -run '^TestCowrieStateful(Image|SSH)$'
+      - name: Exercise four profiles, real SSH and SFTP channels and public-key login
+        run: go test -race -count=1 -timeout 5m ./internal/instance -run '^TestCowrieStateful(Image|SSH|PublicKey)$'
 
   vector-integration:
     name: Real Vector normalization and delayed HiFi evidence
@@ -457,10 +457,10 @@ jobs:
         # stop and recreate their own containers only.
         run: |
           set -euo pipefail
-          test_pattern='^(TestCollectorAndCleanupWithRealDocker|TestDockerHelperForReal|TestDockerSSHInventoryPrivateEvidenceAndUnsupportedObjects|TestVector[A-Za-z]*Live)$'
+          test_pattern='^(TestCollectorAndCleanupWithRealDocker|TestDockerHelperForReal|TestDockerHelperMakesLogsWritable|TestDockerSSHInventoryPrivateEvidenceAndUnsupportedObjects|TestVector[A-Za-z]*Live)$'
           test_packages=(./internal/server ./internal/cleanup ./internal/instance)
           listed=$(go test "${test_packages[@]}" -list "$test_pattern")
-          for required in TestCollectorAndCleanupWithRealDocker TestDockerHelperForReal TestDockerSSHInventoryPrivateEvidenceAndUnsupportedObjects TestVectorRemapLive TestVectorConfigValidatesLive TestVectorEdgeConfigsValidateLive; do
+          for required in TestCollectorAndCleanupWithRealDocker TestDockerHelperForReal TestDockerHelperMakesLogsWritable TestDockerSSHInventoryPrivateEvidenceAndUnsupportedObjects TestVectorRemapLive TestVectorConfigValidatesLive TestVectorEdgeConfigsValidateLive; do
             if ! grep -Fxq "$required" <<<"$listed"; then
               echo "required Docker integration test is missing: $required" >&2
               exit 1

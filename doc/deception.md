@@ -64,6 +64,15 @@ QPot mounts corrected Cowrie source files read-only over the image's, so
 commands answer the way the persona's real tools do. Each change is checked
 against the real program.
 
+- **Public-key login.** The image accepts any public key, and it logged a
+  client in on the query that only asks whether a key would be accepted,
+  before any signature: OpenSSH's client printed "Authenticated" straight
+  after "Offering public key". No SSH server does that, so one query showed
+  a visitor what it had reached. QPot's Cowrie answers the query with "key
+  acceptable" and logs the client in when it then proves it holds the key,
+  as sshd does; a signature made with another key is refused. Any key is
+  still accepted (`TestCowrieStatefulPublicKey` runs both against the real
+  image).
 - **Terminal.** The shell writes what bash 5.2's readline or BusyBox's `ash`
   writes, byte for byte. Before, the prompt came with an `ESC[4h` insert-mode
   switch and Ctrl-C printed no `^C`.

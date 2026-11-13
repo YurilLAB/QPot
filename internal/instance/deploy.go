@@ -72,6 +72,7 @@ const cowriePatchVersion = "24.04.2"
 //	commands/curl.py       d4e53f5bfc75eee50a3c69a6ca9998fa41631276ff373353dcacd8ff4d709417
 //	commands/wget.py       1fec4c13975c5827fe557a73fd547f27302af0e959ea1adfd7f1e1afe31191c1
 //	commands/ls.py         a3690435b1734e02bd7c95df66c8f10fed09b0864b6ec35f6097356d173364b5
+//	core/checkers.py       39ef2d3384d6c9bc2b7abc780e85c5492b1f269af18cbbcbb5545edc1016d714
 //
 // protocol.py: the line editor writes what bash's readline (or BusyBox's ash
 // on the firmware personas) writes, as recorded from bash 5.2.37 and BusyBox
@@ -96,6 +97,13 @@ const cowriePatchVersion = "24.04.2"
 // now walks as GNU find -P does, bounded. bashparse.py: pathname expansion,
 // which the image left to each command and almost none did, so `cat
 // /etc/cron.d/*` answered "No such file or directory" for listed files.
+//
+// checkers.py: the image's personas accept any public key, and its checker
+// logged the client in on the query that only asks whether a key would be
+// accepted (no signature), which no SSH server does: OpenSSH's own client
+// showed "Authenticated" straight after "Offering public key". The key is
+// now answered "acceptable" first and accepted when the client proves it
+// holds it, as sshd does.
 //
 // curl.py and wget.py: curl's and GNU wget's options, exit codes and messages
 // as the persona's release has them (recorded from curl 8.14.1 and wget
@@ -181,6 +189,10 @@ var (
 	// room for is kept and finished later instead of being cut or lost.
 	//go:embed honeypotfiles/cowrie/jsonlog.py
 	cowrieJSONLogPy []byte
+	// The image's credential checkers with one change: a public key is
+	// accepted in the two steps an SSH server takes (see the file).
+	//go:embed honeypotfiles/cowrie/checkers.py
+	cowrieCheckersPy []byte
 )
 
 // cowrieSource is where the image keeps Cowrie's Python package.
@@ -214,6 +226,7 @@ func cowriePatchVolumes() []deployVolume {
 		file("qpot_permissions.py", "core/qpot_permissions.py", cowriePermissionsPy),
 		file("sudo.py", "commands/sudo.py", cowrieSudoPy),
 		file("jsonlog.py", "output/jsonlog.py", cowrieJSONLogPy),
+		file("checkers.py", "core/checkers.py", cowrieCheckersPy),
 	}
 }
 

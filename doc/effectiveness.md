@@ -707,8 +707,8 @@ to check that an operator can carry it out and that the report works:
   `qpot up -d`, `qpot doctor`: all checks passed on both.
 - **They differ only in QPot's layer.** With the instance name, the
   credentials, the ports, the network names and the addresses masked, the
-  two generated compose files differ in 22 lines, all of them in the
-  treatment's Cowrie service: the 21 read-only mounts of QPot's corrected
+  two generated compose files differ in 23 lines, all of them in the
+  treatment's Cowrie service: the 22 read-only mounts of QPot's corrected
   source files and the bait plan. The collector configurations are the
   same. The running containers have the same image digest, the same
   environment, the same read-only root, capabilities, memory, PID and CPU limits and

@@ -92,6 +92,7 @@ func TestCowriePatchMounts(t *testing.T) {
 		cowrieSource + "/core/qpot_permissions.py": cowriePermissionsPy,
 		cowrieSource + "/commands/sudo.py":         cowrieSudoPy,
 		cowrieSource + "/output/jsonlog.py":        cowrieJSONLogPy,
+		cowrieSource + "/core/checkers.py":         cowrieCheckersPy,
 	}
 	d := deployProfile(config.Default("cowrie-patch"), "cowrie")
 	for _, v := range d.Volumes {
@@ -131,6 +132,7 @@ func TestCowriePatchMounts(t *testing.T) {
 		"/honeypots/cowrie/patch/opkg.py:" + cowrieSource + "/commands/opkg.py:ro\n",
 		"/honeypots/cowrie/patch/qpot_permissions.py:" + cowrieSource + "/core/qpot_permissions.py:ro\n",
 		"/honeypots/cowrie/patch/sudo.py:" + cowrieSource + "/commands/sudo.py:ro\n",
+		"/honeypots/cowrie/patch/checkers.py:" + cowrieSource + "/core/checkers.py:ro\n",
 	} {
 		if !strings.Contains(svc, line) {
 			t.Errorf("cowrie service lacks %q", strings.TrimSpace(line))
@@ -217,7 +219,7 @@ func TestCowriePatchFiles(t *testing.T) {
 		"awscli.py": cowrieAWSCLIPy, "honeyfs.py": cowrieHoneyfsPy, "qpot_bait.py": cowrieQPotBaitPy,
 		"find.py": cowrieFindPy, "bashparse.py": cowrieBashparsePy, "curl.py": cowrieCurlPy,
 		"wget.py": cowrieWgetPy, "ls.py": cowrieLsPy, "qpot_state.py": cowrieStatePy,
-		"adduser.py": cowrieAdduserPy, "su.py": cowrieSuPy, "opkg.py": cowrieOpkgPy, "qpot_permissions.py": cowriePermissionsPy, "sudo.py": cowrieSudoPy, "jsonlog.py": cowrieJSONLogPy} {
+		"adduser.py": cowrieAdduserPy, "su.py": cowrieSuPy, "opkg.py": cowrieOpkgPy, "qpot_permissions.py": cowriePermissionsPy, "sudo.py": cowrieSudoPy, "jsonlog.py": cowrieJSONLogPy, "checkers.py": cowrieCheckersPy} {
 		if bytes.Contains(content, []byte("\r")) {
 			t.Errorf("%s has CR bytes", name)
 		}
@@ -242,7 +244,7 @@ func TestCowriePatchWritten(t *testing.T) {
 		"awscli.py": cowrieAWSCLIPy, "honeyfs.py": cowrieHoneyfsPy, "qpot_bait.py": cowrieQPotBaitPy,
 		"find.py": cowrieFindPy, "bashparse.py": cowrieBashparsePy, "curl.py": cowrieCurlPy,
 		"wget.py": cowrieWgetPy, "ls.py": cowrieLsPy, "qpot_state.py": cowrieStatePy,
-		"adduser.py": cowrieAdduserPy, "su.py": cowrieSuPy, "opkg.py": cowrieOpkgPy, "qpot_permissions.py": cowriePermissionsPy, "sudo.py": cowrieSudoPy, "jsonlog.py": cowrieJSONLogPy} {
+		"adduser.py": cowrieAdduserPy, "su.py": cowrieSuPy, "opkg.py": cowrieOpkgPy, "qpot_permissions.py": cowriePermissionsPy, "sudo.py": cowrieSudoPy, "jsonlog.py": cowrieJSONLogPy, "checkers.py": cowrieCheckersPy} {
 		got, err := os.ReadFile(filepath.Join(cfg.DataPath, "honeypots", "cowrie", "patch", name))
 		if err != nil || !bytes.Equal(got, content) {
 			t.Errorf("patch/%s not written (err %v, %d bytes)", name, err, len(got))

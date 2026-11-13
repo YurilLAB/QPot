@@ -2,6 +2,7 @@ package instance
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
@@ -137,13 +138,14 @@ func cowrieStatefulMounts(t *testing.T) (string, []string) {
 	return root, mounts
 }
 
-// TestCowrieStatefulSSH starts the real persona launcher/Twisted SSH service
-// and follows modifications across SSH channels. The client stays inside the
-// network-none namespace; no host port or external connection is available.
-func TestCowrieStatefulSSH(t *testing.T) {
-	if os.Getenv("QPOT_TEST_COWRIE_STATEFUL") != "1" {
-		t.Skip("set QPOT_TEST_COWRIE_STATEFUL=1 for actual SSH state integration")
-	}
+// cowrieStatefulService starts the image's persona launcher and Twisted SSH
+// service in a network-none container, with the client built from
+// testdata/source at /qpot-stateful-test/ssh-client, and returns the
+// container's name once SSH answers. patched mounts QPot's patch layer over
+// the image's source, as an instance does; without it the image runs as
+// shipped.
+func cowrieStatefulService(t *testing.T, source string, patched bool) string {
+	t.Helper()
 	image := GetHoneypotImage("cowrie")
 	architecture, err := conpotLiveDocker(15*time.Second, "image", "inspect", image, "--format", "{{.Architecture}}")
 	if err != nil {
@@ -154,7 +156,7 @@ func TestCowrieStatefulSSH(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
 	defer cancel()
 	build := exec.CommandContext(ctx, "go", "build", "-trimpath", "-buildvcs=false", "-o", client,
-		filepath.Join("testdata", "cowrie_ssh_client.go"))
+		filepath.Join("testdata", source))
 	build.Env = append(os.Environ(), "CGO_ENABLED=0", "GOOS=linux", "GOARCH="+strings.TrimSpace(architecture))
 	if out, err := build.CombinedOutput(); err != nil {
 		t.Fatalf("compile actual SSH client: %v\n%s", err, out)
@@ -176,7 +178,12 @@ func TestCowrieStatefulSSH(t *testing.T) {
 		"-e", "PYTHONDONTWRITEBYTECODE=1", "-e", "COWRIE_PERSONA=debian-bookworm", "-e", "COWRIE_PERSONA_ROTATION=365",
 		"-e", "COWRIE_HONEYPOT_AUTH_CLASS=AuthRandom", "-e", "COWRIE_HONEYPOT_AUTH_CLASS_PARAMETERS=1,1,100",
 		"-e", "COWRIE_SSH_LISTEN_ENDPOINTS=tcp:22:interface=127.0.0.1", "-e", "COWRIE_SSH_SFTP_ENABLED=true", "-e", "COWRIE_TELNET_ENABLED=false"}
-	args = append(args, mounts...)
+	if patched {
+		args = append(args, mounts...)
+	} else {
+		// The image as shipped: only the test's own folder is mounted.
+		args = append(args, mounts[:2]...)
+	}
 	args = append(args, "--entrypoint", "/usr/local/bin/start-cowrie-persona", image)
 	if out, err := conpotLiveDocker(time.Minute, args...); err != nil {
 		t.Fatalf("start isolated Cowrie SSH fixture: %v\n%s", err, out)
@@ -205,6 +212,17 @@ func TestCowrieStatefulSSH(t *testing.T) {
 		logs, _ := conpotLiveDocker(10*time.Second, "logs", name)
 		t.Fatalf("actual SSH readiness failed: %v\n%s\n%s", err, ready, logs)
 	}
+	return name
+}
+
+// TestCowrieStatefulSSH starts the real persona launcher/Twisted SSH service
+// and follows modifications across SSH channels. The client stays inside the
+// network-none namespace; no host port or external connection is available.
+func TestCowrieStatefulSSH(t *testing.T) {
+	if os.Getenv("QPOT_TEST_COWRIE_STATEFUL") != "1" {
+		t.Skip("set QPOT_TEST_COWRIE_STATEFUL=1 for actual SSH state integration")
+	}
+	name := cowrieStatefulService(t, "cowrie_ssh_client.go", true)
 	if out, err := conpotLiveDocker(2*time.Minute, "exec", name, "/qpot-stateful-test/ssh-client"); err != nil {
 		logs, _ := conpotLiveDocker(10*time.Second, "logs", name)
 		t.Fatalf("real SSH action sequences failed: %v\n%s\n%s", err, out, logs)
@@ -221,5 +239,39 @@ print(json.dumps({"attack_commands_logged":len(commands),"required_mutation_inpu
 		t.Fatalf("real SSH command telemetry missing: %v\n%s", err, out)
 	} else {
 		t.Logf("%s", strings.TrimSpace(out))
+	}
+}
+
+// TestCowrieStatefulPublicKey: the image's personas accept any public key,
+// and its checker logged a client in on the query that only asks whether a
+// key would be accepted, before any signature and whatever the signature
+// was. No SSH server does that, so one query showed a visitor what it had
+// reached. With QPot's checkers.py the key is called acceptable first, a
+// signature made with another key is refused, and the client that holds the
+// key is logged in. The image as shipped is run the same way and must still
+// show the fault: when it no longer does, the patch has nothing left to fix.
+func TestCowrieStatefulPublicKey(t *testing.T) {
+	if os.Getenv("QPOT_TEST_COWRIE_STATEFUL") != "1" {
+		t.Skip("set QPOT_TEST_COWRIE_STATEFUL=1 for actual SSH public-key integration")
+	}
+	answers := func(patched bool) map[string]string {
+		t.Helper()
+		name := cowrieStatefulService(t, "cowrie_pubkey_client.go", patched)
+		out, err := conpotLiveDocker(time.Minute, "exec", name, "/qpot-stateful-test/ssh-client")
+		var got map[string]string
+		if err != nil || json.Unmarshal([]byte(strings.TrimSpace(out)), &got) != nil {
+			logs, _ := conpotLiveDocker(10*time.Second, "logs", name)
+			t.Fatalf("public-key client (patched %v): %v\n%s\n%s", patched, err, out, logs)
+		}
+		return got
+	}
+	got := answers(true)
+	if got["wrong_signature"] != "key acceptable, signature refused" || got["right_signature"] != "logged in as root" {
+		t.Errorf("with QPot's checkers.py: %v\nwant the key called acceptable, a wrong signature refused and the key's holder logged in as root", got)
+	}
+	stock := answers(false)
+	const fault = "logged in on the query, before any signature"
+	if stock["wrong_signature"] != fault || stock["right_signature"] != fault {
+		t.Errorf("the image as shipped: %v\nwant %q for both: the image no longer has the fault checkers.py is there for", stock, fault)
 	}
 }
