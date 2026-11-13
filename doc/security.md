@@ -228,8 +228,11 @@ CI scans committed changes and the working tree with the pinned upstream
 Gitleaks rules, including new files under `docker/`. This separate raw gate
 does not use the repository's decoy allowlist, historical fingerprints or
 inline exemptions. Its reviewed baseline is commit
-`85791219d54574fca5d68c60dbbd474f5dfc195a`; changing that baseline requires a
-new review. A missing baseline, scanner or pinned default rules fails the gate.
+`1c342506c7060aad7064be52e703bceab76b54a9`; changing that baseline requires a
+new review. It was moved there on 2026-11-14 from
+`85791219d54574fca5d68c60dbbd474f5dfc195a`, after the one finding between the
+two was reviewed: a line comparing a key hash with the hex alphabet, which the
+scanner took for a key. A missing baseline, scanner or pinned default rules fails the gate.
 The release gate also scans the unpacked standalone archives, projecting
 executable bytes into text so a binary-file exclusion cannot silently skip
 them. Compressed or encrypted content inside an executable is not recursively

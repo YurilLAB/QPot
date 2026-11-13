@@ -22,10 +22,17 @@ import (
 	"strings"
 )
 
-// ReviewedScanBaseline is the reviewed source revision before the stateful
-// deception update. Never infer it from origin/main or HEAD^: fresh checkouts
-// and release tags can otherwise silently omit the changes being released.
-const ReviewedScanBaseline = "85791219d54574fca5d68c60dbbd474f5dfc195a"
+// ReviewedScanBaseline is the reviewed source revision the raw gate scans
+// from. Never infer it from origin/main or HEAD^: fresh checkouts and release
+// tags can otherwise silently omit the changes being released.
+//
+// It was moved on 2026-11-14 from 85791219d54574fca5d68c60dbbd474f5dfc195a,
+// with the owner's decision, after a review of the one finding between the
+// two: commit d1c8337c compared a stored key hash with the hex alphabet
+// "0123456789abcdef", which the generic-api-key rule takes for a key. It is
+// no secret, the line has been reworded, and its fingerprint is in
+// .gitleaksignore for the full-history scan.
+const ReviewedScanBaseline = "1c342506c7060aad7064be52e703bceab76b54a9"
 
 const secretMemberLimit int64 = 256 << 20
 const secretArchiveLimit int64 = 1 << 30
