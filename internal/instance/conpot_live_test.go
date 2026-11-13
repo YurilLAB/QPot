@@ -12,6 +12,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/qpot/qpot/internal/config"
 )
 
 // TestConpotLiveProfiles exercises real protocol implementations in the pinned
@@ -91,63 +93,67 @@ print(actual)`
 				// last listener binds. Require one normal STARTDT exchange.
 				readiness += conpotLiveIEC104Readiness
 			}
-			root := t.TempDir()
-			args := []string{"run", "-d", "--name", name, "--network", "none", "--read-only",
-				"--cap-drop", "ALL", "--cap-add", "SETUID", "--cap-add", "SETGID",
-				"--security-opt", "no-new-privileges:true", "--tmpfs", "/tmp:rw,mode=1777"}
-			// Python carries a NET_BIND_SERVICE file capability in this image,
-			// including for templates whose own listeners are not privileged.
-			if profile.NeedsNetBind() || cfg.Honeypots["conpot"].Port < 1024 {
-				args = append(args, "--cap-add", "NET_BIND_SERVICE")
-			}
-			for _, mount := range profile.Tmpfs {
-				args = append(args, "--tmpfs", mount)
-			}
-			for _, mount := range profile.Volumes {
-				path := filepath.Join(root, mount.HostSubdir)
-				// Rootless Docker maps image UID 2000 to a different host UID.
-				// These are disposable, non-secret test data directories.
-				if mount.File {
-					if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-						t.Fatal(err)
-					}
-					if err := os.Chmod(filepath.Dir(path), 0o755); err != nil {
-						t.Fatal(err)
-					}
-					if err := os.WriteFile(path, mount.Content, 0o644); err != nil {
-						t.Fatal(err)
-					}
-					if err := os.Chmod(path, 0o644); err != nil {
-						t.Fatal(err)
-					}
-				} else {
-					if err := os.MkdirAll(path, 0o777); err != nil {
-						t.Fatal(err)
-					}
-					if err := os.Chmod(path, 0o777); err != nil {
-						t.Fatal(err)
-					}
+			runArgs := func(cfg *config.Config, root string) []string {
+				t.Helper()
+				profile := deployProfile(cfg, "conpot")
+				args := []string{"run", "-d", "--name", name, "--network", "none", "--read-only",
+					"--cap-drop", "ALL", "--cap-add", "SETUID", "--cap-add", "SETGID",
+					"--security-opt", "no-new-privileges:true", "--tmpfs", "/tmp:rw,mode=1777"}
+				// Python carries a NET_BIND_SERVICE file capability in this image,
+				// including for templates whose own listeners are not privileged.
+				if profile.NeedsNetBind() || cfg.Honeypots["conpot"].Port < 1024 {
+					args = append(args, "--cap-add", "NET_BIND_SERVICE")
 				}
-				bind := "type=bind,src=" + path + ",dst=" + mount.ContainerPath
-				if mount.ReadOnly {
-					bind += ",readonly"
+				for _, mount := range profile.Tmpfs {
+					args = append(args, "--tmpfs", mount)
 				}
-				args = append(args, "--mount", bind)
+				for _, mount := range profile.Volumes {
+					path := filepath.Join(root, mount.HostSubdir)
+					// Rootless Docker maps image UID 2000 to a different host UID.
+					// These are disposable, non-secret test data directories.
+					if mount.File {
+						if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+							t.Fatal(err)
+						}
+						if err := os.Chmod(filepath.Dir(path), 0o755); err != nil {
+							t.Fatal(err)
+						}
+						if err := os.WriteFile(path, mount.Content, 0o644); err != nil {
+							t.Fatal(err)
+						}
+						if err := os.Chmod(path, 0o644); err != nil {
+							t.Fatal(err)
+						}
+					} else {
+						if err := os.MkdirAll(path, 0o777); err != nil {
+							t.Fatal(err)
+						}
+						if err := os.Chmod(path, 0o777); err != nil {
+							t.Fatal(err)
+						}
+					}
+					bind := "type=bind,src=" + path + ",dst=" + mount.ContainerPath
+					if mount.ReadOnly {
+						bind += ",readonly"
+					}
+					args = append(args, "--mount", bind)
+				}
+				keys := make([]string, 0, len(profile.Env))
+				for key := range profile.Env {
+					keys = append(keys, key)
+				}
+				sort.Strings(keys)
+				for _, key := range keys {
+					args = append(args, "-e", key+"="+profile.Env[key])
+				}
+				// Reproduce Docker clients which inject both case variants. The real
+				// QPot launcher must normalize them before ConfigParser(os.environ).
+				return append(args, "-e", "HTTP_PROXY=http://127.0.0.1:9", "-e", "http_proxy=http://127.0.0.1:9",
+					"-e", "FTP_PROXY=http://127.0.0.1:9", "-e", "ftp_proxy=http://127.0.0.1:9",
+					"-e", "NO_PROXY=localhost,127.0.0.1", "-e", "no_proxy=localhost,127.0.0.1",
+					image, "/bin/sh", "-c", conpotStartScript())
 			}
-			keys := make([]string, 0, len(profile.Env))
-			for key := range profile.Env {
-				keys = append(keys, key)
-			}
-			sort.Strings(keys)
-			for _, key := range keys {
-				args = append(args, "-e", key+"="+profile.Env[key])
-			}
-			// Reproduce Docker clients which inject both case variants. The real
-			// QPot launcher must normalize them before ConfigParser(os.environ).
-			args = append(args, "-e", "HTTP_PROXY=http://127.0.0.1:9", "-e", "http_proxy=http://127.0.0.1:9",
-				"-e", "FTP_PROXY=http://127.0.0.1:9", "-e", "ftp_proxy=http://127.0.0.1:9",
-				"-e", "NO_PROXY=localhost,127.0.0.1", "-e", "no_proxy=localhost,127.0.0.1",
-				image, "/bin/sh", "-c", conpotStartScript())
+			args := runArgs(cfg, t.TempDir())
 			t.Cleanup(func() {
 				if t.Failed() {
 					output, _ := conpotLiveDocker(10*time.Second, "logs", name)
@@ -181,6 +187,39 @@ print(actual)`
 			start()
 			if after := conpotLiveSnapshot(t, name, test.id); after != before {
 				t.Fatalf("device identity or rendered profile changed after recreation:\nbefore %s\nafter %s", before, after)
+			}
+			// The site does not depend on what the state folder kept: a start
+			// of the same instance with an empty one shows the same device.
+			// (Before QPot passed the seed, Conpot drew a new site whenever
+			// its seed file was gone or could not be written.)
+			remove := func() {
+				t.Helper()
+				if output, err := conpotLiveDocker(30*time.Second, "rm", "-f", name); err != nil {
+					t.Fatalf("remove Conpot: %v\n%s", err, output)
+				}
+			}
+			remove()
+			args = runArgs(cfg, t.TempDir())
+			start()
+			if after := conpotLiveSnapshot(t, name, test.id); after != before {
+				t.Fatalf("the same instance with an empty state folder shows another device:\nbefore %s\nafter %s", before, after)
+			}
+			// Another instance shows another site.
+			remove()
+			args = runArgs(conpotConfig("qp_liveprotocolother", test.id), t.TempDir())
+			start()
+			other := conpotLiveSnapshot(t, name, test.id)
+			var mine, theirs map[string]any
+			if json.Unmarshal([]byte(before), &mine) != nil || json.Unmarshal([]byte(other), &theirs) != nil {
+				t.Fatalf("snapshots are not JSON: %s / %s", before, other)
+			}
+			if mine["site"] == theirs["site"] {
+				t.Fatalf("two instances were given the same site seed %v", mine["site"])
+			}
+			delete(mine, "site")
+			delete(theirs, "site")
+			if fmt.Sprint(mine) == fmt.Sprint(theirs) && test.id != "plc_modbus" {
+				t.Fatalf("two instances show the same device:\n%s\n%s", before, other)
 			}
 		})
 	}
@@ -244,9 +283,10 @@ assert files, "no rendered protocol configuration"
 rendered="".join(p.read_text() for p in sorted(root.rglob("*.toml")))
 for shared in ("BER01","Corporate IT",'"DoE"',"pwr_ctrl_mgmt01","10.232.15.242","Technikzentrale"):
  assert shared not in rendered, "the image's own "+shared+" is still in the rendered profile"
-site=pathlib.Path("/var/lib/conpot/qpot_site.json")
-assert site.is_file(), "the site's seed was not kept"
-files["site"]=json.loads(site.read_text())["seed"]
+import os
+assert len(os.environ.get("QPOT_SITE_SEED",""))>=16, "Conpot was given no site seed"
+files["site"]=os.environ["QPOT_SITE_SEED"]
+assert not pathlib.Path("/var/lib/conpot/qpot_site.json").exists(), "the site step still keeps a seed of its own"
 identity=pathlib.Path("/var/lib/conpot")/(sys.argv[1]+".json")
 if sys.argv[1] not in ("plc_modbus","guardian_ast"): assert identity.is_file(), "persistent identity missing"
 files["identity"]=hashlib.sha256(identity.read_bytes()).hexdigest() if identity.is_file() else None

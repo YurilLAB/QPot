@@ -18,7 +18,14 @@ package instance
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
+	"errors"
+	"fmt"
 	"hash/fnv"
+	"io"
+	"io/fs"
+	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 
@@ -334,4 +341,103 @@ func hostnameForPersona(t credentialTemplate, seed string) string {
 		return hostnameForSeed(seed)
 	}
 	return pool[seededIndex("host:"+seed, len(pool))]
+}
+
+// conpotSiteSeedEnv is the variable Conpot's site step (site_identity.py)
+// reads its site's seed from.
+const conpotSiteSeedEnv = "QPOT_SITE_SEED"
+
+// conpotLegacySiteFile is where Conpot's site step kept the seed it drew
+// itself before QPot supplied one: honeypots/conpot/state, the container's
+// /var/lib/conpot.
+const conpotLegacySiteFile = "qpot_site.json"
+
+// conpotSiteSeed returns the seed of this instance's Conpot site: the names,
+// the DNP3 points, the OPC UA process, the tank gauge and the values the
+// image would draw at random (addresses, MACs, serial numbers) all follow
+// from it. Nothing inside the container has to be saved for the site to stay
+// the same: the seed is derived from the instance's deception seed, so every
+// start of the instance shows the same plant and no two instances show the
+// same one.
+//
+// An instance that ran an earlier QPot drew a random seed inside the
+// container and kept it in its state folder. That seed is what its visitors
+// have seen, so it is used for as long as the file is there. A file that is
+// there but cannot be read, or holds no seed, is an error: deriving a new seed
+// would show those visitors another plant.
+func conpotSiteSeed(cfg *config.Config) (string, error) {
+	if cfg.DataPath != "" {
+		seed, err := conpotLegacySiteSeed(filepath.Join(cfg.DataPath, "honeypots", "conpot", "state"))
+		if err != nil {
+			return "", fmt.Errorf("conpot: the site this instance has shown so far cannot be read from %s: %w; "+
+				"make the file readable to QPot, or remove it to give Conpot a site derived from this instance (visitors then see another plant)",
+				filepath.Join(cfg.DataPath, "honeypots", "conpot", "state", conpotLegacySiteFile), err)
+		}
+		if seed != "" {
+			return seed, nil
+		}
+	}
+	sum := sha256.Sum256([]byte("qpot-conpot-site-v1\x00" + deceptionSeed(cfg)))
+	return hex.EncodeToString(sum[:16]), nil
+}
+
+// conpotLegacySiteSeed reads the seed an earlier site step kept in dir. It
+// returns "" when there is none. The folder is the container's, so the file is
+// opened inside it without following a link out of it, as a regular file and
+// no larger than the step ever wrote.
+func conpotLegacySiteSeed(dir string) (string, error) {
+	root, err := os.OpenRoot(dir)
+	if errors.Is(err, fs.ErrNotExist) {
+		return "", nil
+	}
+	if err != nil {
+		return "", err
+	}
+	defer root.Close()
+	info, err := root.Lstat(conpotLegacySiteFile)
+	if errors.Is(err, fs.ErrNotExist) {
+		return "", nil
+	}
+	if err != nil {
+		return "", err
+	}
+	if !info.Mode().IsRegular() {
+		return "", fmt.Errorf("not a regular file")
+	}
+	f, err := root.Open(conpotLegacySiteFile)
+	if err != nil {
+		return "", err
+	}
+	defer f.Close()
+	data, err := io.ReadAll(io.LimitReader(f, 4097))
+	if err != nil {
+		return "", err
+	}
+	if len(data) > 4096 {
+		return "", fmt.Errorf("larger than a site file")
+	}
+	var site struct {
+		Seed string `json:"seed"`
+	}
+	if err := json.Unmarshal(data, &site); err != nil {
+		return "", fmt.Errorf("not a site file: %w", err)
+	}
+	if !validConpotSiteSeed(site.Seed) {
+		return "", fmt.Errorf("the file holds no usable seed")
+	}
+	return site.Seed, nil
+}
+
+// validConpotSiteSeed accepts what the site step accepts: 16 to 128 letters
+// and digits (it drew 32 hex digits itself).
+func validConpotSiteSeed(seed string) bool {
+	if len(seed) < 16 || len(seed) > 128 {
+		return false
+	}
+	for _, c := range seed {
+		if !(c >= '0' && c <= '9' || c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z') {
+			return false
+		}
+	}
+	return true
 }

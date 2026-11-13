@@ -398,6 +398,14 @@ def report(site, command, epoch=None):
         return _frame(command, now, site, lines)
     return None
 
+def gauge_seed():
+    """The gauge's seed: drawn from the site's seed when QPot passes one."""
+    site = os.environ.get("QPOT_SITE_SEED", "")
+    if len(site) >= 16:
+        return hashlib.sha256(("qpot-gauge\x00" + site).encode()).hexdigest()[:32]
+    return secrets.token_hex(16)
+
+
 def load_state(path=None):
     """The gauge's seed and the labels visitors set, kept across restarts."""
     path = path or STATE_FILE
@@ -410,8 +418,10 @@ def load_state(path=None):
     except (OSError, ValueError):
         pass
     # The model starts ten days back, so the first look already shows
-    # deliveries and tanks at different levels.
-    state = {"seed": secrets.token_hex(16), "labels": {}, "anchor": (int(time.time()) // 86400 - 10) * 86400}
+    # deliveries and tanks at different levels. The gauge's seed follows from
+    # the site's (QPOT_SITE_SEED, from QPot), so its station, tanks and
+    # products are the same whether or not this file could be kept.
+    state = {"seed": gauge_seed(), "labels": {}, "anchor": (int(time.time()) // 86400 - 10) * 86400}
     save_state(state, path)
     return state
 

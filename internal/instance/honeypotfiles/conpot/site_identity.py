@@ -10,16 +10,21 @@ points are the same on every install of the image, and so name the image.
 
 This does what the image's entrypoint does (tpot_templates.py render) with
 one step added: after the profile is rendered, those values are replaced by
-ones drawn from a seed kept beside the image's own identity. Every value the
-image is known to carry must be found where it is expected; if one is not,
-the image has changed and this stops instead of starting a device with
-values nobody reviewed.
+ones drawn from the site's seed, which QPot passes in QPOT_SITE_SEED. Every
+value the image is known to carry must be found where it is expected; if one
+is not, the image has changed and this stops instead of starting a device
+with values nobody reviewed.
+
+The seed comes from QPot, so nothing here has to be saved for the site to
+stay the same. The values the image draws itself on a first start (addresses,
+MACs, serial numbers), which it keeps in /var/lib/conpot, are drawn from the
+seed too: if they cannot be kept, the next start draws the same ones. Without
+a seed this stops: a site made up for one start would change the plant
+between two visits.
 """
 
 import hashlib
-import json
 import os
-import secrets
 import sys
 import tomllib
 from pathlib import Path
@@ -27,7 +32,7 @@ from pathlib import Path
 sys.path.insert(0, "/opt/tpot")
 import tpot_templates as tpot  # noqa: E402
 
-SITE_FILE = "qpot_site.json"
+SEED_ENV = "QPOT_SITE_SEED"
 
 # Made-up station codes, as utilities abbreviate their sites.
 _STATIONS = ["NWD", "ELM", "RVS", "HLD", "KGS", "WTN", "BRK", "ASH", "MRL", "FRD", "LKS", "OAK", "STN", "CLF", "GRV", "PKH"]
@@ -82,23 +87,38 @@ def replacements(name, seed):
     return {}
 
 
-def load_seed(directory):
-    """The site's seed, kept beside the image's own identity files."""
-    path = Path(directory) / SITE_FILE
-    try:
-        seed = json.loads(path.read_text())["seed"]
-        if isinstance(seed, str) and len(seed) >= 16:
-            return seed
-    except (OSError, ValueError, KeyError, TypeError):
-        pass
-    seed = secrets.token_hex(16)
-    try:
-        tmp = path.with_name("." + SITE_FILE + ".tmp")
-        tmp.write_text(json.dumps({"version": 1, "seed": seed}))
-        os.replace(tmp, path)
-    except OSError as exc:
-        tpot.info(f"WARNING: cannot keep the site in {directory} ({exc}), using one for this start only")
+def site_seed():
+    """The site's seed, as QPot passes it."""
+    seed = os.environ.get(SEED_ENV, "")
+    if not (16 <= len(seed) <= 128 and seed.isascii() and seed.isalnum()):
+        tpot.die(f"{SEED_ENV} holds no site seed; QPot sets it when it starts Conpot (qpot up)")
     return seed
+
+
+class SeededDraws(object):
+    """What the image's identity step takes from the secrets module, drawn
+    from the site's seed instead: the same seed draws the same values."""
+
+    def __init__(self, seed, what):
+        self.seed, self.what, self.n = seed, what, 0
+
+    def randbelow(self, n):
+        self.n += 1
+        return draw(self.seed, "%s#%d" % (self.what, self.n), n)
+
+    def choice(self, values):
+        return values[self.randbelow(len(values))]
+
+
+def load_identity(name, tpl, seed):
+    """The image's identity for this template: the one it kept, or values
+    drawn from the site's seed where it kept none."""
+    drawn = tpot.secrets
+    tpot.secrets = SeededDraws(seed, "identity:" + name)
+    try:
+        return tpot.load_identity(name, tpl)
+    finally:
+        tpot.secrets = drawn
 
 
 def apply_site(name, rendered, seed):
@@ -126,11 +146,11 @@ def main(name):
         tpot.die(f"template '{name}' is not part of the T-Pot spec")
     tmp = os.environ.get("CONPOT_TMP", "/tmp/conpot")
     rendered = Path(tmp) / "templates" / name
-    tpot.render_dir(tpot.package_templates_dir() / name, rendered, tpot.load_identity(name, spec["templates"][name]))
-    seed = load_seed(tpot.IDENTITY_DIR)
+    seed = site_seed()
+    tpot.render_dir(tpot.package_templates_dir() / name, rendered, load_identity(name, spec["templates"][name], seed))
     apply_site(name, rendered, seed)
-    # For the protocol servers QPot mounts, which draw a site's readings.
-    os.environ["QPOT_SITE_SEED"] = seed
+    # The protocol servers QPot mounts draw the site's readings from the
+    # same seed (QPOT_SITE_SEED, inherited by conpot).
     argv = [
         "conpot",
         "--mibcache", tmp,

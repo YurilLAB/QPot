@@ -277,7 +277,8 @@ const (
 // conpotSitePy starts Conpot as the image's entrypoint does, and gives the
 // rendered profile a site of its own first: the station, contact, host and
 // room names that are the same on every install of the image (and so name
-// it) are replaced by values drawn from a seed kept in /var/lib/conpot.
+// it) are replaced by values drawn from the seed QPot passes in
+// QPOT_SITE_SEED (conpotSiteSeed).
 //
 //go:embed honeypotfiles/conpot/site_identity.py
 var conpotSitePy []byte
@@ -434,6 +435,14 @@ type honeypotDeploy struct {
 	// cleanup.max_age_days, oldest first when the honeypot is over its
 	// storage limit; state and config folders are never touched.
 	Captures []string
+	// Logs are the files in the "logs" volume the honeypot appends its
+	// events to. QPot creates each one before the first start, as its own
+	// file that the container may write to, so that the disk guard can keep
+	// room allocated beyond its end (diskguard.LogRoom): on a disk that
+	// fills at once the honeypot goes on logging into that room until the
+	// guard has stopped it. A log the honeypot created itself belongs to
+	// the container's user and gets room only when QPot runs as root.
+	Logs []string
 	// LLMEnv maps honeypot custom_config keys to the container environment
 	// variables of an LLM-backed honeypot; LLMRequired are the keys that must
 	// be set (the image refuses to start without a provider).
@@ -482,6 +491,11 @@ func deployProfile(cfg *config.Config, name string) honeypotDeploy {
 		d.UDPPorts = slices.Clone(t.UDP)
 		d.Env = maps.Clone(d.Env)
 		d.Env["CONPOT_TEMPLATE"] = t.ID
+		// Without a seed the site step refuses to start Conpot; the start
+		// itself fails first (ComposeGenerator.Generate) and says why.
+		if seed, err := conpotSiteSeed(cfg); err == nil {
+			d.Env[conpotSiteSeedEnv] = seed
+		}
 		d.Volumes = append(slices.Clone(d.Volumes), conpotSiteVolume())
 		if t.ID == "plc_modbus" {
 			d.Volumes = append(d.Volumes, conpotModbusPatchVolume(), conpotModbusSlavePatchVolume())
@@ -715,6 +729,7 @@ func deployProfileFor(name string) honeypotDeploy {
 				{HostSubdir: "licenses/opkg_sources.tar.xz", File: true, ReadOnly: true, Content: cowrieOpkgSources},
 				{HostSubdir: "licenses/opkg-NOTICE.txt", File: true, ReadOnly: true, Content: cowrieOpkgNotice},
 			}, cowriePatchVolumes()...),
+			Logs:     []string{"cowrie.json"},
 			Ports:    []int{22, 23},
 			Settings: []string{"persona", "persona_rotation", baitSetting, baitProfileSetting, baitTargetSetting, cowrieDeceptionSetting},
 			Values:   map[string][]string{"persona": CowriePersonaIDs(), baitSetting: {"on", "off"}, baitProfileSetting: {"ops", "industrial"}, baitTargetSetting: {"conpot", "refrigeration"}, cowrieDeceptionSetting: {"qpot", "stock"}},
@@ -726,6 +741,7 @@ func deployProfileFor(name string) honeypotDeploy {
 			Volumes: []deployVolume{
 				{HostSubdir: "logs", ContainerPath: "/var/log/endlessh"},
 			},
+			Logs:  []string{"endlessh.log"},
 			Ports: []int{2222},
 		}
 	case "ssh-proxy":
@@ -800,6 +816,7 @@ func deployProfileFor(name string) honeypotDeploy {
 			}, dionaeaPatchVolumes(nil)...),
 			ContainerDirs: []string{"data/binaries", "data/roots/ftp", "data/roots/tftp", "data/roots/www",
 				"data/roots/upnp", "data/rtp"},
+			Logs:     []string{"dionaea.json"},
 			Ports:    []int{20, 21, 42, 81, 135, 443, 445, 1433, 1723, 1883, 3306, 5060, 5061, 27017},
 			UDPPorts: []int{69, 5060},
 		}
@@ -807,8 +824,10 @@ func deployProfileFor(name string) honeypotDeploy {
 		// The image's CMD (tpot_templates.py render "$CONPOT_TEMPLATE") renders
 		// the template into CONPOT_TMP with the device identity it keeps in
 		// /var/lib/conpot, then starts conpot with the other CONPOT_* paths.
-		// Without a writable /var/lib/conpot it draws a new identity (address,
-		// MAC, serials) on every start. The template and its ports depend on
+		// QPot starts it through site_identity.py instead, which draws that
+		// identity from the site seed QPot passes (conpotSiteSeed), so the
+		// same identity comes back even where /var/lib/conpot was not kept;
+		// the state folder keeps it, the tank gauge's history and labels. The template and its ports depend on
 		// the instance: deployProfile fills them in (see conpotTemplate).
 		// Verified by running ghcr.io/telekom-security/conpot:24.04.2 this way
 		// with each template.
@@ -824,6 +843,7 @@ func deployProfileFor(name string) honeypotDeploy {
 				"CONPOT_LOG":      "/var/log/conpot/conpot.log",
 				"CONPOT_JSON_LOG": "/var/log/conpot/conpot.json",
 			},
+			Logs:     []string{"conpot.json", "conpot.log"},
 			Settings: []string{"template"},
 			Values:   map[string][]string{"template": ConpotTemplateIDs()},
 		}

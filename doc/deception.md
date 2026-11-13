@@ -243,12 +243,33 @@ a visitor reads were the same on every install, and so named the image:
 | Smart meter | Reporting server `pwr_ctrl_mgmt01.int.local` at `10.232.15.242` | A server name and a private address |
 | Building controller | Location `Technikzentrale` | A plant room name |
 
-QPot replaces them after the image has rendered the profile, from a seed it
-keeps beside the image's own identity (`qpot_site.json` in the honeypot's
-state folder), so a restart or a new container keeps the site. Each value the
-image is known to carry must be found where it is expected: if one is not,
-the image has changed and the honeypot does not start with unreviewed values.
-`TestConpotSiteIdentity` and the live profile test cover it.
+QPot replaces them after the image has rendered the profile, from the
+instance's site seed. QPot derives that seed from the instance's own
+deception seed and passes it to Conpot when it starts it, so nothing inside
+the container has to be saved for the site to stay the same: every start of
+an instance shows the same plant, a new container or an empty state folder
+included, and no two instances show the same one. The values the image draws
+itself on a first start (addresses, MACs, serial numbers) are drawn from the
+same seed, and so are the PLC's process and a new tank gauge's station and
+tanks. (The gauge's history starts ten days before its first start and is
+kept, with the labels visitors set, in `qpot_gauge.json` in the state
+folder; a gauge that already has that file keeps its own seed.)
+
+Before this, Conpot drew its seed itself and kept it in its state folder
+(`qpot_site.json`); when that file could not be written, it ran with a seed
+for that start only, and the plant changed at the next restart. An instance
+that ran that version keeps the seed in that file: QPot reads it and goes on
+using it, so its visitors see the plant they saw before. A `qpot_site.json`
+that is there but cannot be read, or holds no seed, stops `qpot up` with an
+error that names the file; Conpot itself refuses to start without a seed,
+rather than show a plant made up for one start.
+
+Each value the image is known to carry must be found where it is expected:
+if one is not, the image has changed and the honeypot does not start with
+unreviewed values. `TestConpotSiteIdentity`, `TestConpotSiteSeed` and the
+live profile test cover it; the live test also starts each profile again
+with an empty state folder (the same device) and as another instance (a
+different one).
 
 Left as the image has them, because they are what the real product reports
 on every unit: the Modicon's vendor, product code and revision, the DNP3

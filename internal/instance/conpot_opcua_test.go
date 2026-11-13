@@ -245,8 +245,9 @@ func TestConpotOPCUAMounts(t *testing.T) {
 	if bytes.Contains(want.Content, []byte("\r")) {
 		t.Error("the OPC UA server has CR bytes")
 	}
-	// The start step hands the seed on, under the name the server reads.
-	if !bytes.Contains(conpotSitePy, []byte(`os.environ["QPOT_SITE_SEED"] = seed`)) || !bytes.Contains(want.Content, []byte(`SEED_ENV = "QPOT_SITE_SEED"`)) {
-		t.Error("the start step and the OPC UA server do not agree on how the seed is passed")
+	// QPot passes the seed under the name the start step and the server read.
+	if !bytes.Contains(conpotSitePy, []byte(`SEED_ENV = "`+conpotSiteSeedEnv+`"`)) || !bytes.Contains(want.Content, []byte(`SEED_ENV = "`+conpotSiteSeedEnv+`"`)) ||
+		deployProfile(conpotConfig("qp_opcua_patch_compose", "beckhoff_cx"), "conpot").Env[conpotSiteSeedEnv] == "" {
+		t.Error("QPot, the start step and the OPC UA server do not agree on how the seed is passed")
 	}
 }

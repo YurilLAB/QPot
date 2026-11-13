@@ -7,6 +7,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/qpot/qpot/internal/config"
 )
 
 // conpotSiteHarness runs site_identity.py with the image's tpot_templates
@@ -102,13 +104,36 @@ try:
 except Died:
     check("the image has changed" in died[-1], "what it said: %r" % died[-1])
 
-# The seed is kept: a second start has the same site; a damaged file is replaced.
-state = pathlib.Path(tpot.IDENTITY_DIR)
-state.mkdir(parents=True)
-first = site.load_seed(str(state))
-check(site.load_seed(str(state)) == first and len(first) == 32, "the site's seed was not kept")
-(state / site.SITE_FILE).write_text("not json")
-check(site.load_seed(str(state)) != first and site.load_seed(str(state)) == site.load_seed(str(state)), "a damaged seed file was not replaced")
+# The seed is QPot's: without one, or with one that is not a seed, the
+# start stops instead of making up a site for this start only.
+import os
+for bad in (None, "", "short", "x" * 129, "abcdef0123456789!", "\u00e4" * 20):
+    if bad is None:
+        os.environ.pop("QPOT_SITE_SEED", None)
+    else:
+        os.environ["QPOT_SITE_SEED"] = bad
+    try:
+        site.site_seed()
+        check(False, "a missing or malformed seed %r was accepted" % (bad,))
+    except Died:
+        pass
+os.environ["QPOT_SITE_SEED"] = seeds[5]
+check(site.site_seed() == seeds[5], "the seed QPot passes was not used")
+
+# What the image draws on a first start comes from the seed: the same on
+# every start that kept nothing, another for another seed or template, and
+# the image's own secrets module is put back afterwards.
+tpot.secrets = "the module"
+def image_load_identity(name, tpl):
+    s = tpot.secrets
+    return [s.randbelow(256) for _ in range(6)] + [s.choice("0123456789abcdef") for _ in range(8)]
+tpot.load_identity = image_load_identity
+first = site.load_identity("IEC104", {}, seeds[1])
+check(first == site.load_identity("IEC104", {}, seeds[1]), "the same seed drew other first-start values")
+check(first != site.load_identity("IEC104", {}, seeds[2]), "two seeds drew the same first-start values")
+check(first != site.load_identity("ipmi", {}, seeds[1]), "two templates drew the same first-start values")
+check(all(0 <= v < 256 for v in first[:6]) and all(c in "0123456789abcdef" for c in first[6:]), "drawn values out of range: %r" % first)
+check(tpot.secrets == "the module", "the image's secrets module was not put back")
 print(json.dumps(result))
 `
 
@@ -162,7 +187,124 @@ func TestConpotSiteIdentity(t *testing.T) {
 	if !strings.Contains(conpotStartScript(), "exec python3 "+conpotSitePath+` "$CONPOT_TEMPLATE"`) {
 		t.Errorf("Conpot does not start through the site step: %q", conpotStartScript())
 	}
+	// Conpot gets its site's seed from QPot, on every template.
+	for _, id := range ConpotTemplateIDs() {
+		cfg := conpotConfig("qp_site_mount", id)
+		want, err := conpotSiteSeed(cfg)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := deployProfile(cfg, "conpot").Env[conpotSiteSeedEnv]; got != want || !validConpotSiteSeed(got) {
+			t.Errorf("%s: %s = %q, want %q", id, conpotSiteSeedEnv, got, want)
+		}
+	}
 	if strings.Contains(string(conpotSitePy), "\r") {
 		t.Error("site_identity.py has CR bytes")
 	}
+}
+
+// TestConpotSiteSeed: the site's seed is QPot's, the same on every start of an
+// instance and another for another instance; an instance that ran an earlier
+// QPot keeps the seed its Conpot drew; and a seed file that is there but
+// cannot be used stops the start instead of changing the plant.
+func TestConpotSiteSeed(t *testing.T) {
+	newConfig := func(id string) *config.Config {
+		cfg := conpotConfig(id, "IEC104")
+		cfg.DataPath = t.TempDir()
+		return cfg
+	}
+	one := newConfig("qp_siteseedone")
+	a, err := conpotSiteSeed(one)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if b, _ := conpotSiteSeed(one); a != b || !validConpotSiteSeed(a) || len(a) != 32 {
+		t.Fatalf("one instance: %q then %q", a, b)
+	}
+	// Nothing is kept anywhere: another folder for the same instance (a
+	// restored or moved instance) gives the same site.
+	moved := newConfig("qp_siteseedone")
+	if b, _ := conpotSiteSeed(moved); a != b {
+		t.Errorf("the same instance in another folder: %q, want %q", b, a)
+	}
+	if b, _ := conpotSiteSeed(newConfig("qp_siteseedtwo")); a == b {
+		t.Errorf("two instances share the site seed %q", a)
+	}
+	// The seed is not the QPot ID, nor shows it.
+	if strings.Contains(a, "siteseedone") {
+		t.Errorf("the seed %q shows the QPot ID", a)
+	}
+
+	stateDir := filepath.Join(one.DataPath, "honeypots", "conpot", "state")
+	if err := os.MkdirAll(stateDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	write := func(content string) {
+		t.Helper()
+		if err := os.WriteFile(filepath.Join(stateDir, conpotLegacySiteFile), []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// What an earlier QPot's Conpot kept is what its visitors saw.
+	write(`{"version": 1, "seed": "0123456789abcdef0123456789abcdef"}`)
+	if got, err := conpotSiteSeed(one); err != nil || got != "0123456789abcdef0123456789abcdef" {
+		t.Errorf("the kept seed: %q, %v", got, err)
+	}
+	if got := deployProfile(one, "conpot").Env[conpotSiteSeedEnv]; got != "0123456789abcdef0123456789abcdef" {
+		t.Errorf("Conpot is not given the kept seed: %q", got)
+	}
+	// A file that is there but holds no seed stops the start, and Conpot
+	// gets no seed (its site step then refuses to start, too).
+	for _, bad := range []string{"not json", `{"seed": "short"}`, `{"seed": 7}`, `{"seed": "0123456789abcdef!0123456789abcdef"}`, `{}`, strings.Repeat(" ", 5000)} {
+		write(bad)
+		if got, err := conpotSiteSeed(one); err == nil {
+			t.Errorf("%.30q: accepted as %q", bad, got)
+		}
+		if got, ok := deployProfile(one, "conpot").Env[conpotSiteSeedEnv]; ok {
+			t.Errorf("%.30q: Conpot is still given a seed %q", bad, got)
+		}
+		gen := &ComposeGenerator{Config: one}
+		if _, err := gen.Generate(); err == nil || !strings.Contains(err.Error(), conpotLegacySiteFile) {
+			t.Errorf("%.30q: the compose was generated anyway: %v", bad, err)
+		}
+	}
+	// A link the container left in its own folder is not followed.
+	if err := os.Remove(filepath.Join(stateDir, conpotLegacySiteFile)); err != nil {
+		t.Fatal(err)
+	}
+	outside := filepath.Join(t.TempDir(), "outside.json")
+	if err := os.WriteFile(outside, []byte(`{"seed": "0123456789abcdef0123456789abcdef"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, filepath.Join(stateDir, conpotLegacySiteFile)); err == nil {
+		if got, err := conpotSiteSeed(one); err == nil {
+			t.Errorf("a link out of the state folder was followed: %q", got)
+		}
+		_ = os.Remove(filepath.Join(stateDir, conpotLegacySiteFile))
+	}
+	// Without the file the instance gets its derived site again.
+	if got, err := conpotSiteSeed(one); err != nil || got != a {
+		t.Errorf("after the file was removed: %q, %v; want %q", got, err, a)
+	}
+}
+
+// FuzzConpotSiteSeedFile: whatever a container leaves as its seed file, the
+// seed QPot reads is either refused or one the site step accepts.
+func FuzzConpotSiteSeedFile(f *testing.F) {
+	for _, s := range []string{`{"seed":"0123456789abcdef0123456789abcdef"}`, `{"seed":""}`, "", "null", `{"seed":"\u00e4\u00e4\u00e4\u00e4\u00e4\u00e4\u00e4\u00e4\u00e4\u00e4\u00e4\u00e4\u00e4\u00e4\u00e4\u00e4"}`} {
+		f.Add([]byte(s))
+	}
+	dir := f.TempDir()
+	f.Fuzz(func(t *testing.T, content []byte) {
+		if err := os.WriteFile(filepath.Join(dir, conpotLegacySiteFile), content, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		seed, err := conpotLegacySiteSeed(dir)
+		if err == nil && !validConpotSiteSeed(seed) {
+			t.Fatalf("%q read as the seed %q", content, seed)
+		}
+		if err == nil && seed == "" {
+			t.Fatalf("%q: no error and no seed", content)
+		}
+	})
 }
