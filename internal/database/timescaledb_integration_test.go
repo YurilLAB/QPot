@@ -235,6 +235,164 @@ func TestPGInsertEventsSurvivesBadValues(t *testing.T) {
 	}
 }
 
+// A row whose metadata is not the flat map of strings the collector stores
+// must not fail the reads that reach it. On a live instance one such row made
+// the dashboard's event lists answer "internal error", and the worker's batch
+// query fails the same way, at the same row, on every pass.
+func TestPGReadsSurviveOddMetadata(t *testing.T) {
+	ts := connectPG(t)
+	ctx := context.Background()
+	now := time.Now().UTC().Truncate(time.Millisecond)
+	for i, metadata := range []any{
+		`{"session": "s1"}`, `{"a": {"b": 1}, "n": 5, "s": "x", "z": null}`, `[1, 2]`, `"text"`, `7`, nil,
+	} {
+		if _, err := ts.pool.Exec(ctx, `INSERT INTO events (timestamp, honeypot, source_ip, event_type, metadata)
+			VALUES ($1, 'cowrie', '203.0.113.9', 'cowrie.session.connect', $2::jsonb)`,
+			now.Add(time.Duration(i)*time.Second), metadata); err != nil {
+			t.Fatalf("insert metadata %v: %v", metadata, err)
+		}
+	}
+	check := func(what string, events []*Event, err error) {
+		t.Helper()
+		if err != nil || len(events) != 6 {
+			t.Fatalf("%s = %d events, %v; want all 6", what, len(events), err)
+		}
+		byTime := map[time.Time]map[string]string{}
+		for _, e := range events {
+			byTime[e.Timestamp.UTC()] = e.Metadata
+		}
+		if m := byTime[now]; len(m) != 1 || m["session"] != "s1" {
+			t.Errorf("%s: the collector's own shape read as %v", what, m)
+		}
+		if m := byTime[now.Add(time.Second)]; len(m) != 4 || m["a"] != `{"b": 1}` || m["n"] != "5" || m["s"] != "x" || m["z"] != "" {
+			t.Errorf("%s: mixed values read as %v", what, m)
+		}
+		for i := 2; i < 6; i++ {
+			if m := byTime[now.Add(time.Duration(i)*time.Second)]; m != nil {
+				t.Errorf("%s: metadata that is no object read as %v", what, m)
+			}
+		}
+	}
+	events, err := ts.GetEvents(ctx, EventFilter{Limit: 10})
+	check("GetEvents", events, err)
+	events, err = ts.GetUnclassifiedEvents(ctx, 10)
+	check("GetUnclassifiedEvents", events, err)
+	for _, e := range events {
+		if one, err := ts.GetEventByID(ctx, e.ID); err != nil || one == nil {
+			t.Errorf("GetEventByID(%s) = %v, %v", e.ID, one, err)
+		}
+	}
+}
+
+// The worker's batch query must be answered from the index on unclassified
+// rows. Without it the database sorted the whole table for every batch: 1.4
+// to 3.4 seconds with 5 million events stored, on the one CPU it gets.
+func TestPGWorkerBatchUsesTheUnclassifiedIndex(t *testing.T) {
+	ts := connectPG(t)
+	ctx := context.Background()
+	if _, err := ts.pool.Exec(ctx, eventsUnclassifiedIndexSQL); err != nil {
+		t.Fatalf("create the index: %v", err)
+	}
+	if _, err := ts.pool.Exec(ctx, `INSERT INTO events (timestamp, honeypot, source_ip, event_type, classified)
+		SELECT now() - (g || ' seconds')::interval, 'cowrie', '203.0.113.9', 'cowrie.session.connect', g > 25
+		FROM generate_series(1, 20000) g`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ts.pool.Exec(ctx, "ANALYZE events"); err != nil {
+		t.Fatal(err)
+	}
+	rows, err := ts.pool.Query(ctx, "EXPLAIN "+pgUnclassifiedEventsSQL+" LIMIT 500")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var plan strings.Builder
+	for rows.Next() {
+		var line string
+		if err := rows.Scan(&line); err != nil {
+			t.Fatal(err)
+		}
+		plan.WriteString(line + "\n")
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(plan.String(), "idx_events_unclassified") || strings.Contains(plan.String(), "Seq Scan") {
+		t.Fatalf("the batch query does not use the index on unclassified rows:\n%s", plan.String())
+	}
+	events, err := ts.GetUnclassifiedEvents(ctx, 500)
+	if err != nil || len(events) != 25 {
+		t.Fatalf("GetUnclassifiedEvents = %d events, %v; want the 25 unclassified", len(events), err)
+	}
+	for i := 1; i < len(events); i++ {
+		if events[i].Timestamp.Before(events[i-1].Timestamp) {
+			t.Fatalf("the batch is not oldest first at %d", i)
+		}
+	}
+	// Classified, a row leaves the index and the next batch.
+	events[0].Classified, events[0].TechniqueID = true, "T1110"
+	if err := ts.TagEvent(ctx, events[0]); err != nil {
+		t.Fatal(err)
+	}
+	if left, err := ts.GetUnclassifiedEvents(ctx, 500); err != nil || len(left) != 24 {
+		t.Fatalf("after one was classified: %d events, %v; want 24", len(left), err)
+	}
+}
+
+// The removal of second copies finds its rows by the batch's span of time. A
+// time that lost its microseconds on the way (a batch recovered from a
+// checkpoint, a caller that rounds) must still be inside the span, and rows
+// of the same observation far outside it must still count as the first copy.
+func TestPGRemoveReplayedEventsBoundsByTheBatchTimes(t *testing.T) {
+	ts := connectPG(t)
+	ctx := context.Background()
+	if _, err := ts.pool.Exec(ctx, eventsObservationIndexSQL); err != nil {
+		t.Fatal(err)
+	}
+	old := time.Now().UTC().Add(-40 * 24 * time.Hour).Truncate(time.Microsecond)
+	now := time.Now().UTC().Truncate(time.Millisecond).Add(789 * time.Microsecond)
+	const first, second = "0a0a0a0a-0000-8000-8000-000000000001", "0a0a0a0a-0000-8000-8000-000000000002"
+	for _, row := range []struct {
+		at         time.Time
+		id         string
+		classified bool
+	}{
+		{old, first, true}, // stored and classified 40 days ago
+		{now, second, false},
+		{now.Add(2 * time.Second), "0a0a0a0a-0000-8000-8000-000000000003", false},
+		{now.Add(3 * time.Second), second, false}, // a second copy
+		// The batch's last row, also a second copy: rounded down, its time
+		// lies before the row's own.
+		{now.Add(4 * time.Second), first, false},
+	} {
+		if _, err := ts.pool.Exec(ctx, `INSERT INTO events (timestamp, honeypot, source_ip, event_type, classified, event_id)
+			VALUES ($1, 'cowrie', '203.0.113.9', 'cowrie.session.connect', $2, $3)`, row.at, row.classified, row.id); err != nil {
+			t.Fatal(err)
+		}
+	}
+	batch, err := ts.GetUnclassifiedEvents(ctx, 10)
+	if err != nil || len(batch) != 4 {
+		t.Fatalf("GetUnclassifiedEvents = %d events, %v", len(batch), err)
+	}
+	for _, e := range batch {
+		e.Timestamp = e.Timestamp.Truncate(time.Millisecond)
+	}
+	kept, removed, err := ts.RemoveReplayedEvents(ctx, append([]*Event{nil, {ID: "not-a-row"}}, batch...))
+	if err != nil || removed != 2 {
+		t.Fatalf("removed %d rows, %v; want the two second copies", removed, err)
+	}
+	if len(kept) != 3 || kept[0].ID != "not-a-row" {
+		t.Fatalf("kept %d events of the batch, want the foreign one and two rows: %+v", len(kept), kept)
+	}
+	var total, distinct int
+	if err := ts.pool.QueryRow(ctx, "SELECT count(*), count(DISTINCT event_id) FROM events").Scan(&total, &distinct); err != nil || total != 3 || distinct != 3 {
+		t.Fatalf("%d rows of %d observations left, %v; want 3 of 3", total, distinct, err)
+	}
+	var stillOld bool
+	if err := ts.pool.QueryRow(ctx, "SELECT bool_or(timestamp = $1 AND classified) FROM events WHERE event_id = $2", old, first).Scan(&stillOld); err != nil || !stillOld {
+		t.Fatalf("the classified first copy from 40 days ago is gone (%v, %v)", stillOld, err)
+	}
+}
+
 func TestPGIOCFilters(t *testing.T) {
 	checkIOCValueAndSourceFilters(t, connectPG(t), nil)
 }

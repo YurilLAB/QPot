@@ -1506,6 +1506,33 @@ func TestNativeLeaseGatesUseProductionCoordinationAndRequiredTests(t *testing.T)
 	if !strings.Contains(script.String(), `'"Action":"skip"'`) {
 		t.Fatal("PostgreSQL lease gate does not reject skipped native tests")
 	}
+	// TimescaleDB is the other database a new instance can choose. Until this
+	// gate, nothing in CI ran its storage tests or its collector path.
+	tsdb, ok := w.Job("timescaledb-integration")
+	if !ok {
+		t.Fatal("TimescaleDB storage gate missing")
+	}
+	if len(tsdb.Services) != 1 || !bytes.Contains(readRepo(t, "internal/instance/compose.go"), []byte(`TimescaleDBImage = "`+tsdb.Services[0].Image+`"`)) {
+		t.Fatal("TimescaleDB gate does not use the image an instance runs")
+	}
+	if tsdb.Env["QPOT_TEST_POSTGRES"] != "1" || tsdb.Env["QPOT_TEST_TIMESCALE"] != "1" {
+		t.Fatal("TimescaleDB integration can silently skip")
+	}
+	if len(tsdb.Services[0].Ports) != 1 || tsdb.Services[0].Ports[0] != "127.0.0.1:15433:5432" || tsdb.Env["QPOT_TEST_PG_PORT"] != "15433" {
+		t.Fatal("TimescaleDB CI must expose its native port only on loopback, and test that port")
+	}
+	script.Reset()
+	for _, step := range tsdb.Steps {
+		script.WriteString(step.Run)
+	}
+	for _, name := range []string{"TestPGCollectorIngestView", "TestPGIngestStoresARetriedBatchOnce", "TestPGHypertableStoresARetriedBatchOnce", "TestPGRestoreEvents", "TestPGIntelligenceReplay", "TestPGInsertEventsSurvivesBadValues", "TestPGReadsSurviveOddMetadata", "TestPGWorkerBatchUsesTheUnclassifiedIndex", "TestPGRemoveReplayedEventsBoundsByTheBatchTimes", "TestTimescaleCollectorStoresHostileEventsLive"} {
+		if !strings.Contains(script.String(), name) {
+			t.Fatalf("TimescaleDB gate dropped required test %s", name)
+		}
+	}
+	if !strings.Contains(script.String(), `'"Action":"skip"'`) || !strings.Contains(script.String(), "CollectorImage") {
+		t.Fatal("TimescaleDB gate does not reject skipped tests or does not fetch the collector it delivers through")
+	}
 	es, ok := w.Job("elasticsearch-lease-integration")
 	if !ok || len(es.Services) != 1 {
 		t.Fatal("native Elasticsearch lease gate missing")
@@ -1527,7 +1554,7 @@ func TestNativeLeaseGatesUseProductionCoordinationAndRequiredTests(t *testing.T)
 		t.Fatal("Elasticsearch lease gate can miss or skip its mandatory native test")
 	}
 	local := string(readRepo(t, "scripts/ci-local.sh"))
-	for _, id := range []string{pg.ID, es.ID} {
+	for _, id := range []string{pg.ID, tsdb.ID, es.ID} {
 		if !strings.Contains(local, ","+id+",") {
 			t.Fatalf("ci-local --no-docker does not skip %s", id)
 		}
@@ -1553,6 +1580,7 @@ func TestNativeLeaseGatesRejectMissingSkippedAndFailedTests(t *testing.T) {
 		{"clickhouse-integration", "required=TestCHIntelligenceLeaseMissingKeeperFailsClosed", []string{"TestCHIntelligenceLeaseMissingKeeperFailsClosed"}},
 		{"clickhouse-integration", "test_packages=(", []string{"TestCHIntelligenceLeaseNativeContentionAndFencing", "TestCHIntelligenceLeaseNativeExpiryAndLargeCheckpoint", "TestCHIntelligenceLeaseRejectsNonAtomicControlCatalog", "TestWorkerClassifiesAgainstClickHouse", "TestServerServesDataFromClickHouse"}},
 		{"postgres-lease-integration", "pattern='^TestPGIntelligenceLease'", []string{"TestPGIntelligenceLeaseIndependentOwnersAndAliases", "TestPGIntelligenceLeaseShadowCheckpointCannotSplitOwner", "TestPGIntelligenceLeaseRejectsDifferentProjectionScope", "TestPGIntelligenceLeaseCoordinatesDifferentDatabaseRoles", "TestPGIntelligenceLeaseExpiryRecoveryAndLargeCheckpoint", "TestPGIntelligenceLeaseClockCheckedAfterRowLock", "TestPGIntelligenceLeasePublicCheckpointProjectionAndTags"}},
+		{"timescaledb-integration", "pattern='^(TestPG|TestTimescale)'", []string{"TestPGCollectorIngestView", "TestPGIngestStoresARetriedBatchOnce", "TestPGHypertableStoresARetriedBatchOnce", "TestPGRestoreEvents", "TestPGIntelligenceReplay", "TestPGInsertEventsSurvivesBadValues", "TestPGReadsSurviveOddMetadata", "TestPGWorkerBatchUsesTheUnclassifiedIndex", "TestPGRemoveReplayedEventsBoundsByTheBatchTimes", "TestTimescaleCollectorStoresHostileEventsLive"}},
 		{"elasticsearch-lease-integration", "required=TestElasticsearchIntelligenceLeaseLive", []string{"TestElasticsearchIntelligenceLeaseLive"}},
 	} {
 		t.Run(gate.marker, func(t *testing.T) {

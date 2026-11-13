@@ -3,6 +3,7 @@ package database
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"log/slog"
@@ -94,6 +95,16 @@ const eventsIngestViewSQL = `
 // hypertable's unique index must include the time). Rows from before
 // observation IDs have none, and NULLs never conflict.
 const eventsObservationIndexSQL = "CREATE UNIQUE INDEX IF NOT EXISTS idx_events_observation ON events (event_id, timestamp)"
+
+// eventsUnclassifiedIndexSQL indexes the rows the intelligence worker has
+// still to read, and only those. Without it the worker's batch query (the
+// oldest unclassified rows) sorted every chunk of the table to find them:
+// with 5 million events stored and 600 new ones waiting it took 1.4 to 3.4
+// seconds, and the removal of second copies that follows every batch 6 to 7
+// seconds more, on the one CPU the database gets. With the index: 2 to 10
+// and 73 to 89 milliseconds. A row leaves the index when it is classified,
+// so the index stays as small as the backlog.
+const eventsUnclassifiedIndexSQL = "CREATE INDEX IF NOT EXISTS idx_events_unclassified ON events (timestamp) WHERE classified = FALSE"
 
 // eventsIngestTriggerSQL makes an insert through events_ingest skip a row
 // that is already stored. The collector sends a batch again when the first
@@ -187,6 +198,7 @@ func (ts *TimescaleDB) InitializeSchema(ctx context.Context) error {
 		"CREATE INDEX IF NOT EXISTS idx_events_country ON events (country, timestamp DESC)",
 		"CREATE INDEX IF NOT EXISTS idx_events_event_type ON events (event_type, timestamp DESC)",
 		eventsObservationIndexSQL,
+		eventsUnclassifiedIndexSQL,
 	}
 
 	for _, idx := range indexes {
@@ -294,6 +306,35 @@ func pgText(s string) string {
 	return strings.ToValidUTF8(strings.ReplaceAll(s, "\x00", ""), "\uFFFD")
 }
 
+// pgEventMetadata reads an event's metadata column. The collector stores a
+// flat map of strings there, but the column is JSONB and takes any JSON. One
+// row whose metadata held a number or an object used to fail the scan of the
+// whole page: every list of events and every batch of the intelligence worker
+// that reached the row (seen on a live instance: the dashboard answered
+// "internal error" and the worker stopped at the row). A value that is not a
+// string is read as its JSON text, null as empty, and metadata that is not
+// an object as none.
+type pgEventMetadata map[string]string
+
+// UnmarshalJSON implements json.Unmarshaler. It never fails.
+func (m *pgEventMetadata) UnmarshalJSON(data []byte) error {
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(data, &raw); err != nil || raw == nil {
+		*m = nil
+		return nil
+	}
+	out := make(pgEventMetadata, len(raw))
+	for k, v := range raw {
+		var text string
+		if json.Unmarshal(v, &text) != nil {
+			text = string(v)
+		}
+		out[k] = text
+	}
+	*m = out
+	return nil
+}
+
 // pgInet returns s for an INET column, or nil (SQL NULL) when s is not an IP.
 func pgInet(s string) any {
 	if net.ParseIP(s) == nil {
@@ -389,7 +430,7 @@ func (ts *TimescaleDB) GetEvents(ctx context.Context, filter EventFilter) ([]*Ev
 			&event.Password,
 			&event.Command,
 			&event.Payload,
-			&event.Metadata,
+			(*pgEventMetadata)(&event.Metadata),
 			&event.Country,
 			&event.City,
 			&event.ASN,
@@ -519,7 +560,7 @@ func (ts *TimescaleDB) GetEventByID(ctx context.Context, id string) (*Event, err
 		&event.Password,
 		&event.Command,
 		&event.Payload,
-		&event.Metadata,
+		(*pgEventMetadata)(&event.Metadata),
 		&event.Country,
 		&event.City,
 		&event.ASN,
@@ -1274,13 +1315,10 @@ func (ts *TimescaleDB) GetTTPSessions(ctx context.Context, limit int) ([]*TTPSes
 	return sessions, nil
 }
 
-// GetUnclassifiedEvents returns events that have not yet been classified.
-func (ts *TimescaleDB) GetUnclassifiedEvents(ctx context.Context, limit int) ([]*Event, error) {
-	if ts.pool == nil {
-		return nil, fmt.Errorf("not connected")
-	}
-
-	query := `
+// pgUnclassifiedEventsSQL reads the worker's next batch: the oldest rows it
+// has not classified. Its WHERE clause is the predicate of the index
+// eventsUnclassifiedIndexSQL creates; a test checks the database uses it.
+const pgUnclassifiedEventsSQL = `
 		SELECT timestamp, honeypot, COALESCE(host(source_ip), ''), COALESCE(source_port, 0), COALESCE(dest_port, 0),
 		       COALESCE(protocol, ''), COALESCE(event_type, ''), COALESCE(username, ''), COALESCE(password, ''), COALESCE(command, ''),
 		       payload, metadata, COALESCE(country, ''), COALESCE(city, ''), COALESCE(asn, ''),
@@ -1290,6 +1328,14 @@ func (ts *TimescaleDB) GetUnclassifiedEvents(ctx context.Context, limit int) ([]
 		WHERE classified = FALSE
 		ORDER BY timestamp ASC
 	`
+
+// GetUnclassifiedEvents returns events that have not yet been classified.
+func (ts *TimescaleDB) GetUnclassifiedEvents(ctx context.Context, limit int) ([]*Event, error) {
+	if ts.pool == nil {
+		return nil, fmt.Errorf("not connected")
+	}
+
+	query := pgUnclassifiedEventsSQL
 	if limit > 0 {
 		query += fmt.Sprintf(" LIMIT %d", limit)
 	}
@@ -1307,7 +1353,7 @@ func (ts *TimescaleDB) GetUnclassifiedEvents(ctx context.Context, limit int) ([]
 			&event.Timestamp, &event.Honeypot, &event.SourceIP,
 			&event.SourcePort, &event.DestPort, &event.Protocol,
 			&event.EventType, &event.Username, &event.Password,
-			&event.Command, &event.Payload, &event.Metadata,
+			&event.Command, &event.Payload, (*pgEventMetadata)(&event.Metadata),
 			&event.Country, &event.City, &event.ASN,
 			&event.TechniqueID, &event.TechniqueName,
 			&event.TacticID, &event.TacticName,

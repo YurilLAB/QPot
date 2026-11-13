@@ -31,7 +31,7 @@ while [ $# -gt 0 ]; do
     --list) list=1 ;;
     --only) only=",${2:?--only needs job names},"; shift ;;
     --skip) skip="${skip},${2:?--skip needs job names},"; shift ;;
-    --no-docker) skip="${skip},clickhouse-integration,postgres-lease-integration,elasticsearch-lease-integration,conpot-integration,refrigeration-integration,cowrie-stateful-integration,vector-integration,hifi-organization-integration,distro-runtime," ;;
+    --no-docker) skip="${skip},clickhouse-integration,postgres-lease-integration,timescaledb-integration,elasticsearch-lease-integration,conpot-integration,refrigeration-integration,cowrie-stateful-integration,vector-integration,hifi-organization-integration,distro-runtime," ;;
     -h|--help) sed -n '2,22p' "$0"; exit 0 ;;
     *) echo "ci-local: unknown option $1 (see --help)" >&2; exit 2 ;;
   esac

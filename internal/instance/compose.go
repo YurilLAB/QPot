@@ -2400,16 +2400,74 @@ transforms:
       {{- end}}
 
 {{- if eq .Config.Database.Type "timescaledb"}}
-  # payload is BYTEA: hand it over hex-encoded, otherwise any backslash in
-  # attacker input is an "invalid input syntax for type bytea" that drops the
-  # whole batch. The timestamp is UTC; say so for TIMESTAMPTZ.
+  # PostgreSQL is handed a batch as one JSON value and refuses all of it
+  # when one value in it cannot be stored. A NUL character is such a value,
+  # anywhere in the event: a visitor who ran "echo a\0b" in cowrie lost the
+  # database every event of that batch, up to five seconds of every
+  # honeypot (found on a live instance; the sink logs "unsupported Unicode
+  # escape sequence" and drops the request). So is an address or a number
+  # its column cannot hold, and a value too long for an index entry.
+  #
+  # This step therefore hands over the columns of events_ingest and nothing
+  # else, each made storable: text without NUL, the indexed names bounded,
+  # the address an address or absent, the ports ports, metadata a flat map
+  # of strings, the payload hex for BYTEA (a backslash in it is otherwise
+  # an "invalid input syntax for type bytea") and the time marked UTC for
+  # TIMESTAMPTZ. What a honeypot logged beside those stays in the backup.
   pg_prepare:
     type: remap
     inputs:
       - tag_scanners
     source: |
-      .payload = "\\x" + encode_base16(string(.payload) ?? "")
-      .timestamp = (string(.timestamp) ?? format_timestamp!(now(), "%Y-%m-%d %H:%M:%S%.3f")) + "+00"
+      row = {}
+      for_each(["protocol", "event_type", "username", "password", "command", "country", "city", "asn"]) -> |_i, k| {
+        v = get(., [k]) ?? null
+        if is_string(v) {
+          sv = replace(string!(v), r'\x00', "")
+          # An index entry holds about 2,700 bytes: bound what is indexed.
+          if k == "event_type" { sv = truncate(sv, 256) }
+          if k == "country" { sv = truncate(sv, 64) }
+          row = set!(row, [k], sv)
+        }
+      }
+      hp = ""
+      if is_string(.honeypot) { hp = truncate(replace(string!(.honeypot), r'\x00', ""), 128) }
+      if hp == "" { hp = "unknown" }
+      row.honeypot = hp
+
+      md = {}
+      if is_object(.metadata) {
+        for_each(object!(.metadata)) -> |k, v| {
+          sv = to_string(v) ?? ""
+          if sv != "" {
+            md = set!(md, [replace(k, r'\x00', "")], replace(sv, r'\x00', ""))
+          }
+        }
+      }
+      row.metadata = md
+
+      sip = to_string(.source_ip) ?? ""
+      if (ip_cidr_contains("0.0.0.0/0", sip) ?? false) || (ip_cidr_contains("::/0", sip) ?? false) {
+        row.source_ip = sip
+      }
+      sp = to_int(.source_port) ?? 0
+      if sp < 0 || sp > 65535 { sp = 0 }
+      dp = to_int(.dest_port) ?? 0
+      if dp < 0 || dp > 65535 { dp = 0 }
+      row.source_port = sp
+      row.dest_port = dp
+
+      row.payload = "\\x" + encode_base16(string(.payload) ?? "")
+      ts = to_string(.timestamp) ?? ""
+      if !match(ts, r'^[0-9]{4}-[0-9]{2}-[0-9]{2} [0-9]{2}:[0-9]{2}:[0-9]{2}(\.[0-9]{1,6})?$') {
+        ts = format_timestamp!(now(), "%Y-%m-%d %H:%M:%S%.3f")
+      }
+      row.timestamp = ts + "+00"
+      eid = to_string(.event_id) ?? ""
+      if match(eid, r'^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$') {
+        row.event_id = eid
+      }
+      . = row
 {{- end}}
 
 sinks:
@@ -2453,8 +2511,7 @@ sinks:
     # events_ingest is an auto-updatable view of only the collector-supplied
     # columns: the sink writes NULL for every column it does not have, which
     # on the events table itself breaks id NOT NULL and every DEFAULT.
-    # Fields that are not view columns (sensor_id, the honeypot's raw keys) are
-    # ignored by jsonb_populate_recordset.
+    # pg_prepare hands over those columns and nothing else.
     table: events_ingest
     batch:
       max_bytes: 1049000

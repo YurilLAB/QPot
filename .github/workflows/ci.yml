@@ -8,6 +8,9 @@ name: CI
 # What we look for:
 #   build-test   - it compiles, is gofmt-clean, passes go vet + staticcheck, and
 #                  the full race-enabled test suite is green.
+#   timescaledb-integration - the database tests against the TimescaleDB image an
+#                  instance runs, and hostile log lines through the real collector
+#                  into its production schema.
 #   conpot-integration - real PLC/RTU protocols and persistent identities in isolated containers.
 #   refrigeration-integration - built native supervisor, XML controls, exports and persistent state.
 #   netguard-integration - actual IPv4/IPv6 packet containment in owned namespaces.
@@ -257,6 +260,65 @@ jobs:
           go test -race -count=1 -timeout 5m -json ./internal/database -run "$pattern" | tee "$RUNNER_TEMP/postgres-lease-tests.jsonl"
           if grep -Fq '"Action":"skip"' "$RUNNER_TEMP/postgres-lease-tests.jsonl"; then
             echo "required PostgreSQL lease test skipped" >&2
+            exit 1
+          fi
+
+  timescaledb-integration:
+    name: TimescaleDB storage and collector delivery
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    services:
+      timescaledb:
+        image: timescale/timescaledb:2.28.3-pg15@sha256:6343bdc87ca132c6b53acb26113a6bad1821d188fa39975a745f32ddd9757634
+        env:
+          POSTGRES_DB: qpot_test
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+        ports:
+          - 127.0.0.1:15433:5432
+        options: >-
+          --health-cmd "pg_isready --username postgres --dbname qpot_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
+    env:
+      QPOT_TEST_POSTGRES: "1"
+      QPOT_TEST_TIMESCALE: "1"
+      QPOT_TEST_PG_HOST: 127.0.0.1
+      QPOT_TEST_PG_PORT: "15433"
+      QPOT_TEST_PG_USER: postgres
+      QPOT_TEST_PG_PASS: postgres
+      QPOT_TEST_PG_DB: qpot_test
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Set up Go
+        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Pull the pinned collector image
+        run: |
+          set -euo pipefail
+          image=$(grep -oE 'CollectorImage += "[^"]+"' internal/instance/compose.go | cut -d'"' -f2)
+          test -n "$image"
+          docker pull -q "$image"
+      - name: Store, read and deliver through the real collector
+        # The database tests against the image an instance runs, and hostile
+        # log lines through the real collector into its production schema.
+        run: |
+          set -euo pipefail
+          pattern='^(TestPG|TestTimescale)'
+          test_packages=(./internal/database ./internal/instance)
+          listed=$(go test "${test_packages[@]}" -list "$pattern")
+          for required in TestPGCollectorIngestView TestPGIngestStoresARetriedBatchOnce TestPGHypertableStoresARetriedBatchOnce TestPGRestoreEvents TestPGIntelligenceReplay TestPGInsertEventsSurvivesBadValues TestPGReadsSurviveOddMetadata TestPGWorkerBatchUsesTheUnclassifiedIndex TestPGRemoveReplayedEventsBoundsByTheBatchTimes TestTimescaleCollectorStoresHostileEventsLive; do
+            if ! grep -Fxq "$required" <<<"$listed"; then
+              echo "required TimescaleDB test is missing: $required" >&2
+              exit 1
+            fi
+          done
+          go test -race -p 1 -count=1 -timeout 8m -json "${test_packages[@]}" -run "$pattern" | tee "$RUNNER_TEMP/timescaledb-tests.jsonl"
+          if grep -Fq '"Action":"skip"' "$RUNNER_TEMP/timescaledb-tests.jsonl"; then
+            echo "required TimescaleDB test skipped" >&2
             exit 1
           fi
 

@@ -20,11 +20,23 @@ func (ts *TimescaleDB) RemoveReplayedEvents(ctx context.Context, events []*Event
 		return nil, 0, fmt.Errorf("not connected")
 	}
 	ids := make([]int64, 0, len(events))
+	// The rows are found by their id, and the table has no index on it: the
+	// batch's own span of time is what lets the database go straight to
+	// them (the time index, and the chunks of those days only). The span is
+	// a millisecond wider on each side than the batch says: a time that was
+	// rounded on its way here must still be inside it.
+	var from, to time.Time
 	for _, e := range events {
 		if e == nil {
 			continue
 		}
 		if id, err := strconv.ParseInt(e.ID, 10, 64); err == nil {
+			if len(ids) == 0 || e.Timestamp.Before(from) {
+				from = e.Timestamp
+			}
+			if len(ids) == 0 || e.Timestamp.After(to) {
+				to = e.Timestamp
+			}
 			ids = append(ids, id)
 		}
 	}
@@ -33,11 +45,12 @@ func (ts *TimescaleDB) RemoveReplayedEvents(ctx context.Context, events []*Event
 	}
 	rows, err := ts.pool.Query(ctx, `
 		DELETE FROM events e USING events o
-		WHERE e.id = ANY($1::bigint[]) AND e.classified = FALSE AND e.event_id IS NOT NULL
+		WHERE e.id = ANY($1::bigint[]) AND e.timestamp >= $2 AND e.timestamp <= $3
+		  AND e.classified = FALSE AND e.event_id IS NOT NULL
 		  AND o.event_id = e.event_id AND o.id <> e.id
 		  AND (o.classified = TRUE OR (o.timestamp, o.id) < (e.timestamp, e.id))
 		RETURNING e.id::text
-	`, ids)
+	`, ids, from.Add(-time.Millisecond), to.Add(time.Millisecond))
 	if err != nil {
 		return nil, 0, fmt.Errorf("remove replayed events: %w", err)
 	}
