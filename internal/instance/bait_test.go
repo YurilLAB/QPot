@@ -11,6 +11,7 @@ import (
 	"regexp"
 	"runtime"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -173,7 +174,8 @@ func checkBaitPlan(t *testing.T, p tpotCowriePersona, plan baitPlan, planted []*
 		}
 		base := path.Base(f.Path)
 		if (base == "id_ed25519" || base == "credentials" || base == ".git-credentials" ||
-			base == ".bash_history" || base == "authorized_keys" || base == ".env" || base == ".netrc") && f.Mode != 0o600 {
+			base == ".bash_history" || base == "authorized_keys" || base == ".env" || base == ".netrc" ||
+			strings.HasSuffix(base, ".nmconnection") || base == "jupyter_server_config.py") && f.Mode != 0o600 {
 			t.Fatalf("%s: mode %o", where, f.Mode)
 		}
 		if strings.HasPrefix(f.Path, "/etc/cron.d/") && strings.Contains(base, ".") {
@@ -251,8 +253,14 @@ func baitFileWithPrefix(t *testing.T, plan baitPlan, prefix string) baitFile {
 func TestBaitConsistent(t *testing.T) {
 	kinds := map[string]bool{}
 	parts := map[string]int{}
+	var servers []tpotCowriePersona
+	for _, p := range serverPersonas() {
+		if baitSceneKind(p) == "server" {
+			servers = append(servers, p)
+		}
+	}
 	for i := 0; i < 60; i++ {
-		p := serverPersonas()[i%len(serverPersonas())]
+		p := servers[i%len(servers)]
 		cfg := baitCfg(fmt.Sprintf("qp_consistent%015d", i), p.ID)
 		s := newBaitScene(cfg, p)
 		plan, planted := cowrieBait(cfg)
@@ -597,13 +605,88 @@ func TestIndustrialBaitReferencesMatchDevice(t *testing.T) {
 						t.Fatalf("endpoint/CSV disagree: %+v / %v", ep, rows[i+1])
 					}
 				}
-				if len(planted) != 2 || planted[0].Kind != canary.KindSSHKey || planted[1].Kind != canary.KindCredential {
+				byName := map[string]*canary.Canary{}
+				for _, c := range planted {
+					byName[c.Name] = c
+				}
+				vendor, archiveCred := byName["cowrie bait: OT vendor support account"], byName["cowrie bait: OT archive credential"]
+				if len(planted) != 3 || planted[0].Kind != canary.KindSSHKey || vendor == nil || archiveCred == nil ||
+					vendor.Kind != canary.KindCredential || archiveCred.Kind != canary.KindCredential {
 					t.Fatalf("unregistered archive credential or unrelated canary: %+v", planted)
 				}
 				netrc := baitFileAt(t, plan, "/root/.netrc")
 				if netrc.Mode != 0o600 || !strings.Contains(netrc.Text, "login svc_otbackup\n") ||
-					!strings.Contains(netrc.Text, "password "+planted[1].Values[0]+"\n") {
+					!strings.Contains(netrc.Text, "password "+archiveCred.Values[0]+"\n") {
 					t.Fatal("archive credential is unprotected or disagrees with canary")
+				}
+				// the vendor's account sheet: its password is the canary's, the asset and the host are the archive's
+				sheet := baitFileAt(t, plan, industrialRoot+"/maintenance/vendor-access.txt")
+				if sheet.Mode != 0o640 || !strings.Contains(sheet.Text, "\nPassword: "+vendor.Values[0]+"\n") ||
+					!strings.Contains(sheet.Text, "review of "+a.ID+" ("+device.Model+") through archive01,") ||
+					!strings.Contains(sheet.Text, "\nAccount on archive01.") || strings.Contains(sheet.Text, "%!") ||
+					vendor.Values[0] == archiveCred.Values[0] {
+					t.Fatalf("vendor access sheet:\n%s", sheet.Text)
+				}
+				// the change record: one asset, tickets that only grow, dates that only grow, the export last
+				changes, err := csv.NewReader(strings.NewReader(baitFileAt(t, plan, industrialRoot+"/maintenance/changes.csv").Text)).ReadAll()
+				if err != nil || len(changes) < 7 || !slices.Equal(changes[0], []string{"date", "change", "engineer", "asset", "summary"}) {
+					t.Fatalf("change record: %v; %v", changes, err)
+				}
+				offset := func(cell string) int {
+					m := regexp.MustCompile(`^\{\{date:[^|}]+(?:\|-(\d+))?\}\}$`).FindStringSubmatch(cell)
+					if m == nil {
+						t.Fatalf("no date placeholder: %q", cell)
+					}
+					n, _ := strconv.Atoi(m[1])
+					return n
+				}
+				lastTicket, lastOff := "", 1<<40
+				for _, row := range changes[1:] {
+					if len(row) != 5 || row[3] != a.ID || row[1] <= lastTicket || offset(row[0]) >= lastOff || len(row[2]) != 2 || row[4] == "" {
+						t.Fatalf("change record row %v after ticket %s, %d s back", row, lastTicket, lastOff)
+					}
+					lastTicket, lastOff = row[1], offset(row[0])
+				}
+				if last := changes[len(changes)-1]; lastOff != 0 || last[4] != "Reference export taken after the maintenance window" ||
+					!strings.Contains(sheet.Text, "\nChange: "+last[1]+"\n") {
+					t.Fatalf("the change record does not end with the export the sheet names: %v", last)
+				}
+				// the event history: newest first, every lost link restored and every opened door closed after it
+				events, err := csv.NewReader(strings.NewReader(baitFileAt(t, plan, industrialRoot+"/exports/"+a.ID+"/events.csv").Text)).ReadAll()
+				if err != nil || len(events) < 20 {
+					t.Fatalf("event history: %d rows; %v", len(events), err)
+				}
+				lastOff = -1
+				for i, row := range events[1:] {
+					if len(row) != 4 || row[1] != a.ID || offset(row[0]) <= lastOff {
+						t.Fatalf("event row %v after %d s back", row, lastOff)
+					}
+					lastOff = offset(row[0])
+					after := map[string]string{"Communication restored": "Communication lost", "Cabinet door closed": "Cabinet door opened"}[row[2]]
+					if after != "" && (i+2 >= len(events) || events[i+2][2] != after) {
+						t.Fatalf("%q without %q before it", row[2], after)
+					}
+				}
+				setup := industrialRoot + "/exports/" + a.ID + "/tank-setup.csv"
+				hasSetup := slices.ContainsFunc(plan.Files, func(f baitFile) bool { return f.Path == setup })
+				if hasSetup != (len(site.Tanks) > 0) {
+					t.Fatalf("tank setup present=%v for a device with %d tanks", hasSetup, len(site.Tanks))
+				}
+				if hasSetup {
+					rows, err := csv.NewReader(strings.NewReader(baitFileAt(t, plan, setup).Text)).ReadAll()
+					if err != nil || len(rows) != len(site.Tanks)+1 {
+						t.Fatalf("tank setup: %v; %v", rows, err)
+					}
+					for i, tank := range site.Tanks {
+						if !slices.Equal(rows[i+1][:3], []string{fmt.Sprint(tank.Number), tank.Product, fmt.Sprint(tank.CapacityGal)}) {
+							t.Fatalf("tank setup row %v, the gauge says %+v", rows[i+1], tank)
+						}
+					}
+				}
+				for _, h := range []string{"/root/.bash_history", "/home/" + p.User + "/.bash_history"} {
+					if text := baitFileAt(t, plan, h).Text; !strings.Contains(text, "changes.csv") && !strings.Contains(text, "events.csv") {
+						t.Fatalf("%s does not look at the records", h)
+					}
 				}
 				if len(plan.Hosts) != 2 || plan.Hosts[0].IP == a.Address || plan.Hosts[1].IP != a.Address {
 					t.Fatal("archive server and reference device must have separate addresses")
@@ -789,5 +872,177 @@ func TestBaitMounted(t *testing.T) {
 	svc, _, _ := publishedPorts(t, cfg, "cowrie")
 	if !strings.Contains(svc, "/honeypots/cowrie/bait/plan.json:"+baitPlanPath+":ro\n") {
 		t.Fatal("compose lacks the plan mount")
+	}
+}
+
+// deskPlan is the plan and canaries of a persona that is no ops box, with the
+// files by path.
+func deskPlan(t *testing.T, id, persona string) (tpotCowriePersona, baitPlan, map[string]*canary.Canary, func(string) baitFile) {
+	t.Helper()
+	p, ok := cowriePersonaByID(persona)
+	if !ok {
+		t.Fatalf("no persona %s", persona)
+	}
+	plan, planted := cowrieBait(baitCfg(id, persona))
+	checkBaitPlan(t, p, plan, planted)
+	byName := map[string]*canary.Canary{}
+	for _, c := range planted {
+		byName[c.Name] = c
+	}
+	return p, plan, byName, func(path string) baitFile { return baitFileAt(t, plan, path) }
+}
+
+// TestBaitWorkstation: the GPU persona is somebody's training machine, so it
+// carries that person's files and not a server's database backup: a notebook
+// server's token, a project whose .env, config, script and notebook agree on
+// the bucket and the tracker, the tracker's key where `wandb login` also
+// writes it, and an SSH key for the cluster. The notebook is one Jupyter
+// opens, and nothing of an ops box is left.
+func TestBaitWorkstation(t *testing.T) {
+	for i := 0; i < 12; i++ {
+		p, plan, canaries, file := deskPlan(t, fmt.Sprintf("qp_workstation%013d", i), "gpu-ubuntu")
+		home := "/home/" + p.User
+		var root string
+		for _, f := range plan.Files {
+			if strings.HasSuffix(f.Path, "/train.py") {
+				root = path.Dir(f.Path)
+			}
+			if strings.Contains(f.Path, "backup") || strings.HasSuffix(f.Path, ".sql.gz") || strings.HasPrefix(f.Path, "/etc/cron.d/") ||
+				strings.HasPrefix(f.Path, "/root/.aws/") || f.Path == home+"/.bash_history" || f.Path == home+"/.env" {
+				t.Fatalf("a GPU workstation with %s", f.Path)
+			}
+		}
+		if !strings.HasPrefix(root, home+"/work/") {
+			t.Fatalf("no project under %s/work: %q", home, root)
+		}
+		env := file(root + "/.env").Text
+		value := func(key string) string {
+			m := regexp.MustCompile(`(?m)^` + key + `=(.+)$`).FindStringSubmatch(env)
+			if m == nil {
+				t.Fatalf(".env without %s:\n%s", key, env)
+			}
+			return m[1]
+		}
+		bucket, tracker := strings.TrimPrefix(value("DATA_BUCKET"), "s3://"), value("MLFLOW_TRACKING_URI")
+		wandb, aws, mlflow, token, key := canaries["cowrie bait: experiment tracker API key"], canaries["cowrie bait: AWS access key"],
+			canaries["cowrie bait: MLflow password"], canaries["cowrie bait: Jupyter token"], canaries["cowrie bait: "+p.User+" SSH key"]
+		if len(canaries) != 5 || wandb == nil || aws == nil || mlflow == nil || token == nil || key == nil {
+			t.Fatalf("canaries: %v", canaries)
+		}
+		if value("WANDB_API_KEY") != wandb.Values[0] || value("AWS_ACCESS_KEY_ID") != aws.AccessKeyID ||
+			value("AWS_SECRET_ACCESS_KEY") != aws.SecretAccessKey || value("MLFLOW_TRACKING_PASSWORD") != mlflow.Values[0] ||
+			file(home+"/.netrc").Text != "machine api.wandb.ai\n  login user\n  password "+wandb.Values[0]+"\n" {
+			t.Fatalf("the project's keys are not the canaries':\n%s", env)
+		}
+		project := path.Base(root)
+		config, readme, book := file(root+"/configs/lora.yaml").Text, file(root+"/README.md").Text, file(root+"/notebooks/01-eval.ipynb").Text
+		for _, text := range []string{config, readme, book} {
+			if !strings.Contains(text, "s3://"+bucket+"/"+project+"/") {
+				t.Fatalf("a file of the project names another bucket than %s:\n%s", bucket, text)
+			}
+		}
+		var nb struct {
+			Cells []struct {
+				CellType string   `json:"cell_type"`
+				Source   []string `json:"source"`
+			} `json:"cells"`
+			Format int `json:"nbformat"`
+		}
+		if err := json.Unmarshal([]byte(book), &nb); err != nil || nb.Format != 4 || len(nb.Cells) < 4 || nb.Cells[0].CellType != "markdown" {
+			t.Fatalf("the notebook is none Jupyter opens: %v\n%s", err, book)
+		}
+		// the tracker and the cluster are hosts of the internal network; ssh's config names the cluster
+		host := strings.TrimSuffix(strings.TrimPrefix(tracker, "http://"), ":5000")
+		sshConfig := file(home + "/.ssh/config").Text
+		named := 0
+		for _, h := range plan.Hosts {
+			if slices.Contains(h.Names, host) {
+				named++
+			}
+			if len(h.Names) == 3 && strings.Contains(sshConfig, "Host "+h.Names[0]+"\n    HostName "+h.Names[1]+"\n") &&
+				strings.Contains(readme, "`ssh "+h.Names[0]+"`") {
+				named += 10
+			}
+		}
+		if named != 11 {
+			t.Fatalf("the tracker or the cluster of the README is no host of the plan (%d): %+v", named, plan.Hosts)
+		}
+		jupyter := file(home + "/.jupyter/jupyter_server_config.py").Text
+		if !strings.Contains(jupyter, "c.ServerApp.token = '"+token.Values[0]+"'\n") || !strings.Contains(jupyter, "c.ServerApp.port = 8888\n") ||
+			!strings.Contains(jupyter, "root_dir = '"+home+"/work'") {
+			t.Fatalf("notebook server settings:\n%s", jupyter)
+		}
+		priv, err := ssh.ParseRawPrivateKey([]byte(file(home + "/.ssh/id_ed25519").Text))
+		if err != nil {
+			t.Fatal(err)
+		}
+		pub, _ := ssh.NewPublicKey(priv.(*ed25519.PrivateKey).Public())
+		if key.Values[0] != strings.Fields(string(ssh.MarshalAuthorizedKey(pub)))[1] {
+			t.Fatal("the SSH key canary does not watch the planted key")
+		}
+		if h := file("/root/.bash_history"); !strings.Contains(h.Text, "ollama") || !strings.HasSuffix(h.Text, "uptime\nreboot\n") {
+			t.Fatalf("root's history: %s", h.Text)
+		}
+	}
+}
+
+// TestBaitPi: the Raspberry Pi carries what one on a home or office network
+// has: the Wi-Fi profile it was set up on (the key in it is the one its user
+// typed, in the history), a dynamic DNS updater and a copy job to the NAS,
+// both in cron under the user's name and reaching the NAS by its .local name.
+func TestBaitPi(t *testing.T) {
+	reProfileUUID := regexp.MustCompile(`\nuuid=[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-a[0-9a-f]{3}-[0-9a-f]{12}\n`)
+	for i := 0; i < 12; i++ {
+		p, plan, canaries, file := deskPlan(t, fmt.Sprintf("qp_raspberry%015d", i), "raspios")
+		home := "/home/" + p.User
+		wifi, ddns, pass, key := canaries["cowrie bait: Wi-Fi password"], canaries["cowrie bait: dynamic DNS token"],
+			canaries["cowrie bait: "+p.User+" password"], canaries["cowrie bait: "+p.User+" SSH key"]
+		if len(canaries) != 4 || wifi == nil || ddns == nil || pass == nil || key == nil {
+			t.Fatalf("canaries: %v", canaries)
+		}
+		var profile baitFile
+		for _, f := range plan.Files {
+			if strings.HasSuffix(f.Path, ".nmconnection") {
+				profile = f
+			}
+			if strings.HasSuffix(f.Path, ".sql.gz") || strings.Contains(f.Path, "/.aws/") || strings.Contains(f.Path, "report") {
+				t.Fatalf("a Raspberry Pi with %s", f.Path)
+			}
+		}
+		ssid := strings.TrimSuffix(path.Base(profile.Path), ".nmconnection")
+		history := file(home + "/.bash_history").Text
+		if path.Dir(profile.Path) != "/etc/NetworkManager/system-connections" || profile.Owner != "root" ||
+			!strings.Contains(profile.Text, "\nssid="+ssid+"\n") || !strings.Contains(profile.Text, "\npsk="+wifi.Values[0]+"\n") ||
+			!strings.Contains(profile.Text, "\ninterface-name=wlan0\n") ||
+			!strings.Contains(history, `sudo nmcli dev wifi connect "`+ssid+`" password "`+wifi.Values[0]+"\"\n") {
+			t.Fatalf("Wi-Fi profile %s and the history disagree:\n%s", profile.Path, profile.Text)
+		}
+		if !reProfileUUID.MatchString(profile.Text) {
+			t.Fatalf("no UUID in the profile:\n%s", profile.Text)
+		}
+		duck := file(home + "/duckdns/duck.sh")
+		if duck.Mode != 0o700 || !strings.Contains(duck.Text, "&token="+ddns.Values[0]+"&ip=") || !strings.Contains(duck.Text, "-o ~/duckdns/duck.log") ||
+			file(home+"/duckdns/duck.log").Text != "OK" {
+			t.Fatalf("the updater: %s", duck.Text)
+		}
+		script := file(home + "/bin/backup-to-nas.sh")
+		cron := file("/etc/cron.d/pi-jobs").Text
+		if script.Mode != 0o755 || !strings.Contains(script.Text, "| ssh -o BatchMode=yes nas ") ||
+			!strings.Contains(cron, " "+p.User+" "+home+"/duckdns/duck.sh ") || !strings.Contains(cron, " "+p.User+" "+script.Path+" ") {
+			t.Fatalf("the jobs and their cron entries disagree:\n%s\n%s", script.Text, cron)
+		}
+		// the NAS has a .local name and is an internal host; the folder the script packs is there
+		sshConfig := file(home + "/.ssh/config").Text
+		if len(plan.Hosts) != 1 || plan.Hosts[0].Names[0] != "nas" || !strings.HasSuffix(plan.Hosts[0].Names[1], ".local") ||
+			!strings.Contains(sshConfig, "Host nas\n    HostName "+plan.Hosts[0].Names[1]+"\n") {
+			t.Fatalf("the NAS: %+v\n%s", plan.Hosts, sshConfig)
+		}
+		folder := regexp.MustCompile(`-C "\$HOME" (\w+) \|`).FindStringSubmatch(script.Text)
+		if folder == nil || !slices.ContainsFunc(plan.Dirs, func(d baitDir) bool { return d.Path == home+"/"+folder[1] && d.Owner == p.User }) {
+			t.Fatalf("the script packs a folder that is not there:\n%s", script.Text)
+		}
+		if !strings.Contains(history, "sudo -i\n"+pass.Values[0]+"\nsudo -i\n") {
+			t.Fatal("the history lacks the password typed at the prompt")
+		}
 	}
 }

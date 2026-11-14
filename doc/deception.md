@@ -139,6 +139,11 @@ Server personas carry the files an intruder expects on an operations box:
   settings), the admin's notes with the monitoring login, and the login
   user's `.netrc`.
 
+The GPU persona and the Raspberry Pi are no operations box: the first carries
+a training project with its keys, a notebook server's token and an SSH key
+for the cluster, the second the Wi-Fi profile it was set up on, a dynamic DNS
+updater and a copy job to the NAS ([canary.md](canary.md#gpu-workstation-and-raspberry-pi)).
+
 Choose the files with `cowrie bait_profile=ops` (the default) or
 `cowrie bait_profile=industrial`. Industrial support archives contain a parseable
 inventory, communication exports, maintenance notes and dated compressed snapshots

@@ -220,7 +220,7 @@ var settingSpecs = map[string]settingSpec{
 var settingHelp = map[string]string{
 	"persona":      "The system Cowrie presents. Empty: one server persona picked for this instance.",
 	"bait":         "Plant working files with synthetic credential canaries on server personas. Empty: on.",
-	"bait_profile": "Files for an ops server or a Linux industrial support host. Industrial archives reference bait_target; they do not make Cowrie a PLC or start an engineering runtime. Server personas only. Empty: ops.",
+	"bait_profile": "The persona's own working files (ops: a server's backup job, the GPU workstation's projects and keys, the Raspberry Pi's network and jobs) or a Linux industrial support host's. Industrial archives reference bait_target; they do not make Cowrie a PLC or start an engineering runtime. Server personas only. Empty: ops.",
 	"bait_target":  "Asset referenced by industrial support files: the selected Conpot device or the refrigeration controller. This does not enable the referenced service. Used with bait_profile=industrial. Empty: conpot.",
 	"deception":    "qpot: QPot's Cowrie. stock: the image's own Cowrie, with none of QPot's changes and no bait. Use stock only for the control side of a comparison. Empty: qpot.",
 	"template":     "The industrial device Conpot emulates; only its ports are published. Empty: the saved automatic device, kept across restarts and upgrades.",

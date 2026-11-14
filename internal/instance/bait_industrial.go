@@ -13,6 +13,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"regexp"
+	"slices"
 	"strings"
 
 	"github.com/qpot/qpot/internal/canary"
@@ -188,8 +189,10 @@ func (s *baitScene) buildIndustrial() {
 	s.file(baitFile{Path: notesPath, Owner: "root", Mode: 0o644, At: exportAt, Text: notes})
 	s.file(baitFile{Path: industrialRoot + "/README.txt", Owner: "root", Mode: 0o644, At: created,
 		Text: "OT maintenance reference archive\n\nInventory format: schema_version 1, assets with the name and site the device reports (where it reports them), model, role, private address and service endpoints.\n" +
-			"exports/ contains communications records; maintenance/handover.txt records the archive procedure.\n" +
+			"exports/ contains communications records and the event history; maintenance/handover.txt records the archive procedure.\n" +
+			"maintenance/changes.csv is the change record, maintenance/vendor-access.txt the vendor's support account.\n" +
 			"backups/ contains dated text snapshots of the inventory and communications records.\n"})
+	s.industrialRecords(assetID, p.Model, asset, archive, exportDir, exportAt)
 
 	backupPath := industrialRoot + "/backups/" + assetID + "-reference-{{date:%Y%m%d}}.txt.gz"
 	archivedInventory := strings.ReplaceAll(string(b), "{{date:%Y-%m-%dT%H:%M:%SZ}}", "{{date:%Y-%m-%dT%H:%M:%SZ@ot_inventory}}")
@@ -209,8 +212,104 @@ func (s *baitScene) buildIndustrial() {
 
 	s.plan.Links = append(s.plan.Links, baitLink{Path: s.home + "/ot", Target: industrialRoot, At: exportAt})
 	s.file(baitFile{Path: s.home + "/.bash_history", Owner: s.user, Mode: 0o600, At: 1,
-		Offset: -300, InPlace: true, Text: "cd ~/ot\nls -l exports\ncat maintenance/handover.txt\ncat inventory.json\nexit\n"})
+		Offset: -300, InPlace: true, Text: "cd ~/ot\nls -l exports\ncat maintenance/handover.txt\ncat inventory.json\ntail -5 maintenance/changes.csv\nexit\n"})
 	s.file(baitFile{Path: "/root/.bash_history", Owner: "root", Mode: 0o600, At: 1,
 		Offset: -60, InPlace: true, Text: "cd " + industrialRoot + "\ncat inventory.json\ncat " + commsPath +
-			"\nzcat " + industrialRoot + "/backups/" + assetID + "-reference-{{date:%Y%m%d@ot_backup}}.txt.gz\nssh " + archive.Alias + "\nexit\n"})
+			"\nhead -20 " + exportDir + "/events.csv\ncat maintenance/vendor-access.txt\nzcat " + industrialRoot + "/backups/" + assetID + "-reference-{{date:%Y%m%d@ot_backup}}.txt.gz\nssh " + archive.Alias + "\nexit\n"})
+}
+
+// industrialRecords adds what accumulates on a support host between two
+// exports: the change record, the device's event history as it was last
+// exported, the sheet of the vendor's support account (a canary), and for a
+// tank gauge the tank setup. All of it is the support host's own bookkeeping
+// in CSV and text; none of it claims a value the live device could contradict.
+func (s *baitScene) industrialRecords(assetID, model string, asset industrialAsset, archive baitHostInfo, exportDir string, exportAt float64) {
+	stream := s.d.Stream("ot-records")
+	engineers := []string{strings.ToUpper(s.admin.First[:1] + s.admin.Last[:1])}
+	for len(engineers) < 3 {
+		initials := strings.ToUpper(baitFirst[stream.Intn(len(baitFirst))][:1] + baitLast[stream.Intn(len(baitLast))][:1])
+		if !slices.Contains(engineers, initials) {
+			engineers = append(engineers, initials)
+		}
+	}
+	// the change record, oldest first; the last entry is the export itself
+	summaries := []string{"Clock checked against the site time source", "Communications settings recorded, no change",
+		"Spare unit serial recorded in the inventory", "Vendor review of the event history, no findings",
+		"Archive account password rotated", "Firmware version recorded, update deferred to the next outage",
+		"Cabinet inspection, terminals re-torqued", "Reference export compared with the previous one, no difference"}
+	var changes strings.Builder
+	w := csv.NewWriter(&changes)
+	_ = w.Write([]string{"date", "change", "engineer", "asset", "summary"})
+	rows := 6 + stream.Intn(5)
+	ticket := 10000 + stream.Intn(60000)
+	days := 30*rows + stream.Intn(60)
+	for i := 0; i < rows-1; i++ {
+		ticket += 3 + stream.Intn(140)
+		_ = w.Write([]string{fmt.Sprintf("{{date:%%Y-%%m-%%d|-%d}}", days*86400), fmt.Sprintf("CHG-%05d", ticket),
+			engineers[stream.Intn(len(engineers))], assetID, summaries[stream.Intn(len(summaries))]})
+		days -= 12 + stream.Intn(30)
+		if days < 2 {
+			days = 2
+		}
+	}
+	ticket += 3 + stream.Intn(140)
+	_ = w.Write([]string{"{{date:%Y-%m-%d}}", fmt.Sprintf("CHG-%05d", ticket), engineers[0], assetID,
+		"Reference export taken after the maintenance window"})
+	w.Flush()
+	s.file(baitFile{Path: industrialRoot + "/maintenance/changes.csv", Owner: "root", Mode: 0o644, At: exportAt, Text: changes.String()})
+
+	// the event history of the last export, newest first: what any networked device logs
+	kinds := [][2]string{{"Communication lost", "no reply from the master for 30 s"}, {"Communication restored", ""},
+		{"Time synchronised", "site time source"}, {"Configuration read", "maintenance host"},
+		{"Cabinet door opened", ""}, {"Cabinet door closed", ""}, {"Supply voltage low", "cleared after 4 s"}}
+	var events strings.Builder
+	w = csv.NewWriter(&events)
+	_ = w.Write([]string{"timestamp", "asset", "event", "detail"})
+	_ = w.Write([]string{"{{date:%Y-%m-%d %H:%M:%S|-540}}", assetID, "Configuration read", "maintenance host"})
+	off := 3600 + stream.Intn(7200)
+	for i, n := 0, 24+stream.Intn(20); i < n; i++ {
+		kind := kinds[stream.Intn(len(kinds))]
+		switch kind[0] {
+		case "Communication lost", "Cabinet door opened":
+			// the pair it belongs to: restored or closed some time after
+			after := kinds[1]
+			if kind[0] == "Cabinet door opened" {
+				after = kinds[5]
+			}
+			_ = w.Write([]string{fmt.Sprintf("{{date:%%Y-%%m-%%d %%H:%%M:%%S|-%d}}", off), assetID, after[0], after[1]})
+			off += 20 + stream.Intn(1500)
+		case "Communication restored", "Cabinet door closed":
+			continue
+		}
+		_ = w.Write([]string{fmt.Sprintf("{{date:%%Y-%%m-%%d %%H:%%M:%%S|-%d}}", off), assetID, kind[0], kind[1]})
+		off += 3600 + stream.Intn(5*86400)
+	}
+	w.Flush()
+	s.file(baitFile{Path: exportDir + "/events.csv", Owner: "root", Mode: 0o644, At: exportAt, Text: events.String()})
+
+	if len(asset.Tanks) > 0 {
+		var tanks strings.Builder
+		w = csv.NewWriter(&tanks)
+		_ = w.Write([]string{"tank", "product", "nominal_capacity_gal", "max_fill_gal"})
+		for _, tank := range asset.Tanks {
+			_ = w.Write([]string{fmt.Sprint(tank.Number), tank.Product, fmt.Sprint(tank.CapacityGal), fmt.Sprint(tank.CapacityGal * 9 / 10)})
+		}
+		w.Flush()
+		s.file(baitFile{Path: exportDir + "/tank-setup.csv", Owner: "root", Mode: 0o644, At: exportAt, Text: tanks.String()})
+	}
+
+	// the vendor's support account on the archive host
+	user := canary.Pick(s.d, "vendor-user", []string{"ext_vendor", "svc_vendor", "contractor01", "vendor_support", "oem_service"})
+	password := s.d.HumanPassword("vendor-password")
+	path := industrialRoot + "/maintenance/vendor-access.txt"
+	s.file(baitFile{Path: path, Owner: "root", Mode: 0o640, At: exportAt, Text: fmt.Sprintf(
+		"Vendor remote support - %s\n\nChange: CHG-%05d\nRequested by: %s %s\n"+
+			"Scope: review of %s (%s) through %s, no configuration changes\n\n"+
+			"Account on %s: %s\nPassword: %s\n\n"+
+			"Issued for one maintenance window. Disable the account after the visit;\n"+
+			"it was still enabled at the last reference export ({{date:%%Y-%%m-%%d}}).\n",
+		s.org, ticket, title(s.admin.First), title(s.admin.Last), assetID, model, archive.Alias, archive.FQDN, user, password)})
+	s.plant(&canary.Canary{ID: s.d.ID("vendor-password"), Kind: canary.KindCredential,
+		Name: "cowrie bait: OT vendor support account", Values: []string{password},
+		Memo: s.memo("the password of the vendor's support account "+user+" on "+archive.FQDN, path)})
 }

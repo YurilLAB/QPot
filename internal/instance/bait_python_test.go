@@ -146,7 +146,7 @@ func TestIndustrialBaitPlantedByPython(t *testing.T) {
 		!bytes.Contains(out.Nodes["/root/.bash_history"].bytes(t), []byte(archivePath)) {
 		t.Fatal("backup log/history names a missing dated archive")
 	}
-	if out.Nodes["/root/.netrc"].Mode&0o777 != 0o600 || !bytes.Contains(out.Nodes["/root/.netrc"].bytes(t), []byte(planted[1].Values[0])) {
+	if out.Nodes["/root/.netrc"].Mode&0o777 != 0o600 || !bytes.Contains(out.Nodes["/root/.netrc"].bytes(t), []byte(planted[len(planted)-1].Values[0])) {
 		t.Fatal("rendered archive credential lost its mode/value")
 	}
 	store, err := canary.NewStore(t.TempDir(), 20)

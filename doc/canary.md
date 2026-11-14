@@ -79,8 +79,8 @@ credential harvesters read `~/.ssh` (keys, `config`, `known_hosts`),
 `~/.aws/credentials`, `.git-credentials`, `.env` files and database dumps, then
 log in to the hosts they found with the keys and passwords they found; people at
 the keyboard look for user files and stay longer where the files look lived in.
-The default `bait_profile=ops` adds that working state to server personas. Its
-bait is:
+The default `bait_profile=ops` adds that working state to server personas (the
+GPU workstation and the Raspberry Pi carry their own, below). Its bait is:
 
 | Canary | Where the attacker finds it | It trips when |
 |--------|-----------------------------|---------------|
@@ -128,6 +128,39 @@ Current planted canaries cannot be deleted while planned. Turn planting off with
 exposed values. Trips need `canary.enabled` and, for the honeypot channel,
 `intelligence.enabled`.
 
+### GPU workstation and Raspberry Pi
+
+Two server personas are no ops box, and `bait_profile=ops` gives each the
+working files of what it is instead of a database backup job.
+
+`gpu-ubuntu` is somebody's training machine (the persona runs Ollama and a
+Jupyter server and brings its own shell history, `~/.env` and Hugging Face
+token; the plan adds around them):
+
+| Canary | Where the attacker finds it | It trips when |
+|--------|-----------------------------|---------------|
+| the Jupyter token (`credential`) | `~/.jupyter/jupyter_server_config.py`, for the notebook server the persona runs on port 8888 | it shows up in a session (a `curl` of the server with it) or as a password |
+| the experiment tracker key (`credential`) | `WANDB_API_KEY` in the project's `.env` and the `api.wandb.ai` entry of `~/.netrc` | it shows up in a session or as a password |
+| the MLflow password (`credential`) | the project's `.env`, for the tracker on the internal network | it is used to log in to a QPot honeypot or shows up in a session |
+| the AWS key (`aws`) | `AWS_ACCESS_KEY_ID`/`AWS_SECRET_ACCESS_KEY` in the project's `.env`, for the dataset bucket | either half shows up in a session |
+| the user's SSH key (`ssh-key`) | `~/.ssh/id_ed25519`, with a `config` for the cluster login node and the dataset store | it is offered in a login, or used by `ssh` on the honeypot |
+
+The project under `~/work` has a README, `requirements.txt`, a LoRA
+configuration, the training script and a notebook Jupyter opens; they agree
+on the bucket, the tracker and the cluster.
+
+`raspios` is a Raspberry Pi on a home or small-office network:
+
+| Canary | Where the attacker finds it | It trips when |
+|--------|-----------------------------|---------------|
+| the Wi-Fi password (`credential`) | the NetworkManager profile in `/etc/NetworkManager/system-connections` and the `nmcli` line of the user's history | it is used to log in to a QPot honeypot or shows up in a session |
+| the dynamic DNS token (`credential`) | `~/duckdns/duck.sh`, run from `/etc/cron.d/pi-jobs` | it shows up in a session: the updater run or its URL fetched on the honeypot |
+| the user's SSH key (`ssh-key`) | `~/.ssh/id_ed25519`, with a `config` for the NAS the nightly copy job writes to | it is offered in a login, or used by `ssh` on the honeypot |
+| the user's password (`credential`) | the user's `.bash_history`, typed at the `sudo` prompt by mistake | it is used to log in to a QPot honeypot or shows up in a session |
+
+Changing a running instance from the earlier files to these needs a Cowrie
+recreation; the canaries of the files it carried before stay watched.
+
 ### Industrial support archives
 
 ```bash
@@ -136,9 +169,14 @@ qpot honeypot set cowrie persona=debian-bookworm bait_profile=industrial
 
 This opt-in profile replaces the generic ops files with an OT maintenance archive:
 `/srv/ot/inventory.json`, per-asset `communications.csv`, handover/backup records,
-and dated `.txt.gz` snapshots. The login user's `~/ot` link and shell histories
+and dated `.txt.gz` snapshots. Beside them is what accumulates between two
+exports: `maintenance/changes.csv` (the change record, tickets and dates in
+order), the device's event history as last exported (`events.csv`), a tank
+gauge's tank setup, and `maintenance/vendor-access.txt`, the sheet of the
+vendor's support account. The login user's `~/ot` link and shell histories
 lead to the archive. Root's SSH configuration and `0600` `.netrc` describe a
-separate private archive host; their synthetic key/password are registered canaries.
+separate private archive host; their synthetic key/password and the vendor
+account's password are registered canaries.
 The model, role and protocol ports match the selected device profile. The private
 asset address is a distinct synthetic reference, not Conpot's live host mapping.
 

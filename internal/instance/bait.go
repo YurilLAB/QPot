@@ -284,7 +284,15 @@ func cowrieBait(cfg *config.Config) (baitPlan, []*canary.Canary) {
 			s.buildIndustrial()
 		}
 	} else {
-		s.build()
+		// the working files of what the persona is: a server, a GPU workstation, a Raspberry Pi
+		switch baitSceneKind(p) {
+		case "workstation":
+			s.buildWorkstation()
+		case "pi":
+			s.buildPi()
+		default:
+			s.build()
+		}
 	}
 	return s.plan, s.canaries
 }
@@ -353,6 +361,9 @@ type baitScene struct {
 	repoUser, repoPass string
 	repoFile           string
 
+	// addr draws an address of the internal network no other host has.
+	addr func(label string) string
+
 	plan     baitPlan
 	canaries []*canary.Canary
 }
@@ -413,6 +424,7 @@ func newBaitScene(cfg *config.Config, p tpotCowriePersona) *baitScene {
 			}
 		}
 	}
+	s.addr = addr
 
 	s.engine = canary.Pick(d, "engine", []string{"mysql", "postgres"})
 	s.dbName = canary.Pick(d, "db-name", baitDBNames)

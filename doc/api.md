@@ -259,7 +259,8 @@ the operator to QPot service output because a honeypot container may not exist.
 The native controller XML interface is separate from this management API; see
 [refrigeration.md](refrigeration.md).
 
-Cowrie accepts `bait_profile=ops|industrial` (empty means ops). Industrial
+Cowrie accepts `bait_profile=ops|industrial` (empty means ops: the working
+files of what the persona is, a server, a GPU workstation or a Raspberry Pi). Industrial
 archives belong to a Linux support host and reference the selected device;
 `bait_target=conpot|refrigeration` chooses the industrial archive reference
 (empty means conpot); it does not enable the referenced service. `bait=off`
