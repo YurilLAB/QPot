@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"slices"
 	"sort"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -50,6 +51,7 @@ print(actual)`
 		{conpotBACnetPatchVolume().ContainerPath, conpotBACnetOriginalSHA256},
 		{conpotGuardianASTPatchVolume().ContainerPath, conpotGuardianASTOriginalSHA256},
 		{conpotOPCUAPatchVolume().ContainerPath, conpotOPCUAOriginalSHA256},
+		{conpotServePatchVolume().ContainerPath, conpotServeOriginalSHA256},
 		// What the site step calls, and the spec whose values it replaces.
 		{"/opt/tpot/tpot_templates.py", conpotTemplatesPyOriginalSHA256},
 		{"/opt/tpot/templates.toml", conpotTemplatesSpecOriginalSHA256},
@@ -355,6 +357,84 @@ print(said)`
 	}
 	if said := strings.TrimSpace(output); (said == "0") != (facts == 0) {
 		t.Fatalf("%s: QPot knows %d names of the device, the device was asked for %s", template, facts, said)
+	}
+}
+
+// conpotLiveAcceptRace runs, in the container, an echo server under the
+// mounted accept loop and connects to it at the moments the image's loop
+// lost connections: half a second after the last accept, give or take a
+// millisecond and a half. It prints how many of the connections were reset
+// or closed without an answer.
+const conpotLiveAcceptRace = `import asyncio,socket,sys,threading,time
+from conpot.utils import asyncio_serve
+class Echo:
+ def handle(self,sock,address):
+  sock.settimeout(5)
+  try:
+   data=sock.recv(4)
+   if data: sock.sendall(data)
+  finally: sock.close()
+started={}
+def server():
+ async def main():
+  stop,ready=asyncio.Event(),asyncio.Event()
+  task=asyncio.create_task(asyncio_serve.serve_tcp_sync_handler("127.0.0.1",15020,Echo(),stop_event=stop,ready_event=ready,name="race"))
+  await ready.wait();started["at"]=time.monotonic()
+  await task
+ asyncio.run(main())
+threading.Thread(target=server,daemon=True).start()
+while "at" not in started: time.sleep(0.01)
+lost,last=0,started["at"]
+for i in range(int(sys.argv[1])):
+ target=last+0.5+((i%61)-30)*0.00005
+ while True:
+  delay=target-time.monotonic()
+  if delay<=0: break
+  time.sleep(delay if delay>0.002 else 0)
+ try:
+  with socket.create_connection(("127.0.0.1",15020),timeout=5) as s:
+   last=time.monotonic();s.settimeout(5);s.sendall(b"ping")
+   if s.recv(4)!=b"ping": lost+=1
+ except ConnectionResetError: lost+=1
+print(lost)`
+
+// TestConpotLiveAcceptLoop: under the mounted accept loop no connection is
+// lost at the moments the image's own loop lost about a quarter of them
+// (measured on the pinned image: 65 of 240, and none of 240 with the fix).
+func TestConpotLiveAcceptLoop(t *testing.T) {
+	if os.Getenv("QPOT_TEST_CONPOT") != "1" {
+		t.Skip("set QPOT_TEST_CONPOT=1 to run pinned-image protocol integration tests")
+	}
+	image := GetHoneypotImage("conpot")
+	if output, err := conpotLiveDocker(15*time.Second, "image", "inspect", image); err != nil {
+		t.Fatalf("pull the pinned image %s before running this test: %v\n%s", image, err, output)
+	}
+	patch := conpotServePatchVolume()
+	dir := t.TempDir()
+	if err := os.Chmod(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for name, content := range map[string][]byte{"asyncio_serve.py": patch.Content, "race.py": []byte(conpotLiveAcceptRace)} {
+		if err := os.WriteFile(filepath.Join(dir, name), content, 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chmod(filepath.Join(dir, name), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	const connections = 80
+	output, err := conpotLiveDocker(3*time.Minute, "run", "--rm", "--network", "none", "--read-only",
+		// Python carries a NET_BIND_SERVICE file capability in this image.
+		"--cap-drop", "ALL", "--cap-add", "NET_BIND_SERVICE",
+		"--security-opt", "no-new-privileges:true", "--tmpfs", "/tmp:rw,mode=1777",
+		"--mount", "type=bind,src="+filepath.Join(dir, "asyncio_serve.py")+",dst="+patch.ContainerPath+",readonly",
+		"--mount", "type=bind,src="+filepath.Join(dir, "race.py")+",dst=/opt/qpot/race.py,readonly",
+		"--entrypoint", "python3", image, "/opt/qpot/race.py", strconv.Itoa(connections))
+	if err != nil {
+		t.Fatalf("the accept loop check did not run: %v\n%s", err, output)
+	}
+	if lost := strings.TrimSpace(output); lost != "0" {
+		t.Fatalf("%s of %d connections were reset or closed without an answer under the mounted accept loop", lost, connections)
 	}
 }
 

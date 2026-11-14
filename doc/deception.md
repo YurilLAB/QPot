@@ -258,6 +258,18 @@ five bytes `quit.`, which no PLC does and which is easy to try. QPot's
 mounted server treats them as the start of a frame header like any other
 bytes.
 
+The image's TCP servers (Modbus, S7, the tank gauge, ADS, HART-IP, ICCP,
+EtherNet/IP and the meter) share one loop that accepts connections, and that
+loop waited for a connection half a second at a time. A connection accepted
+in the moment such a wait ran out was dropped: the client was reset before
+the device said anything. On the pinned image about a quarter of the
+connections arriving within a millisecond and a half of that moment were
+lost, which is roughly one in several hundred of all connections, and a
+device that resets a new connection now and then is not what a scanner
+expects. QPot mounts the same file with the accept awaited without a
+timeout. `TestConpotLiveAcceptLoop` connects at exactly those moments: none
+of 80 connections is lost with the mounted file, 15 of 80 with the image's.
+
 The image's RTU profile gives the device an SNMP name and registers only its
 contact and location, so a request for `sysName` was answered with an empty
 string by a device that answers the other two. QPot's site step registers the

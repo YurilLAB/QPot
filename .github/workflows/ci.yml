@@ -384,7 +384,7 @@ jobs:
       - name: Exercise industrial device protocols and persistent identity
         # No host ports or external container connectivity; clients execute
         # inside isolated namespaces. Requested tests fail if the image is absent.
-        run: go test -race -count=1 -timeout 20m ./internal/instance -run '^TestConpotLiveProfiles$'
+        run: go test -race -count=1 -timeout 20m ./internal/instance -run '^TestConpotLive(Profiles|AcceptLoop)$'
 
   refrigeration-integration:
     name: Live refrigeration supervisor and packaged image build

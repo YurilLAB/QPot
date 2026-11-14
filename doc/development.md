@@ -54,7 +54,7 @@ Run the industrial protocol checks locally after pulling the versioned image:
 
 ```bash
 docker pull ghcr.io/telekom-security/conpot:24.04.2@sha256:be17a238709c78909c7d2e0da55bc3ea66dc3aa46618f0d89b7080f3e7dda3e8
-QPOT_TEST_CONPOT=1 go test -race -count=1 -timeout 8m ./internal/instance -run '^TestConpotLiveProfiles$'
+QPOT_TEST_CONPOT=1 go test -race -count=1 -timeout 8m ./internal/instance -run '^TestConpotLive(Profiles|AcceptLoop)$'
 ```
 
 The image reference includes the reviewed multi-architecture index digest;

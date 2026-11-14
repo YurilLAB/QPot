@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"crypto/sha256"
 	"fmt"
+	"regexp"
 	"strings"
 	"testing"
 )
@@ -224,6 +225,46 @@ func TestConpotModbusPatchMounts(t *testing.T) {
 		line := "/honeypots/conpot/" + want.HostSubdir + ":" + want.ContainerPath + ":ro\n"
 		if !strings.Contains(svc, line) {
 			t.Fatalf("generated Compose does not mount the Modbus patch read-only: want %q", strings.TrimSpace(line))
+		}
+	}
+}
+
+// TestConpotAcceptLoopMounts: every Conpot profile runs its TCP servers under
+// the accept loop that does not drop a connection it accepted, mounted
+// read-only over the image's; the file differs from the image's in that loop
+// only (the live test checks the image's hash and that no connection is
+// lost).
+func TestConpotAcceptLoopMounts(t *testing.T) {
+	want := conpotServePatchVolume()
+	if len(conpotServeOriginalSHA256) != 64 || len(want.Content) == 0 {
+		t.Fatal("the accept loop or the hash of the file it replaces is missing")
+	}
+	src := string(want.Content)
+	if regexp.MustCompile(`wait_for\(\s*loop\.sock_accept`).MatchString(src) || !strings.Contains(src, "conn, peer = await loop.sock_accept(listen_sock)") {
+		t.Fatal("the mounted accept loop still waits for a connection under a timeout, which drops the connection accepted as the timeout fires")
+	}
+	if strings.Contains(src, "\r") {
+		t.Error("the accept loop has CR bytes")
+	}
+	for _, keep := range []string{"async def serve_tcp_sync_handler(", "async def serve_tcp_async_handler(", "async def serve_udp_datagram(", "await loop.run_in_executor(None, handler_obj.handle, conn, peer)", "listen_sock.listen(100)"} {
+		if !strings.Contains(src, keep) {
+			t.Errorf("the mounted file lacks %q of the image's", keep)
+		}
+	}
+	for _, id := range ConpotTemplateIDs() {
+		cfg := conpotConfig("qp_accept_patch_mount", id)
+		found := false
+		for _, mount := range deployProfile(cfg, "conpot").Volumes {
+			if mount.ContainerPath == want.ContainerPath {
+				found = mount.File && mount.ReadOnly && bytes.Equal(mount.Content, want.Content)
+			}
+		}
+		if !found {
+			t.Fatalf("%s: the accept loop is not mounted as a populated read-only file", id)
+		}
+		svc, _, _ := publishedPorts(t, cfg, "conpot")
+		if line := "/honeypots/conpot/" + want.HostSubdir + ":" + want.ContainerPath + ":ro\n"; !strings.Contains(svc, line) {
+			t.Fatalf("%s: generated Compose does not mount the accept loop read-only: want %q", id, strings.TrimSpace(line))
 		}
 	}
 }

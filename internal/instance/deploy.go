@@ -314,7 +314,27 @@ const (
 	// it stands in for.
 	conpotGuardianASTOriginalSHA256 = "15c1d0d54fb0c41890c652c5716ad6c39ab1500a9a0adf564ac50ceed8187efc"
 	conpotOPCUAOriginalSHA256       = "6ff93684019c5c3d75547b5f61dce93431dff371e526807dc07df7b5503769d1"
+	// The accept loop every synchronous TCP server of the image runs under.
+	conpotServeOriginalSHA256 = "647e07a350fbbda38582a05ed008619158fc7d123c45f07f6a573a8735cf7934"
 )
+
+// conpotServePy is the image's conpot/utils/asyncio_serve.py with one change
+// to the loop that accepts TCP connections for the synchronous protocol
+// servers (Modbus, S7, the tank gauge, ADS, HART-IP, ICCP, EtherNet/IP and
+// the meter). The image waited for a connection half a second at a time;
+// when that half second ran out in the moment a connection was accepted, the
+// accepted socket was dropped and the client reset before a handler saw it.
+// About a quarter of the connections arriving within a millisecond and a
+// half of such a moment were lost. The mounted file awaits the accept.
+//
+//go:embed honeypotfiles/conpot/asyncio_serve.py
+var conpotServePy []byte
+
+func conpotServePatchVolume() deployVolume {
+	return deployVolume{HostSubdir: "patch/asyncio_serve.py",
+		ContainerPath: conpotSource + "/utils/asyncio_serve.py",
+		File:          true, ReadOnly: true, Content: conpotServePy}
+}
 
 // conpotModbusServerPy reads segmented MBAP frames within one timeout budget.
 // TCP fragments must neither invalidate a header nor extend worker lifetimes.
@@ -505,7 +525,7 @@ func deployProfile(cfg *config.Config, name string) honeypotDeploy {
 		d.Env = maps.Clone(d.Env)
 		d.Env["CONPOT_TEMPLATE"] = t.ID
 		d.Env[conpotSiteSeedEnv] = conpotSiteSeed(cfg)
-		d.Volumes = append(slices.Clone(d.Volumes), conpotSiteVolume())
+		d.Volumes = append(slices.Clone(d.Volumes), conpotSiteVolume(), conpotServePatchVolume())
 		if t.ID == "plc_modbus" {
 			d.Volumes = append(d.Volumes, conpotModbusPatchVolume(), conpotModbusSlavePatchVolume())
 		} else if t.ID == "building_automation" {
