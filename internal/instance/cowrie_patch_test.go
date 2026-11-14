@@ -81,6 +81,7 @@ func TestCowriePatchMounts(t *testing.T) {
 		cowrieSource + "/core/honeyfs.py":          cowrieHoneyfsPy,
 		cowrieSource + "/core/qpot_bait.py":        cowrieQPotBaitPy,
 		cowrieSource + "/commands/find.py":         cowrieFindPy,
+		cowrieSource + "/commands/searchutils.py":  cowrieSearchutilsPy,
 		cowrieSource + "/shell/bashparse.py":       cowrieBashparsePy,
 		cowrieSource + "/commands/curl.py":         cowrieCurlPy,
 		cowrieSource + "/commands/wget.py":         cowrieWgetPy,
@@ -122,6 +123,7 @@ func TestCowriePatchMounts(t *testing.T) {
 		"/honeypots/cowrie/patch/honeyfs.py:" + cowrieSource + "/core/honeyfs.py:ro\n",
 		"/honeypots/cowrie/patch/qpot_bait.py:" + cowrieSource + "/core/qpot_bait.py:ro\n",
 		"/honeypots/cowrie/patch/find.py:" + cowrieSource + "/commands/find.py:ro\n",
+		"/honeypots/cowrie/patch/searchutils.py:" + cowrieSource + "/commands/searchutils.py:ro\n",
 		"/honeypots/cowrie/patch/bashparse.py:" + cowrieSource + "/shell/bashparse.py:ro\n",
 		"/honeypots/cowrie/patch/curl.py:" + cowrieSource + "/commands/curl.py:ro\n",
 		"/honeypots/cowrie/patch/wget.py:" + cowrieSource + "/commands/wget.py:ro\n",
@@ -217,7 +219,7 @@ func TestCowriePatchFiles(t *testing.T) {
 	for name, content := range map[string][]byte{"protocol.py": cowrieProtocolPy, "ping.py": cowriePingPy,
 		"coreutils.py": cowrieCoreutilsPy, "commands_init.py": cowrieCommandsInitPy, "ssh.py": cowrieSSHPy,
 		"awscli.py": cowrieAWSCLIPy, "honeyfs.py": cowrieHoneyfsPy, "qpot_bait.py": cowrieQPotBaitPy,
-		"find.py": cowrieFindPy, "bashparse.py": cowrieBashparsePy, "curl.py": cowrieCurlPy,
+		"find.py": cowrieFindPy, "searchutils.py": cowrieSearchutilsPy, "bashparse.py": cowrieBashparsePy, "curl.py": cowrieCurlPy,
 		"wget.py": cowrieWgetPy, "ls.py": cowrieLsPy, "qpot_state.py": cowrieStatePy,
 		"adduser.py": cowrieAdduserPy, "su.py": cowrieSuPy, "opkg.py": cowrieOpkgPy, "qpot_permissions.py": cowriePermissionsPy, "sudo.py": cowrieSudoPy, "jsonlog.py": cowrieJSONLogPy, "checkers.py": cowrieCheckersPy} {
 		if bytes.Contains(content, []byte("\r")) {
@@ -242,7 +244,7 @@ func TestCowriePatchWritten(t *testing.T) {
 	for name, content := range map[string][]byte{"protocol.py": cowrieProtocolPy, "ping.py": cowriePingPy,
 		"coreutils.py": cowrieCoreutilsPy, "commands_init.py": cowrieCommandsInitPy, "ssh.py": cowrieSSHPy,
 		"awscli.py": cowrieAWSCLIPy, "honeyfs.py": cowrieHoneyfsPy, "qpot_bait.py": cowrieQPotBaitPy,
-		"find.py": cowrieFindPy, "bashparse.py": cowrieBashparsePy, "curl.py": cowrieCurlPy,
+		"find.py": cowrieFindPy, "searchutils.py": cowrieSearchutilsPy, "bashparse.py": cowrieBashparsePy, "curl.py": cowrieCurlPy,
 		"wget.py": cowrieWgetPy, "ls.py": cowrieLsPy, "qpot_state.py": cowrieStatePy,
 		"adduser.py": cowrieAdduserPy, "su.py": cowrieSuPy, "opkg.py": cowrieOpkgPy, "qpot_permissions.py": cowriePermissionsPy, "sudo.py": cowrieSudoPy, "jsonlog.py": cowrieJSONLogPy, "checkers.py": cowrieCheckersPy} {
 		got, err := os.ReadFile(filepath.Join(cfg.DataPath, "honeypots", "cowrie", "patch", name))

@@ -90,6 +90,43 @@ against the real program.
   `arch`, `timeout`, `setsid`, `nice`, `basename`, `dirname`,
   `md5sum`/`sha*sum`, `mktemp`, `tty`, `sync`, `printenv` and `expr`.
 
+### The search for secrets
+
+A visitor who has a shell and wants credentials does not read files one by
+one: they search, and pack what they find. Those commands ended on the image
+in ways no Linux server ends them, each of them a sign of what had been
+reached. They now answer as the real tools do:
+
+| What is typed | The image as shipped | With QPot |
+|---|---|---|
+| `grep -r AKIA /root` | `grep: /root: Is a directory` | the matching lines, as GNU grep prints them (`-R`, `--include`, `--exclude-dir`, binary files named) |
+| `find / -type f \| xargs grep -l KEY` | nothing: grep read xargs' empty pipe | the files that hold the word |
+| `find / -name id_rsa -o -name '*.pem'` | `find: unknown argument '-o'` | GNU find's expression: `-o`, `!`, parentheses, `-path`, `-regex`, `-size`, `-mtime`, `-newer`, `-user`, `-perm`, `-prune`, `-printf`, `-ls`, `-delete` |
+| `find /root -type f -exec cat {} \;` | `unknown argument` | the command runs for each file, or once with `+`; its status decides the test, so `-exec grep -q KEY {} \; -print` prints the right files |
+| `echo ${HOME:-/root}`, `${file##*/}`, `${#x}` | `syntax error: unexpected end of file` | bash's parameter expansion (ash's on the firmware personas) |
+| `sh -c 'wc -l "$1"' _ file`, `echo $0` | the arguments joined into the command; `$0` empty | `$0` and `$1`... as a shell sets them |
+| `uname -m \| cut -c1-3` | the whole line | the characters asked for |
+| `source .env`, `. ./env.sh` | `source: command not found` | the file runs in the calling shell |
+| `tar czf /tmp/k.tgz ~/.ssh` | `Cannot open: No such file or directory` | the archive is made (also to a pipe), listed and unpacked |
+| `ssh-keygen -lf key.pub`, `ssh-keygen -t ed25519` | `Exec format error` | fingerprints, the public key of a private one, a new key pair with its randomart |
+| `cat /etc/ssh/ssh_host_ed25519_key.pub` | an empty file | the key the SSH service presents: its fingerprint is the one the visitor's client showed at the login |
+| `cat /proc/1/cgroup` | an empty file | a systemd host's `0::/init.scope` |
+
+Every command `find -exec` or `xargs` starts is one of the honeypot's own and
+is logged like a typed one. The walks are bounded: a search of the whole tree
+ends within about two seconds whatever is asked, a pattern that could take
+long matches nothing, and one `find` starts at most 1000 commands.
+
+`TestCowrieStatefulHunt` runs these against the real image in CI, and runs
+the image as shipped beside it to show the faults are still there to fix.
+The messages were recorded from findutils 4.10.0, grep 3.11, tar 1.35,
+OpenSSH 10.0 and bash 5.2; the expansions are compared with what bash itself
+printed for the same variables.
+
+Known gaps: `sh -e` does not stop at a failing command, a script whose first
+line names Python is read as shell, the host's private key files stay empty,
+and the DMI files under `/sys/class/dmi/id` hold no vendor or product name.
+
 ## Bait files
 
 Server personas carry the files an intruder expects on an operations box:

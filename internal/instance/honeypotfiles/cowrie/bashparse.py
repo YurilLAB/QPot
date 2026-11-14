@@ -43,9 +43,10 @@ Known deviations from standard bash (none are emulated yet):
 * No word expansions beyond ``$VAR`` / ``${VAR}``: tilde (``~``), brace
   (``{a,b}`` / ``{1..3}``) and ANSI-C quoting (``$'...'``) are passed through
   literally. Arithmetic (``$((1+2))``) runs as a command substitution of a
-  subshell, so ``1+2`` is reported as a command not found. The parameter
-  expansion operators (``${x:-y}``, ``${#x}``, ``${x/a/b}`` ...) are a syntax
-  error.
+  subshell, so ``1+2`` is reported as a command not found.
+* QPot: the parameter expansion operators (``${x:-y}``, ``${#x}``,
+  ``${x/a/b}`` ...) are expanded (see ``qpot_param_value``); upstream answered
+  them with a syntax error.
 * Word splitting always uses the default ``IFS`` (space, tab, newline); an
   assigned ``IFS`` is ignored.
 * QPot: pathname expansion (globbing of ``*`` / ``?`` / ``[...]``) is done
@@ -75,6 +76,7 @@ plain syntax error.
 from __future__ import annotations
 
 import contextlib
+import fnmatch
 import gc
 import os
 import re
@@ -622,8 +624,8 @@ async def tpot_arith_expand(context, text: str, level: int = 0) -> str:
         if text.startswith("${", index):
             end = text.find("}", index + 2)
             if end > 0:
-                value = context.get_variable(text[index + 2:end])
-                out.append(value if value is not None else "")
+                # QPot: a parameter with an operator inside $(( )), as in $((${N:-0} + 1))
+                out.append(await qpot_param_value(context, text[index + 2:end], level))
                 index = end + 1
                 continue
         found = re.compile(r"\$[_a-zA-Z0-9]+").match(text, index)
@@ -737,7 +739,10 @@ DQ_ESC: /\\[$`"\\]/ | /\\(?![$`"\\])/
 sq: SQ
 SQ: /'[^']*'/
 
-dollar_brace: "${" BRACE_NAME "}"
+dollar_brace: "${" BRACE_NAME "}" | "${" BRACE_EXPR "}"
+// QPot: a parameter with an operator (qpot_param_value): never a text BRACE_NAME matches, so a
+// reference has one reading. The word after the operator may hold one more ${...}.
+BRACE_EXPR: /#(?:[_a-zA-Z][_a-zA-Z0-9]*|[0-9]+|[@*])|![_a-zA-Z][_a-zA-Z0-9]*|(?:[_a-zA-Z][_a-zA-Z0-9]*|[0-9]+|[@*])(?::?[-=?+]|##?|%%?|\/\/?|\^\^?|,,?|:)(?:[^{}\\]|\\.|\$\{[^{}]*\})*/s
 BRACE_NAME: /[_a-zA-Z][_a-zA-Z0-9]*\[(?:[0-9]{1,9}|[@*])\]|[_a-zA-Z0-9]+|[?@$#!*]/
 
 dollar_var: DOLLAR_NAME | DOLLAR_SPECIAL
@@ -1202,6 +1207,289 @@ def qpot_subscript(context, name: str) -> str:
         return " ".join(items)
     position = int(index)
     return items[position] if position < len(items) else ""
+
+
+# QPot: parameter expansion with an operator. The grammar took ${NAME} alone and answered every
+#   other form with "syntax error: unexpected end of file", so a line as common in a dropper as
+#   ARCH=${1:-$(uname -m)}, [ -z "${SSH_CONNECTION:-}" ] or ${file##*/} never ran. These are bash's
+#   forms (ash has all but the case changes): ${#x}, ${!x}, ${x:-w} ${x:=w} ${x:?w} ${x:+w} (and
+#   without the colon), ${x#p} ${x##p} ${x%p} ${x%%p}, ${x/p/r} ${x//p/r} ${x/#p/r} ${x/%p/r},
+#   ${x:off} ${x:off:len}, ${x^} ${x^^} ${x,} ${x,,}. The word after the operator is expanded as
+#   the shell expands it: quotes, $name, ${...}, $(...), backticks and $((...)).
+QPOT_PARAM_FORM = re.compile(
+    r"([_a-zA-Z][_a-zA-Z0-9]*|[0-9]+|[@*])(:?[-=?+]|##?|%%?|//?|\^\^?|,,?|:)(.*)\Z", re.S)
+QPOT_PARAM_DOLLAR = re.compile(r"\$([_a-zA-Z][_a-zA-Z0-9]*|[0-9]|[?$#@*!])")
+# a value longer than this is not searched with a pattern that holds a wildcard: every cut of it is tried
+QPOT_PARAM_TRIM_MAX = 2048
+QPOT_PARAM_REPLACE_MAX = 256
+QPOT_PARAM_LEVELS = 8
+
+
+def qpot_shell_name(context) -> str:
+    """$0: the name the shell reports its errors under."""
+    return str(getattr(context, "name", "") or "")
+
+
+def qpot_param_bad(text: str) -> TpotArithError:
+    """What the shell says of an expansion it cannot make."""
+    if tpot_arith_style() == "bash":
+        return TpotArithError("${" + text + "}: bad substitution", 1)
+    return TpotArithError("syntax error: bad substitution", 2, True)
+
+
+def qpot_param_lookup(context, name: str) -> str | None:
+    """A parameter's value, None when it is unset: no positional parameters is $@ and $* unset."""
+    if name in ("@", "*"):
+        count = context.get_variable("#")
+        if count is None or count == "0":
+            return None
+    return context.get_variable(name)
+
+
+def qpot_param_trim(value: str, pattern: str, op: str) -> str:
+    """value without the shortest (# %) or longest (## %%) part at its start or end that matches."""
+    front = op[0] == "#"
+    if not pattern:
+        return value
+    if not any(char in pattern for char in "*?["):
+        if front:
+            return value[len(pattern):] if value.startswith(pattern) else value
+        return value[: len(value) - len(pattern)] if value.endswith(pattern) else value
+    if len(value) > QPOT_PARAM_TRIM_MAX or len(pattern) > 256:
+        return value
+    size = len(value)
+    cuts = range(size + 1) if op in ("#", "%%") else range(size, -1, -1)
+    for cut in cuts:
+        if fnmatch.fnmatchcase(value[:cut] if front else value[cut:], pattern):
+            return value[cut:] if front else value[:cut]
+    return value
+
+
+def qpot_param_replace(value: str, pattern: str, with_text: str, every: bool) -> str:
+    """${value/pattern/with_text}: the first match (every: each one) replaced, the longest at a place;
+    a pattern that begins with # or % matches at the start or the end only."""
+    anchor = ""
+    if not every and pattern[:1] in ("#", "%"):
+        anchor, pattern = pattern[0], pattern[1:]
+    if not pattern:
+        return value
+    if not any(char in pattern for char in "*?["):
+        if anchor == "#":
+            return with_text + value[len(pattern):] if value.startswith(pattern) else value
+        if anchor == "%":
+            return value[: len(value) - len(pattern)] + with_text if value.endswith(pattern) else value
+        return value.replace(pattern, with_text) if every else value.replace(pattern, with_text, 1)
+    if len(value) > QPOT_PARAM_REPLACE_MAX or len(pattern) > 64 or pattern.count("*") > 2:
+        return value
+    size = len(value)
+    if anchor == "#":
+        for end in range(size, -1, -1):
+            if fnmatch.fnmatchcase(value[:end], pattern):
+                return with_text + value[end:]
+        return value
+    if anchor == "%":
+        for begin in range(size + 1):
+            if fnmatch.fnmatchcase(value[begin:], pattern):
+                return value[:begin] + with_text
+        return value
+    out, begin = [], 0
+    while begin < size:
+        found = next((end for end in range(size, begin, -1) if fnmatch.fnmatchcase(value[begin:end], pattern)), -1)
+        if found < 0:
+            out.append(value[begin])
+            begin += 1
+            continue
+        out.append(with_text)
+        begin = found
+        if not every:
+            break
+    return "".join(out) + value[begin:]
+
+
+async def qpot_param_dollar(context, text: str, index: int, level: int) -> tuple[str, int]:
+    """(value, next index) of the expansion that starts at text[index], a $ or a backtick."""
+    if text[index] == "`":
+        end = text.find("`", index + 1)
+        if end < 0:
+            return text[index:], len(text)
+        return await context.command_substitution(text[index + 1:end]), end + 1
+    if text.startswith("$((", index):
+        end = tpot_arith_close(text, index + 2, "(", ")")
+        if end > 0 and text[end - 1] == ")":
+            return await tpot_arith_value(context, text[index + 3:end - 1], level + 1), end + 1
+    if text.startswith("$(", index):
+        end = tpot_arith_close(text, index + 2, "(", ")")
+        if end > 0:
+            return await context.command_substitution(text[index + 2:end]), end + 1
+    if text.startswith("${", index):
+        end = text.find("}", index + 2)
+        if end > 0:
+            return await qpot_param_value(context, text[index + 2:end], level + 1), end + 1
+    found = QPOT_PARAM_DOLLAR.match(text, index)
+    if not found:
+        return "$", index + 1
+    name = found.group(1)
+    if name == "?":
+        return context.get_status(), found.end()
+    if name == "$":
+        return tpot_shell_pid(context), found.end()
+    value = context.get_variable(name)
+    if value is None:
+        value = "0" if name == "#" else qpot_shell_name(context) if name == "0" else ""
+    return value, found.end()
+
+
+async def qpot_param_word(context, text: str, level: int = 0, quoted: bool = False) -> str:
+    """The word after an operator, expanded: tilde, quotes, backslashes, and what a $ or a backtick
+    starts. quoted: the expansion stands inside double quotes, where a tilde and single quotes are
+    themselves."""
+    out, index, size = [], 0, len(text)
+    if not quoted and text[:1] == "~" and (size == 1 or text[1] == "/"):
+        home = context.get_variable("HOME")
+        out.append(home if home is not None else "~")
+        index = 1
+    while index < size:
+        char = text[index]
+        if char == "\\" and index + 1 < size:
+            follows = text[index + 1]
+            # inside double quotes a backslash stays unless it escapes one of these
+            out.append(follows if not quoted or follows in '\\"$`' else char + follows)
+            index += 2
+        elif char == "'" and not quoted:
+            end = text.find("'", index + 1)
+            if end < 0:
+                out.append(text[index:])
+                break
+            out.append(text[index + 1:end])
+            index = end + 1
+        elif char == '"':
+            quoted = not quoted
+            index += 1
+        elif char in "$`":
+            piece, index = await qpot_param_dollar(context, text, index, level)
+            out.append(piece)
+        else:
+            out.append(char)
+            index += 1
+    return "".join(out)
+
+
+async def qpot_param_number(context, text: str, shown: str, level: int) -> int:
+    """An offset or a length of ${x:offset:length}: a number, or an expression of $(( ))."""
+    text = text.strip()
+    if re.fullmatch(r"-?[0-9]{1,18}", text):
+        return int(text)
+    try:
+        return int(await tpot_arith_value(context, text, level + 1))
+    except (TpotArithError, ValueError) as err:
+        raise qpot_param_bad(shown) from err
+
+
+async def qpot_param_value(context, text: str, level: int = 0, quoted: bool = False) -> str:
+    """The value of ${text}, text being what stands between the braces; quoted inside double quotes."""
+    if level > QPOT_PARAM_LEVELS:
+        return ""
+    if re.fullmatch(r"[_a-zA-Z0-9]+|[@*#!]", text):
+        value = context.get_variable(text)
+        if value is None and text == "0":
+            return qpot_shell_name(context)
+        return value if value is not None else ("0" if text == "#" else "")
+    if text == "?":
+        return context.get_status()
+    if text == "$":
+        return tpot_shell_pid(context)
+    if text.endswith("]") and re.fullmatch(r"[_a-zA-Z][_a-zA-Z0-9]*\[(?:[0-9]{1,9}|[@*])\]", text):
+        return qpot_subscript(context, text)
+    if text.startswith("#") and re.fullmatch(r"#(?:[_a-zA-Z][_a-zA-Z0-9]*|[0-9]+|[@*])", text):
+        if text[1:] in ("@", "*"):
+            return context.get_variable("#") or "0"
+        return str(len(context.get_variable(text[1:]) or ""))
+    if text.startswith("!") and re.fullmatch(r"![_a-zA-Z][_a-zA-Z0-9]*", text):
+        if tpot_arith_style() != "bash":
+            raise qpot_param_bad(text)
+        target = context.get_variable(text[1:]) or ""
+        if not re.fullmatch(r"[_a-zA-Z][_a-zA-Z0-9]*|[0-9]+", target):
+            return ""
+        return context.get_variable(target) or ""
+    form = QPOT_PARAM_FORM.match(text)
+    if not form:
+        raise qpot_param_bad(text)
+    name, op, word = form.groups()
+    bash = tpot_arith_style() == "bash"
+    value = qpot_param_lookup(context, name)
+    if op in ("-", ":-", "=", ":=", "?", ":?", "+", ":+"):
+        missing = value is None or (op[0] == ":" and value == "")
+        kind = op[-1]
+        if kind == "+":
+            return "" if missing else await qpot_param_word(context, word, level, quoted)
+        if not missing:
+            return value or ""
+        if kind == "-":
+            return await qpot_param_word(context, word, level, quoted)
+        if kind == "=":
+            if not re.fullmatch(r"[_a-zA-Z][_a-zA-Z0-9]*", name):
+                raise TpotArithError(f"${name}: cannot assign in this way", 1) if bash else qpot_param_bad(text)
+            made = await qpot_param_word(context, word, level, quoted)
+            environ = getattr(context, "environ", None)
+            if isinstance(environ, dict):
+                environ[name] = made
+            return made
+        said = await qpot_param_word(context, word, level, quoted)
+        if not said and op[0] == ":":
+            said = "parameter null or not set" if bash else "parameter not set or null"
+        elif not said:
+            said = "parameter not set"
+        # bash at a prompt gives the line up with status 1; one running a script or -c ends with 127
+        status = (1 if getattr(context, "interactive", False) else 127) if bash else 2
+        raise TpotArithError(f"{name}: {said}", status, not bash)
+    current = value or ""
+    if op in ("#", "##", "%", "%%"):
+        return qpot_param_trim(current, await qpot_param_word(context, word, level), op)
+    if op in ("/", "//"):
+        cut, index = -1, 0
+        while index < len(word):
+            if word[index] == "\\":
+                index += 2
+                continue
+            if word[index] == "/" and (index > 0 or op == "//"):
+                cut = index
+                break
+            index += 1
+        pattern, with_text = (word, "") if cut < 0 else (word[:cut], word[cut + 1:])
+        return qpot_param_replace(current, await qpot_param_word(context, pattern, level),
+                                  await qpot_param_word(context, with_text, level), op == "//")
+    if op == ":":
+        first, colon, second = word.partition(":")
+        if not first.strip():
+            raise qpot_param_bad(text)
+        size = len(current)
+        begin = await qpot_param_number(context, first, text, level)
+        if begin < 0:
+            begin += size
+            if begin < 0:
+                return ""
+        begin = min(begin, size)
+        if not colon:
+            return current[begin:]
+        length = await qpot_param_number(context, second, text, level) if second.strip() else 0
+        if length < 0:
+            end = size + length
+            if end < begin:
+                raise TpotArithError(f"{second.strip()}: substring expression < 0", 1) if bash else qpot_param_bad(text)
+            return current[begin:end]
+        return current[begin:begin + length]
+    # ^ ^^ , ,, : bash's change of case, of the first character or of all, where the pattern matches
+    if not bash:
+        raise qpot_param_bad(text)
+    pattern = await qpot_param_word(context, word, level)
+    change = str.upper if op[0] == "^" else str.lower
+
+    def turned(char: str) -> str:
+        return change(char) if not pattern or fnmatch.fnmatchcase(char, pattern) else char
+
+    if len(op) == 1:
+        return turned(current[:1]) + current[1:]
+    return "".join(turned(char) for char in current[:65536]) + current[65536:]
 
 
 class BashParser:
@@ -1952,7 +2240,7 @@ class BashParser:
                 else:  # HD_TEXT, BARE_DOLLAR
                     parts.append(str(part.value))
             elif part.data == "dollar_var" or part.data == "dollar_brace":
-                parts.append(self._expand_embedded(part))
+                parts.append(await self._qpot_expand(part, True))
             elif part.data == "arith":
                 parts.append(await tpot_arith_value(self.context, str(part.children[0])[3:-2]))
             elif part.data == "cmdsub":
@@ -2270,7 +2558,7 @@ class BashParser:
         if atom.data == "sq":
             return self._leaf_value(atom)[1:-1]  # strip surrounding quotes
         if atom.data == "dollar_var" or atom.data == "dollar_brace":
-            return self._expand_embedded(atom)
+            return await self._qpot_expand(atom)
         if atom.data == "arith":
             # T-Pot: $(( )) of the persona's shell
             return await tpot_arith_value(self.context, str(atom.children[0])[3:-2])
@@ -2316,7 +2604,7 @@ class BashParser:
                 return self._unescape_dq(part.value)
             return ""
         if part.data == "dollar_var" or part.data == "dollar_brace":
-            return self._expand_embedded(part)
+            return await self._qpot_expand(part, True)
         if part.data == "arith":
             return await tpot_arith_value(self.context, str(part.children[0])[3:-2])
         if part.data == "cmdsub":
@@ -2352,6 +2640,15 @@ class BashParser:
             return text[1]
         return text
 
+    async def _qpot_expand(self, node: Tree, quoted: bool = False) -> str:
+        """QPot: a reference with an operator (${x:-y}, ${#x} ...) is expanded as the shell expands it
+        (quoted: inside double quotes or a here-document); any other one as before."""
+        if node.data == "dollar_brace":
+            token = node.children[0]
+            if isinstance(token, Token) and token.type == "BRACE_EXPR":
+                return await qpot_param_value(self.context, str(token), 0, quoted)
+        return self._expand_embedded(node)
+
     def _expand_embedded(self, node: Tree) -> str:
         """Expand a ``$VAR`` reference that is embedded in a larger word.
 
@@ -2371,7 +2668,9 @@ class BashParser:
             return qpot_subscript(self.context, name)
         value = self.context.get_variable(name)
         if value is None:
-            return ""
+            # QPot: $0 is the name the shell goes by (-bash at a login, the script's name in a script),
+            #   what `echo $0` is typed to learn; it was empty
+            return qpot_shell_name(self.context) if name == "0" else ""
         return value
 
     def _special_param(self, node: Tree) -> str | None:

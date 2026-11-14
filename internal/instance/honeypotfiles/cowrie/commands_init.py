@@ -71,4 +71,6 @@ command_modules = [
     "opkg",
     # QPot: last, so its commands (hostname, bash, exit) win over those above
     "coreutils",
+    # QPot: after coreutils and the image's grep and tar, which it extends
+    "searchutils",
 ]

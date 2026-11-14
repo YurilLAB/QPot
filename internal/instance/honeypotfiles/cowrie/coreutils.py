@@ -2031,8 +2031,15 @@ except ImportError:  # pragma: no cover - the image always has them
 
 if Command_sh is not None:
 
+    # the option letters a shell takes in one word with -c (set's letters and bash's own)
+    QPOT_SH_LETTERS = frozenset("abefhiklmnprstuvxBCEHPTc")
+
     class Command_bash(Command_sh):
-        """bash --version as the persona's bash (Cowrie's ran a nested shell and printed nothing)."""
+        """bash --version as the persona's bash (Cowrie's ran a nested shell and printed nothing), and
+        sh -c as a shell reads it: the command is the one argument after -c, the next is $0 and the
+        rest are $1, $2 ... (`sh -c 'wc -l "$1"' _ file`, what find -exec and xargs are given).
+        Cowrie's joined every argument into the command and left the parameters unset. -c may share
+        its word with other options (bash -lc, sh -ec) or come after them."""
 
         def start(self) -> None:
             if self.args[:1] == ["--version"] and not CowrieConfig.get("shell", "bash_version", fallback=""):
@@ -2041,10 +2048,57 @@ if Command_sh is not None:
                     self.write(text)
                     self.exit(0)
                     return
-            super().start()
+            at = self.qpot_command_at()
+            if at is None:
+                super().start()
+                return
+            if at >= len(self.args):
+                self.errorWrite(f"{self.argv0}: -c: option requires an argument\n")
+                self.exit(2)
+                return
+            self.qpot_run_command(self.args[at], list(self.args[at + 1:]))
+            self.exit()
 
-    commands["/bin/bash"] = Command_bash
-    commands["bash"] = Command_bash
+        def qpot_command_at(self) -> int | None:
+            """Where the command string of -c stands in the arguments; None without -c."""
+            args, index = list(self.args), 0
+            while index < len(args):
+                arg = args[index]
+                if arg in ("--login", "--noprofile", "--norc", "--posix", "--restricted", "--verbose", "--noediting"):
+                    index += 1
+                elif arg in ("--rcfile", "--init-file", "-o", "+o", "-O", "+O"):
+                    index += 2
+                elif len(arg) > 1 and arg[0] == "-" and arg[1] != "-" and all(c in QPOT_SH_LETTERS for c in arg[1:]):
+                    index += 1
+                    if "c" in arg[1:]:
+                        # options may still follow -c, before the command (bash -c -x 'id')
+                        while index < len(args) and len(args[index]) > 1 and args[index][0] in "-+" and all(
+                                c in QPOT_SH_LETTERS for c in args[index][1:]):
+                            index += 1
+                        return index
+                elif len(arg) > 1 and arg[0] == "+" and all(c in QPOT_SH_LETTERS for c in arg[1:]):
+                    index += 1
+                else:
+                    return None
+            return None
+
+        def qpot_run_command(self, line: str, rest: list[str]) -> None:
+            from cowrie.shell.honeypot import HoneyPotShell
+
+            shell = HoneyPotShell(self.protocol, interactive=False)
+            shell.name = rest[0] if rest else self.argv0
+            # a new process: its own arguments, never the parameters of what started it
+            for key in [k for k in shell.environ if k.isdigit() or k in ("#", "@", "*")]:
+                del shell.environ[key]
+            if len(rest) > 1:
+                shell.set_positional_params(rest[1:])
+            self.protocol.cmdstack.append(shell)
+            shell.lineReceived(line)
+            self.exit_code = shell.last_exit_code
+
+    for _name in ("/bin/bash", "bash", "/bin/sh", "sh", "/usr/bin/bash", "/usr/bin/sh"):
+        if _name in ("/bin/bash", "bash") or commands.get(_name) is None:
+            commands[_name] = Command_bash
 
 if Command_exit is not None:
 

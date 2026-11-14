@@ -133,6 +133,23 @@ const cowriePatchVersion = "24.04.2"
 // on every persona; ash, which keeps no arrays, refuses a line with
 // ${NAME[INDEX]}.
 //
+// What someone looking for secrets runs. find.py: GNU find's expression (its
+// operators, tests and actions, -exec with the status of the command it
+// starts), where the image's knew -name, -type and -maxdepth and answered
+// "unknown predicate" to `-o`, `-path`, `-size`, `-mtime` and `-exec`.
+// searchutils.py (new, loaded after coreutils): grep -r and -R (the image's
+// grep with the directory walk added; it read xargs' empty pipe where files
+// were named), cut -b and -c (taken and not acted on), source and `.`, tar
+// that packs as well as unpacks, ssh-keygen (fingerprints, the public key of
+// a private one, a new key pair). bashparse.py: the shell's parameter
+// expansion operators (${x:-y}, ${#x}, ${x##*/}, ${x/a/b}, ${x:0:4} ...),
+// which upstream answers with "syntax error: unexpected end of file", and $0.
+// coreutils.py: sh -c 'command' NAME ARG... sets $0 and the positional
+// parameters. qpot_bait.py: the persona's /etc/ssh/ssh_host_*_key.pub hold
+// the keys the SSH service presents and /proc/1/cgroup a systemd host's line
+// (both were empty files). Texts recorded from findutils 4.10.0, grep 3.11,
+// tar 1.35, OpenSSH 10.0p2, bash 5.2.37 and BusyBox 1.37.0.
+//
 // ls.py: GNU ls -l counts a folder's links, shows dates as the C locale does,
 // totals its blocks, rounds -h up as GNU does, fills -C's columns top to
 // bottom (-x across, as wide as -w, the terminal or an exported COLUMNS),
@@ -159,6 +176,8 @@ var (
 	cowrieQPotBaitPy []byte
 	//go:embed honeypotfiles/cowrie/find.py
 	cowrieFindPy []byte
+	//go:embed honeypotfiles/cowrie/searchutils.py
+	cowrieSearchutilsPy []byte
 	//go:embed honeypotfiles/cowrie/bashparse.py
 	cowrieBashparsePy []byte
 	//go:embed honeypotfiles/cowrie/curl.py
@@ -214,6 +233,7 @@ func cowriePatchVolumes() []deployVolume {
 		file("honeyfs.py", "core/honeyfs.py", cowrieHoneyfsPy),
 		file("qpot_bait.py", "core/qpot_bait.py", cowrieQPotBaitPy),
 		file("find.py", "commands/find.py", cowrieFindPy),
+		file("searchutils.py", "commands/searchutils.py", cowrieSearchutilsPy),
 		file("bashparse.py", "shell/bashparse.py", cowrieBashparsePy),
 		file("curl.py", "commands/curl.py", cowrieCurlPy),
 		file("wget.py", "commands/wget.py", cowrieWgetPy),

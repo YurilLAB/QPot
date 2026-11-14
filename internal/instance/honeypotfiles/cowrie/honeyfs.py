@@ -101,6 +101,15 @@ def _tree() -> list[Any]:
         from twisted.logger import Logger
 
         Logger().failure("QPot bait not planted")
+    # QPot: the host's own facts in files the image left empty (its SSH host keys, its cgroup)
+    try:
+        from cowrie.core import qpot_bait
+
+        qpot_bait.host_facts(tree)
+    except Exception:  # noqa: BLE001 - the tree stays as the image has it
+        from twisted.logger import Logger
+
+        Logger().failure("QPot host facts not filled")
     return tree
 
 

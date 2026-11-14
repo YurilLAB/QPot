@@ -306,6 +306,67 @@ def _at(value: Any) -> float:
     return min(max(float(value), 0.0), 1.0) if isinstance(value, (int, float)) else 0.5
 
 
+# the persona's host key files and the [ssh] option that names the key its SSH server presents
+HOST_KEYS = (("ssh_host_rsa_key.pub", "rsa_public_key"), ("ssh_host_ecdsa_key.pub", "ecdsa_public_key"),
+             ("ssh_host_ed25519_key.pub", "ed25519_public_key"))
+
+
+def _fill(node: list, data: bytes, sized: bool = True) -> None:
+    """Give a file its bytes; a file of /proc keeps the size 0 the kernel shows for it."""
+    node[A_CONTENTS] = data
+    if sized:
+        node[A_SIZE] = len(data)
+
+
+def host_facts(tree: list) -> int:
+    """What the host says of itself in files the image left empty; the number of files filled.
+
+    /etc/ssh/ssh_host_*_key.pub: the keys the SSH server presents, so `ssh-keygen -lf` of them is
+    the fingerprint the visitor's own client showed at the login (the files had the image's sizes
+    and no bytes: `cat` printed nothing where `ls -l` showed 99). /proc/1/cgroup and
+    /proc/self/cgroup: what a systemd host with the unified hierarchy shows (an empty file there
+    is what a check for a container trips on); a persona of the older hierarchy keeps its files.
+    """
+    done = 0
+    host = CowrieConfig.get("honeypot", "hostname", fallback="localhost")
+    for name, option in HOST_KEYS:
+        node = _find(tree, "/etc/ssh/" + name)
+        if node is None or node[A_TYPE] != T_FILE:
+            continue
+        try:
+            data = _read_bounded(CowrieConfig.get("ssh", option), 16384)
+        except Exception:  # noqa: BLE001 - a key the configuration does not name
+            data = None
+        words = data.decode("ascii", "replace").split() if data else []
+        if len(words) < 2:
+            continue
+        try:
+            blob = base64.b64decode(words[1], validate=True)
+        except (binascii.Error, ValueError):
+            continue
+        if key_type(blob) != words[0]:
+            continue
+        _fill(node, f"{words[0]} {words[1]} root@{host}\n".encode("ascii", "replace"))
+        done += 1
+    # the unified hierarchy: systemd 247 and later make it the default (Debian 11, Ubuntu 21.10, RHEL 9)
+    unified = _find(tree, "/sys/fs/cgroup/cgroup.controllers") is not None
+    init = _find(tree, "/proc/1/cgroup")
+    if init is not None and init[A_TYPE] == T_FILE and not init[A_CONTENTS] and (
+            unified or _find(tree, "/sys/fs/cgroup/systemd") is None and _find(tree, "/run/systemd/system") is not None):
+        _fill(init, b"0::/init.scope\n", False)
+        done += 1
+        # the shell's own: the scope of a login session of root (/proc/self is a link to its process)
+        own = _find(tree, "/proc/self")
+        if own is not None and own[A_TYPE] == T_LINK and isinstance(own[A_TARGET], str):
+            own = _find(tree, posixpath.normpath(posixpath.join("/proc", own[A_TARGET])))
+        own = _child(own, "cgroup") if own is not None and own[A_TYPE] == T_DIR else None
+        if own is not None and own[A_TYPE] == T_FILE and not own[A_CONTENTS]:
+            session = 2 + int(hashlib.sha256(host.encode("utf-8", "replace")).hexdigest()[:4], 16) % 400
+            _fill(own, f"0::/user.slice/user-0.slice/session-{session}.scope\n".encode(), False)
+            done += 1
+    return done
+
+
 def plant(tree: list) -> int:
     """Add the plan to the persona's tree (before any session copies it); the number of entries added."""
     current = plan()
