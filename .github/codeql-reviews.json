@@ -310,7 +310,7 @@
           "sha256": "0b58e8c7cffe74517c3f632769c693db32762948b16d4fd9ec6f62b187ba17b8"
         },
         "internal/instance/deploy.go": {
-          "sha256": "58f5217dc6e40b889c75190fac3696e9ff1e788d6341476fbd1bb41eaabbd341"
+          "sha256": "53384ed8fa52fff02c83bd7d6e7678ffbc89bbe94dc772de733f6c10b38c9aa0"
         },
         "internal/instance/manager.go": {
           "sha256": "6c0d0e176145ef542bbb77951eb36ffc09fd7a393a6e1338cb0f789851dbb909"
@@ -352,7 +352,7 @@
           "sha256": "0b58e8c7cffe74517c3f632769c693db32762948b16d4fd9ec6f62b187ba17b8"
         },
         "internal/instance/deploy.go": {
-          "sha256": "58f5217dc6e40b889c75190fac3696e9ff1e788d6341476fbd1bb41eaabbd341"
+          "sha256": "53384ed8fa52fff02c83bd7d6e7678ffbc89bbe94dc772de733f6c10b38c9aa0"
         },
         "internal/instance/manager.go": {
           "sha256": "6c0d0e176145ef542bbb77951eb36ffc09fd7a393a6e1338cb0f789851dbb909"
@@ -1534,6 +1534,6 @@
       "uri": "internal/server/server.go"
     }
   ],
-  "sourceCatalogSHA256": "91b33431d87f8ecf2c0b7dc8b6aac16fab8979d87a2cc1f48ce9b32eb0a5c797",
+  "sourceCatalogSHA256": "aa565edec5af1b33952045dbc689a9db8c12062b27cce6b735969bab8e4e2ddb",
   "version": 2
 }
