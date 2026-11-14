@@ -17,10 +17,29 @@ import (
 	"net"
 	"os"
 	"strings"
+	"sync"
 	"time"
 
 	"golang.org/x/crypto/ssh"
 )
+
+// screen is what the terminal showed, written by the session and read while it runs.
+type screen struct {
+	mu sync.Mutex
+	b  bytes.Buffer
+}
+
+func (s *screen) Write(p []byte) (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.b.Write(p)
+}
+
+func (s *screen) String() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.b.String()
+}
 
 type answer struct {
 	Out    string `json:"out"`
@@ -58,23 +77,38 @@ func main() {
 		session, err := client.NewSession()
 		must(err)
 		must(session.RequestPty("xterm", 50, 200, ssh.TerminalModes{}))
-		var shown bytes.Buffer
-		session.Stdout, session.Stderr = &shown, &shown
+		shown := &screen{}
+		session.Stdout, session.Stderr = shown, shown
 		stdin, err := session.StdinPipe()
 		must(err)
 		must(session.Shell())
-		for _, command := range append(commands[1:], "exit") {
+		// a command is typed once the prompt stands, and the next one once it stands again: the
+		// service takes its time to start a shell, and what is typed before that is lost
+		prompt := func(from int, limit time.Duration) bool {
+			for end := time.Now().Add(limit); time.Now().Before(end); time.Sleep(50 * time.Millisecond) {
+				if text := shown.String(); len(text) > from && strings.Contains(text[from:], "# ") {
+					return true
+				}
+			}
+			return false
+		}
+		ready := prompt(0, 30*time.Second)
+		for _, command := range commands[1:] {
+			from := len(shown.String())
 			_, err := io.WriteString(stdin, command+"\n")
 			must(err)
-			time.Sleep(400 * time.Millisecond)
+			prompt(from, 20*time.Second)
 		}
-		done := make(chan struct{})
-		go func() { _ = session.Wait(); close(done) }()
+		_, _ = io.WriteString(stdin, "exit\n")
+		done := make(chan error, 1)
+		go func() { done <- session.Wait() }()
+		ended := "no end within 15 s"
 		select {
-		case <-done:
-		case <-time.After(20 * time.Second):
+		case err := <-done:
+			ended = fmt.Sprint(err)
+		case <-time.After(15 * time.Second):
 		}
-		must(json.NewEncoder(os.Stdout).Encode(map[string]any{"host_key": hostKey,
+		must(json.NewEncoder(os.Stdout).Encode(map[string]any{"host_key": hostKey, "prompt": ready, "ended": ended,
 			"answers": []answer{{Out: strings.ReplaceAll(shown.String(), "\r\n", "\n")}}}))
 		return
 	}

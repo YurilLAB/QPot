@@ -32,10 +32,17 @@ func cowrieHunt(t *testing.T, patched bool, commands []string) ([]huntAnswer, st
 	var got struct {
 		HostKey string       `json:"host_key"`
 		Answers []huntAnswer `json:"answers"`
+		// of the login shell the image as shipped is driven through
+		Prompt *bool  `json:"prompt"`
+		Ended  string `json:"ended"`
 	}
 	if err != nil || json.Unmarshal([]byte(strings.TrimSpace(out)), &got) != nil || len(got.Answers) != want {
 		logs, _ := conpotLiveDocker(10*time.Second, "logs", "--tail", "60", name)
 		t.Fatalf("hunt client (patched %v): %v\n%s\n%s", patched, err, out, logs)
+	}
+	if got.Prompt != nil && !*got.Prompt {
+		logs, _ := conpotLiveDocker(10*time.Second, "logs", "--tail", "60", name)
+		t.Fatalf("the image as shipped gave no prompt (the session ended: %s)\n%q\n%s", got.Ended, got.Answers[0].Out, logs)
 	}
 	return got.Answers, got.HostKey
 }
