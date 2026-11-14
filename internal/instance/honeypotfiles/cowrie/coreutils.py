@@ -2033,6 +2033,8 @@ if Command_sh is not None:
 
     # the option letters a shell takes in one word with -c (set's letters and bash's own)
     QPOT_SH_LETTERS = frozenset("abefhiklmnprstuvxBCEHPTc")
+    # shells that may run inside one another on one line (a script counts too: the image's own bound)
+    QPOT_SH_DEPTH = 8
 
     class Command_bash(Command_sh):
         """bash --version as the persona's bash (Cowrie's ran a nested shell and printed nothing), and
@@ -2083,6 +2085,19 @@ if Command_sh is not None:
             return None
 
         def qpot_run_command(self, line: str, rest: list[str]) -> None:
+            protocol = self.protocol
+            depth = int(getattr(protocol, "_script_depth", 0) or 0)
+            if depth >= QPOT_SH_DEPTH:
+                self.errorWrite(f"{self.argv0}: fork: Resource temporarily unavailable\n")
+                self.exit_code = 254
+                return
+            protocol._script_depth = depth + 1
+            try:
+                self.qpot_start_command(line, rest)
+            finally:
+                protocol._script_depth = depth
+
+        def qpot_start_command(self, line: str, rest: list[str]) -> None:
             from cowrie.shell.honeypot import HoneyPotShell
 
             shell = HoneyPotShell(self.protocol, interactive=False)

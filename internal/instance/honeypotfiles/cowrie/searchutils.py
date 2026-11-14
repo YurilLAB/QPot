@@ -405,6 +405,30 @@ def qpot_gzip_stream(data: bytes) -> bytes:
         "<II", zlib.crc32(data) & 0xFFFFFFFF, len(data) & 0xFFFFFFFF)
 
 
+def qpot_tar_plain(data: bytes) -> bytes | None:
+    """The tar stream of an archive made here, without its compression; None for one that is larger
+    than tar here packs (TAR_MAX_BYTES and its blocks), compressed or not: a few bytes of gzip can
+    hold gigabytes, and they would be expanded on the thread every session shares."""
+    limit = TAR_MAX_BYTES + (TAR_MAX_ENTRIES + 4) * 1024
+    if len(data) > limit:
+        return None
+    try:
+        if data[:2] == b"\x1f\x8b":
+            unpacker = zlib.decompressobj(31)
+        elif data[:3] == b"BZh":
+            import bz2
+            unpacker = bz2.BZ2Decompressor()
+        elif data[:6] == b"\xfd7zXZ\x00":
+            import lzma
+            unpacker = lzma.LZMADecompressor()
+        else:
+            return data
+        plain = unpacker.decompress(data, limit + 1)
+    except Exception:  # noqa: BLE001 - no stream of the kind its first bytes name
+        return None
+    return plain if len(plain) <= limit else None
+
+
 def qpot_mode_text(kind: str, mode: int) -> str:
     text = kind
     for shift, special, low, high in ((6, 0o4000, "s", "S"), (3, 0o2000, "s", "S"), (0, 0o1000, "t", "T")):
@@ -656,13 +680,21 @@ class Command_qpot_tar(Command_tar):
     def qpot_read(self, data: bytes, mode: str, flags: set, directory) -> None:
         """List or unpack an archive made here."""
         try:
-            archive = tarfile.open(fileobj=io.BytesIO(data), mode="r:*")
-            members = archive.getmembers()
+            plain = qpot_tar_plain(data)
+            if plain is None:
+                raise ValueError("an archive larger than tar here makes")
+            archive = tarfile.open(fileobj=io.BytesIO(plain), mode="r:")
+            members = []
+            for member in archive:
+                members.append(member)
+                if len(members) >= TAR_MAX_ENTRIES:
+                    break
         except Exception:  # noqa: BLE001
             self.qpot_fail("tar: This does not look like a tar archive\ntar: Exiting with failure status due to previous errors\n")
             return
         base = self.fs.resolve_path(directory, self.cwd) if directory else self.cwd
-        for member in members[:TAR_MAX_ENTRIES]:
+        left = TAR_MAX_BYTES  # what all the members together may put into the tree
+        for member in members:
             shown = member.name + ("/" if member.isdir() and not member.name.endswith("/") else "")
             if "v" in flags and mode == "t":
                 kind = "d" if member.isdir() else "l" if member.issym() else "-"
@@ -683,13 +715,14 @@ class Command_qpot_tar(Command_tar):
                 if member.isdir():
                     if not self.fs.exists(dest):
                         self.fs.mkdir(dest, member.uid, member.gid, 4096, stat_mod.S_IFDIR | member.mode, member.mtime)
-                elif member.isfile():
+                elif member.isreg() and not member.issparse():
                     parent = posixpath.dirname(dest)
                     if parent and not self.fs.exists(parent):
                         self.mkfullpath(parent.lstrip("/"), member)
                     if self.fs.exists(dest):
                         self.fs.remove(dest)
-                    body = archive.extractfile(member).read(TAR_MAX_BYTES)
+                    body = archive.extractfile(member).read(max(min(left, member.size), 0))
+                    left -= len(body)
                     self.fs.mkfile(dest, member.uid, member.gid, len(body), stat_mod.S_IFREG | member.mode, member.mtime)
                     self.fs.getfile(dest)[tree_fs.A_CONTENTS] = body
             except Exception:  # noqa: BLE001 - a place nothing can be written to: the member is skipped

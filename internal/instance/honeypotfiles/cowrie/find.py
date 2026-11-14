@@ -244,7 +244,16 @@ class Command_find(HoneyPotCommand):
         for text in self.qpot_warnings:
             self.errorWrite(text)
         self.qpot_left = self.QPOT_FIND_MAX
+        # one budget for the whole call, the commands it starts included, inside what the connection
+        #   may still use
         self.qpot_deadline = time.monotonic() + self.QPOT_FIND_SECONDS
+        try:
+            from cowrie.shell.command import tpot_deadline
+
+            self.qpot_deadline = min(self.qpot_deadline, tpot_deadline(getattr(self, "protocol", None)))
+        except Exception:  # noqa: BLE001
+            pass
+        self.qpot_paused = 0.0
         self.qpot_gen = self.qpot_run(paths or ["."], expr)
         self.qpot_step(None)
 
@@ -384,6 +393,7 @@ class Command_find(HoneyPotCommand):
             self.qpot_state = "idle"
             return int(getattr(self, "last_exit_code", 0) or 0)
         self.qpot_state = "waiting"
+        self.qpot_paused = time.monotonic()
         child = protocol.cmdstack[-1] if protocol.cmdstack else None
         if child is not None and child is not self:
             handle = child.handle_CTRL_C
@@ -406,7 +416,8 @@ class Command_find(HoneyPotCommand):
                 if not self.exited:
                     self.exit(130)
                 return
-            self.qpot_deadline = time.monotonic() + self.QPOT_FIND_SECONDS
+            # the time spent waiting for the command is not find's own: the budget goes on where it stopped
+            self.qpot_deadline += time.monotonic() - self.qpot_paused
             self.qpot_step(int(getattr(self, "last_exit_code", 0) or 0))
 
     def qpot_exec_batches(self, action: dict):
@@ -423,6 +434,8 @@ class Command_find(HoneyPotCommand):
             status = yield (action["argv"] + batch, action["cwd"] or self.cwd)
             if status:
                 self.qpot_status = 1
+            if time.monotonic() > self.qpot_deadline:
+                return
 
     # --- reading the command line ---
 
@@ -950,6 +963,8 @@ class Command_find(HoneyPotCommand):
             shown = "./" + entry.name if there else entry.path
             cwd = (posixpath.dirname(entry.full.rstrip("/")) or "/") if there else self.cwd
             status = yield ([arg.replace("{}", shown) for arg in argv], cwd)
+            if time.monotonic() > self.qpot_deadline:
+                raise QpotFindQuit  # the call's time is used up: as the walk's bound, no more is started
             return status == 0
         return ran, True
 

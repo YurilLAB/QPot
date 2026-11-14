@@ -19,8 +19,9 @@ import (
 // does) and of the part of its protocol that starts a command, and prints,
 // per command, what it wrote, its status and how long it took. The programs
 // -exec may start: echo, cat, pwd, true, false, has WORD FILE (status 0 where
-// the file holds the word) and slow, an echo that ends after find has
-// returned to the reactor, as a download does.
+// the file holds the word), slow, an echo that ends after find has returned
+// to the reactor, as a download does, and spin, which holds the thread for a
+// quarter of a second before it ends.
 const findHarness = `
 import json, posixpath, sys, time, types, importlib.util
 find_path, cases_path, wide = sys.argv[1], sys.argv[2], int(sys.argv[3])
@@ -123,7 +124,7 @@ class Proto:
         self.cmd, self.cmdstack, self.later, self.started = cmd, [cmd], [], []
         self.events = types.SimpleNamespace(dispatch=lambda *a, **k: None)
     def getCommand(self, name, paths, cwd):
-        return name if name in ("echo", "cat", "pwd", "true", "false", "has", "slow") else None
+        return name if name in ("echo", "cat", "pwd", "true", "false", "has", "slow", "spin") else None
     def call_command(self, pp, name, *args):
         cmd = self.cmd
         self.started.append([name, *args])
@@ -137,6 +138,8 @@ class Proto:
             self.later.append(lambda: (cmd.write(" ".join(args) + "\n"), end(0)))
             return
         code = 0
+        if name == "spin":
+            time.sleep(0.25)
         if name == "echo":
             cmd.write(" ".join(args) + "\n")
         elif name == "pwd":
@@ -459,6 +462,15 @@ func TestFindExec(t *testing.T) {
 	many := runFindHarness(t, py, [][]string{{"/srv", "-type", "f", "-exec", "true", ";"}}, "40")
 	if many[0].Started != 1000 || many[0].status() != 0 || many[0].Seconds > 5 {
 		t.Errorf("-exec on 1600 files started %d commands in %.2f s, status %d", many[0].Started, many[0].Seconds, many[0].status())
+	}
+	// the call has one budget of time, the commands that run at once included: commands that each
+	// hold the thread do not add up to minutes (1000 of these would take four)
+	held := runFindHarness(t, py, [][]string{{"/srv", "-type", "f", "-exec", "spin", ";"}, {"/srv", "-type", "f", "-exec", "spin", "{}", "+"}}, "40")
+	if held[0].Started < 2 || held[0].Started > 12 || held[0].Seconds > 4 || held[0].status() != 0 {
+		t.Errorf("-exec of a command that holds the thread: %d started in %.2f s, status %d", held[0].Started, held[0].Seconds, held[0].status())
+	}
+	if held[1].Started != 1 || held[1].Seconds > 4 {
+		t.Errorf("-exec ... + of the same: %d started in %.2f s", held[1].Started, held[1].Seconds)
 	}
 }
 

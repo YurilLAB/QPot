@@ -88,6 +88,8 @@ func TestCowrieStatefulHunt(t *testing.T) {
 		// a .env holds plain NAME=value lines: they are the caller's after it is read
 		{`cd /srv/app && . ./.env && echo "$DB_PASS ${AWS_KEY:0:4}"`, "s3cret AKIA\n", 0},
 		{`echo $((${NOPE:-4} + ${#HOME}))`, "9\n", 0},
+		// shells inside shells end where a host runs out of processes, not in the honeypot's stack
+		{`sh -c "sh -c \"sh -c 'sh -c \\\"echo deep\\\"'\""`, "deep\n", 0},
 	}
 	commands := make([]string, len(steps))
 	for i, s := range steps {
