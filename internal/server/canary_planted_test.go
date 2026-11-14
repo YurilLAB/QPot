@@ -70,7 +70,9 @@ func plantedCfg(t *testing.T) (*config.Config, []*canary.Canary) {
 // heralding's log lines): the stolen key offered in a login, the user's
 // password in a login, the database password and the tokens typed in
 // commands, the AWS key the emulated CLI signed with, the SMTP password tried
-// on heralding. Near misses trip nothing.
+// on heralding, and where the instance has them the chat webhook posted to
+// from the honeypot, the monitoring login and the file server password tried
+// elsewhere. Near misses trip nothing.
 func TestPlantedCanariesTripEndToEnd(t *testing.T) {
 	cfg, planted := plantedCfg(t)
 	cs, err := canary.NewStore(cfg.DataPath, 0)
@@ -149,6 +151,28 @@ func TestPlantedCanariesTripEndToEnd(t *testing.T) {
 	events = append(events, ev("203.0.113.7", "cowrie", "cowrie.command.input", func(e *database.Event) {
 		e.Command = "git clone https://anna:" + git.Values[0] + "@git.corp.internal/ops/infra.git"
 	}))
+	// the files some instances carry beside those: each trips where its value is used
+	more := map[*canary.Canary]string{}
+	for _, c := range planted {
+		ip := fmt.Sprintf("203.0.113.%d", 20+len(more))
+		switch {
+		case c.Name == "cowrie bait: ops chat webhook":
+			events = append(events, ev(ip, "cowrie", "cowrie.command.input", func(e *database.Event) {
+				e.Command = "curl -s -d '{\"text\":\"hi\"}' https://chat.corp.internal/hooks/" + c.Values[0]
+			}))
+		case strings.HasSuffix(c.Name, " login"): // the monitoring console's, from the admin's notes
+			events = append(events, ev(ip, "heralding", "heralding.login.failed", func(e *database.Event) {
+				e.Protocol, e.Username, e.Password = "http", "admin", c.Values[0]
+			}))
+		case c.Name == "cowrie bait: file server password":
+			events = append(events, ev(ip, "heralding", "heralding.login.failed", func(e *database.Event) {
+				e.Protocol, e.Username, e.Password = "ftp", "deploy", c.Values[0]
+			}))
+		default:
+			continue
+		}
+		more[c] = ip
+	}
 	db := &batchDB{events: events}
 	s := &Server{config: cfg, canaries: cs, database: db}
 	cl := intelligence.NewClassifier(intelligence.NewATTCKLoader(t.TempDir()), nil)
@@ -169,6 +193,9 @@ func TestPlantedCanariesTripEndToEnd(t *testing.T) {
 	}
 	want := map[*canary.Canary]string{key: "203.0.113.1", user: "203.0.113.2", dbPass: "203.0.113.3",
 		aws: "203.0.113.4", ping: "203.0.113.5", smtp: "203.0.113.6", git: "203.0.113.7"}
+	for c, ip := range more {
+		want[c] = ip
+	}
 	for c, ip := range want {
 		if tripped[c.ID] != ip {
 			t.Errorf("%s (%s): tripped by %q, want %s", c.Name, c.Kind, tripped[c.ID], ip)

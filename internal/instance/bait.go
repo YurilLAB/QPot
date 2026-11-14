@@ -47,6 +47,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/url"
+	"path"
 	"slices"
 	"strings"
 	"sync"
@@ -334,6 +335,24 @@ type baitScene struct {
 	userPass          string
 	smtpPass          string
 
+	// the weekly report job: its folder, the mail and chat hosts it posts to
+	report              bool
+	reportDir           string
+	reportMin, reportHr int
+	mail, chat          baitHostInfo
+	chatHook            string
+	// the admin's notes: the monitoring console and its login
+	notes            bool
+	notesPath        string
+	monTool, monUser string
+	monPort          int
+	monPass          string
+	// the login user's .netrc for the internal file server
+	netrc              bool
+	repo               baitHostInfo
+	repoUser, repoPass string
+	repoFile           string
+
 	plan     baitPlan
 	canaries []*canary.Canary
 }
@@ -453,6 +472,41 @@ func newBaitScene(cfg *config.Config, p tpotCowriePersona) *baitScene {
 	}
 	s.userPass = d.HumanPassword("user-pass")
 	s.smtpPass = d.AlnumSecret("smtp-pass", 16+d.Intn("smtp-len", 5))
+
+	// What follows was added after the scene above was in use: every draw has a
+	// label of its own, so the files and canaries of an existing instance stay
+	// what they were.
+	s.mail = baitHostInfo{FQDN: "smtp." + s.domain}
+	s.report = d.Intn("report", 10) < 6
+	if s.report {
+		s.reportDir = canary.Pick(d, "report-dir", []string{"/opt/backup-report", "/opt/" + s.org + "-reports",
+			"/usr/local/lib/backup-report", "/opt/ops/backup-report"})
+		s.reportMin, s.reportHr = 5*d.Intn("report-min", 12), 6+d.Intn("report-hour", 3)
+		s.mail.IP = addr("mail-ip")
+		s.chat = baitHostInfo{FQDN: canary.Pick(d, "chat-name", []string{"chat", "mattermost", "mm"}) + "." + s.domain,
+			IP: addr("chat-ip")}
+		s.chatHook = d.Chars("chat-hook", 26, "abcdefghijklmnopqrstuvwxyz0123456789")
+	}
+	s.notes = d.Intn("notes", 10) < 6
+	if s.notes {
+		s.notesPath = canary.Pick(d, "notes-path", []string{"/root/notes.txt", "/root/NOTES", "/root/handover.txt",
+			"/root/" + s.org + "-notes.txt"})
+		tool := canary.Pick(d, "mon-tool", []struct {
+			name, user string
+			port       int
+		}{{"grafana", "admin", 3000}, {"zabbix", "Admin", 8080}, {"uptime-kuma", "admin", 3001}, {"netdata", "netdata", 19999}})
+		s.monTool, s.monUser, s.monPort = tool.name, tool.user, tool.port
+		s.monPass = d.HumanPassword("mon-pass")
+	}
+	s.netrc = d.Intn("netrc", 10) < 5
+	if s.netrc {
+		s.repo = baitHostInfo{FQDN: canary.Pick(d, "repo-name", []string{"repo", "files", "artifacts", "mirror"}) + "." + s.domain,
+			IP: addr("repo-ip")}
+		s.repoUser = canary.Pick(d, "repo-user", []string{"deploy", "ci", s.admin.Login, "ops"})
+		s.repoPass = d.AlnumSecret("repo-pass", 20+d.Intn("repo-len", 5))
+		s.repoFile = canary.Pick(d, "repo-file", []string{"tools/node_exporter-1.8.2.linux-amd64.tar.gz",
+			"releases/latest.txt", "ops/motd.txt", "tools/restic_0.17.3_linux_amd64.bz2", "pool/Release"})
+	}
 	return s
 }
 
@@ -549,8 +603,15 @@ func (s *baitScene) build() {
 	if s.dump {
 		s.dumpFile()
 	}
+	if s.report {
+		s.reportJob()
+	}
+	if s.notes {
+		s.notesFile()
+	}
 	s.userFiles()
 	s.rootHistory()
+	s.smtpCanary()
 
 	s.plan.Hosts = append(s.plan.Hosts, baitHost{Names: []string{s.db.Alias, s.db.FQDN, s.db.IP}, IP: s.db.IP})
 	if !s.aws {
@@ -558,6 +619,11 @@ func (s *baitScene) build() {
 			IP: s.backup.IP})
 	}
 	s.plan.Hosts = append(s.plan.Hosts, baitHost{Names: []string{s.monitor.IP}, IP: s.monitor.IP})
+	for _, h := range []baitHostInfo{s.mail, s.chat, s.repo} {
+		if h.IP != "" {
+			s.plan.Hosts = append(s.plan.Hosts, baitHost{Names: []string{h.FQDN, h.IP}, IP: h.IP})
+		}
+	}
 
 	pingPaths := []string{s.script, "/root/.bash_history"}
 	s.plant(&canary.Canary{ID: s.d.ID("ping"), Kind: canary.KindWeb, Token: s.pingToken,
@@ -690,6 +756,116 @@ func (s *baitScene) backupJob() {
 		Memo: s.memo("the "+s.engine+" password of "+s.dbUser+"@"+s.db.Alias, paths...)})
 }
 
+// reportJob: the weekly report of the backups, mailed and posted to the ops
+// channel: its settings (.env), the script that reads them and its cron entry.
+// It uses what the persona has (bash, curl, and the aws or ssh the backup
+// itself uses); the mailbox is the application's own, the one its settings
+// table in the dump names.
+func (s *baitScene) reportJob() {
+	at := s.at("report", 0.3, 0.42)
+	if strings.Count(s.reportDir, "/") > 2 {
+		s.dir(path.Dir(s.reportDir), "root", 0o755, at)
+	}
+	s.dir(s.reportDir, "root", 0o755, at)
+	mailbox := s.dbName + "@" + s.domain
+	env := fmt.Sprintf("# backup report: mail and chat (read by report.sh)\nSMTP_HOST=%s\nSMTP_PORT=587\nSMTP_USER=%s\nSMTP_PASS='%s'\n"+
+		"MAIL_TO=%s\nCHAT_WEBHOOK=https://%s/hooks/%s\n",
+		s.mail.FQDN, mailbox, s.smtpPass, canary.Pick(s.d, "report-to", []string{"it-ops", "it", "sysadmin", "ops"})+"@"+s.domain,
+		s.chat.FQDN, s.chatHook)
+	s.file(baitFile{Path: s.reportDir + "/.env", Owner: "root", Mode: 0o600, At: at, Text: env})
+
+	var list string
+	if s.aws {
+		profile := ""
+		if s.awsProfile != "default" {
+			profile = " --profile " + s.awsProfile
+		}
+		list = fmt.Sprintf(`aws s3 ls "s3://%s/%s/"%s | tail -n 8`, s.bucket, s.dbName, profile)
+	} else {
+		list = fmt.Sprintf(`ssh -o BatchMode=yes %s "ls -lh /srv/backups/%s/ | tail -n 8"`, s.backup.Alias, s.dbName)
+	}
+	var b strings.Builder
+	b.WriteString("#!/bin/bash\n")
+	fmt.Fprintf(&b, "# Weekly report of the %s dumps: mailed to IT, last file posted to the ops channel.\n", s.dbName)
+	b.WriteString("set -euo pipefail\ncd \"$(dirname \"$0\")\"\n. ./.env\n\n")
+	fmt.Fprintf(&b, "LIST=$(%s)\n", list)
+	b.WriteString("LAST=$(printf '%s\\n' \"$LIST\" | tail -n 1)\n\n")
+	fmt.Fprintf(&b, "printf 'From: %%s\\nTo: %%s\\nSubject: [backup] %s weekly report\\n\\n%%s\\n' \"$SMTP_USER\" \"$MAIL_TO\" \"$LIST\" \\\n", s.dbName)
+	b.WriteString("  | curl -fsS --ssl-reqd --url \"smtp://$SMTP_HOST:$SMTP_PORT\" --user \"$SMTP_USER:$SMTP_PASS\" \\\n" +
+		"      --mail-from \"$SMTP_USER\" --mail-rcpt \"$MAIL_TO\" --upload-file -\n\n")
+	fmt.Fprintf(&b, "curl -fsS -m 10 -H 'Content-Type: application/json' \\\n  -d \"{\\\"text\\\": \\\"%s backups, last: ${LAST##* }\\\"}\" \"$CHAT_WEBHOOK\" >/dev/null\n", s.dbName)
+	s.file(baitFile{Path: s.reportDir + "/report.sh", Owner: "root", Mode: 0o750, At: at + 0.002, Text: b.String()})
+
+	cron := fmt.Sprintf("# weekly backup report\nSHELL=/bin/bash\nPATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin\nMAILTO=\"\"\n%d %d * * 1 root %s/report.sh >/dev/null 2>&1\n",
+		s.reportMin, s.reportHr, s.reportDir)
+	s.file(baitFile{Path: "/etc/cron.d/backup-report", Owner: "root", Mode: 0o644, At: at + 0.004, Text: cron})
+
+	s.plant(&canary.Canary{ID: s.d.ID("chat-hook"), Kind: canary.KindCredential, Values: []string{s.chatHook},
+		Name: "cowrie bait: ops chat webhook",
+		Memo: s.memo("the incoming webhook of the ops channel on "+s.chat.FQDN, s.reportDir+"/.env")})
+}
+
+// smtpCanary watches the application's SMTP password wherever it was planted:
+// the settings table of the dump, the report job's .env, or both.
+func (s *baitScene) smtpCanary() {
+	var paths []string
+	where := "the report job"
+	if s.dump {
+		paths = append(paths, s.dumpPath)
+		where = "the " + s.dbName + " dump"
+	}
+	if s.report {
+		paths = append(paths, s.reportDir+"/.env")
+		if s.dump {
+			where += " and the report job"
+		}
+	}
+	if len(paths) == 0 {
+		return
+	}
+	s.plant(&canary.Canary{ID: s.d.ID("smtp-pass"), Kind: canary.KindCredential, Values: []string{s.smtpPass},
+		Name: "cowrie bait: SMTP password in " + where,
+		Memo: s.memo("the mail password of "+s.dbName+"@"+s.domain, paths...)})
+}
+
+// notesFile: what the admin wrote down for whoever looks after the host next:
+// where the dumps go, how to restore one, and the monitoring console with its
+// login.
+func (s *baitScene) notesFile() {
+	var b strings.Builder
+	head := s.org + " ops host - notes (" + s.admin.First + ")"
+	b.WriteString(head + "\n" + strings.Repeat("=", len(head)) + "\n\n")
+	fmt.Fprintf(&b, "db dumps\n  nightly %02d:%02d, /etc/cron.d/%s -> %s\n", s.cronHour, s.cronMin, s.cronName, s.script)
+	if s.aws {
+		fmt.Fprintf(&b, "  go to s3://%s/%s/ (aws profile %s, key is for that bucket only)\n", s.bucket, s.dbName, s.awsProfile)
+	} else {
+		fmt.Fprintf(&b, "  go to %s:/srv/backups/%s/ (same key as %s)\n", s.backup.Alias, s.dbName, s.db.Alias)
+	}
+	if s.engine == "mysql" {
+		fmt.Fprintf(&b, "  restore on %s:  zcat FILE | mysql %s\n", s.db.Alias, s.dbName)
+	} else {
+		fmt.Fprintf(&b, "  restore on %s:  zcat FILE | psql -U postgres %s\n", s.db.Alias, s.dbName)
+	}
+	if s.dump {
+		fmt.Fprintf(&b, "  take a manual one before upgrades, they are in %s\n", s.dumpDir)
+	}
+	if s.report {
+		fmt.Fprintf(&b, "  weekly report: %s (mail + chat, settings in .env)\n", s.reportDir)
+	}
+	fmt.Fprintf(&b, "\nmonitoring\n  %s  http://%s:%d   %s / %s\n", s.monTool, s.monitor.IP, s.monPort, s.monUser, s.monPass)
+	b.WriteString("  the backup job pings its check when it is done, no ping by morning = it failed\n")
+	b.WriteString("\ntodo\n")
+	fmt.Fprintf(&b, "  - rotate the %s db password, still the one from the migration\n", s.dbUser)
+	if s.report {
+		fmt.Fprintf(&b, "  - own mailbox for the reports instead of %s@\n", s.dbName)
+	}
+	fmt.Fprintf(&b, "  - %s: disk at %d%%, ask about the old dumps\n", s.db.Alias, 71+s.d.Intn("notes-disk", 22))
+	s.file(baitFile{Path: s.notesPath, Owner: "root", Mode: 0o644, At: s.at("notes", 0.86, 0.9), Text: b.String()})
+	s.plant(&canary.Canary{ID: s.d.ID("mon-pass"), Kind: canary.KindCredential, Values: []string{s.monPass},
+		Name: "cowrie bait: " + s.monTool + " login",
+		Memo: s.memo("the "+s.monTool+" password of "+s.monUser+" on "+s.monitor.IP, s.notesPath)})
+}
+
 // awsCLIVersion is the AWS CLI v2 the persona's root installed with AWS's
 // bundled installer (to /usr/local/aws-cli, linked from /usr/local/bin).
 const awsCLIVersion = "2.9.19"
@@ -750,6 +926,14 @@ func (s *baitScene) userFiles() {
 			fmt.Sprintf("git ls-remote https://git.%s/%s.git", s.domain, s.gitRepo))
 		s.plant(&canary.Canary{ID: s.d.ID("git-token"), Kind: canary.KindCredential, Values: []string{s.gitToken},
 			Name: "cowrie bait: GitLab token", Memo: s.memo("the GitLab token of "+s.gitUser, s.home+"/.git-credentials")})
+	}
+	if s.netrc {
+		s.file(baitFile{Path: s.home + "/.netrc", Owner: s.user, Mode: 0o600, At: s.at("netrc", 0.36, 0.5),
+			Text: fmt.Sprintf("machine %s\nlogin %s\npassword %s\n", s.repo.FQDN, s.repoUser, s.repoPass)})
+		h = append(h, "vi ~/.netrc", "chmod 600 ~/.netrc", "curl -nsSI https://"+s.repo.FQDN+"/"+s.repoFile)
+		s.plant(&canary.Canary{ID: s.d.ID("repo-pass"), Kind: canary.KindCredential, Values: []string{s.repoPass},
+			Name: "cowrie bait: file server password",
+			Memo: s.memo("the password of "+s.repoUser+" on "+s.repo.FQDN, s.home+"/.netrc")})
 	}
 	h = append(h, "sudo -i", s.userPass, "sudo -i", "exit")
 	s.file(baitFile{Path: s.home + "/.bash_history", Owner: s.user, Mode: 0o600, At: s.at("user-history", 0.9, 0.96),
@@ -815,6 +999,17 @@ func (s *baitScene) rootHistory() {
 		"df -h",
 		"free -m",
 	)
+	if s.report {
+		h = append(h,
+			"mkdir -p "+s.reportDir,
+			"vi "+s.reportDir+"/.env",
+			"chmod 600 "+s.reportDir+"/.env",
+			"vi "+s.reportDir+"/report.sh",
+			"chmod 750 "+s.reportDir+"/report.sh",
+			s.reportDir+"/report.sh",
+			"vi /etc/cron.d/backup-report",
+		)
+	}
 	if s.dump {
 		var remote string
 		switch s.engine {
@@ -829,6 +1024,9 @@ func (s *baitScene) rootHistory() {
 			"ls -lh "+s.dumpDir+"/",
 			"zcat "+path+" | head -40",
 		)
+	}
+	if s.notes {
+		h = append(h, "vi "+s.notesPath)
 	}
 	h = append(h, pm[0], pm[1], pm[2], "uptime", "reboot")
 	// bash writes the history as the reboot ends the session: minutes before the boot

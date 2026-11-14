@@ -88,14 +88,22 @@ bait is:
 | the database password (`credential`) | the backup script (in `/usr/local/sbin`, `/usr/local/bin` or `/root/bin`), run from `/etc/cron.d`, and root's `.bash_history` | it is typed in a command, at the password prompt of `ssh` on the honeypot, or used to log in to any QPot honeypot |
 | the AWS key (`aws`, on some instances) | `/root/.aws/credentials` and `config` | the `aws` command on the honeypot uses it (Cowrie logs the key it would sign with), or either half shows up in a session |
 | the healthcheck URL (`web`) | the backup script and root's `.bash_history` | its token shows up in a session (`curl` of the URL on the honeypot); with `canary.base_url` set, also a GET of `<base_url>/c/<token>` |
-| the SMTP password (`credential`, on some instances) | the `settings` table of a gzipped database dump in `/var/backups` (root's home on Red Hat and CentOS) | it is used to log in to a QPot honeypot (a mail login on heralding, for one) or shows up in a session |
+| the SMTP password (`credential`, on most instances) | the `settings` table of a gzipped database dump in `/var/backups` (root's home on Red Hat and CentOS), and the `.env` of the weekly report job: the same mailbox in both | it is used to log in to a QPot honeypot (a mail login on heralding, for one) or shows up in a session (`curl --user` with it, for one) |
+| the ops chat webhook (`credential`, on some instances) | `CHAT_WEBHOOK` in the report job's `.env` (under `/opt` or `/usr/local/lib`), read by its `report.sh` and run from `/etc/cron.d/backup-report` | its token shows up in a session: a `curl` of the URL on the honeypot |
+| the monitoring login (`credential`, on some instances) | the admin's notes in root's home (`notes.txt`, `handover.txt` ...), beside where the dumps go and how to restore one | it is used to log in to a QPot honeypot or shows up in a session |
+| the file server password (`credential`, on some instances) | the login user's `.netrc`, used by `curl -n` in their history | it is used to log in to a QPot honeypot (FTP or HTTP on heralding, for one) or shows up in a session |
 | a GitLab token (`credential`, Ubuntu and Raspberry Pi OS, some instances) | the login user's `.git-credentials` | it shows up in a session (a clone URL, an API header) or as a password |
 | the login user's password (`credential`) | the user's `.bash_history`, typed at the `sudo` prompt by mistake | it is used to log in to a QPot honeypot or shows up in a session |
 
 Everything agrees with the persona: the host name it drew, its users and their
 home directories, its package manager, file owners and modes, and file times
 placed between its installation and its boot (the last line of root's history
-is the reboot). The names, hosts, addresses and which parts exist are drawn
+is the reboot). The files agree with each other too: the report job lists the
+backups where the backup script puts them, mails from the mailbox the dump's
+settings name, and the notes give the script, its cron time and the bucket or
+host the other files use. The report script runs on the honeypot's shell with
+what the persona has (bash, curl, and the `aws` or `ssh` of the backup), and
+its mail, chat and file server hosts time out like the other internal hosts. The names, hosts, addresses and which parts exist are drawn
 from the instance's deception seed: a regenerated compose plants the same files
 and canaries, another instance gets different ones. The patch layer also makes
 the files usable the way an attacker uses them: `history` shows the history

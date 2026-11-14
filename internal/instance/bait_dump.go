@@ -10,8 +10,6 @@ package instance
 import (
 	"fmt"
 	"strings"
-
-	"github.com/qpot/qpot/internal/canary"
 )
 
 // The server versions the dumps name: releases of early 2023, older than any
@@ -124,9 +122,6 @@ func (s *baitScene) dumpFile() {
 	}
 	s.file(baitFile{ID: "dump", Path: s.dumpPath, Owner: "root", Mode: 0o644, At: s.at("dump", 0.55, 0.85),
 		Gzip: true, Text: text})
-	s.plant(&canary.Canary{ID: s.d.ID("smtp-pass"), Kind: canary.KindCredential, Values: []string{s.smtpPass},
-		Name: "cowrie bait: SMTP password in the " + s.dbName + " dump",
-		Memo: s.memo("the mail.password of "+s.dbName+"@"+s.domain+" in a database dump", s.dumpPath)})
 }
 
 func (s *baitScene) mysqlDump(users []baitUser, settings []baitKV, audit []baitAudit) string {

@@ -173,7 +173,7 @@ func checkBaitPlan(t *testing.T, p tpotCowriePersona, plan baitPlan, planted []*
 		}
 		base := path.Base(f.Path)
 		if (base == "id_ed25519" || base == "credentials" || base == ".git-credentials" ||
-			base == ".bash_history" || base == "authorized_keys") && f.Mode != 0o600 {
+			base == ".bash_history" || base == "authorized_keys" || base == ".env" || base == ".netrc") && f.Mode != 0o600 {
 			t.Fatalf("%s: mode %o", where, f.Mode)
 		}
 		if strings.HasPrefix(f.Path, "/etc/cron.d/") && strings.Contains(base, ".") {
@@ -250,6 +250,7 @@ func baitFileWithPrefix(t *testing.T, plan baitPlan, prefix string) baitFile {
 // (what a person comparing them would check).
 func TestBaitConsistent(t *testing.T) {
 	kinds := map[string]bool{}
+	parts := map[string]int{}
 	for i := 0; i < 60; i++ {
 		p := serverPersonas()[i%len(serverPersonas())]
 		cfg := baitCfg(fmt.Sprintf("qp_consistent%015d", i), p.ID)
@@ -337,6 +338,97 @@ func TestBaitConsistent(t *testing.T) {
 		if !strings.Contains(user, "sudo -i\n"+s.userPass+"\n") {
 			t.Fatalf("%s: user history without the password typed at the prompt", p.ID)
 		}
+		internal := func(h baitHostInfo) bool {
+			return slices.ContainsFunc(plan.Hosts, func(b baitHost) bool {
+				return b.IP == h.IP && slices.Contains(b.Names, h.FQDN)
+			})
+		}
+		mailbox := s.dbName + "@" + s.domain
+		if s.report {
+			parts["report"]++
+			env := baitFileAt(t, plan, s.reportDir+"/.env")
+			script := baitFileAt(t, plan, s.reportDir+"/report.sh")
+			cron := baitFileAt(t, plan, "/etc/cron.d/backup-report").Text
+			// the mailbox, its host and its password are those of the application's settings in the dump
+			if !strings.Contains(env.Text, "SMTP_HOST=smtp."+s.domain+"\nSMTP_PORT=587\nSMTP_USER="+mailbox+"\nSMTP_PASS='"+s.smtpPass+"'\n") ||
+				!strings.Contains(env.Text, "CHAT_WEBHOOK=https://"+s.chat.FQDN+"/hooks/"+s.chatHook+"\n") {
+				t.Fatalf("%s: report settings:\n%s", p.ID, env.Text)
+			}
+			if s.dump {
+				dump := baitFileAt(t, plan, s.dumpPath).Text
+				for _, v := range []string{"'mail.host','smtp." + s.domain + "'", "'mail.username','" + mailbox + "'", "'mail.password','" + s.smtpPass + "'"} {
+					if !strings.Contains(strings.ReplaceAll(dump, "\t", ","), strings.ReplaceAll(v, "'", "")) && !strings.Contains(dump, v) {
+						t.Fatalf("%s: the dump's settings do not carry %s", p.ID, v)
+					}
+				}
+			}
+			if script.Mode != 0o750 || !strings.HasPrefix(script.Text, "#!/bin/bash\n") || !strings.Contains(script.Text, "\n. ./.env\n") ||
+				!strings.Contains(script.Text, `--user "$SMTP_USER:$SMTP_PASS"`) || !strings.Contains(script.Text, `"$CHAT_WEBHOOK"`) {
+				t.Fatalf("%s: report script:\n%s", p.ID, script.Text)
+			}
+			// it lists the backups where the backup script puts them
+			if s.aws != strings.Contains(script.Text, `aws s3 ls "s3://`+s.bucket+"/"+s.dbName+`/"`) ||
+				s.aws == strings.Contains(script.Text, "ssh -o BatchMode=yes "+s.backup.Alias+" ") || (!s.aws && s.backup.Alias == "") {
+				t.Fatalf("%s: the report lists another place than the backups go to:\n%s", p.ID, script.Text)
+			}
+			if !strings.Contains(cron, " * * 1 root "+s.reportDir+"/report.sh ") {
+				t.Fatalf("%s: report cron entry: %s", p.ID, cron)
+			}
+			// set up after the backup's cron entry, before the dump taken by hand
+			made, cronAt := strings.Index(rootHist, "mkdir -p "+s.reportDir+"\nvi "+s.reportDir+"/.env\nchmod 600 "), strings.Index(rootHist, "vi /etc/cron.d/"+s.cronName+"\n")
+			if made < 0 || cronAt < 0 || made < cronAt || (s.dump && made > strings.Index(rootHist, "| gzip > ")) {
+				t.Fatalf("%s: root's history does not set the report up in its place", p.ID)
+			}
+			if !internal(s.mail) || !internal(s.chat) || s.mail.IP == s.chat.IP || s.mail.IP == s.db.IP || s.chat.IP == s.monitor.IP {
+				t.Fatalf("%s: the report's hosts are not internal hosts of their own: %+v", p.ID, plan.Hosts)
+			}
+		} else if strings.Contains(rootHist, "report") || slices.ContainsFunc(plan.Files, func(f baitFile) bool { return strings.HasSuffix(f.Path, "/.env") }) {
+			t.Fatalf("%s: traces of a report job that is not there", p.ID)
+		}
+		if s.notes {
+			parts["notes"]++
+			notes := baitFileAt(t, plan, s.notesPath)
+			where := "s3://" + s.bucket + "/" + s.dbName + "/"
+			if !s.aws {
+				where = s.backup.Alias + ":/srv/backups/" + s.dbName + "/"
+			}
+			for _, v := range []string{s.script, "/etc/cron.d/" + s.cronName, where, s.db.Alias, fmt.Sprintf("nightly %02d:%02d,", s.cronHour, s.cronMin),
+				fmt.Sprintf("http://%s:%d   %s / %s\n", s.monitor.IP, s.monPort, s.monUser, s.monPass)} {
+				if !strings.Contains(notes.Text, v) {
+					t.Fatalf("%s: the notes do not say %q:\n%s", p.ID, v, notes.Text)
+				}
+			}
+			if s.report != strings.Contains(notes.Text, s.reportDir+" ") && s.report != strings.Contains(notes.Text, "weekly report") {
+				t.Fatalf("%s: the notes and the report job disagree", p.ID)
+			}
+			if s.aws == strings.Contains(notes.Text, "/srv/backups/") || s.dump != strings.Contains(notes.Text, "manual one before upgrades") ||
+				!strings.Contains(rootHist, "vi "+s.notesPath+"\n") || notes.Owner != "root" {
+				t.Fatalf("%s: notes of another host:\n%s", p.ID, notes.Text)
+			}
+		}
+		if s.netrc {
+			parts["netrc"]++
+			netrc := baitFileAt(t, plan, s.home+"/.netrc")
+			if netrc.Owner != p.User || netrc.Text != "machine "+s.repo.FQDN+"\nlogin "+s.repoUser+"\npassword "+s.repoPass+"\n" ||
+				!strings.Contains(user, "chmod 600 ~/.netrc\ncurl -nsSI https://"+s.repo.FQDN+"/") || !internal(s.repo) {
+				t.Fatalf("%s: .netrc %+v", p.ID, netrc)
+			}
+		} else if strings.Contains(user, "netrc") {
+			t.Fatalf("%s: history of a .netrc that is not there", p.ID)
+		}
+		// one SMTP canary wherever the password is, none where it is nowhere
+		smtp := 0
+		for _, c := range planted {
+			if slices.Contains(c.Values, s.smtpPass) {
+				smtp++
+				if s.dump != strings.Contains(c.Memo, ".sql.gz") || s.report != strings.Contains(c.Memo, "/.env") {
+					t.Fatalf("%s: the SMTP canary's memo does not name its files: %s", p.ID, c.Memo)
+				}
+			}
+		}
+		if want := map[bool]int{true: 1}[s.dump || s.report]; smtp != want {
+			t.Fatalf("%s: %d SMTP canaries, want %d", p.ID, smtp, want)
+		}
 		// the history is written minutes before the boot, after the files it made
 		h := baitFileAt(t, plan, "/root/.bash_history")
 		if h.At != 1 || h.Offset > -60 || h.Offset < -660 {
@@ -346,6 +438,12 @@ func TestBaitConsistent(t *testing.T) {
 	for _, k := range []string{"aws", "credential", "ssh-key", "web"} {
 		if !kinds[k] {
 			t.Errorf("no instance planted a %s canary", k)
+		}
+	}
+	// each of the optional parts is on some instances and not on others
+	for _, k := range []string{"report", "notes", "netrc"} {
+		if parts[k] < 10 || parts[k] > 50 {
+			t.Errorf("%d of 60 instances have the %s files", parts[k], k)
 		}
 	}
 }

@@ -134,7 +134,10 @@ Server personas carry the files an intruder expects on an operations box:
 - an SSH key and shell histories;
 - a backup script;
 - AWS and git credentials;
-- a database dump.
+- a database dump;
+- on some instances a weekly report job with its `.env` (mail and chat
+  settings), the admin's notes with the monitoring login, and the login
+  user's `.netrc`.
 
 Choose the files with `cowrie bait_profile=ops` (the default) or
 `cowrie bait_profile=industrial`. Industrial support archives contain a parseable
