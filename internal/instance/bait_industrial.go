@@ -2,13 +2,17 @@ package instance
 
 // Industrial bait is an archive kept on a Linux support host. It does not add
 // a controller filesystem, claim a Windows engineering installation, or imply
-// that Cowrie can reach Conpot. Only the selected device's model and actual
-// protocol families are shared; addresses and maintenance accounts are synthetic.
+// that Cowrie can reach Conpot. It names the selected device as that device
+// names itself: its model and actual protocol families, and the site names
+// the instance's Conpot answers with (conpot_site.go), so a visitor who reads
+// the archive and then asks the device hears the same thing. Addresses and
+// maintenance accounts are synthetic.
 
 import (
 	"encoding/csv"
 	"encoding/json"
 	"fmt"
+	"regexp"
 	"strings"
 
 	"github.com/qpot/qpot/internal/canary"
@@ -23,12 +27,42 @@ type industrialEndpoint struct {
 }
 
 type industrialAsset struct {
-	ID        string               `json:"asset_id"`
+	ID string `json:"asset_id"`
+	// Name, Site, Location and Contact are what the device reports of
+	// itself where it reports any (conpotSite); absent otherwise.
+	Name      string               `json:"name,omitempty"`
+	Site      string               `json:"site,omitempty"`
+	Location  string               `json:"location,omitempty"`
+	Contact   string               `json:"site_contact,omitempty"`
 	Role      string               `json:"role"`
 	Model     string               `json:"model"`
 	Address   string               `json:"address"`
 	Protocols []string             `json:"protocols"`
 	Endpoints []industrialEndpoint `json:"endpoints"`
+	// Domain is an ICCP server's domain, ReportsTo the server a meter is
+	// set to report to, Tanks a gauge's tanks.
+	Domain    string          `json:"domain,omitempty"`
+	ReportsTo *industrialPeer `json:"reports_to,omitempty"`
+	Tanks     []conpotTank    `json:"tanks,omitempty"`
+}
+
+// industrialPeer is another system a device's configuration names.
+type industrialPeer struct {
+	Host    string `json:"host"`
+	Address string `json:"address"`
+}
+
+// reHostLabel is a name that can stand in /etc/hosts.
+var reHostLabel = regexp.MustCompile(`^[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?$`)
+
+// industrialSiteNotes says in the handover's words what the device reports
+// of itself, one fact a line; nothing for a device that reports none.
+func industrialSiteNotes(site conpotSite) string {
+	var b strings.Builder
+	for _, f := range site.facts() {
+		b.WriteString(f.Label + ": " + f.Value + "\n")
+	}
+	return b.String()
 }
 
 type industrialInventory struct {
@@ -89,8 +123,19 @@ func (s *baitScene) buildIndustrial() {
 	archive.Alias = "archive01"
 	archive.FQDN = archive.Alias + "." + s.domain
 	archive.User = "svc_otbackup"
-	asset := industrialAsset{ID: assetID, Role: p.Category, Model: p.Model, Address: s.monitor.IP,
-		Protocols: p.Protocols, Endpoints: industrialEndpoints(p)}
+	site := conpotSiteOf(s.cfg)
+	asset := industrialAsset{ID: assetID, Name: site.Name, Site: site.Facility, Location: site.Location, Contact: site.Contact,
+		Role: p.Category, Model: p.Model, Address: s.monitor.IP,
+		Protocols: p.Protocols, Endpoints: industrialEndpoints(p), Domain: site.Domain, Tanks: site.Tanks}
+	if site.ReportsTo != "" {
+		asset.ReportsTo = &industrialPeer{Host: site.ReportsTo, Address: site.ReportsToIP}
+	}
+	// The device's own name resolves on the support host when it can be a
+	// host name (an RTU's or a BMC's; not a filling station's).
+	assetNames := []string{assetID, assetID + "." + s.domain}
+	if reHostLabel.MatchString(site.Name) {
+		assetNames = append(assetNames, strings.ToLower(site.Name))
+	}
 	// sshFiles is shared with the ops builder; with aws=true it writes one
 	// remote-host entry only. No AWS files are created by this builder.
 	s.db, s.aws = archive, true
@@ -98,7 +143,7 @@ func (s *baitScene) buildIndustrial() {
 	s.sshFiles()
 	s.plan.Hosts = append(s.plan.Hosts,
 		baitHost{Names: []string{archive.Alias, archive.FQDN, archive.IP}, IP: archive.IP},
-		baitHost{Names: []string{assetID, assetID + "." + s.domain, asset.Address}, IP: asset.Address})
+		baitHost{Names: append(assetNames, asset.Address), IP: asset.Address})
 
 	created := s.at("ot-created", 0.18, 0.25)
 	exportAt := s.at("ot-export", 0.42, 0.54)
@@ -130,7 +175,7 @@ func (s *baitScene) buildIndustrial() {
 	s.file(baitFile{Path: commsPath, Owner: "root", Mode: 0o644, At: exportAt, Text: comms.String()})
 
 	notesPath := industrialRoot + "/maintenance/handover.txt"
-	notes := fmt.Sprintf("Maintenance handover - %s\n\nReference asset: %s (%s), %s\n"+
+	notes := fmt.Sprintf("Maintenance handover - %s\n\nReference asset: %s (%s), %s\n%s"+
 		"Communications record: %s\nInventory: %s\n"+
 		"These are support copies from the last maintenance window, not live polling data.\n"+
 		"Full configuration backups and firmware are held offline by the maintenance contractor.\n"+
@@ -139,10 +184,10 @@ func (s *baitScene) buildIndustrial() {
 		"Archive host: %s\nArchive account: %s\nSSH identity: /root/.ssh/id_ed25519\n"+
 		"Transfer credentials: /root/.netrc (root only)\n"+
 		"Last reference export: {{date:%%Y-%%m-%%d@ot_inventory}}\n",
-		s.org, assetID, p.Model, p.Category, commsPath, inventoryPath, archive.FQDN, archive.User)
+		s.org, assetID, p.Model, p.Category, industrialSiteNotes(site), commsPath, inventoryPath, archive.FQDN, archive.User)
 	s.file(baitFile{Path: notesPath, Owner: "root", Mode: 0o644, At: exportAt, Text: notes})
 	s.file(baitFile{Path: industrialRoot + "/README.txt", Owner: "root", Mode: 0o644, At: created,
-		Text: "OT maintenance reference archive\n\nInventory format: schema_version 1, assets with model, role, private address and service endpoints.\n" +
+		Text: "OT maintenance reference archive\n\nInventory format: schema_version 1, assets with the name and site the device reports (where it reports them), model, role, private address and service endpoints.\n" +
 			"exports/ contains communications records; maintenance/handover.txt records the archive procedure.\n" +
 			"backups/ contains dated text snapshots of the inventory and communications records.\n"})
 

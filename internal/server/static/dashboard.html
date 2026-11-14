@@ -1689,6 +1689,9 @@
             field('Model', device.model);
             field('Protocols', Array.isArray(device.protocols) ? device.protocols.join(', ') : '');
             field('Device ports', ports.join('; ') || 'None');
+            // What this instance's device says of itself; the industrial support archive repeats it.
+            const said = setting.sites && Array.isArray(setting.sites[selected]) ? setting.sites[selected] : [];
+            field('Presents itself as', said.map((f) => String(f.label || '') + ': ' + String(f.value || '')).join(' · '));
             target.append(h('h4', {}, device.label),
                 h('p', { class: 'setting-description' }, device.description || ''), details,
                 h('p', { class: 'setting-description' }, value ? (pending ? 'Selected profile: ' : 'Pinned profile: ') + selected : 'Automatic profile: ' + selected + '. This selection is kept across restarts and upgrades.'),

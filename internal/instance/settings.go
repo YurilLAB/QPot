@@ -317,6 +317,10 @@ type SettingInfo struct {
 	Allowed []string `json:"allowed,omitempty"`
 	// Options enrich device choices without changing their accepted IDs.
 	Options []ConpotDeviceProfile `json:"options,omitempty"`
+	// Sites is, for each device choice, what this instance's device would
+	// say of itself (ConpotSiteFacts); a device that reports no names has
+	// no entry.
+	Sites map[string][]SiteFact `json:"sites,omitempty"`
 	// Default is the saved automatic device, also provided while pinned.
 	Default  string   `json:"default,omitempty"`
 	Min      *float64 `json:"min,omitempty"`
@@ -385,6 +389,12 @@ func DescribeSettings(cfg *config.Config, name string) []SettingInfo {
 		if name == "conpot" && key == "template" {
 			si.Options = ConpotProfiles()
 			si.Default = config.ConpotAutomaticProfileID(cfg)
+			si.Sites = map[string][]SiteFact{}
+			for _, p := range si.Options {
+				if facts := ConpotSiteFacts(cfg, p.ID); len(facts) > 0 {
+					si.Sites[p.ID] = facts
+				}
+			}
 		}
 		if IsSecretSetting(key) {
 			si.Secret, si.Value = true, ""

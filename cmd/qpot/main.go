@@ -751,7 +751,16 @@ instance is running, it is recreated with the new settings.`,
 				if hp.CustomConfig["template"] != "" {
 					mode = "explicit template"
 				}
-				fmt.Fprintf(out, "Effective device: %s · %s [%s] (%s)\n\n", selected.Label, selected.Model, selected.ID, mode)
+				fmt.Fprintf(out, "Effective device: %s · %s [%s] (%s)\n", selected.Label, selected.Model, selected.ID, mode)
+				// The site follows from the instance's ID: an instance that
+				// has none yet (not created) has no site to show.
+				if facts := instance.ConpotSiteFacts(cfg, selected.ID); cfg.QPotID != "" && len(facts) > 0 {
+					fmt.Fprintln(out, "It presents itself to visitors, and is named in the industrial support archive, as:")
+					for _, f := range facts {
+						fmt.Fprintf(out, "  %-13s %s\n", f.Label+":", f.Value)
+					}
+				}
+				fmt.Fprintln(out)
 			}
 			for _, p := range instance.ConpotProfiles() {
 				fmt.Fprintf(out, "%s — %s [%s]\n  Model: %s\n  %s\n  Protocols: %s\n", p.ID, p.Label, p.Category, p.Model, p.Description, strings.Join(p.Protocols, ", "))

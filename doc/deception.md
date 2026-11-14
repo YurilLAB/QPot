@@ -107,6 +107,35 @@ belong to a Linux support host and reference a separate asset using the selected
 Conpot device model and protocols. They do not install a Windows engineering
 runtime, add a filesystem to a PLC, or claim a live connection to Conpot.
 
+The archive names that asset as the instance's Conpot device names itself, so
+a visitor who reads the files and then asks the device hears the same thing:
+
+| Device | In the inventory, the handover note and the stored snapshot | Where the device says it |
+|---|---|---|
+| Substation RTU | Its name (`BRK23-RTU3`), site (`BRK23 Substation`), location and site contact | SNMP `sysName`, `sysLocation`, `sysContact` and the facility name |
+| ICCP server | Its domain (`BRK23_ICC`) | The domain and the names of its points |
+| Server BMC | Its system name (`node16-ipmi`) | The BMC's system name |
+| Smart meter | The server it reports to, by name and address | The meter's own configuration |
+| Building controller | The plant room | The BACnet device's location |
+| Tank gauge | The station's name and street, and each tank's product and nominal size | The header and tank lines of its inventory report |
+
+A name that can be a host name (the RTU's, the BMC's) also resolves on the
+support host, to the asset's address. A PLC, an embedded PC and a HART gateway
+report no site name, and the archive gives them none. The asset's address in
+the archive stays a made-up private one: where the device is reached from the
+internet is not something a support archive would hold.
+
+`qpot honeypot profiles conpot` prints these names for the instance's device,
+and the device picker in the web UI shows them as "Presents itself as", so an
+operator following a visitor from the support host to the device knows what
+both said.
+
+QPot draws these names twice from the instance's site seed, once in the
+container that answers and once for the archive. `TestConpotSiteMirror` runs
+the container's own code and compares the two for 61 sites; the live profile
+test asks the running device (the RTU over SNMP, the gauge for its inventory
+report) and compares its answer with what the archive would say.
+
 ```bash
 qpot honeypot set cowrie persona=debian-bookworm bait_profile=industrial
 ```
@@ -228,6 +257,12 @@ Conpot's Modbus server closes a connection at once when a client sends the
 five bytes `quit.`, which no PLC does and which is easy to try. QPot's
 mounted server treats them as the start of a frame header like any other
 bytes.
+
+The image's RTU profile gives the device an SNMP name and registers only its
+contact and location, so a request for `sysName` was answered with an empty
+string by a device that answers the other two. QPot's site step registers the
+name too: the RTU now answers with its station's name (`BRK23-RTU3`), the one
+the support archive carries.
 
 The existing Modbus register map remains compatible with earlier QPot versions;
 its unusual raw wire addresses are not presented as a verified M340 process map.

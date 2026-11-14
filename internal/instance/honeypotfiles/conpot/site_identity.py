@@ -75,6 +75,12 @@ def replacements(name, seed):
             ("{ index = 1, value = true }", "{ index = 1, value = %s }" % ("true", "false")[draw(seed, "dnp3-b1", 2)]),
             ("{ index = 0, value = 25 }", "{ index = 0, value = %d }" % (12 + draw(seed, "dnp3-a0", 469))),
             ("{ index = 1, value = 100 }", "{ index = 1, value = %d }" % (500 + draw(seed, "dnp3-a1", 11500))),
+        ], "snmp.toml": [
+            # The profile gives the RTU a name and does not register it, so
+            # an SNMP request for sysName was answered with an empty string
+            # by a device that answers for its contact and location.
+            ('    { name = "sysContact", value = "sysContact" },' + "\n",
+             '    { name = "sysContact", value = "sysContact" },' + "\n" + '    { name = "sysName", value = "sysName" },' + "\n"),
         ]}
     if name == "ipmi":
         return {"template.toml": [

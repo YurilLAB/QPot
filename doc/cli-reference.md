@@ -411,7 +411,10 @@ bundled Go sources. See [refrigeration.md](refrigeration.md).
 Conpot emulates one device template of its image. Its automatic choice is
 saved with a profile version, so expanding or reordering the catalog preserves
 existing devices. `template` pins a device; `template=` returns to the saved
-automatic choice. Explore the catalog with `qpot honeypot profiles conpot`.
+automatic choice. Explore the catalog with `qpot honeypot profiles conpot`;
+for an existing instance it also prints what the effective device says of
+itself (its name, site and the like), which the industrial support archive
+repeats ([deception.md](deception.md#bait-files)).
 For a new controller-only instance, `qpot setup --profile industrial` selects
 `plc_modbus` and enables only Conpot. Settings of an existing instance are kept.
 

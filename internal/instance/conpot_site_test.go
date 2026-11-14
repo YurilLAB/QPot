@@ -2,10 +2,13 @@ package instance
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"regexp"
+	"slices"
 	"strings"
 	"testing"
 
@@ -37,6 +40,7 @@ spec.loader.exec_module(site)
 # The lines the image's rendered profiles hold (copied from the image).
 PROFILES = {
     "IEC104": {"template.toml": '[core.databus.key_value_mappings]\nsysContact = "Corporate IT"\nsysName = "DE-BER01"\nsysLocation = "BER01, T2E"\nFacilityName = "BER01 Substation"\nSystemName = "CP 343-1 IT"\n',
+        "snmp.toml": '[[snmp.mibs]]\nname = "SNMPv2-MIB"\nsymbols = [\n    { name = "sysDescr", value = "SystemDescription" },\n    { name = "sysContact", value = "sysContact" },\n    { name = "sysLocation", value = "sysLocation" },\n]\n',
         "dnp3.toml": '[dnp3]\nmaster_address = 0\nbinary_inputs = [\n    { index = 0, value = false },\n    { index = 1, value = true },\n]\nanalog_inputs = [\n    { index = 0, value = 25 },\n    { index = 1, value = 100 },\n]\n'},
     "ipmi": {"template.toml": '[core.databus.key_value_mappings]\nSystemName = "DoE"\n'},
     "kamstrup_382": {"template.toml": "[a]\nvalue = \"'pwr_ctrl_mgmt01.int.local'\"\n[b]\nvalue = \"'10.232.15.242'\"\n"},
@@ -84,6 +88,10 @@ rtu = tomllib.loads(render("IEC104", seeds[3])["template.toml"])["core"]["databu
 station = rtu["FacilityName"].removesuffix(" Substation")
 check(rtu["sysName"].startswith(station + "-RTU") and rtu["sysLocation"].startswith(station + ", "), "the RTU's names disagree: %r" % rtu)
 check(rtu["SystemName"] == "CP 343-1 IT", "a value that is the device's own was changed")
+# The RTU answers an SNMP request for its name: the image's profile sets a
+# name and registers only the contact and the location.
+snmp = tomllib.loads(render("IEC104", seeds[3])["snmp.toml"])["snmp"]["mibs"][0]["symbols"]
+check([s["name"] for s in snmp] == ["sysDescr", "sysContact", "sysName", "sysLocation"] and snmp[2]["value"] == "sysName", "sysName is not registered for SNMP: %r" % snmp)
 # The outstation's points: this site's, not the image's 25 and 100.
 points = set()
 for seed in seeds:
@@ -353,4 +361,190 @@ func TestConpotSiteSeed(t *testing.T) {
 		}
 	}
 	_ = os.Chmod(site, 0o644)
+}
+
+// conpotMirrorHarness prints, for each seed given, what site_identity.py
+// and the tank gauge make of it: {seed: {"replacements": ..., "header":
+// [...], "tanks": [[number, label, nominal gallons]]}}.
+const conpotMirrorHarness = `
+import importlib.util, json, os, sys, types
+
+def stub(name, **attrs):
+    m = types.ModuleType(name)
+    m.__dict__.update(attrs)
+    sys.modules[name] = m
+    return m
+
+def load(name, path):
+    spec = importlib.util.spec_from_file_location(name, path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+stub("tpot_templates", IDENTITY_DIR=".", DEFAULT_SPEC="unused", die=sys.exit, info=lambda msg: None)
+core = stub("conpot.core", get_databus=lambda: object(), get_session=lambda *a: None)
+stub("conpot", core=core)
+stub("conpot.core.protocol_wrapper", conpot_protocol=lambda c: c)
+stub("conpot.utils")
+stub("conpot.utils.asyncio_serve", serve_tcp_sync_handler=None)
+site = load("site_identity", sys.argv[1])
+gauge = load("gast", sys.argv[2])
+
+out = {}
+for seed in sys.argv[3:]:
+    os.environ["QPOT_SITE_SEED"] = seed
+    g = gauge.gauge_seed()
+    station = gauge.Site(g, None, 0)
+    out[seed] = {
+        "replacements": {name: site.replacements(name, seed) for name in ("IEC104", "iccp", "ipmi", "kamstrup_382", "building_automation")},
+        "header": station.header,
+        "tanks": [[t.number, t.label, gauge._pick(g, gauge._TANKS, "tank", t.number)[0]] for t in station.tanks],
+    }
+print(json.dumps(out))
+`
+
+// pyList returns the strings of the list assigned to name in a Python
+// source, in order.
+func pyList(t *testing.T, src []byte, name string) []string {
+	t.Helper()
+	m := regexp.MustCompile(`(?s)\n` + regexp.QuoteMeta(name) + ` = \[(.*?)\n?\]\n`).FindSubmatch(src)
+	if m == nil {
+		t.Fatalf("%s is not a list in the source", name)
+	}
+	var out []string
+	for _, s := range regexp.MustCompile(`"([^"]*)"`).FindAllSubmatch(m[1], -1) {
+		out = append(out, string(s[1]))
+	}
+	return out
+}
+
+// TestConpotSiteMirror: what QPot writes about the industrial device (the
+// support host's archive) names it as the device names itself. conpot_site.go
+// draws the site's names from the seed as the container does; this holds the
+// two together, by the lists in the sources and, with Python, by running the
+// container's own code on the same seeds.
+func TestConpotSiteMirror(t *testing.T) {
+	for name, want := range map[string][]string{"_STATIONS": siteStations, "_BAYS": siteBays, "_CONTACTS": siteContacts,
+		"_BMC_NAMES": siteBMCNames, "_METER_SERVERS": siteMeterServers, "_ROOMS": siteRooms} {
+		if got := pyList(t, conpotSitePy, name); !slices.Equal(got, want) {
+			t.Errorf("site_identity.py %s = %q, conpot_site.go has %q", name, got, want)
+		}
+	}
+	if got := pyList(t, conpotGuardianASTPy, "_NAMES"); !slices.Equal(got, gaugeNames) {
+		t.Errorf("the gauge's _NAMES = %q, conpot_site.go has %q", got, gaugeNames)
+	}
+	if got := pyList(t, conpotGuardianASTPy, "_STREETS"); !slices.Equal(got, gaugeStreets) {
+		t.Errorf("the gauge's _STREETS = %q, conpot_site.go has %q", got, gaugeStreets)
+	}
+	var products []string
+	for _, lineup := range gaugeLineups {
+		products = append(products, lineup...)
+	}
+	if got := pyList(t, conpotGuardianASTPy, "_LINEUPS"); !slices.Equal(got, products) {
+		t.Errorf("the gauge's _LINEUPS = %q, conpot_site.go has %q", got, products)
+	}
+
+	// Every profile has a site; only the ones whose device names something
+	// QPot decides have values, and those are plain text.
+	for _, id := range ConpotTemplateIDs() {
+		cfg := conpotConfig("qp_site_mirror", id)
+		site := conpotSiteOf(cfg)
+		if again := conpotSiteFor(id, conpotSiteSeed(cfg)); !reflect.DeepEqual(site, again) {
+			t.Errorf("%s: the site is not a function of the seed: %+v, then %+v", id, site, again)
+		}
+		for _, v := range []string{site.Name, site.Station, site.Facility, site.Location, site.Contact, site.Domain, site.ReportsTo, site.ReportsToIP} {
+			for _, r := range v {
+				if r < 32 || r > 126 {
+					t.Errorf("%s: %q is not plain text", id, v)
+				}
+			}
+		}
+	}
+
+	py := python(t)
+	if exec.Command(py, "-c", "import tomllib").Run() != nil {
+		t.Skip("the comparison with the container's code needs Python 3.11+ (tomllib)")
+	}
+	dir := t.TempDir()
+	files := map[string][]byte{"site_identity.py": conpotSitePy, "guardian_ast_server.py": conpotGuardianASTPy, "harness.py": []byte(conpotMirrorHarness)}
+	for name, data := range files {
+		if err := os.WriteFile(filepath.Join(dir, name), data, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	seeds := []string{conpotSiteSeed(conpotConfig("qp_site_mirror", "IEC104"))}
+	for i := 0; i < 60; i++ {
+		seeds = append(seeds, fmt.Sprintf("%032x", i*7919+1))
+	}
+	cmd := exec.Command(py, append([]string{filepath.Join(dir, "harness.py"), filepath.Join(dir, "site_identity.py"), filepath.Join(dir, "guardian_ast_server.py")}, seeds...)...)
+	cmd.Dir = dir
+	out, err := cmd.Output()
+	if err != nil {
+		t.Fatalf("harness: %v\n%s", err, out)
+	}
+	var res map[string]struct {
+		Replacements map[string]map[string][][2]string `json:"replacements"`
+		Header       []string                          `json:"header"`
+		Tanks        [][3]any                          `json:"tanks"`
+	}
+	if err := json.Unmarshal(out, &res); err != nil {
+		t.Fatalf("harness output: %v\n%s", err, out)
+	}
+	// new returns what the container puts in place of the image's old text.
+	replaced := func(seed, profile, file, old string) string {
+		for _, pair := range res[seed].Replacements[profile][file] {
+			if pair[0] == old {
+				return pair[1]
+			}
+		}
+		t.Fatalf("%s/%s: the container replaces no %q", profile, file, old)
+		return ""
+	}
+	sites := map[string]bool{}
+	for _, seed := range seeds {
+		rtu := conpotSiteFor("IEC104", seed)
+		for old, want := range map[string]string{
+			`sysName = "DE-BER01"`:              `sysName = "` + rtu.Name + `"`,
+			`sysLocation = "BER01, T2E"`:        `sysLocation = "` + rtu.Location + `"`,
+			`sysContact = "Corporate IT"`:       `sysContact = "` + rtu.Contact + `"`,
+			`FacilityName = "BER01 Substation"`: `FacilityName = "` + rtu.Facility + `"`,
+		} {
+			if got := replaced(seed, "IEC104", "template.toml", old); got != want {
+				t.Errorf("seed %s: the RTU says %s, QPot would write %s", seed, got, want)
+			}
+		}
+		if got, want := replaced(seed, "iccp", "iccp.toml", "BER01"), conpotSiteFor("iccp", seed); got != want.Station || want.Domain != got+"_ICC" || want.Station != rtu.Station {
+			t.Errorf("seed %s: the ICCP station is %s, QPot would write %+v", seed, got, want)
+		}
+		if got, want := replaced(seed, "ipmi", "template.toml", `SystemName = "DoE"`), `SystemName = "`+conpotSiteFor("ipmi", seed).Name+`"`; got != want {
+			t.Errorf("seed %s: the BMC says %s, QPot would write %s", seed, got, want)
+		}
+		meter := conpotSiteFor("kamstrup_382", seed)
+		if got := replaced(seed, "kamstrup_382", "template.toml", "'pwr_ctrl_mgmt01.int.local'"); got != "'"+meter.ReportsTo+"'" {
+			t.Errorf("seed %s: the meter reports to %s, QPot would write %s", seed, got, meter.ReportsTo)
+		}
+		if got := replaced(seed, "kamstrup_382", "template.toml", "'10.232.15.242'"); got != "'"+meter.ReportsToIP+"'" {
+			t.Errorf("seed %s: the meter reports to %s, QPot would write %s", seed, got, meter.ReportsToIP)
+		}
+		if got, want := replaced(seed, "building_automation", "bacnet.toml", `location = "Technikzentrale"`), `location = "`+conpotSiteFor("building_automation", seed).Location+`"`; got != want {
+			t.Errorf("seed %s: the building controller says %s, QPot would write %s", seed, got, want)
+		}
+		gauge := conpotSiteFor("guardian_ast", seed)
+		if h := res[seed].Header; len(h) != 4 || h[0] != gauge.Name || h[1] != gauge.Location {
+			t.Errorf("seed %s: the gauge's header is %q, QPot would write %q and %q", seed, h, gauge.Name, gauge.Location)
+		}
+		if len(res[seed].Tanks) != len(gauge.Tanks) {
+			t.Fatalf("seed %s: the gauge has %d tanks, QPot would write %d", seed, len(res[seed].Tanks), len(gauge.Tanks))
+		}
+		for i, tank := range res[seed].Tanks {
+			want := gauge.Tanks[i]
+			if tank[0] != float64(want.Number) || tank[1] != want.Product || tank[2] != float64(want.CapacityGal) {
+				t.Errorf("seed %s: the gauge's tank is %v, QPot would write %+v", seed, tank, want)
+			}
+		}
+		sites[rtu.Name+"|"+gauge.Name] = true
+	}
+	if len(sites) < len(seeds)-2 {
+		t.Errorf("%d seeds gave only %d different sites", len(seeds), len(sites))
+	}
 }

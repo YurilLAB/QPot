@@ -174,6 +174,7 @@ print(actual)`
 			}
 			start()
 			before := conpotLiveSnapshot(t, name, test.id)
+			conpotLiveSays(t, name, test.id, conpotSiteOf(cfg))
 			if output, err := conpotLiveDocker(30*time.Second, "restart", name); err != nil {
 				t.Fatalf("restart Conpot: %v\n%s", err, output)
 			}
@@ -288,6 +289,74 @@ const conpotLiveOPCUAReadiness = `endpoint=b"opc.tcp://127.0.0.1:4840/"
 hello=struct.pack("<IIIIIi",0,65536,65536,0,0,len(endpoint))+endpoint
 assert tcp(4840,b"HELF"+struct.pack("<I",8+len(hello))+hello).startswith(b"ACKF")
 `
+
+// conpotLiveSays checks, in the running container, that the device presents
+// the names QPot writes about it elsewhere (conpotSiteOf, which the support
+// host's archive is written from): in the profile Conpot serves, in the
+// RTU's answer to an SNMP request for its name, and in the header and tank
+// lines of the gauge's inventory report.
+func conpotLiveSays(t *testing.T, name, template string, site conpotSite) {
+	t.Helper()
+	want, err := json.Marshal(site)
+	if err != nil {
+		t.Fatal(err)
+	}
+	code := `import json,pathlib,socket,sys
+template,site=sys.argv[1],json.loads(sys.argv[2])
+root=pathlib.Path("/tmp/conpot/templates")/template
+rendered="".join(p.read_text() for p in sorted(root.rglob("*.toml")))
+said=0
+if template!="guardian_ast":
+ for key in ("Name","Facility","Location","Contact","Domain","ReportsTo","ReportsToIP"):
+  if site.get(key):
+   assert site[key] in rendered, "the device's profile does not say %s %r" % (key,site[key])
+   said+=1
+if template=="IEC104":
+ # SNMP GetRequests (version 1, community public) for sysContact.0,
+ # sysName.0 and sysLocation.0: what the RTU answers, not what its
+ # profile holds.
+ for last,key in ((4,"Contact"),(5,"Name"),(6,"Location")):
+  oid=bytes.fromhex("06082b0601020101")+bytes([last,0])
+  binding=b"\x30"+bytes([len(oid)+2])+oid+b"\x05\x00"
+  bindings=b"\x30"+bytes([len(binding)])+binding
+  request=b"\x02\x04\x51\x50\x4f\x54\x02\x01\x00\x02\x01\x00"+bindings
+  body=b"\x02\x01\x00\x04\x06public"+b"\xa0"+bytes([len(request)])+request
+  with socket.socket(socket.AF_INET,socket.SOCK_DGRAM) as s:
+   s.settimeout(5);s.connect(("127.0.0.1",161));s.send(b"\x30"+bytes([len(body)])+body)
+   answer=s.recv(8192)
+  assert answer.endswith(b"\x04"+bytes([len(site[key])])+site[key].encode()), "asked over SNMP for its %s the RTU answered %r, not %r" % (key,answer,site[key])
+  said+=1
+if template=="guardian_ast":
+ with socket.create_connection(("127.0.0.1",10001),timeout=5) as s:
+  s.settimeout(5);s.sendall(b"\x01I20100\n");reply=b""
+  while not reply.endswith(b"\x03"):
+   chunk=s.recv(8192)
+   assert chunk, "the gauge closed before ETX"
+   reply+=chunk
+ lines=reply[1:-1].decode("ascii").split("\r\n")
+ assert lines[4]==site["Name"] and lines[5]==site["Location"], "the gauge's header is %r, not %r and %r" % (lines[4:6],site["Name"],site["Location"])
+ rows=[l for l in lines[12:] if l.strip()]
+ assert len(rows)==len(site["Tanks"]), "the gauge reports %d tanks, not %d" % (len(rows),len(site["Tanks"]))
+ for tank in site["Tanks"]:
+  # The probe before this one gave tank 2 a label of its own.
+  if tank["tank"]!=2:
+   assert ("\r\n%3d  %s " % (tank["tank"],tank["product"])).encode() in reply, "tank %r is not in the report" % (tank,)
+ said+=2
+print(said)`
+	output, err := conpotLiveDocker(30*time.Second, "exec", name, "python3", "-c", code, template, string(want))
+	if err != nil {
+		t.Fatalf("what QPot writes about the %s and what it presents differ: %v\n%s", template, err, output)
+	}
+	facts := 0
+	for _, v := range []string{site.Name, site.Facility, site.Location, site.Contact, site.Domain, site.ReportsTo, site.ReportsToIP} {
+		if v != "" {
+			facts++
+		}
+	}
+	if said := strings.TrimSpace(output); (said == "0") != (facts == 0) {
+		t.Fatalf("%s: QPot knows %d names of the device, the device was asked for %s", template, facts, said)
+	}
+}
 
 const conpotLiveIEC104Readiness = `assert tcp(2404,bytes.fromhex("680407000000"))==bytes.fromhex("68040b000000")
 `

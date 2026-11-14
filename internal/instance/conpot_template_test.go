@@ -215,6 +215,25 @@ func TestConpotSettingsProfilePreviewAndPinRemoval(t *testing.T) {
 			t.Fatal("rich choices disagree with accepted IDs")
 		}
 	}
+	// Each choice comes with what this instance's device would say of
+	// itself: the same names the support archive is written from, and none
+	// for a device that reports none.
+	rtu := conpotSiteFor("IEC104", conpotSiteSeed(cfg))
+	if got := infos[0].Sites["IEC104"]; len(got) != 4 || got[0] != (SiteFact{"Device name", rtu.Name}) || got[1] != (SiteFact{"Site", rtu.Facility}) ||
+		got[2] != (SiteFact{"Location", rtu.Location}) || got[3] != (SiteFact{"Site contact", rtu.Contact}) {
+		t.Fatalf("what the RTU says of itself: %+v, want %+v", got, rtu)
+	}
+	if got := infos[0].Sites["guardian_ast"]; len(got) < 5 || got[0].Label != "Device name" || !strings.HasPrefix(got[2].Label, "Tank 1") {
+		t.Fatalf("what the gauge says of itself: %+v", got)
+	}
+	for _, quiet := range []string{"plc_modbus", "beckhoff_cx", "hart_gateway"} {
+		if got, listed := infos[0].Sites[quiet]; listed {
+			t.Fatalf("%s reports no names, the preview gives it %+v", quiet, got)
+		}
+	}
+	if len(ConpotSiteFacts(cfg, "no-such-device")) != 0 {
+		t.Fatal("an unknown device was given a site")
+	}
 	infos[0].Options[0].Protocols[0] = "changed"
 	if DescribeSettings(cfg, "conpot")[0].Options[0].Protocols[0] == "changed" {
 		t.Fatal("metadata shares the catalog")

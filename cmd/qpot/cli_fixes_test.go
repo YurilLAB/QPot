@@ -159,12 +159,39 @@ func TestIndustrialProfilesCatalogCLI(t *testing.T) {
 			t.Errorf("catalog omits %q: %s", want, output.String())
 		}
 	}
+	if strings.Contains(output.String(), "presents itself") {
+		t.Errorf("an instance that does not exist was given a site: %s", output.String())
+	}
 	if _, err := os.Stat(filepath.Join(home, ".qpot")); !os.IsNotExist(err) {
 		t.Fatalf("read-only catalog created instance files: %v", err)
 	}
 	root.SetArgs([]string{"honeypot", "profiles", "cowrie"})
 	if err := root.Execute(); err == nil {
 		t.Fatal("unsupported profiles accepted")
+	}
+
+	// For an instance that exists, the effective device comes with what it
+	// says of itself: the names the support archive repeats.
+	cfg := config.Default("site-shown")
+	cfg.QPotID = "qp_siteshown00000000000001"
+	cfg.SetHoneypotCustomConfig("conpot", map[string]string{"template": "IEC104"})
+	if err := config.Save(cfg); err != nil {
+		t.Fatal(err)
+	}
+	facts := instance.ConpotSiteFacts(cfg, "IEC104")
+	if len(facts) != 4 {
+		t.Fatalf("the RTU's site: %+v", facts)
+	}
+	output.Reset()
+	root.SetArgs([]string{"honeypot", "profiles", "conpot", "-i", "site-shown"})
+	if err := root.Execute(); err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"It presents itself to visitors, and is named in the industrial support archive, as:",
+		"Device name:  " + facts[0].Value, "Site:         " + facts[1].Value, "Site contact: " + facts[3].Value} {
+		if !strings.Contains(output.String(), want) {
+			t.Errorf("the effective device lacks %q: %s", want, output.String()[:600])
+		}
 	}
 }
 

@@ -231,6 +231,21 @@ func baitFileAt(t *testing.T, plan baitPlan, p string) baitFile {
 	return baitFile{}
 }
 
+// baitFileWithPrefix returns the one file of the plan under prefix.
+func baitFileWithPrefix(t *testing.T, plan baitPlan, prefix string) baitFile {
+	t.Helper()
+	var found []baitFile
+	for _, f := range plan.Files {
+		if strings.HasPrefix(f.Path, prefix) {
+			found = append(found, f)
+		}
+	}
+	if len(found) != 1 {
+		t.Fatalf("%d files under %s in the plan, want 1", len(found), prefix)
+	}
+	return found[0]
+}
+
 // TestBaitConsistent: the files agree with each other and with the persona
 // (what a person comparing them would check).
 func TestBaitConsistent(t *testing.T) {
@@ -416,12 +431,51 @@ func TestIndustrialBaitReferencesMatchDevice(t *testing.T) {
 				if inventory.Version != 1 || inventory.SourceHost != "{{host}}" || inventory.RecordType != "maintenance reference" || len(inventory.Assets) != 1 {
 					t.Fatalf("invalid reference inventory: %+v", inventory)
 				}
+				// What the device calls itself is the device's to say (a BMC
+				// may be "node16-ipmi"); QPot's name for the profile is not.
+				site := conpotSiteOf(cfg)
 				for _, f := range plan.Files {
-					if strings.Contains(f.Text, "reference_profile") || strings.Contains(f.Text, device.ID) {
+					text := f.Text
+					if site.Name != "" {
+						text = strings.ReplaceAll(strings.ReplaceAll(text, site.Name, ""), strings.ToLower(site.Name), "")
+					}
+					if strings.Contains(text, "reference_profile") || strings.Contains(text, device.ID) {
 						t.Fatalf("attacker-facing archive exposes internal profile metadata: %s", f.Path)
 					}
 				}
 				a := inventory.Assets[0]
+				// The archive names the device as the device names itself
+				// (TestConpotSiteMirror holds conpotSiteOf to the container).
+				if a.Name != site.Name || a.Site != site.Facility || a.Location != site.Location || a.Contact != site.Contact ||
+					a.Domain != site.Domain || !slices.Equal(a.Tanks, site.Tanks) || (a.ReportsTo != nil) != (site.ReportsTo != "") ||
+					(a.ReportsTo != nil && (a.ReportsTo.Host != site.ReportsTo || a.ReportsTo.Address != site.ReportsToIP)) {
+					t.Fatalf("the archive names the device %+v, the device says %+v", a, site)
+				}
+				said := map[string]bool{"IEC104": site.Name != "" && site.Facility != "" && site.Location != "" && site.Contact != "",
+					"iccp": site.Domain != "", "ipmi": site.Name != "", "kamstrup_382": a.ReportsTo != nil,
+					"building_automation": site.Location != "", "guardian_ast": site.Name != "" && len(site.Tanks) >= 3}
+				if ok, named := said[device.ID]; named && !ok {
+					t.Fatalf("the archive leaves out what a %s reports of itself: %+v", device.ID, a)
+				}
+				handover := baitFileAt(t, plan, industrialRoot+"/maintenance/handover.txt").Text
+				if strings.Contains(handover, "%!") || !strings.Contains(handover, "Reference asset: "+a.ID+" ("+device.Model+"), "+device.Category+"\n"+industrialSiteNotes(site)+"Communications record: "+industrialRoot+"/exports/"+a.ID+"/communications.csv\nInventory: "+industrialRoot+"/inventory.json\n") {
+					t.Fatalf("the handover does not read as written:\n%s", handover)
+				}
+				snapshot := baitFileWithPrefix(t, plan, industrialRoot+"/backups/").Text
+				for _, v := range []string{site.Name, site.Facility, site.Location, site.Contact, site.Domain, site.ReportsTo, site.ReportsToIP} {
+					if v != "" && (!strings.Contains(handover, v) || !strings.Contains(snapshot, v)) {
+						t.Fatalf("%q is in the inventory and not in the handover or the stored snapshot", v)
+					}
+				}
+				for _, tank := range site.Tanks {
+					if !strings.Contains(handover, fmt.Sprintf("Tank %d: %s, %d gal nominal\n", tank.Number, tank.Product, tank.CapacityGal)) {
+						t.Fatalf("tank %+v is not in the handover", tank)
+					}
+				}
+				// A name that can be a host name resolves to the asset.
+				if alias := strings.ToLower(site.Name); reHostLabel.MatchString(site.Name) != slices.Contains(plan.Hosts[1].Names, alias) {
+					t.Fatalf("hosts entry of the asset: %v, device name %q", plan.Hosts[1].Names, site.Name)
+				}
 				if a.Model != device.Model || a.Role != device.Category || !slices.Equal(a.Protocols, device.Protocols) ||
 					len(a.Endpoints) != len(device.TCP)+len(device.UDP) {
 					t.Fatalf("archive contradicts device: %+v vs %+v", a, device)
