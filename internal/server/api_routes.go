@@ -13,6 +13,7 @@ func (s *Server) setupAPIRoutes() {
 	s.mux.HandleFunc("/api/cluster/requests", s.withQPotAuth(s.handleClusterRequests))
 	s.mux.HandleFunc("/api/pulse", s.withQPotAuth(s.handlePulse))
 	s.mux.HandleFunc("/api/access", s.withQPotAuth(s.handleAccess))
+	s.mux.HandleFunc("/api/fleet", s.withQPotAuth(s.handleFleet))
 	s.mux.HandleFunc("/api/alerts", s.withQPotAuth(s.handleAlerts))
 	s.mux.HandleFunc("/api/investigate", s.withQPotAuth(s.handleInvestigate))
 	s.mux.HandleFunc("/api/investigate/case", s.withQPotAuth(s.handleInvestigateCase))

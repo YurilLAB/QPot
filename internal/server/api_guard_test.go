@@ -60,6 +60,7 @@ var apiRoutes = []apiRoute{
 	{method: http.MethodGet, path: "/api/doctor/codes"},
 	{method: http.MethodGet, path: "/api/cluster/requests"},
 	{method: http.MethodGet, path: "/api/access"},
+	{method: http.MethodGet, path: "/api/fleet"},
 	{method: http.MethodGet, path: "/api/alerts"},
 	{method: http.MethodPut, path: "/api/alerts", body: `{"rule":"nosuch","enabled":true}`},
 	{method: http.MethodGet, path: "/api/investigate"},

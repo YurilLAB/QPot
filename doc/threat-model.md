@@ -137,6 +137,7 @@ machine; across a network it must go through an SSH tunnel or a TLS proxy.
 
 | Threat | Answer | Enforced by |
 |---|---|---|
+| A member sends a false or hostile report about itself | A report is kept only within fixed limits, with every field checked for what it holds and control characters stripped; it is shown as that member's word and changes nothing on the sensor that reads it. A removed member's report is dropped. | [clustering.md](clustering.md#all-sensors-in-one-place); `TestSensorReportIsHeldToItsLimits`, `FuzzSensorReport` |
 | An unknown node joins, or a removed one returns | Only CA-signed certificates are admitted; the CA key stays on the enrolling host; removed nodes are remembered. | [clustering.md](clustering.md); `internal/cluster` tests |
 | A tampered release or installer download | The installers verify SHA256SUMS and GitHub build provenance and refuse redirects off GitHub's release servers. Release builds are reproducible from the tagged commit. | [installation.md](installation.md), [release.md](release.md) |
 | A changed image under the same tag | The database and collector images are pinned by digest; honeypot images by T-Pot release tag, and every file QPot mounts over an image is tied to a hash of the original it replaces. | `TestCIClickHouseImageMatchesCompose`; `*_patch_test.go` |

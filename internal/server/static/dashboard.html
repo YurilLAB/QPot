@@ -647,11 +647,39 @@
                     <div class="dash-card stat-card"><div class="stat-label"><i class="fas fa-bolt"></i> Group events</div><span class="stat-value" id="grp-events">-</span><div class="stat-sub">all nodes</div></div>
                 </div>
                 <div class="dash-card">
-                    <div class="card-header flex-between"><h4 class="flex-center"><i class="fas fa-circle-nodes"></i> Paired honeypots</h4></div>
+                    <div class="card-header flex-between">
+                        <h4 class="flex-center"><i class="fas fa-circle-nodes"></i> Sensors</h4>
+                        <span class="card-note" id="fleet-note"></span>
+                    </div>
+                    <div class="card-body hidden" id="fleet-message-wrap"><div class="callout" id="fleet-message"></div></div>
                     <div class="table-wrapper">
                         <table class="data-table">
-                            <thead><tr><th>Node</th><th class="optional">Address</th><th>State</th><th class="optional">Up</th><th>Events</th></tr></thead>
+                            <thead><tr><th>Sensor</th><th class="optional">Address</th><th>State</th><th class="optional">Version</th><th class="optional">Honeypots</th><th>Events 1h</th><th>Events 24h</th><th>Alerts</th><th class="optional">Last event</th><th class="optional">Up</th></tr></thead>
                             <tbody id="pairing-list"></tbody>
+                        </table>
+                    </div>
+                </div>
+                <div class="dash-card">
+                    <div class="card-header flex-between">
+                        <h4 class="flex-center"><i class="fas fa-diagram-project"></i> Seen by more than one sensor</h4>
+                        <span class="card-note">payloads of the last week, most active sources of the last hour</span>
+                    </div>
+                    <div class="table-wrapper">
+                        <table class="data-table">
+                            <thead><tr><th>Kind</th><th>Value</th><th>Sensors</th><th class="optional">Events 1h</th></tr></thead>
+                            <tbody id="fleet-shared"></tbody>
+                        </table>
+                    </div>
+                </div>
+                <div class="dash-card">
+                    <div class="card-header flex-between">
+                        <h4 class="flex-center"><i class="fas fa-bell"></i> Behaviour alerts across the sensors</h4>
+                        <span class="card-note">the last day; to look into one, open the sensor that raised it</span>
+                    </div>
+                    <div class="table-wrapper">
+                        <table class="data-table">
+                            <thead><tr><th>Time</th><th>Sensor</th><th>Alert</th><th class="optional">Sources</th></tr></thead>
+                            <tbody id="fleet-alerts"></tbody>
                         </table>
                     </div>
                 </div>
@@ -2625,7 +2653,7 @@
                 $('grp-online').textContent = '0';
                 $('grp-online-sub').textContent = 'healthy nodes';
                 $('grp-events').textContent = '0';
-                emptyRow(list, 5, 'This node is standalone. Pair honeypots into a group with qpot cluster init / qpot cluster join on the hosts.', 'fa-circle-nodes');
+                await loadFleet();
                 return;
             }
             const g = data.group || {}, nodes = Array.isArray(data.nodes) ? data.nodes : [];
@@ -2635,13 +2663,60 @@
             $('grp-online').textContent = fmt(g.healthy_nodes);
             $('grp-online-sub').textContent = `${fmt(g.suspect_nodes)} suspect · ${fmt(g.failed_nodes)} failed`;
             $('grp-events').textContent = fmt(g.total_events);
-            if (!nodes.length) { emptyRow(list, 5, 'No nodes yet.', 'fa-circle-nodes'); return; }
-            list.replaceChildren(...nodes.map((n) => h('tr', {},
-                h('td', {}, String(n.name || ''), n.is_local ? h('span', { class: 'setting-description' }, ' (this node)') : null),
-                h('td', { class: 'optional mono-accent' }, String(n.address || '')),
-                h('td', {}, n.online ? pill('online', 'ok') : pill(String(n.status || 'offline'), 'bad')),
-                h('td', { class: 'optional' }, fmtUptime(n.uptime_seconds)),
-                h('td', {}, fmt(n.total_events)))));
+            await loadFleet();
+        }
+
+        // GET /api/fleet: every sensor of the cluster, what more than one of them saw, and their
+        // alerts. All of it is what the sensors said about themselves: text only.
+        async function loadFleet() {
+            const list = $('pairing-list'), shared = $('fleet-shared'), alerts = $('fleet-alerts');
+            let v;
+            try {
+                v = await api(`${API_BASE}/fleet`);
+            } catch (e) {
+                if (e.status === 401 || e.status === 403) return;
+                emptyRow(list, 10, e.status === 404 && !e.code ? 'The sensor view needs a newer qpot serve.' : errorText(e), 'fa-triangle-exclamation');
+                emptyRow(shared, 4, '', 'fa-diagram-project');
+                emptyRow(alerts, 4, '', 'fa-bell');
+                return;
+            }
+            const sensors = Array.isArray(v && v.sensors) ? v.sensors : [], t = (v && v.totals) || {};
+            $('fleet-note').textContent = `${plural(t.sensors, 'sensor', 'sensors')} · ${fmt(t.online)} online · ` +
+                (Number(t.need_attention) > 0 ? plural(t.need_attention, 'needs a look', 'need a look') : 'none needs a look');
+            const msg = !v.clustered ? 'This sensor is in no group, so it is the only one here. Pair sensors with qpot cluster init / qpot cluster join on the hosts.'
+                : !v.live ? 'This control plane does not run the cluster, so it knows the other sensors only by name.' : '';
+            $('fleet-message-wrap').classList.toggle('hidden', !msg);
+            callout($('fleet-message'), 'warn', msg);
+            if (!sensors.length) emptyRow(list, 10, 'No sensors yet.', 'fa-circle-nodes');
+            else list.replaceChildren(...sensors.map((s) => {
+                const need = Array.isArray(s.attention) ? s.attention.map(String) : [];
+                const hps = Array.isArray(s.honeypots) ? s.honeypots.map(String) : [];
+                return h('tr', {},
+                    h('td', { class: 'wrap' }, String(s.name || ''), s.is_local ? h('span', { class: 'setting-description' }, ' (this sensor)') : null,
+                        need.length ? h('div', { class: 'setting-description' }, h('i', { class: 'fas fa-triangle-exclamation' }), ' ' + need.join('; ')) : null),
+                    h('td', { class: 'optional mono-accent' }, String(s.address || '')),
+                    h('td', {}, s.online ? pill('online', need.length ? 'warn' : 'ok') : pill(String(s.status || 'offline'), 'bad')),
+                    h('td', { class: 'optional' }, String(s.version || '-')),
+                    h('td', { class: 'optional', title: hps.join(', ') }, fmt(hps.length)),
+                    h('td', {}, fmt(s.events_hour)),
+                    h('td', {}, fmt(s.events_day)),
+                    h('td', {}, Number(s.alerts) > 0 ? pill(fmt(s.alerts), 'warn') : '0'),
+                    h('td', { class: 'optional' }, s.last_event ? ago(s.last_event) : '-'),
+                    h('td', { class: 'optional' }, fmtUptime(s.uptime_seconds)));
+            }));
+            const both = Array.isArray(v.shared) ? v.shared : [];
+            if (!both.length) emptyRow(shared, 4, sensors.length > 1 ? 'Nothing was seen by more than one sensor.' : 'With one sensor there is nothing to compare.', 'fa-diagram-project');
+            else shared.replaceChildren(...both.map((s) => h('tr', {},
+                h('td', {}, pill(String(s.kind || ''), s.kind === 'payload' ? 'bad' : 'accent')),
+                h('td', { class: 'mono-accent wrap' }, String(s.value || '')),
+                h('td', { class: 'wrap' }, Array.isArray(s.sensors) ? s.sensors.map(String).join(', ') : ''),
+                h('td', { class: 'optional' }, s.kind === 'source' ? fmt(s.events) : ''))));
+            const raised = Array.isArray(v.alerts) ? v.alerts : [];
+            if (!raised.length) emptyRow(alerts, 4, 'No sensor raised a behaviour alert in the last day.', 'fa-bell');
+            else alerts.replaceChildren(...raised.map((a) => h('tr', {}, timeCell(a.time),
+                h('td', {}, String(a.sensor || '')),
+                h('td', { class: 'wrap' }, pill(String(a.severity || ''), SEV[a.severity] || 'muted'), ' ', String(a.title || '')),
+                h('td', { class: 'optional mono-accent wrap' }, Array.isArray(a.source_ips) ? a.source_ips.map(String).join(', ') : ''))));
         }
 
         // ---------- join requests ----------

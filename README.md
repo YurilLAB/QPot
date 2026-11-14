@@ -62,6 +62,9 @@ brings T-Pot's web interface with a dashboard for all of it.
 - **Team access.** Give other people a key of their own as viewer, analyst or
   admin, with an audit log of every change.
   [security.md](doc/security.md#team-access-keys-with-roles)
+- **Several sensors, one view.** Pair sensors into a cluster and see each one's
+  state, what more than one of them saw and all their alerts from any of them.
+  [clustering.md](doc/clustering.md#all-sensors-in-one-place)
 - **Canaries.** Decoy credentials, files and links you plant in your own
   environment, plus bait planted inside the honeypots. QPot raises a critical
   alert when it observes one in use; [canary.md](doc/canary.md) explains what it

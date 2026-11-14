@@ -48,7 +48,7 @@ signed in. See [security.md](security.md#team-access-keys-with-roles).
 | Canaries | Create web, file and AWS canaries; download a file canary's document; review trips; delete your own canaries |
 | Overview | Host CPU, memory, disk and process load, 24-hour activity per honeypot and the latest events with a severity; disk cleanup settings, the last cleanup run and **Clean up now** (it shows what it would free before it runs) |
 | Doctor | `qpot doctor`'s checks, with each problem's code, cause and fix (read-only) |
-| Pairing / Networking | Cluster members and pending join requests. Approving or denying a node stays on the host: the tab shows the exact `qpot cluster approve` or `deny` command to run. |
+| Pairing / Networking | Every sensor of the cluster in one table (state, version, honeypots, events, alerts, and what is wrong with the ones that need a look), what more than one sensor saw, the sensors' behaviour alerts together, and pending join requests. Approving or denying a node stays on the host: the tab shows the exact `qpot cluster approve` or `deny` command to run. |
 | Security | The instance's security posture; who is signed in and with which role; for the owner and admins, the members and the audit log of every change made through the web UI or API |
 
 The LLM API key of galah and beelzebub is write-only: it is never sent back to

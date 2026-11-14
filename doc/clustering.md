@@ -3,9 +3,11 @@
 Pair several QPot nodes into a cluster that shares each node's health:
 uptime, event counts and active attackers. Each node also shares its 20 most
 active sources of the last hour, which `GET /api/cluster` merges
-(`shared_attackers`). Each node keeps its own events and dashboard.
+(`shared_attackers`). Each node keeps its own events and dashboard; the
+[fleet view](#all-sensors-in-one-place) shows every node's state in one place.
 
 - [Quick start](#quick-start)
+- [All sensors in one place](#all-sensors-in-one-place)
 - [How joining works](#how-joining-works)
 - [Trust and certificates](#trust-and-certificates)
 - [Upgrading an older cluster](#upgrading-an-older-cluster)
@@ -25,6 +27,41 @@ qpot cluster status
 Membership runs in the control plane, so restart the instance after `init`
 or `join`: `qpot down`, then `qpot up -d`. The web UI's **Pairing** tab shows members and pending join
 requests, with the exact approve or deny command to run on the host.
+
+## All sensors in one place
+
+`qpot fleet`, the **Pairing / Networking** tab and `GET /api/fleet` show the
+whole cluster from any one of its sensors:
+
+- **A row for each sensor**: state, version, honeypots turned on, events of the
+  last hour and day, behaviour alerts and canary trips of the last day, the
+  time of its newest event. Under a sensor that needs a look it says why:
+  offline or not answering, no report, a report older than five minutes, its
+  database not reachable, no honeypots turned on, no events in 24 hours, or a
+  QPot version other than this sensor's.
+- **What more than one sensor saw**: the SHA-256 of payloads captured in the
+  last week, and the most active source addresses of the last hour, with the
+  sensors that saw each.
+- **The sensors' behaviour alerts of the last day** in one list, the newest
+  first, each with the sensor that raised it.
+
+`qpot fleet --check` exits with status 1 when a sensor needs a look, for a
+scheduled job that watches the fleet.
+
+To fill the view, every sensor sends the others a report on itself with its
+intel, every 30 seconds: its version, the names of the honeypots turned on,
+the two event counts, the time of its newest event, up to 200 payload hashes,
+up to 20 alerts (rule, severity, one line of text, time, up to five source
+addresses) and the number of canary trips. Nothing else leaves a sensor: no
+event, command, credential or captured file. To look into an alert, open the
+sensor that raised it (`qpot alerts`, `qpot investigate`).
+
+A report is another machine's word. The receiving sensor keeps only what fits
+those limits, drops anything that is not what its field holds (a hash that is
+no SHA-256, an address that is no address), strips control characters from
+text, and dates the report by its own clock. A sensor that runs an older QPot
+sends no report: it is listed with the counts gossip gives and "sends no
+report". A sensor in no cluster is shown as a fleet of one.
 
 ## How joining works
 

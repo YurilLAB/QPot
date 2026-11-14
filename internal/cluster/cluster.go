@@ -331,6 +331,9 @@ type ThreatIntel struct {
 	// NodeID is the originating node.
 	NodeID    string    `json:"node_id"`
 	Timestamp time.Time `json:"timestamp"`
+	// Sensor is the node's report on itself (see fleet.go); a node older
+	// than the report sends none.
+	Sensor *SensorReport `json:"sensor,omitempty"`
 }
 
 // IPCount pairs an IP address with an event count.
@@ -524,11 +527,15 @@ func (m *Manager) UpdateThreatIntel(topIPs []IPCount) {
 	if m.cluster != nil && m.cluster.LocalNode != nil {
 		nodeID = m.cluster.LocalNode.ID
 	}
-	m.localIntel = &ThreatIntel{
+	next := &ThreatIntel{
 		TopSourceIPs: topIPs,
 		NodeID:       nodeID,
 		Timestamp:    time.Now(),
 	}
+	if m.localIntel != nil {
+		next.Sensor = m.localIntel.Sensor
+	}
+	m.localIntel = next
 }
 
 // GetThreatIntel returns the merged threat intelligence from all cluster nodes.
@@ -2364,6 +2371,8 @@ func (m *Manager) sync() {
 				// The answer is the peer's own intel. Its event count is not
 				// derived from it: the node's own count comes with its gossip.
 				if peerIntel.NodeID == peer.id {
+					// Dated by this node's clock: the peer's may be wrong.
+					peerIntel.Timestamp = time.Now()
 					m.storePeerIntelLocked(&peerIntel)
 					if node, ok := m.cluster.Nodes[peer.id]; ok {
 						node.Stats.LastSync = time.Now()
@@ -2506,6 +2515,9 @@ func (m *Manager) handleIntelHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Dated by this node's clock: with the sender's, intel from a node whose
+	// clock runs behind was never counted, and from one ahead never aged.
+	incoming.Timestamp = time.Now()
 	m.mu.Lock()
 	m.storePeerIntelLocked(&incoming)
 	localIntel := m.localIntel
@@ -2529,9 +2541,19 @@ func (m *Manager) storePeerIntelLocked(intel *ThreatIntel) {
 	if n, member := m.cluster.Nodes[intel.NodeID]; !member || n.Status == NodeStatusLeft || m.revokedLocked(intel.NodeID) {
 		return
 	}
-	if len(intel.TopSourceIPs) > maxIntelSources {
-		intel.TopSourceIPs = intel.TopSourceIPs[:maxIntelSources]
+	// A source is an address with a count, in the address's usual form, so
+	// that the members' intel merges; anything else a member sends is not.
+	kept := make([]IPCount, 0, min(len(intel.TopSourceIPs), maxIntelSources))
+	for _, ip := range intel.TopSourceIPs {
+		if len(kept) == maxIntelSources {
+			break
+		}
+		if s := sourceText(ip.IP); s != "" && ip.Count > 0 {
+			kept = append(kept, IPCount{IP: s, Count: ip.Count})
+		}
 	}
+	intel.TopSourceIPs = kept
+	intel.Sensor = intel.Sensor.clean(time.Now())
 	m.peerIntel[intel.NodeID] = intel
 }
 

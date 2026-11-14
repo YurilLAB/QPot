@@ -75,6 +75,8 @@ type Server struct {
 
 	// behaviour is the state of the behaviour alerts (behaviour.go).
 	behaviour behaviourState
+	// fleet caches this sensor's report on itself (fleet.go).
+	fleet fleetState
 
 	// casesBuilding counts the investigation cases being put together, under
 	// caseMu: at most caseSlots at once (api_investigate.go).
@@ -777,6 +779,7 @@ func (s *Server) updateNodeStats(ctx context.Context) {
 	}
 	s.nodeStats.LastSync = now
 	cm.UpdateNodeStats(s.nodeStats)
+	cm.SetSensorReport(s.sensorReport(ctx, now))
 	s.updateClusterIntel(ctx, cm, now)
 }
 

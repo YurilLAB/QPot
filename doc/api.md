@@ -553,6 +553,33 @@ two hours, or from a node that left, is left out.
 are current. It is false when another instance's control plane on this host
 runs it: the answer is then `cluster.json` as it was when the server started.
 
+### GET /api/fleet
+
+Every sensor of the cluster in one view (see
+[clustering.md](clustering.md#all-sensors-in-one-place)). Any role may read it.
+
+```json
+{"clustered": true, "live": true, "cluster": "lab",
+ "sensors": [{"name": "sensor-1", "address": "10.0.0.1:7946", "is_local": true, "status": "healthy",
+              "online": true, "uptime_seconds": 3600, "version": "1.2.0", "honeypots": ["conpot", "cowrie"],
+              "events_hour": 50, "events_day": 900, "active_sources": 3, "alerts": 1, "canary_trips": 0,
+              "reported": "2026-11-14T12:00:00Z", "last_event": "2026-11-14T11:59:00Z", "attention": []}],
+ "shared": [{"kind": "payload", "value": "<sha256>", "sensors": ["sensor-1", "sensor-2"]},
+            {"kind": "source", "value": "198.51.100.7", "sensors": ["sensor-1", "sensor-2"], "events": 52}],
+ "alerts": [{"sensor": "sensor-2", "rule": "new-payload", "severity": "high", "title": "...",
+             "time": "2026-11-14T11:20:00Z", "source_ips": ["198.51.100.7"]}],
+ "totals": {"sensors": 2, "online": 2, "need_attention": 0, "events_hour": 54, "events_day": 930, "alerts": 1}}
+```
+
+This sensor comes first, the others by name. `attention` lists what is wrong
+with a sensor, in words; it is empty when nothing is. `reported` is absent for
+a sensor that sent no report. `shared` has what more than one sensor saw, at
+most 50 payloads and 50 sources, those seen by the most sensors first;
+`alerts` the last day's behaviour alerts of all sensors, newest first, at most
+50. Standalone, `clustered` is false and the view is this sensor alone. When
+`live` is false this control plane does not run the cluster and knows the
+other sensors only by name.
+
 ### GET /api/cluster/requests
 
 Join requests waiting for the host's approval. Read-only: approving and

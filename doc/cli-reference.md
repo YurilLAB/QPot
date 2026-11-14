@@ -40,6 +40,7 @@ this document stays in lock-step with the code.
 - [Investigation — `qpot investigate`](#investigation--qpot-investigate)
 - [Behaviour alerts — `qpot alerts`](#behaviour-alerts--qpot-alerts)
 - [Team access — `qpot access`](#team-access--qpot-access)
+- [All sensors — `qpot fleet`](#all-sensors--qpot-fleet)
 - [GeoIP — `qpot geoip`](#geoip--qpot-geoip)
 - [Configuration — `qpot config`](#configuration--qpot-config)
 - [Utilities](#utilities)
@@ -102,6 +103,7 @@ qpot --version
 | `qpot investigate` | Follow one session or campaign through its records; export and verify evidence bundles. |
 | `qpot alerts` | Show the alerts on what visitors do, and turn their rules on and off. |
 | `qpot access` | Give other people a key of their own with a role; show the audit log. |
+| `qpot fleet` | Show every sensor of the cluster in one place: state, what several saw, their alerts. |
 | `qpot geoip` | Install or refresh the GeoIP database used for countries and the attack map. |
 | `qpot config` | Open or print the instance config file. |
 | `qpot id` | Show the QPot ID for an instance. |
@@ -1002,6 +1004,28 @@ Keys for other people, each with a role, and the log of what was changed
 `-i` names the instance. The commands read and write the instance's data
 folder directly, so they work whether or not the instance is running, and
 only for someone who can already read that folder. At most 100 members.
+
+---
+
+## All sensors — `qpot fleet`
+
+Every sensor of the cluster in one view, read from the running instance
+(`qpot up`). See [clustering.md](clustering.md#all-sensors-in-one-place) for
+what the sensors tell each other.
+
+```bash
+qpot fleet           # a row for each sensor, what more than one saw, their alerts
+qpot fleet --check   # the same, and exit status 1 when a sensor needs a look
+qpot fleet --json
+```
+
+| Flag | Meaning |
+|---|---|
+| `-i`, `--instance` | The instance to ask (default `default`) |
+| `--check` | Exit with status 1 when at least one sensor needs a look |
+| `--json` | Print what `GET /api/fleet` answers |
+
+A sensor in no cluster is shown as a fleet of one.
 
 ---
 
