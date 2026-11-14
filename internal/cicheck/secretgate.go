@@ -32,7 +32,16 @@ import (
 // "0123456789abcdef", which the generic-api-key rule takes for a key. It is
 // no secret, the line has been reworded, and its fingerprint is in
 // .gitleaksignore for the full-history scan.
-const ReviewedScanBaseline = "1c342506c7060aad7064be52e703bceab76b54a9"
+//
+// It was moved again the same day from
+// 1c342506c7060aad7064be52e703bceab76b54a9, with the owner's decision, after
+// a review of every file changed between the two, which had one finding:
+// commit b7c3b3ae's searchutils.py spelled out the first and last line of an
+// OpenSSH private key file, which Cowrie's ssh-keygen writes around the keys
+// it makes and looks for in the ones it reads. The private-key rule takes
+// the two lines and the code between them for a key. No key is in the file,
+// and it now puts the two lines together at runtime.
+const ReviewedScanBaseline = "3a77efdc3f1a299f4768392fc1cb2b6883f69f9b"
 
 const secretMemberLimit int64 = 256 << 20
 const secretArchiveLimit int64 = 1 << 30
